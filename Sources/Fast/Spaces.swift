@@ -1825,6 +1825,32 @@ enum SpaceAsk {
     }
 }
 
+// MARK: - the glide after a sideways swipe
+
+/// The trackpad's glide after fingers lift from a sideways swipe the
+/// column took. The catch let it through: lifted while drifting down, the
+/// glide scrolled the rows of the space being left as the row of spaces
+/// slid, and the column seemed stuck. A swipe that turned the space keeps
+/// its glide too, until the glide ends or fingers come down again.
+struct SwipeGlide {
+    /// The glide coming is a sideways swipe's, the column's to hold back.
+    private(set) var held = false
+
+    /// The fingers lifted: `sideways` when the swipe was the column's.
+    mutating func lifted(sideways: Bool) { held = sideways }
+
+    /// Whether this event is the held glide's, to be swallowed.
+    mutating func takes(phase: NSEvent.Phase, momentum: NSEvent.Phase) -> Bool {
+        if phase == .began || phase == .mayBegin {
+            held = false
+            return false
+        }
+        guard held, momentum != [] else { return false }
+        if momentum == .ended || momentum == .cancelled { held = false }
+        return true
+    }
+}
+
 // MARK: - two fingers sideways
 
 /// Laid behind the column: two fingers sideways over it go to the next
@@ -1906,7 +1932,15 @@ struct SpaceSwipe: NSViewRepresentable {
             SpaceSwipe.columns.add(self)
             spaceButtons.removeAll()
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .otherMouseDown, .otherMouseUp, .swipe]) { [weak self] event in
-                AppKitMainThread.sync { self?.heard(event) ?? event }
+                // Not `self?.heard(event) ?? event`: optional chaining
+                // folds heard's nil, the event taken, into self's, and the
+                // `??` handed every taken event back. A sideways swipe's
+                // moves, its drift up or down too, went on to the rows of
+                // the space being left, which scrolled under the fingers.
+                AppKitMainThread.sync {
+                    guard let self else { return event }
+                    return self.heard(event)
+                }
             }
         }
 
@@ -1926,6 +1960,8 @@ struct SpaceSwipe: NSViewRepresentable {
             return abs(speed) > 600 && (speed < 0) == (travel < 0)
         }
         private var sideways: Bool?
+        /// The glide after a sideways swipe, held back (SwipeGlide).
+        private var glide = SwipeGlide()
 
         /// Fingers down again on a gesture whose end never came here, gone
         /// to another window or another app (a swipe of three fingers to
@@ -2013,10 +2049,12 @@ struct SpaceSwipe: NSViewRepresentable {
                 travel = 0
                 recent = []
                 wheel.reset()
+                glide = SwipeGlide()
                 return event
             }
             if column, event.phase == [], event.momentumPhase == [] { return wheeled(event) }
             guard Swipe.isGesture(event) else { return event }
+            if glide.takes(phase: event.phase, momentum: event.momentumPhase) { return nil }
             if column, event.phase == .began || event.phase == .ended || event.phase == .cancelled {
                 MainActor.assumeIsolated {
                     SpaceSwipe.note(event.phase == .began
@@ -2052,6 +2090,7 @@ struct SpaceSwipe: NSViewRepresentable {
                 let mine = owned && sideways == true
                 if event.phase == .ended || event.phase == .cancelled {
                     owned = false
+                    glide.lifted(sideways: mine)
                     // The row of spaces goes on the way the fingers went,
                     // or to whichever shows more (SpacePaging).
                     if mine, paging {

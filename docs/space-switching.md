@@ -633,3 +633,24 @@ key does: one space at once, then one per hold. A move the other way, or a
 pause longer than `quiet`, starts a new push that turns at once.
 `SpaceWheelTests` plays a hand's uneven turn, a long steady turn and the
 cases at the edges of each rule.
+
+## Two fingers sideways, then up or down: the old space scrolled
+
+Reported with the side-wheel fix: a swipe sideways over the column, halfway
+to the next space, that drifted up or down scrolled the rows of the space
+being left, and the column seemed stuck.
+
+**Cause.** The column's catch never took an event. Its monitor returned
+`self?.heard(event) ?? event`; optional chaining folds `heard`'s nil (the
+event taken) into the nil of a catch that is gone, and the `??` handed the
+event back. A debug build's log of two such swipes (`taken` false for all
+323 events the catch judged, 314 of them while it held the row of spaces)
+had 705 moves with fingers down and 188 of the glide after reach the rows'
+scroll view through the window's own dispatch. Sideways moves did nothing
+there; the drift up or down scrolled the rows.
+
+**Fix.** The monitor returns what `heard` returns. A sideways swipe's
+moves are the catch's alone, its drift with them, and so are the glide's
+after the fingers lift (`SwipeGlide`), until the glide ends or fingers come
+down again. A mouse's side buttons over the column now only turn the space,
+as their comment always said.
