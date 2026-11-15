@@ -959,8 +959,28 @@ struct Omnibox: View {
             return what.hasPrefix("ext:") || what.hasPrefix("us:")
         }
 
+        /// A row whose key is its address and whose title is the page's name:
+        /// history, bookmarks, well-known sites and a typed address. Frequent,
+        /// Favorites, open tabs and pages found in what you read carry the
+        /// name as the key and the address as the title.
+        private var keyIsAddress: Bool {
+            switch offer.kind {
+            case .known, .address: return true
+            case .visited: return offer.frequent == nil && offer.seen == nil && !offer.favorite
+            default: return false
+            }
+        }
+
+        /// A place's name first, then its address; only the address when it
+        /// has no name.
+        private var lead: String {
+            if keyIsAddress { return offer.title.isEmpty ? IDN.shownAddress(offer.key) : offer.title }
+            return offer.isPlace ? IDN.shownAddress(offer.key) : offer.key
+        }
+
         private var detail: String {
             if let answer = calculatedAnswer, case .color = answer.kind { return answer.result }
+            if keyIsAddress { return offer.title.isEmpty ? "" : IDN.shownAddress(offer.key) }
             return offer.url == nil ? offer.title : IDN.shownAddress(offer.title)
         }
 
@@ -983,7 +1003,7 @@ struct Omnibox: View {
             HStack(spacing: Omnibox.gap) {
                 mark
                     .frame(width: Omnibox.slot)
-                Text(offer.isPlace || offer.kind == .address ? IDN.shownAddress(offer.key) : offer.key)
+                Text(lead)
                     .font(.system(size: 13.5, weight: offer.kind == .sum && !compact ? .semibold : .regular))
                     .foregroundStyle(lit ? Color.white : Palette.ink)
                     .lineLimit(1)
