@@ -524,7 +524,7 @@ a wheel move with no gesture phase that is more sideways than up or down
 (shift with a clicking wheel counts as sideways) is the column's. Moves
 closer together than 65 ms are one push; a push turns one space when it has
 added up to 2 lines (a clicking wheel) or 10 points (a smooth one), and
-nothing more until a pause. The turn is `switchSpace`, a key's slide, never
+nothing more until a pause (changed in #822, below). The turn is `switchSpace`, a key's slide, never
 round past the ends. Up or down stays the rows' scroll and ends any push.
 
 The first probe runs turned the space over the pins, name, folder and foot
@@ -613,3 +613,23 @@ in by 85 to 130 ms; settled by 230 to 300 ms, as Dia (265 to 300).
 
 Not verified: a real trackpad (posted scroll events), hover in dark
 (the pointer state was not caught in that film).
+
+## #822: a mouse's side wheel skipped several spaces
+
+The reporter's mouse has a thumb wheel: one steady turn went two or three
+spaces, and only a turn of just the right size went one.
+
+**Cause.** A push ended at any gap longer than 65 ms, and every new push
+could turn the space again. A hand turning a wheel on leaves 80 to 150 ms
+between notches, so one turn was cut into several pushes, each of which
+added up to 2 lines or 10 points and turned a space.
+
+**Fix.** The 65 ms rule (`SpaceWheel.Rule.gather`) now holds only before
+the first turn, so a stray notch still turns nothing. Once the space has
+turned, the push goes on while moves come within 200 ms of each other
+(`quiet`), and it turns nothing for 250 ms (`hold`). Moves after that add
+up again for the next space, so turning on and on repeats the way a held
+key does: one space at once, then one per hold. A move the other way, or a
+pause longer than `quiet`, starts a new push that turns at once.
+`SpaceWheelTests` plays a hand's uneven turn, a long steady turn and the
+cases at the edges of each rule.
