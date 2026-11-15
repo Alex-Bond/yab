@@ -48,21 +48,39 @@ struct TabletOmnibox: View {
     private let shape = RoundedRectangle(cornerRadius: TabletOmniboxStyle.corner, style: .continuous)
     private var dark: Bool { app.field.isPrivate || app.pageIsPrivate || app.pageIsDark || AppAppearance.current == .dark }
     private var privateField: Bool { app.field.isPrivate || app.pageIsPrivate }
-    private var rows: [WordRow] { app.field.showsAddress ? [] : Array(app.fieldRows.prefix(app.fieldAnswer == nil ? 5 : 4)) }
-    private var recent: [NewTabItem] {
-        app.field.showsAddress || privateField || !app.field.words.isEmpty ? [] : Array(NewTabContent.make(for: app).recent.prefix(5))
+    /// What the card shows, made once for each drawing of it. The field's
+    /// rows and New Tab's walk every tab; asked for in each row's `chosen`,
+    /// they were made again for every row, and an iPad with many tabs spent
+    /// its launch on them until the watchdog ended it (#546-#561).
+    private struct Lines {
+        var rows: [WordRow] = []
+        var recent: [NewTabItem] = []
+        var key: WordRow.Key = .go
+        var choiceIDs: [String] = []
+        var choice: String?
     }
-    private var choiceIDs: [String] {
-        (app.fieldAnswer != nil && !app.field.showsAddress ? ["answer"] : [])
-            + (rows.isEmpty ? recent.map { "recent:" + $0.id } : rows.map { "row:" + $0.id })
-    }
-    private var choice: String? {
-        if let selectedID, choiceIDs.contains(selectedID) { return selectedID }
-        if app.fieldAnswerTakesKey, choiceIDs.contains("answer") { return "answer" }
-        return choiceIDs.first(where: { $0 != "answer" }) ?? choiceIDs.first
+
+    private func makeLines() -> Lines {
+        var lines = Lines()
+        let all = app.fieldRows
+        lines.key = app.fieldKey(rows: all)
+        lines.rows = app.field.showsAddress ? [] : Array(all.prefix(app.fieldAnswer == nil ? 5 : 4))
+        // Recent shows only where there are no rows.
+        if lines.rows.isEmpty, !app.field.showsAddress, !privateField, app.field.words.isEmpty {
+            lines.recent = Array(NewTabContent.make(for: app).recent.prefix(5))
+        }
+        let ids = (app.fieldAnswer != nil && !app.field.showsAddress ? ["answer"] : [])
+            + (lines.rows.isEmpty ? lines.recent.map { "recent:" + $0.id } : lines.rows.map { "row:" + $0.id })
+        lines.choiceIDs = ids
+        if let selectedID, ids.contains(selectedID) { lines.choice = selectedID }
+        else if app.fieldAnswerTakesKey, ids.contains("answer") { lines.choice = "answer" }
+        else { lines.choice = ids.first(where: { $0 != "answer" }) ?? ids.first }
+        return lines
     }
 
     var body: some View {
+        let lines = makeLines()
+        let rows = lines.rows, recent = lines.recent, choice = lines.choice
         let model = app.field
         let available = geometry.size.height - geometry.top - (model.resting ? 0 : max(0, model.keyboard))
         let top = S.top(in: available)
@@ -74,7 +92,7 @@ struct TabletOmnibox: View {
             Color.clear.contentShape(Rectangle()).onTapGesture { model.close() }
                 .accessibilityLabel("Close Search").accessibilityAddTraits(.isButton)
             VStack(spacing: 0) {
-                header
+                header(lines)
                 if bodyHeight > 0 {
                     ScrollViewReader { scroll in
                         ScrollView {
@@ -139,19 +157,19 @@ struct TabletOmnibox: View {
         .onChange(of: model.text) { _, _ in selectedID = nil }
         .onChange(of: model.isPrivate) { _, _ in selectedID = nil }
         .onChange(of: model.showsAddress) { _, _ in selectedID = nil }
-        .onChange(of: choiceIDs) { _, ids in
+        .onChange(of: lines.choiceIDs) { _, ids in
             if let selectedID, !ids.contains(selectedID) { self.selectedID = nil }
         }
     }
 
-    private var header: some View {
+    private func header(_ lines: Lines) -> some View {
         HStack(spacing: S.gap) {
             FieldInput(text: app.field.text, selected: app.field.showsAddress, placeholder: "Search or enter address",
-                       style: S.input(dark: dark), dark: dark, key: app.fieldKey, focusRequest: app.field.focusRequest,
+                       style: S.input(dark: dark), dark: dark, key: lines.key, focusRequest: app.field.focusRequest,
                        blurRequest: app.field.blurRequest, typed: app.field.typed, editAddress: app.field.editAddress,
                        submit: submit, escape: app.field.close,
-                       moveSelection: choiceIDs.isEmpty ? nil : moveSelection,
-                       allowsEmptySubmit: !choiceIDs.isEmpty)
+                       moveSelection: lines.choiceIDs.isEmpty ? nil : moveSelection,
+                       allowsEmptySubmit: !lines.choiceIDs.isEmpty)
                 .frame(height: 26)
             if !app.field.pageIsPrivate {
                 Button { app.field.setPrivate(!app.field.isPrivate) } label: {
@@ -232,7 +250,7 @@ struct TabletOmnibox: View {
 
     @ViewBuilder private func mark(_ icon: WordRow.Icon, chosen: Bool) -> some View {
         switch icon {
-        case let .favicon(key, host): Favicon(icon: key, host: host, size: 18)
+        case let .favicon(key, host): Favicon(icon: key, host: host, size: 18, isPrivate: privateField)
         default:
             let asset: String = switch icon {
             case .magnifier: "TabletFind"
@@ -263,15 +281,17 @@ struct TabletOmnibox: View {
         }
     }
     private func submit() {
+        let lines = makeLines(), choice = lines.choice
         if choice == "answer" { app.copyFieldAnswer() }
-        else if let row = rows.first(where: { choice == "row:" + $0.id }) { app.choose(row) }
-        else if let item = recent.first(where: { choice == "recent:" + $0.id }) { app.choose(item) }
+        else if let row = lines.rows.first(where: { choice == "row:" + $0.id }) { app.choose(row) }
+        else if let item = lines.recent.first(where: { choice == "recent:" + $0.id }) { app.choose(item) }
         else { app.fieldReturn() }
     }
 
     private func moveSelection(_ delta: Int) {
-        guard let choice, let index = choiceIDs.firstIndex(of: choice) else { return }
-        selectedID = choiceIDs[max(0, min(choiceIDs.count - 1, index + delta))]
+        let lines = makeLines(), ids = lines.choiceIDs
+        guard let choice = lines.choice, let index = ids.firstIndex(of: choice) else { return }
+        selectedID = ids[max(0, min(ids.count - 1, index + delta))]
     }
 }
 

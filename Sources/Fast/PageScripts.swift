@@ -35,11 +35,21 @@ enum PageScripts {
         return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
 
+    /// Foundation's stored host and the DOM hostname can differ in IPv6
+    /// URL delimiters. Compare the address itself, leaving www significant
+    /// for saved looks (Curtain drops it separately).
+    nonisolated static func scriptHost(_ host: String) -> String {
+        host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    }
+    nonisolated static let documentHost = #"location.hostname.toLowerCase().replace(/^\[|\]$/g, '')"#
+
     /// Every script the tab's next document gets, in the order they run.
     /// Boosts come after, from Boosts.attach.
     static func list(for tab: Tab, _ arming: Arming) -> [WKUserScript] {
-        var list = [
-            fonts(PageFonts.read()),
+        // Fonts of one's own only when there are some: no script in every
+        // frame for nothing (#1889).
+        let chosenFonts = PageFonts.read()
+        var list = (chosenFonts.css.isEmpty ? [] : [fonts(chosenFonts)]) + [
             // A page's own Document Picture-in-Picture (DocumentPiP.swift).
             pip,
             // A page leaving for another site isn't taken back by a reload
@@ -66,7 +76,7 @@ enum PageScripts {
         // light: the engine's proxy in the page's world, the engine and the
         // start script in their own (DarkPages.swift). The same three for
         // every site, so going between sites sends nothing.
-        list += DarkPages.scripts(for: tab.darkState.armed)
+        if !omits("dark") { list += DarkPages.scripts(for: tab.darkState.armed) }
         list += [
             // Every frame: a swipe over an embedded map is the map's, and only
             // the map's own document can say so.
@@ -94,7 +104,7 @@ enum PageScripts {
             // its first line.
             dev, devBridge,
             // A web app's own count, as it tells the Dock (Corner.swift).
-            badge, badgeBridge,
+            badge, badgeBridge, windowBridge,
             // The page's icons as its script changes them after load (Icons.swift).
             icons,
             // The page's EyeDropper, the Mac's color sampler, with its bridge
@@ -148,6 +158,9 @@ enum PageScripts {
     /// to tell which of them a page's trouble comes with.
     nonisolated static let left: Set<String> = Set((ProcessInfo.processInfo.environment["YAB_PAGE_SCRIPTS_OFF"] ?? "")
         .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty })
+    nonisolated static func omits(_ group: String) -> Bool {
+        left.contains("all") || left.contains(group)
+    }
     private static func leftOut(_ script: WKUserScript) -> Bool {
         if left.contains("all") { return true }
         let named: [(String, [WKUserScript])] = [
@@ -173,9 +186,13 @@ enum PageScripts {
             if ids.allSatisfy(have.contains) { return false }
         }
         counts.changed += 1
+        // A Cocoa-backed getter result can mutate when the controller is
+        // cleared. Keep the requested application scripts in an owned array.
+        let snapshot = list.map { $0 }
         controller.removeAllUserScripts()
         // WebKit keeps extensions' scripts through that (PageAppearance.install).
-        list.forEach(controller.addUserScript)
+        var kept = Set(controller.userScripts.map(ObjectIdentifier.init))
+        for script in snapshot where kept.insert(ObjectIdentifier(script)).inserted { controller.addUserScript(script) }
         let before = (objc_getAssociatedObject(controller, &armedKey) as? Armed)?.sends ?? 0
         objc_setAssociatedObject(controller, &armedKey, Armed(ids, sends: before + 1), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         return true
@@ -277,6 +294,7 @@ enum PageScripts {
     private static let devBridge = script(DevRelay.bridge, .atDocumentStart, mainOnly: true)
     private static let badge = script(BadgeRelay.page, .atDocumentStart, mainOnly: true, in: .page)
     private static let badgeBridge = script(BadgeRelay.bridge, .atDocumentStart, mainOnly: true)
+    private static let windowBridge = script(WindowRelay.bridge, .atDocumentStart, mainOnly: true)
     private static let icons = script(IconRelay.script, .atDocumentEnd, mainOnly: true)
     private static let eyeDropper = script(EyeDropperRelay.page, .atDocumentStart, mainOnly: false, in: .page)
     private static let eyeDropperBridge = script(EyeDropperRelay.bridge, .atDocumentStart, mainOnly: false)
@@ -341,15 +359,27 @@ enum PageScripts {
 // Chromium adopts feature families only after their native receiver and
 // page consumers use PageHandle. Keep the order of the shared list.
 extension PageScripts {
-    static func chromium(for tab: Tab, _ arming: Arming) -> [PageScriptRegistration] {
+    /// `WKUserScript.source` makes its string anew each time, and a Chromium
+    /// tab keeps what it was given: 1.4 MB a tab of the same words. One script,
+    /// one string; the few made for a site's own CSS fall out at a clear.
+    private static var texts: [ObjectIdentifier: (script: WKUserScript, text: String)] = [:]
+    private static func text(of script: WKUserScript) -> String {
+        if let known = texts[ObjectIdentifier(script)] { return known.text }
+        if texts.count >= 512 { texts.removeAll() }
+        let text = script.source
+        texts[ObjectIdentifier(script)] = (script, text)
+        return text
+    }
+
+    static func chromium(for tab: Tab, _ arming: Arming, hiddenCSS: [String: String]? = nil) -> [PageScriptRegistration] {
         let list = list(for: tab, arming)
         // call: Meet's, Zoom's and Slack's own switches, read from the DOM.
         // linkCards and the peek origin: scripts the hover card and the peek
         // ask through PageHandle.run, with no message handler of their own.
-        var selected = [fonts(PageFonts.read()), navigationHold, scroll, drawn, picker, peekOrigin(force: tab.forcePeeks?() ?? false), linkCards,
+        var selected = [TopDragRelay.script, fonts(PageFonts.read()), navigationHold, scroll, drawn, picker, peekOrigin(force: tab.forcePeeks?() ?? false), linkCards,
                         icons, forms, formFrames, call, wallet, walletSoon, agentFrames,
-                        images, sent, watched, badge, badgeBridge, share, shareBridge, isolate,
-                        json(JSONShow.current, keeps: !tab.shy), veils(arming.css)]
+                        swipe, images, sent, watched, badge, badgeBridge, windowBridge, share, shareBridge, pushBridge, withoutPasskeys, passkeyBridge, isolate, dev, devBridge, eyeDropper, eyeDropperBridge,
+                        json(JSONShow.current, keeps: !tab.shy)]
         if let site = ChatBusy.site(arming.host) { selected.append(busy(site)) }
         if tab.skipsAds { selected.append(YouTube.user) }
         if let items = memo["items"] { selected += items.values }
@@ -361,14 +391,27 @@ extension PageScripts {
         let ids = Set(selected.map(ObjectIdentifier.init))
         // Yab's own site is told it is open in Yab (Dress), a mark in the DOM, made afresh each time.
         let dressed = Dress.ours(arming.host) ? Dress.script(Links.browser).source : nil
-        return list.filter { ids.contains(ObjectIdentifier($0)) || $0.source == dressed || $0 === tab.engineSwitchDocument?.script }.map {
+        let tips = PageScriptRegistration(source: PageScript.load("chromium-tips"), world: .yab, atEnd: false, mainOnly: false)
+        let chosen: [PageScriptRegistration] = list.filter { ids.contains(ObjectIdentifier($0)) || $0.source == dressed || $0 === tab.engineSwitchDocument?.script }.map {
             let world: PageWorld = $0 === agentFrames ? .agent
                 : $0 === tab.engineSwitchDocument?.script ? .client
-                : ($0 === badge || $0 === navigationHold || $0 === DarkPages.proxy || $0 === share || $0 === YouTube.user) ? .page
+                : ($0 === badge || $0 === navigationHold || $0 === DarkPages.proxy || $0 === share || $0 === YouTube.user
+                   || $0 === withoutPasskeys || $0 === dev || $0 === eyeDropper) ? .page
                 : $0 === isolate ? .named("float")
                 : darkWorld.contains(ObjectIdentifier($0)) ? DarkPages.pageWorld : .yab
-            return PageScriptRegistration(source: $0.source, world: world,
+            // No passkey script: Chromium's own WebAuthn checks a request,
+            // then hands it to Yab (ChromiumWebAuthn).
+            return PageScriptRegistration(source: text(of: $0), world: world,
                                           atEnd: $0.injectionTime == .atDocumentEnd, mainOnly: $0.isForMainFrameOnly)
         }
+        // Yab's pushManager takes the place of Chromium's own (WebPush.swift).
+        let windows = PageScriptRegistration(source: WindowRelay.page, world: .page, atEnd: false, mainOnly: true)
+        let hidden = hiddenCSS ?? Curtain.shared.styles
+        let veils = left.contains("all") || hidden.isEmpty ? [] : [PageScriptRegistration(
+            source: Veiling.styles(hidden), world: .yab, atEnd: false, mainOnly: true)]
+        return (omits("chromium-tips") ? [] : [tips]) + chosen
+            + veils
+            + (omits("window") ? [] : [windows])
+            + (tab.shy || omits("chromium-push") ? [] : [PageScriptRegistration(source: PushRelay.chromiumPage, world: .page, atEnd: false, mainOnly: false)])
     }
 }

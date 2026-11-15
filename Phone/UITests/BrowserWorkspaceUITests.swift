@@ -175,7 +175,7 @@ final class BrowserWorkspaceUITests: XCTestCase {
         app.launchArguments = ["-YabProfileDirectory", profileFolder.path, "-YabURL", one, "-YabNoAnim", "NO"]
         app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1", "YAB_HAPTICS_JOURNAL": journal.path]
         app.launch()
-        XCTAssertTrue(app.buttons["welcome.start"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["welcome.skip"].waitForExistence(timeout: 15))
         app.passWelcome()
         let input = app.textFields["field.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5))

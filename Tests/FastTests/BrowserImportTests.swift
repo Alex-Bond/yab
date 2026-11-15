@@ -14,7 +14,7 @@ struct ImportFixture {
 
     func json(_ name: String, _ value: Any) throws { try write(name, JSONSerialization.data(withJSONObject: value)) }
     func remove() { try? FileManager.default.removeItem(at: root) }
-    func source(_ known: Chromium.Source) -> Chromium.Source { var source = known; source.dataRoot = root; return source }
+    func source(_ known: Chromium.Source) -> Chromium.Source { var source = known; source.dataRoot = root; return source.authorizingImport() }
 
     func database(_ name: String, _ sql: String) throws -> OpaquePointer {
         let file = root.appendingPathComponent(name)
@@ -119,6 +119,34 @@ struct BrowserImportTests {
         #expect(Chromium.places(in: source, limit: 10).count == 10)
         #expect(try Data(contentsOf: file) == original)
         #expect(try Data(contentsOf: URL(fileURLWithPath: file.path + "-wal")) == wal)
+    }
+
+    /// A backup that fails after its copy was opened removes the copy, and
+    /// only once its connection is closed: unlinking it under the open
+    /// connection was EXC_GUARD (vnode guard, unlink) in Yab on macOS 27.0.1,
+    /// where a large History or Web Data ran out of the ten seconds
+    /// (`partial`: the same cut-off with no time at all). `unreadable`: a
+    /// source SQLite can't read, nothing copied. A plain process on 26.6.1
+    /// gets no guard either way, so this checks the outcome, not the trap.
+    @Test(arguments: ["partial", "unreadable"])
+    func failedSnapshotClosesItsCopyBeforeRemovingIt(_ kind: String) throws {
+        let fixture = ImportFixture()
+        defer { fixture.remove() }
+        if kind == "partial" {
+            let db = try fixture.database("Default/History", """
+            PRAGMA journal_mode=WAL; CREATE TABLE t(x BLOB);
+            WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)
+            INSERT INTO t SELECT randomblob(2000) FROM n;
+            """)
+            sqlite3_close(db)
+        } else {
+            try fixture.write("Default/History", Data(String(repeating: "not a database ", count: 512).utf8))
+        }
+        let copies = fixture.root.appendingPathComponent("copies")
+        try FileManager.default.createDirectory(at: copies, withIntermediateDirectories: true)
+        let file = fixture.root.appendingPathComponent("Default/History")
+        #expect(throws: (any Error).self) { try Chromium.copyWithLog(file, into: copies, within: 0) }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: copies.path).isEmpty)
     }
 
     @Test func extensionsReadSecurePreferencesAndIntegerDisableReasons() throws {

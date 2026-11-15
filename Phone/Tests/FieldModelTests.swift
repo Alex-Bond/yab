@@ -376,6 +376,28 @@ final class FieldModelTests: XCTestCase {
         XCTAssertNil(app.surfaces.chat)
     }
 
+    /// #1603: the plate's field over an ordinary tab of Today, eyes shut,
+    /// loaded the private search into that ordinary tab, which history
+    /// then recorded. It opens a private tab of its own, as + does.
+    func testTheEyesShutOverAnOrdinaryTabOpenAPrivateTabOfTheirOwn() throws {
+        let today = try XCTUnwrap(app.browser.space.today.first { !$0.isPrivate })
+        app.browser.select(today.id)
+        app.surfaces.openField(.address)
+        app.field.typed("")
+        app.field.setPrivate(true)
+        app.field.typed("gift ideas for jonas")
+        XCTAssertEqual(app.fieldRows.map(\.action), [.search])
+        app.fieldReturn()
+        let opened = try XCTUnwrap(app.browser.tab)
+        XCTAssertNotEqual(opened.id, today.id, "not loaded into the ordinary tab")
+        XCTAssertTrue(opened.isPrivate, "never history, never synced")
+        XCTAssertEqual(opened.page, "google-gift")
+        let left = try XCTUnwrap(app.browser.tab(today.id))
+        XCTAssertFalse(left.isPrivate)
+        XCTAssertEqual(left.page, today.page, "the ordinary tab keeps its own page")
+        XCTAssertEqual(left.title, today.title)
+    }
+
     func testAPrivateTabClosedAnywhereLeavesNothing() async throws {
         app.openPrivately(PageFixtures.search("gift ideas for jonas"))
         let tab = try XCTUnwrap(app.browser.tab)

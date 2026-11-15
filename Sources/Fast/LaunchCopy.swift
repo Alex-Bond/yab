@@ -33,6 +33,7 @@ enum LaunchCopy {
             usleep(200_000)
             guard whole(files, exists: exists), fileSize(path) == size, !again else { continue }
             setenv(relaunched, "1", 1)
+            fputs("YAB-LAUNCH exec-retry pid=\(getpid()) target=\(path)\n", stderr)
             execv(path, CommandLine.unsafeArgv)
         }
         let line = "yab: the app this was started from (\(files.app)) was moved or removed while it started, an update perhaps. Start it again.\n"

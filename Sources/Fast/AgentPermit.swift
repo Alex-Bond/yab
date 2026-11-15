@@ -95,6 +95,8 @@ struct AgentPermit: Equatable {
     }
 
     let kind: Kind
+    /// Monotonic arrival order, unaffected by a wall-clock correction.
+    let askOrder = DispatchTime.now().uptimeNanoseconds
     let session: String
     /// A line beside the question: what for, or to whom.
     let detail: String
@@ -109,6 +111,14 @@ struct AgentPermit: Equatable {
     /// whole session, every connection of it (Agents.mailGrants): the yes
     /// says so.
     var forSession = false
+
+    // Arrival is presentation metadata. Cause matching deliberately rebuilds
+    // a permit, so its fresh clock value must not create a different question.
+    static func == (left: AgentPermit, right: AgentPermit) -> Bool {
+        left.kind == right.kind && left.session == right.session && left.detail == right.detail
+            && left.draft == right.draft && left.amount == right.amount && left.pays == right.pays
+            && left.forSession == right.forSession
+    }
 
     /// The press a rule can be kept for, Always here or Never here: not a
     /// payment, not a sign-in, not Messages.
@@ -218,76 +228,13 @@ extension Agents {
     /// since a sent mail can't come back (docs/casa.md, Consent). The
     /// caller checks the task and mail access before reaching here.
     func sendMail(_ out: MailAgent.Outgoing, in tab: Tab, session: String, mode: AgentAsking, hold: TimeInterval? = nil) async -> [String: Any] {
-        let permit = AgentPermit(kind: .sendMail(to: out.to, mail: out.key), session: session, detail: out.detail, draft: out.draft.body)
-        let yes = tab.approved.flatMap { $0.session == session && $0.ref == permit.key && Date().timeIntervalSince($0.at) < 120 ? $0 : nil }
-        guard yes != nil else {
-            if tab.declined.remove(session) != nil {
-                return ["error": "the person said not now to that mail: don't send it another way; say so in your answer"]
-            }
-            // The mail whole, for a device that reads it before its yes.
-            ApprovalDetails.shared.outgoing[permit.key] = [out]
-            ask(tab, permit)
-            if let browser { showAsk(tab, session: session, in: browser) }
-            return ["error": "sending waits for the person's yes; asking them now", "asking": true, "tab": Bench.short(tab)]
-        }
-        tab.approved = nil
-        touch(session, "mail · send to \(out.to)")
-        let held = hold ?? MailCenter.undoSend
-        let result = await MailAgent.send(out, hold: held)
-        await foldSent(tab, permit, outs: [out], results: [result], hold: held)
-        sent(tab, trouble: result["error"] as? String) {
-            await MailAgent.send(out, hold: held)["error"] as? String
-        }
-        return result
+        await queueMail([out], session: session, hold: hold)
     }
 
-    /// Several mails on one card, every address and word of each on it:
-    /// one yes, Send All, sends them all, in every mode, each through its
-    /// own Undo send window, so each can still be taken back alone.
+    /// An explicit batch shares one decision, and each outgoing operation
+    /// still has one owner. A one-item batch has the single-mail card.
     func sendMails(_ outs: [MailAgent.Outgoing], in tab: Tab, session: String, hold: TimeInterval? = nil) async -> [String: Any] {
-        let permit: AgentPermit
-        if outs.count == 1, let out = outs.first {
-            // A one-item mails array is still one mail: the same recipient,
-            // paper and Send as the single-mail call, with its exact consent key.
-            permit = AgentPermit(kind: .sendMail(to: out.to, mail: out.key), session: session,
-                                 detail: out.detail, draft: out.draft.body)
-        } else {
-            permit = AgentPermit(kind: .sendMails(count: outs.count, mail: MailAgent.batchKey(outs)), session: session,
-                                 detail: "To " + outs.map(\.to).joined(separator: "; "), draft: MailAgent.batchDraft(outs))
-        }
-        let yes = tab.approved.flatMap { $0.session == session && $0.ref == permit.key && Date().timeIntervalSince($0.at) < 120 ? $0 : nil }
-        guard yes != nil else {
-            if tab.declined.remove(session) != nil {
-                return ["error": "the person said not now to those mails: don't send them another way; say so in your answer"]
-            }
-            ApprovalDetails.shared.outgoing[permit.key] = outs
-            ask(tab, permit)
-            if let browser { showAsk(tab, session: session, in: browser) }
-            return ["error": "sending waits for the person's yes; asking them now", "asking": true, "tab": Bench.short(tab)]
-        }
-        tab.approved = nil
-        touch(session, "mail · send \(outs.count) mails")
-        var said: [String] = []
-        var trouble: String?
-        var results: [[String: Any]] = []
-        for out in outs {
-            let got = await MailAgent.send(out, hold: hold ?? MailCenter.undoSend)
-            if let error = got["error"] as? String { trouble = trouble ?? error }
-            said.append((got["text"] as? String) ?? (got["error"] as? String) ?? "")
-            results.append(got)
-        }
-        if trouble == nil { await foldSent(tab, permit, outs: outs, results: results, hold: hold ?? MailCenter.undoSend) }
-        sent(tab, trouble: trouble)
-        return ["text": said.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n"),
-                "count": outs.count, "sending": trouble == nil]
-    }
-
-    /// The card starts folding on approval. Attach Undo as soon as the
-    /// real drafts exist, without delaying the shared surface's animation.
-    func foldSent(_ tab: Tab, _ permit: AgentPermit, outs: [MailAgent.Outgoing], results: [[String: Any]], hold: TimeInterval) async {
-        let drafts = results.compactMap { $0["sending"] as? Bool == true ? $0["draft"] as? String : nil }
-        guard !drafts.isEmpty, drafts.count == results.count else { return }
-        AskStand.shared.sending(permit, outs: outs, drafts: drafts, hold: hold)
+        await queueMail(outs, session: session, hold: hold)
     }
 
     /// Where a task asks for its yes: its own latest tab; else the tab of
@@ -511,6 +458,7 @@ extension Agents {
     /// A task over: its face leaves your tabs, and what it was allowed there
     /// goes with it.
     func leave(_ session: Session) {
+        forgetMailCaller(session.id)
         AssistantApprovals.shared.left(session: session.id)
         Payments.shared.left(session: session.id)
         if let root = self.session(root(of: session.id)), root !== session, root.permit?.session == session.id {
@@ -719,8 +667,12 @@ extension AgentPage {
     function all(el, q) { const list = $allIn(el, q), out = []; for (let i = 0, n = $count(list); i < n; i++) out.push($item(list, i)); return out; }
     function textOf(el) { if (!el) return ''; try { return $innerText(el) || ''; } catch (e) { return $textContent(el) || ''; } }
     function valueOf(el) { const t = $tag(el); return (t === 'INPUT' ? $inputValue(el) : t === 'TEXTAREA' ? $areaValue(el) : '') || ''; }
-    const kinds = 'button,[role=button],a,input[type=submit],input[type=button],[role=menuitem]';
-    const verbs = /^(send|send now|post|publish|tweet|pay|pay now|buy|buy now|place (your )?order|order now|purchase|complete (purchase|order|payment)|confirm (and pay|payment|purchase|order|transfer)|submit (payment|order)|transfer|withdraw|donate|delete|delete forever|delete permanently|delete account|empty trash|cancel (my |your )?(subscription|plan|membership)|(confirm|finish|complete) cancel(l)?ation|(yes, )?cancel (subscription|plan|membership)|turn off auto-?renew(al)?|don'?t renew|end (subscription|plan|membership))(\\b|$)/i;
+    // A link that goes somewhere is reading, not committing: "Delete an
+    // API key" in a docs sidebar, "Send feedback" in a footer. Only links
+    // that act as buttons (no address, #, javascript:) can commit.
+    const kinds = 'button,[role=button],a:not([href]),a[href="#"],a[href^="javascript:" i],input[type=submit],input[type=button],[role=menuitem]';
+    // "Purchase orders" names a table or a record (register 1762), not a press that buys.
+    const verbs = /^(send|send now|post|publish|tweet|pay|pay now|buy|buy now|place (your )?order|order now|purchase(?! (?:orders?|requisitions?|requests?|histor(?:y|ies)|invoices?|records?)\\b)|complete (purchase|order|payment)|confirm (and pay|payment|purchase|order|transfer)|submit (payment|order)|transfer|withdraw|donate|delete|delete forever|delete permanently|delete account|empty trash|cancel (my |your )?(subscription|plan|membership)|(confirm|finish|complete) cancel(l)?ation|(yes, )?cancel (subscription|plan|membership)|turn off auto-?renew(al)?|don'?t renew|end (subscription|plan|membership))(\\b|$)/i;
     // The same last steps as other languages label them, most of yab's
     // people's: German, French, Spanish, Portuguese, Italian. \\b
     // knows only ASCII letters, so the word ends where no letter follows.
@@ -744,14 +696,34 @@ extension AgentPage {
       // A label's click is its control's.
       if ($tag(el) === 'LABEL' && $control(el)) el = $control(el);
       if (action === 'click') {
-        const c = $closest(el, kinds) || el;
-        return commits(c) ? c : null;
+        // A link that goes somewhere is reading, whatever it says.
+        const c = $closest(el, kinds) || ($closest(el, 'a[href]') ? null : el);
+        return c && commits(c) ? c : null;
       }
       // Enter in a field, Space on a button, or a form sent: what its form
       // or dialog would do with it, or, for a composer in neither, the
       // nearest surroundings that have a Send.
       const self = $closest(el, kinds);
       if (self && commits(self)) return self;
+      // Enter in a one-line field does what its form's default button does,
+      // and nothing else: a filter box beside a key's Delete (GitHub SSH
+      // keys, Cloud credentials) or Gmail's toolbar never asks "Delete?".
+      // Outside a form only a nearby Send-like button counts (a chat box).
+      if ($tag(el) === 'INPUT') {
+        const form = $closest(el, 'form');
+        if (form) {
+          const main = $one(form, 'button:not([type]),button[type=submit],input[type=submit],input[type=image]');
+          return main && commits(main) ? main : null;
+        }
+        const sends = b => commits(b) && !/^(delete|remove|empty|cancel|turn off|don'?t|end|l[öo]sch|supprim|elimin|exclu|borr)/i.test(nameOf(b));
+        // The nearest box with any buttons is the field's own: its Send or
+        // nothing, never one further up the page.
+        for (let up = $up(el), n = 0; up && n < 4; up = $up(up), n++) {
+          const near = all(up, kinds);
+          if (near.length) return near.find(sends) || null;
+        }
+        return null;
+      }
       let box = $closest(el, 'form,[role=dialog],dialog');
       for (let up = el, n = 0; !box && up && n < 8; up = $up(up), n++) {
         if (all(up, kinds).some(commits)) box = up;
@@ -1083,23 +1055,21 @@ extension AgentPage {
     /// last value what comes back.
     static func eval(_ web: any PageHandle, _ js: String, patience: Double = 20, _ done: @escaping @MainActor (Result<Any?, Error>) -> Void) {
         let checked: @MainActor (Result<Any?, Error>) -> Void = { result in
-            guard web.engine == .chromium else { done(result); return }
             Task { @MainActor in
-                guard await AgentSecrets.check(web) else { done(.failure(AgentSecrets.Refused())); return }
+                guard await AgentSecrets.check(web) else { done(.failure(AgentSecrets.Refused(web))); return }
                 done(result)
             }
         }
         let execute = {
-            let guardBody = web.engine == .chromium ? AgentSecrets.guardBody : ""
+            let guardBody = AgentSecrets.guardBody
             guard let body = awaited(js, patience: patience) else {
                 web.run(guardBody + js, in: .agentEval) { result in MainActor.assumeIsolated { checked(result) } }
                 return
             }
             web.call(guardBody + body, arguments: [:], in: .agentEval) { result in MainActor.assumeIsolated { checked(result) } }
         }
-        guard web.engine == .chromium else { execute(); return }
         Task { @MainActor in
-            guard await AgentSecrets.check(web) else { done(.failure(AgentSecrets.Refused())); return }
+            guard await AgentSecrets.check(web) else { done(.failure(AgentSecrets.Refused(web))); return }
             execute()
         }
     }
@@ -1129,7 +1099,7 @@ extension AgentPage {
         let ms = Int(patience * 1000)
         return """
         let timer; try { const value = await Promise.race([(async () => { \(inner)
-        })(), new Promise((_, no) => { timer = setTimeout(() => no("its promise hadn't settled after \(Int(patience)) s"), \(ms)); })]); return value === undefined ? null : value; }
+        })(), new Promise((_, no) => { timer = setTimeout(() => no("its promise hadn't settled after \(Int(patience)) s"), \(ms)); })]); return value === undefined ? null : \(WebKitIPCBoundary.plainScript)(value); }
         catch (e) { throw typeof e?.line === 'number' && e.line > 0 ? `${e} (line ${e.line})` : e; } finally { clearTimeout(timer); }
         """
     }

@@ -9,7 +9,10 @@ struct ChromiumNativeCapture: Equatable {
     let document: String
     let camera: Bool
     let microphone: Bool
+    /// This page shows something (getDisplayMedia).
     let screen: Bool
+    /// Something shows this page.
+    let mirrored: Bool
     let videoPiP: Bool
     let documentPiP: Bool
     let actions: Set<String>
@@ -24,13 +27,14 @@ struct ChromiumNativeCapture: Equatable {
               let browser = p["browserId"]?.number, browser.isFinite, browser > 0,
               case .array(let actions)? = p["actions"], actions.count <= 16 else { return nil }
         var flags: [String: Bool] = [:]
-        for key in ["camera", "microphone", "screen", "tab", "window", "display", "allScreens", "mirrored", "videoPiP", "documentPiP"] {
+        for key in ["camera", "microphone", "screen", "tabCapture", "window", "display", "allScreens", "mirrored", "videoPiP", "documentPiP"] {
             guard case .bool(let value)? = p[key] else { return nil }
             flags[key] = value
         }
         profile = expected; self.token = token; self.document = document
         camera = flags["camera"]!; microphone = flags["microphone"]!
-        screen = ["screen", "tab", "window", "display", "allScreens", "mirrored"].contains { flags[$0] == true }
+        screen = ["screen", "tabCapture", "window", "display", "allScreens"].contains { flags[$0] == true }
+        mirrored = flags["mirrored"]!
         videoPiP = flags["videoPiP"]!; documentPiP = flags["documentPiP"]!
         idle = !flags.values.contains(true)
         self.actions = Set(actions.compactMap(\.string)).intersection(["stopUserMedia", "stopScreen"])
@@ -64,6 +68,28 @@ extension ChromiumPage {
         // and the native atomic lifecycle guard are integrated and verified.
         if let capture = media.nativeCapture { applyNativeCapture(capture) }
     }
+
+    /// What the page's next getDisplayMedia shows, chosen in Yab's box. A
+    /// tab of this engine, a window or a screen; false where this SDK can't
+    /// take it or the source has gone (Share falls back on ShareFeed).
+    func grantDisplaySource(_ source: [String: JSONValue], origin: PageOrigin, audio: Bool) async -> Bool {
+        var params = source
+        let scheme = origin.scheme, host = origin.host
+        let standard = (scheme == "https" && origin.port == 443) || (scheme == "http" && origin.port == 80) || origin.port <= 0
+        params["origin"] = .string(scheme + "://" + host + (standard ? "" : ":\(origin.port)"))
+        params["audio"] = .bool(audio)
+        return (try? await navigationRequest("media.capture.grant", params))?["granted"] == .bool(true)
+    }
+
+    /// Chrome's "Share this tab instead": the running capture moves to
+    /// `page`, and the track the far end gets carries on.
+    func switchDisplaySource(to page: ChromiumPage, audio: Bool) {
+        guard let remote = page.remoteID else { return }
+        command("media.capture.switch", ["source": .string("tab"), "sourceTab": .string(remote), "audio": .bool(audio)])
+    }
+
+    /// The share can be stopped natively: it ends every track of it.
+    var stopsNativeCapture: Bool { media.nativeCapture?.stopParameters(kind: "screen") != nil }
 
     func stopNativeCapture(kind: String) {
         guard let capture = media.nativeCapture, let params = capture.stopParameters(kind: kind),

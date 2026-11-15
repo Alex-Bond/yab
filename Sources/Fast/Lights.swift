@@ -156,7 +156,7 @@ final class LightsRow: NSView {
         ]
         for (name, object) in names {
             watching.append(center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.cancelHover(name.rawValue); self?.refresh() }
+                AppKitMainThread.sync { self?.cancelHover(name.rawValue); self?.refresh() }
             })
         }
         // Moved or resized: posted on every frame of a drag, and `refresh`
@@ -165,7 +165,7 @@ final class LightsRow: NSView {
         // main thread's time then). Looked at once the window is at rest.
         for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didEndLiveResizeNotification] {
             watching.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
+                AppKitMainThread.sync {
                     self?.cancelHover(name.rawValue)
                     self?.refreshAtRest(now: name == NSWindow.didEndLiveResizeNotification)
                 }
@@ -174,12 +174,12 @@ final class LightsRow: NSView {
         for name in [NSWindow.willCloseNotification, NSWindow.willMiniaturizeNotification,
                      NSWindow.willEnterFullScreenNotification, NSWindow.willExitFullScreenNotification] {
             watching.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.cancelHover(name.rawValue) }
+                AppKitMainThread.sync { self?.cancelHover(name.rawValue) }
             })
         }
         for name in [NSMenu.didBeginTrackingNotification, NSMenu.didEndTrackingNotification] {
             watching.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
-                MainActor.assumeIsolated {
+                AppKitMainThread.sync {
                     guard let self, let menu = note.object as? NSMenu else { return }
                     if note.name == NSMenu.didBeginTrackingNotification {
                         self.menus.insert(ObjectIdentifier(menu))
@@ -200,7 +200,7 @@ final class LightsRow: NSView {
                                            .leftMouseDown, .rightMouseDown, .otherMouseDown,
                                            .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .keyDown]
         pointer = NSEvent.addLocalMonitorForEvents(matching: kinds) { [weak self] event in
-            MainActor.assumeIsolated {
+            AppKitMainThread.sync {
                 guard let self else { return }
                 if event.window === self.window,
                    [.mouseMoved, .mouseEntered, .mouseExited].contains(event.type) {
@@ -221,7 +221,7 @@ final class LightsRow: NSView {
         atRest = nil
         guard !now, let window else { return refresh() }
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated {
+            AppKitMainThread.sync {
                 self?.atRest = nil
                 self?.refresh()
             }
@@ -365,7 +365,7 @@ final class LightsRow: NSView {
         hoverArmed += 1
         noteHover("armed turn=\(turn) frame=\(frame)")
         let work = DispatchWorkItem { [weak self, weak button] in
-            MainActor.assumeIsolated {
+            AppKitMainThread.sync {
                 guard let self else { return }
                 self.hoverFired += 1
                 self.noteHover("fired turn=\(turn) current=\(self.hoverTurn)")
@@ -645,9 +645,9 @@ enum EdgeReach {
         return y >= 0 && y <= height
     }
 
-    /// A forgiving target for a put-away column (#217), independent of the
-    /// three-point wall used by the top strip and the window's geometry.
-    static let hoverReach: CGFloat = 12
+    /// Only the outermost points belong to the hidden column. Page logos
+    /// and menus just inside the window must receive their own hover.
+    static let hoverReach: CGFloat = 3
 
     /// The pointer is near the edge, where resting brings the column out,
     /// or out past it beside the window, having gone out
@@ -684,21 +684,10 @@ enum EdgeReach {
         return point.y >= 0 && point.y <= height
     }
 
-    /// How long the pointer rests before the column comes out: at the edge,
-    /// or in the corner the lights live in. Nil where resting brings nothing.
-    ///
-    /// The corner is inside the page, and pages put things there to click:
-    /// X's image viewer has its close button in it (bug #58), and resting on
-    /// it brought the column out over it. So the corner keeps quiet while
-    /// the page shows its pointing hand there, the way WebKit says something
-    /// takes a click, and for a moment after a press in it, for the page
-    /// under a button that was just clicked. It also waits a little longer
-    /// than the edge: a hand aiming at something in the corner rests there
-    /// on its way, a hand at the edge has nowhere else to go.
-    static func rest(edge: Bool, corner: Bool, hand: Bool, quiet: Bool) -> CFTimeInterval? {
-        if edge { return edgeRest }
-        if corner, !hand, !quiet { return cornerRest }
-        return nil
+    /// Only the side edge reveals the column. The lights become accessible
+    /// with it; their old corner target overlaps the page's own controls.
+    static func rest(edge: Bool) -> CFTimeInterval? {
+        edge ? edgeRest : nil
     }
 
     /// A pass through the edge brings nothing; a rest does, from either side.
@@ -846,7 +835,7 @@ final class Brim {
             fullScreenMoves += 1
             let move = fullScreenMoves
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                MainActor.assumeIsolated {
+                AppKitMainThread.sync {
                     if let self, self.fullScreenMoves == move { self.moving = false }
                 }
             }
@@ -927,27 +916,27 @@ final class Brim {
         // column or the strip is put away, and there is a card to bring out.
         browser.prefs.changes(\.sideShut).combineLatest(browser.prefs.changes(\.sidebar), browser.prefs.changes(\.sideFlank), browser.prefs.changes(\.stripShut))
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _, _, _, _ in MainActor.assumeIsolated { self?.rewatch(); self?.light() } }
+            .sink { [weak self] _, _, _, _ in AppKitMainThread.sync { self?.rewatch(); self?.light() } }
             .store(in: &keeping)
         // Menus are heard as they open and close, on the spot: while one is
         // open the main queue is the menu's.
         center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { [weak self] _ in
-            MainActor.assumeIsolated { self?.menuOpen = true }
+            AppKitMainThread.sync { self?.menuOpen = true }
         }
         center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: nil) { [weak self] _ in
-            MainActor.assumeIsolated { self?.menuOpen = false }
+            AppKitMainThread.sync { self?.menuOpen = false }
         }
         center.addObserver(forName: NSWindow.willEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.entering() }
+            AppKitMainThread.sync { self?.entering() }
         }
         center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.settled() }
+            AppKitMainThread.sync { self?.settled() }
         }
         center.addObserver(forName: NSWindow.willExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.leaving() }
+            AppKitMainThread.sync { self?.leaving() }
         }
         center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.settled() }
+            AppKitMainThread.sync { self?.settled() }
         }
         // macOS gives the window its new size inside the move, where the
         // picture at that size is taken, and SwiftUI would lay the window
@@ -956,7 +945,7 @@ final class Brim {
         // Laid out on the spot, the page has its size while macOS waits.
         // Posted synchronously, so `queue: nil`.
         center.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: nil) { [weak self] note in
-            MainActor.assumeIsolated {
+            AppKitMainThread.sync {
                 guard let self, self.moving, let window = note.object as? NSWindow else { return }
                 window.contentView?.layoutSubtreeIfNeeded()
             }
@@ -1046,7 +1035,7 @@ final class Brim {
         // Thirty a second: all it has to catch is the pointer reaching an
         // edge, and a thirtieth of a second is quicker than a hand gets there.
         let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.moved() }
+            AppKitMainThread.sync { self?.moved() }
         }
         RunLoop.main.add(timer, forMode: .common)
         ticking = timer
@@ -1057,17 +1046,17 @@ final class Brim {
         // the menu bar, which sends the app nothing either.
         moves = [
             NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-                MainActor.assumeIsolated { self?.moved() }
+                AppKitMainThread.sync { self?.moved() }
                 return event
             },
             NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
-                MainActor.assumeIsolated { self?.moved() }
+                AppKitMainThread.sync { self?.moved() }
             },
         ].compactMap { $0 }
         // Presses are listened to: a tap on a trackpad is over in less
         // than a look.
         presses = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
-            MainActor.assumeIsolated {
+            AppKitMainThread.sync {
                 if let self, let window = self.window, event.window === window {
                     self.pressed(at: window.convertPoint(toScreen: event.locationInWindow))
                 }
@@ -1197,29 +1186,31 @@ final class Brim {
             browser.moveHead(out: false)
         }
 
-        // Whatever sits at the top, the strip, or the card's first row,
-        // steps down while macOS has its menu bar and title bar down, and
-        // back up once the pointer has left the both of them. Nothing is
-        // kept in reserve for them while they are up: the strip has no
-        // lights of its own in full screen, the title bar coming down is
-        // where you go to find them.
-        // A strip put away comes down with them, over the page, lifted, on
-        // their beat, and stays while something hanging from it is up.
+        // The vertical card clears the system menu. Horizontal tabs live
+        // in that menu's native title-bar accessory instead; their state
+        // is observed here only for controls anchored to the strip.
         let menu = full ? menuReach : 0
-        if full, !held {
+        if full, browser.stripAway {
+            // Downloads and background-tab notices need to know whether
+            // their anchor is visible. Mirror AppKit; do not animate it.
+            let shown = FullscreenToolbarView.isRevealed(browser)
+            if browser.stripPeek != shown { browser.quietly { browser.stripPeek = shown } }
+        }
+        // Horizontal tabs are an AppKit title-bar accessory. AppKit owns
+        // their reveal and hysteresis; this pointer state is only for the
+        // vertical column's clearance under the system menu.
+        if full, browser.prefs.sidebar, !held {
             if fromTop <= 2, !browser.menuOut {
                 withAnimation(Motion.arrive) {
                     browser.menuOut = true
                     browser.menuDown = menu
                 }
-                if browser.stripAway { Self.bringStrip(browser, out: true, motion: Motion.arrive) }
             } else if fromTop > menu + (browser.prefs.sidebar ? Metrics.strip : Metrics.row), browser.menuOut,
                       !(browser.stripPeek && stripHeld(browser)) {
                 withAnimation(Motion.depart) {
                     browser.menuOut = false
                     browser.menuDown = 0
                 }
-                Self.bringStrip(browser, out: false, motion: Motion.depart)
             }
         }
 
@@ -1251,7 +1242,7 @@ final class Brim {
                 } else if stripResting == nil, let rest {
                     stripResting = now
                     // Looked at again the moment the rest is long enough.
-                    let look = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.moved() } }
+                    let look = DispatchWorkItem { [weak self] in AppKitMainThread.sync { self?.moved() } }
                     stripLook?.cancel()
                     stripLook = look
                     DispatchQueue.main.asyncAfter(deadline: .now() + rest, execute: look)
@@ -1268,7 +1259,7 @@ final class Brim {
             } else if stripLetting == nil {
                 // A moment's grace, as long as Dia's, then away (EdgeReach.letGo).
                 let work = DispatchWorkItem { [weak self] in
-                    MainActor.assumeIsolated {
+                    AppKitMainThread.sync {
                         guard let self, let browser = self.browser else { return }
                         self.stripLetting = nil
                         guard !self.stripHeld(browser) else { return }
@@ -1296,9 +1287,7 @@ final class Brim {
                 // A rest at the very edge brings it out, or out past it
                 // beside the window, gone there through the edge (EdgeReach),
                 // for a short moment, enough to tell a pointer that stopped
-                // from one passing through; the corner the lights live in a
-                // longer one, and only over nothing the page takes a click
-                // on (EdgeReach.rest). The full-screen menu bar brings no
+                // from one passing through. The full-screen menu bar brings no
                 // column out, including where it meets the side edge (#223),
                 // nor anything under it while it is down: on a screen
                 // without a notch it comes down over the window, the title
@@ -1317,16 +1306,8 @@ final class Brim {
                     past = true
                 }
                 let edge = !away && EdgeReach.at(here, past: past, height: frame.height)
-                // Not while a band or the bookmarks hold the corner: a
-                // half's back, there in a Split View, brought the card out
-                // over itself, and the card's lights stood on it (#136).
-                let clear = !browser.barShown && !browser.shelfShown
-                let corner = !right && over && clear && fromLeft <= Metrics.lightsCorner.width && fromTop <= Metrics.lightsCorner.height
                 let now = CACurrentMediaTime()
-                // WebKit sets the pointing hand over a link or a button.
-                let hand = corner && !edge
-                    && (Brim.benchPointer == nil ? NSCursor.current == NSCursor.pointingHand : Brim.benchHand)
-                let rest = belowMenu ? EdgeReach.rest(edge: edge, corner: corner, hand: hand, quiet: now < cornerQuiet) : nil
+                let rest = belowMenu ? EdgeReach.rest(edge: edge) : nil
                 let before = dwell.until
                 let remaining = dwell.remaining(rest: held ? nil : rest, now: now)
                 if dwell.until != before || remaining == nil {
@@ -1343,7 +1324,7 @@ final class Brim {
                     }
                     // Looked at again the moment the rest is long enough.
                     let look = DispatchWorkItem { [weak self] in
-                        MainActor.assumeIsolated {
+                        AppKitMainThread.sync {
                             self?.restLook = nil
                             self?.moved()
                         }
@@ -1374,7 +1355,7 @@ final class Brim {
             } else if visited, !held, letting == nil {
                 // Leave after the pointer has passed the card's safe area.
                 let work = DispatchWorkItem { [weak self] in
-                    MainActor.assumeIsolated {
+                    AppKitMainThread.sync {
                         guard let self, let browser = self.browser else { return }
                         self.letting = nil
                         guard !self.columnHeld(browser) else { return }

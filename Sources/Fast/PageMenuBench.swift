@@ -34,7 +34,11 @@ extension Bench {
             type == .rightMouseDown ? web.rightMouseDown(with: event) : web.rightMouseUp(with: event)
         }
         let open = request["open"] as? String
+        // AppKit's AutoFill row is attached by its menu implementation,
+        // outside NSMenu.items. It is the last row on editable field menus.
+        let systemAutofill = request["openSystemAutofill"] as? Bool == true
         let path = request["path"] as? String
+        let hold = min(3, max(0, request["hold"] as? Double ?? 0))
         let started = CACurrentMediaTime()
         Self.pageMenuTyped = nil
         // WebKit asks the page first and opens the menu a moment later, in a
@@ -45,6 +49,12 @@ extension Bench {
                 let now = CACurrentMediaTime()
                 if menus.isEmpty {
                     if now - started > 6 { timer.invalidate(); answer(["error": "no menu opened"]) }
+                    return
+                }
+                if systemAutofill, Self.pageMenuTyped == nil {
+                    Self.pageMenuTyped = now
+                    Self.press(String(UnicodeScalar(NSUpArrowFunctionKey)!), code: 126)
+                    Self.press(String(UnicodeScalar(NSRightArrowFunctionKey)!), code: 124)
                     return
                 }
                 if let open, Self.pageMenuTyped == nil {
@@ -62,6 +72,7 @@ extension Bench {
                     return
                 }
                 if let typed = Self.pageMenuTyped, now - typed < 0.6 { return }
+                if now - started < hold { return }
                 timer.invalidate()
                 var out: [String: Any] = ["menus": menus.count]
                 if let menu = Self.pageMenu { out["items"] = Self.rows(menu) }
@@ -69,6 +80,17 @@ extension Bench {
                 let menu = Self.pageMenu
                 menu?.cancelTracking()
                 Self.pageMenu = nil
+                // Test the text-input-client boundary used by the system
+                // picker with a fixture value, without opening a real vault.
+                if let text = request["insertSystemText"] as? String {
+                    DispatchQueue.main.async {
+                        window.makeFirstResponder(web)
+                        web.insertText(text)
+                        out["insertedSystemText"] = true
+                        answer(out)
+                    }
+                    return
+                }
                 guard let press = request["press"] as? String else { answer(out); return }
                 var rows = menu?.items ?? []
                 var row: NSMenuItem?
@@ -173,6 +195,8 @@ extension Bench {
             if let target = item.target { row["target"] = String(describing: type(of: target)) }
             // Whether the line wears a picture, and the tip the system would draw over it.
             row["image"] = item.image != nil
+            // Which picture: a system symbol says its name here.
+            if let image = item.image { row["picture"] = String(describing: image) }
             if let tip = item.toolTip { row["tip"] = tip }
             if let sub = item.submenu { row["submenu"] = rows(sub) }
             return row

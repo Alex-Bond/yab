@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// The bookmarks in the menu bar's Bookmarks menu, made by AppKit rather
 /// than SwiftUI. SwiftUI makes a menu bar's items all at once, folders and
@@ -78,8 +79,14 @@ final class BookmarkMenu: NSObject, NSMenuDelegate {
         for item in items(for: roots) { menu.addItem(item) }
     }
 
+    /// Each line of the Bookmarks menu with its mark: a
+    /// page's favicon at 16 points (the one it last wore, its site's
+    /// otherwise), a folder's glyph, the site's letter until its icon is
+    /// fetched. The bookmarks' row's own menus draw the same
+    /// (BookmarkBar.image).
     private func items(for nodes: [Bookmark]) -> [NSMenuItem] {
-        nodes.compactMap { node in
+        let scheme: ColorScheme = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        return nodes.compactMap { node in
             let item: NSMenuItem
             if node.isFolder {
                 item = NSMenuItem(title: node.title, action: nil, keyEquivalent: "")
@@ -94,6 +101,8 @@ final class BookmarkMenu: NSObject, NSMenuDelegate {
             } else {
                 return nil
             }
+            item.image = BookmarkBar.image(node, scheme: scheme)
+            if !node.isFolder { node.fetchIcon() }
             item.tag = Self.mark
             return item
         }

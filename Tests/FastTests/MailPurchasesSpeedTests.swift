@@ -38,4 +38,34 @@ struct MailPurchasesSpeedTests {
         #expect(read > mail.count / 2)
         #expect(ms < 60_000)
     }
+
+    /// "Order" and then a long run of blanks, as a table comes out in a
+    /// plain part: it took the number's pattern cubic time in the blanks.
+    @Test func aRunOfBlanksAfterOrderIsNoWork() {
+        let text = String(repeating: "Order" + String(repeating: " ", count: 2_000) + "?\n", count: 20) + "Order number: A100-77"
+        let clock = ContinuousClock()
+        var number: String?
+        let took = clock.measure { number = MailPurchases.orderNumber(in: text) }
+        #expect(number == "A100-77")
+        #expect(took < .seconds(1))
+    }
+
+    /// A very long mail is read by its start and its end.
+    @Test func aVeryLongMailKeepsItsStartAndEnd() {
+        let body = "Receipt from Figma\n" + String(repeating: "Спасибо за покупку, line of a digest\n", count: 5_000) + "Total: $144.00"
+        let short = MailPurchases.clipped(body)
+        #expect(short.utf16.count < 60_010)
+        #expect(short.hasPrefix("Receipt from Figma"))
+        #expect(short.hasSuffix("Total: $144.00"))
+        #expect(MailPurchases.clipped("Total: $144.00") == "Total: $144.00")
+    }
+
+    /// The code read skips elements too big to be one, never the code in a
+    /// mail that big.
+    @Test func aReceiptWithACodeInACellIsStillACode() {
+        let cell = "<td style=\"font-size:32px;letter-spacing:4px\">482913</td>"
+        let html = "<html><body><table><tr><td>" + String(repeating: "<p>filler words</p>", count: 2_000) + "</td></tr><tr>" + cell + "</tr></table></body></html>"
+        let read = MailCodeWords.read(subject: "Your login code", text: "", html: html, received: Self.now)
+        #expect(read?.code == "482913")
+    }
 }

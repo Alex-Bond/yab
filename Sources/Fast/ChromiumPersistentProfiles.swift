@@ -27,7 +27,7 @@ enum ChromiumPersistentProfiles {
         var quarantined: Set<UUID> { existing.subtracting(associated) }
         func physical(for placement: UUID) -> UUID { primary }
     }
-    private struct Key: Hashable { let root: String; let logical: UUID; let shared: Bool; let aliases: Set<UUID> }
+    private struct Key: Hashable { let root: String; let logical: UUID; let shared: Bool }
     private struct Association: Codable {
         let version: Int
         let logical: UUID
@@ -48,18 +48,29 @@ enum ChromiumPersistentProfiles {
         }
     }
     private static var records: [Key: Record] = [:]
+    // Input asks for the endpoint on every wheel/pointer event. A live store
+    // already has a resolved association; migration discovery is not input
+    // work. Weak keys do not keep a closed website store alive. Retirement
+    // removes its Record from `records`, invalidating this shortcut as well.
+    private static let liveRecords = NSMapTable<WKWebsiteDataStore, Record>.weakToStrongObjects()
 
     private static func record(for store: WKWebsiteDataStore) -> Record {
         precondition(store.isPersistent)
+        if let record = liveRecords.object(forKey: store), records[record.key] === record { return record }
         let sharedStore = Store.websites
         let shared = store === sharedStore || store.identifier == sharedStore.identifier
         let logical = shared ? Space.firstID : (store.identifier ?? Space.firstID)
+        let root = Store.file("Chromium"), metadata = Store.file("ChromiumImports")
+        let key = Key(root: root.path, logical: logical, shared: shared)
+        if let record = records[key] {
+            liveRecords.setObject(record, forKey: store)
+            return record
+        }
+        // Aliases discover legacy data once. Adding/moving a space cannot
+        // reinterpret an association already used by this logical store.
         let aliases: Set<UUID> = shared
             ? Set(Spaces.read().filter { !$0.ownSignIns }.map(\.id)).union(Spaces.sharing)
                 .union([Space.firstID, Space.mailID, Space.pinsID]) : [logical]
-        let root = Store.file("Chromium"), metadata = Store.file("ChromiumImports")
-        let key = Key(root: root.path, logical: logical, shared: shared, aliases: aliases)
-        if let record = records[key] { return record }
         let receipt = Store.file("ChromiumProfiles").appendingPathComponent(logical.uuidString + (shared ? "-shared" : "-named") + ".json")
         let generation = Store.settings.string(forKey: "chromium.profile.generation." + logical.uuidString) ?? "initial"
         var existing = Set(aliases.filter {
@@ -83,6 +94,7 @@ enum ChromiumPersistentProfiles {
         let plan = Plan(logical: logical, aliases: aliases, existing: existing, associated: associated, fresh: fresh)
         let record = Record(key: key, plan: plan, receipt: receipt, generation: generation, authorized: associated.contains(plan.primary))
         records[key] = record
+        liveRecords.setObject(record, forKey: store)
         return record
     }
     static func plan(for store: WKWebsiteDataStore) -> Plan { record(for: store).plan }
@@ -117,9 +129,50 @@ enum ChromiumPersistentProfiles {
         record.authorized = true
     }
 
+    private static let erasingKey = "chromium.profiles.erasing"
+
+    /// A deleted space's Chromium folder goes with its sign-ins. A loaded
+    /// profile keeps its files open, so the folder is removed while no helper
+    /// runs: at the next launch, or before the next helper starts.
+    static func sweepErased() {
+        guard ChromiumProcess.shared.processID == nil else { return }
+        let waiting = Store.settings.stringArray(forKey: erasingKey) ?? []
+        guard !waiting.isEmpty else { return }
+        let manager = FileManager.default
+        // A ledger is named by the physical folder and the logical store, and
+        // the two differ when the space's own id was taken: every pair of
+        // the ids waiting, so both are found.
+        let ids = waiting.compactMap(UUID.init(uuidString:))
+        for physical in ids {
+            for logical in ids {
+                try? manager.removeItem(at: ChromiumSwitchCookieLedger.file(profile: physical.uuidString, store: logical))
+                try? manager.removeItem(at: EngineStorageCarry.ledger(profile: physical.uuidString, store: logical))
+            }
+        }
+        let left = waiting.filter { name in
+            guard let id = UUID(uuidString: name) else { return false }
+            let folder = Store.file("Chromium").appendingPathComponent("space-" + id.uuidString)
+            try? manager.removeItem(at: Store.file("ChromiumImports").appendingPathComponent(id.uuidString + ".json"))
+            // Chrome keeps a profile's HTTP and code caches under ~/Library/Caches.
+            if let caches = manager.urls(for: .cachesDirectory, in: .userDomainMask).first {
+                try? manager.removeItem(at: caches.appendingPathComponent(Store.name).appendingPathComponent("Chromium/space-" + id.uuidString))
+            }
+            guard manager.fileExists(atPath: folder.path) else { return false }
+            do { try manager.removeItem(at: folder); return false } catch { return true }
+        }
+        Store.settings.set(left, forKey: erasingKey)
+    }
+
     /// Erasing/recreating a WK store must not revive its old native sign-ins.
-    /// Preserve the old directories and receipt for explicit migration review.
     static func retireAssociation(_ logical: UUID) {
+        // The space's own id, and the folder its receipt names when that id was taken.
+        var folders: Set<UUID> = [logical]
+        let named = Store.file("ChromiumProfiles").appendingPathComponent(logical.uuidString + "-named.json")
+        if let data = try? Data(contentsOf: named), let state = try? JSONDecoder().decode(Association.self, from: data) {
+            folders.insert(state.physical)
+        }
+        let erasing = Set(Store.settings.stringArray(forKey: erasingKey) ?? []).union(folders.map(\.uuidString))
+        Store.settings.set(erasing.sorted(), forKey: erasingKey)
         ChromiumDRMCookies.retireStore(logical)
         ChromiumDRMExtensionSession.retireStore(logical)
         Store.settings.set(UUID().uuidString, forKey: "chromium.profile.generation." + logical.uuidString)

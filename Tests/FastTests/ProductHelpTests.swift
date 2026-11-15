@@ -69,6 +69,6 @@ struct ProductHelpTests {
     @MainActor @Test func guideSaysHowAMailIsSentAndNeverByScreen() {
         #expect(Guide.productOverview.contains("not in Gmail's Drafts"))
         #expect(Guide.productOverview.contains("mail_send sends"))
-        #expect(Guide.main.contains("Never drive its windows by screen control"))
+        #expect(Guide.main.contains("Use Yab's tools, not desktop keystrokes, Computer Use or AppleScript, to control its tabs."))
     }
 }

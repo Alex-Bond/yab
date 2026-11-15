@@ -28,7 +28,7 @@ extension ChromiumPage {
         do { result = try await core.request("agents.frames", params: ["tab": .string(id)]) }
         catch { throw AgentFramesError.step("agents.frames", error) }
         guard case .array(let values) = result["frames"], !values.isEmpty,
-              values.count <= 256 else { throw PageEngineError.foreignFrame }
+              values.count <= 1000 else { throw PageEngineError.foreignFrame }  // Blink's frame bound (agents.inc)
         let frames = scripts.frames(.array(values), tab: id)
         guard frames.count == values.count, frames.filter(\.isMain).count == 1 else {
             throw PageEngineError.foreignFrame

@@ -69,7 +69,7 @@ struct PlanReadinessRaceTests {
         let found = Shell.Found(claude: "/fixture/claude", env: ["CLAUDE_CONFIG_DIR": home.path])
         var signedIn = found
         signedIn.env["ANTHROPIC_API_KEY"] = "fixture-key"
-        await setup.look(find: { signedIn }, readStatus: { status }, plans: plans)
+        await setup.look(find: { _ in signedIn }, readStatus: { status }, plans: plans)
         #expect(setup.signedIn["claude"] == true)
         #expect(setup.canRunTasks())
 
@@ -86,7 +86,7 @@ struct PlanReadinessRaceTests {
         _ = await starts.next()
         let (joined, didJoin) = AsyncStream<Void>.makeStream()
         let readinessRefresh = Task {
-            await setup.look(find: { found }, readStatus: { status }, plans: plans,
+            await setup.look(find: { _ in found }, readStatus: { status }, plans: plans,
                              readIdentity: { account, env, revision in
                 didJoin.yield(())
                 let who = await PlanAccounts.read(account, env: env, revision: revision, keychain: { _ in

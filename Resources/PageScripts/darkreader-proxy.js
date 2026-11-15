@@ -3,6 +3,44 @@
 // a user script (DarkPages.swift), where a page's Content-Security-Policy
 // cannot refuse it, when the engine in the yab-dark world asks with an event.
 (() => {
+  // Yab: every shadow host since the document started, told to the engine
+  // so that it never walks a change's elements one by one to find them
+  // (iterateShadowHosts). The engine asks once it starts and hears each
+  // new one from then on; a composed event reaches it from inside other
+  // shadow trees too.
+  // A host off the page can't be heard from the document: it waits in
+  // `pending` until the engine, taking in a change, asks again.
+  const hosts = [];
+  const pending = new Set();
+  let telling = false;
+  const tell = host => {
+    if (!host.isConnected) { pending.add(new WeakRef(host)); return; }
+    host.dispatchEvent(new CustomEvent('__yabdark__host', {bubbles: true, composed: true}));
+  };
+  const attach = Element.prototype.attachShadow;
+  if (typeof attach === 'function') {
+    Element.prototype.attachShadow = function (options) {
+      const root = attach.call(this, options);
+      hosts.push(new WeakRef(this));
+      if (telling) tell(this);
+      return root;
+    };
+  }
+  document.addEventListener('__yabdark__hosts', () => {
+    telling = true;
+    for (let i = hosts.length - 1; i >= 0; i--) {
+      const host = hosts[i].deref();
+      if (host) tell(host); else hosts.splice(i, 1);
+    }
+    document.dispatchEvent(new CustomEvent('__yabdark__hostsTold'));
+  });
+  document.addEventListener('__yabdark__pendingHosts', () => {
+    for (const ref of pending) {
+      const host = ref.deref();
+      if (!host) pending.delete(ref);
+      else if (host.isConnected) { pending.delete(ref); tell(host); }
+    }
+  });
   function injectProxy(
       enableStyleSheetsProxy,
       enableCustomElementRegistryProxy

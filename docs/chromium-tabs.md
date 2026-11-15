@@ -8,9 +8,9 @@ overrides are applied before page construction and can switch a live tab through
 the isolated bench; see [chromium-drm.md](chromium-drm.md). No Settings UI
 changes are included.
 
-Private R1 release-mode candidates also accept the hidden `YabPageEngine`
-preference on Apple Silicon when CEF is bundled. WebKit stays the default;
-see [Chromium release R1](chromium-release-r1.md). Environment overrides
+Release-mode builds on Apple Silicon with CEF bundled are on Auto unless the
+`YabPageEngine` preference says otherwise; see
+[Chromium release R1](chromium-release-r1.md). Environment overrides
 remain limited to development and isolated testing.
 
 Launch the delivered development app through LaunchServices:
@@ -80,8 +80,10 @@ navigation/reload starts a fresh helper. A renderer crash retains its tab ID.
 This is not a general replacement for all remaining WebKit consumers.
 WebKit-only commit/finish side effects are skipped for Chromium. Existing
 WebKit script relays, extensions UI, authenticated frame/message tokens,
-action/response policy interception, downloads, permissions, authentication,
-file pickers, PiP, find, print/PDF and native popup menus remain TODOs.
+response policy interception, downloads, permissions, authentication,
+file pickers, find, print/PDF and native popup menus remain TODOs. A page's own
+floating window: [document-pip.md](document-pip.md).
+Navigation policy and Shield: [chromium-features.md](chromium-features.md).
 Sound, Now Playing, camera/microphone state and a page's own full screen are
 reported by YabCore's media events (see "Media track" in `YabCore/README.md`). Chrome-created windows (`window.open` / target blank)
 are closed until Yab tab adoption is implemented. Chromium PageFoot obscured

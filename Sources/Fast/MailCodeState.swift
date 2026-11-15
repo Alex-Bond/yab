@@ -26,7 +26,7 @@ struct MailCodeItem: Identifiable, Equatable {
 final class MailCodeState: ObservableObject {
     static let shared = MailCodeState()
     @Published private(set) var revision = 0
-    private var timer: Timer?
+    private(set) var timer: Timer?
     private var uses = Set<String>()
     private var copiedID: String?
     private var copiedCount: Int?
@@ -37,7 +37,9 @@ final class MailCodeState: ObservableObject {
 
     init() {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.revision &+= 1 }
+            // Crash #1010 faults in executor lookup, before the tick runs.
+            // Foundation calls this timer on the main run loop.
+            AppKitMainThread.sync { self?.revision &+= 1 }
         }
     }
 

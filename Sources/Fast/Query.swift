@@ -98,8 +98,15 @@ final class Query: ObservableObject {
     /// The field's own place it is in, after Tab took its name: Clipboard
     /// History or Emoji. What is typed then looks only there.
     @Published var place: FieldPlace? {
-        didSet { if place != oldValue { unpick() } }
+        didSet { if place != oldValue { placeFromField = false; unpick() } }
     }
+    /// Only a destination entered in the new-tab field belongs to its next
+    /// opening. A place's own key, menu or link starts a separate request.
+    var placeFromField = false
+    /// Destination and category only: never keep a page target, secret,
+    /// search, selection or in-progress edit after the field closes.
+    var returnPlace: (place: FieldPlace, filter: Int)?
+
     /// The empty field's "Set up Yab" row taken: getting started's rows in
     /// its place, until Escape or the field goes.
     var settingUp = false
@@ -203,7 +210,7 @@ enum Command: String, CaseIterable {
     /// The site in front kept light, or dark again (DarkPages.swift).
     case darkPage
     case reload, hardReload, clearCookies, zoomIn, zoomOut, actualSize, pinTab, unpinTab, closeOthers, closeBefore, closeAfter, hidden, inspector, console
-    case extensions, welcome, boostStore
+    case extensions, welcome, boostStore, addExtension, importExtensions
     /// A boost for the site in front, from the agent; Arc's boosts brought
     /// over while Arc has some not here yet (ArcBoosts, register #447).
     case newBoost, arcBoosts
@@ -247,6 +254,7 @@ enum Command: String, CaseIterable {
     case aiOff, aiOn, aiWhenAsked, hideAIRows, showAIRows
 
     /// Existing menu actions share their metadata and routes in MenuCommands.
+    case sharePage
     case back, forward, stopLoading, closeWindow, pasteAndGo, findNext, findPrevious
     case nextTab, previousTab, moveTabLeft, moveTabRight, renameTab, pickAllTabs, moveTabToWindow
     case moveToWindow, copyTabToWindow, keepTab, releaseTab, sleepTabs, keepSiteAwake, allowSiteSleep
@@ -869,7 +877,7 @@ enum Command: String, CaseIterable {
             guard let tab = browser.active, browser.pair(of: tab.id) == nil, browser.splitFits else { return false }
             return !tab.isBlank || browser.splitNeighbor != nil
         case .separate: return browser.pair(of: browser.activeID) != nil
-        case .arcBoosts: return !ArcBoosts.waitingSoon().isEmpty
+        case .arcBoosts: return ArcBoosts.available
         default:
             return true
         }

@@ -1,0 +1,58 @@
+--- a/content/browser/webauth/authenticator_common_impl.cc
++++ b/content/browser/webauth/authenticator_common_impl.cc
+@@ -1297,6 +1297,16 @@
+   WebAuthenticationRequestProxy* proxy =
+       GetWebAuthnRequestProxyIfActive(caller_origin);
+   if (proxy) {
++    // Yab: nor a conditional create (a passkey upgrade after a password
++    // sign-in), which must show no UI; the embedder's client would answer it
++    // with its modal sheet. Refused as a conditional get is.
++    if (options->is_conditional &&
++        proxy == GetEmbedderWebAuthenticationRequestProxy()) {
++      req_state_->request_outcome = MakeCredentialOutcome::kOtherFailure;
++      CompleteMakeCredentialRequest(
++          blink::mojom::AuthenticatorStatus::NOT_ALLOWED_ERROR);
++      return;
++    }
+     if (options->remote_desktop_client_override ||
+         options->remote_client_data_json) {
+       // Don't allow proxying of an already proxied request.
+@@ -2217,11 +2227,25 @@
+   auto barrier_callback =
+       base::BarrierCallback<blink::mojom::WebAuthnClientCapabilityPtr>(
+           kNumberOfComputedCapabilities, std::move(completion_callback));
++
++  // Yab: the embedder's proxy (0113) answers this frame's requests, and it
++  // takes neither a conditional create nor an immediate get: both are
++  // refused, as upstream refuses a proxied conditional get and so reports
++  // conditionalGet false (ContinueIsConditionalMediationAvailable...).
++  WebAuthenticationRequestProxy* embedder =
++      GetEmbedderWebAuthenticationRequestProxy();
++  const bool embedder_answers =
++      embedder && enable_request_proxy_api_ &&
++      embedder->IsActive(caller_origin) &&
++      !AuthenticatorEnvironment::GetInstance()
++           ->MaybeGetVirtualAuthenticatorManager(
++               static_cast<RenderFrameHostImpl*>(GetRenderFrameHost())
++                   ->frame_tree_node());
+ 
+   barrier_callback.Run(
+       MakeCapability(client_capabilities::kRelatedOrigins, true));
+-  barrier_callback.Run(
+-      MakeCapability(client_capabilities::kConditionalCreate, true));
++  barrier_callback.Run(MakeCapability(client_capabilities::kConditionalCreate,
++                                      !embedder_answers));
+ 
+   IsHybridTransportSupported(
+       base::BindOnce(&MakeCapability, client_capabilities::kHybridTransport)
+@@ -2237,8 +2261,8 @@
+       caller_origin,
+       base::BindOnce(&MakeCapability, client_capabilities::kConditionalGet)
+           .Then(barrier_callback));
+-  barrier_callback.Run(
+-      MakeCapability(client_capabilities::kImmediateGet, true));
++  barrier_callback.Run(MakeCapability(client_capabilities::kImmediateGet,
++                                      !embedder_answers));
+   if (ambient_get_enabled) {
+     barrier_callback.Run(
+         MakeCapability(client_capabilities::kAmbientGet, true));

@@ -34,6 +34,28 @@ struct ManagerVaultTests {
         #expect(!V.matches([], host: "github.com"))
     }
 
+    /// Register 2492: only a real answer is kept for a site's 30 seconds.
+    /// A failed tool is no answer, a change of state since drops it, and so
+    /// does a manager connected or let go meanwhile.
+    @MainActor
+    @Test func onlyRealAnswersAreKept() {
+        let bw = PasswordManagers.bitwarden, op = PasswordManagers.onePassword
+        let at = Date(timeIntervalSince1970: 1000)
+        #expect(!ManagerVaults.answered(.failed("bw didn't answer")))
+        for state: V.State in [.open, .locked, .signedOut, .noTool, .needsApproval] { #expect(ManagerVaults.answered(state)) }
+        // Every manager answered, a moment ago, nothing changed since: kept.
+        #expect(ManagerVaults.stillTrue(true, at: at, states: [bw: .open], readable: [bw], now: at + 5, seen: [bw: .open]))
+        // A list that timed out or failed is not.
+        #expect(!ManagerVaults.stillTrue(false, at: at, states: [bw: .open], readable: [bw], now: at + 5, seen: [bw: .open]))
+        // Nor anything older than 30 seconds.
+        #expect(!ManagerVaults.stillTrue(true, at: at, states: [bw: .open], readable: [bw], now: at + 31, seen: [bw: .open]))
+        // Locked when read, open now (unlocked, paired): read again.
+        #expect(!ManagerVaults.stillTrue(true, at: at, states: [bw: .locked], readable: [bw], now: at + 5, seen: [bw: .open]))
+        // Another manager connected since, or one let go: read again.
+        #expect(!ManagerVaults.stillTrue(true, at: at, states: [bw: .open], readable: [bw, op], now: at + 5, seen: [bw: .open]))
+        #expect(!ManagerVaults.stillTrue(true, at: at, states: [bw: .open, op: .open], readable: [bw], now: at + 5, seen: [bw: .open]))
+    }
+
     @Test func secretsNeverPrint() {
         let secret = V.Secret(user: "me", password: "hunter2")
         #expect(!"\(secret)".contains("hunter2"))
@@ -243,6 +265,36 @@ struct ManagerVaultTests {
         return (path, created)
     }
 
+    /// 1Password's app asks the person when Yab isn't allowed yet (whoami
+    /// fails until then): that get is proven, and Yab doesn't ask again.
+    /// Allowed already, within its 10 minutes, nobody was asked: not proven.
+    @Test func onePasswordIsProvenOnlyWhenItsAppAsked() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("yab-op-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let allowed = folder.appendingPathComponent("allowed").path
+        let asked = folder.appendingPathComponent("asked.log").path
+        let script = """
+        #!/bin/sh
+        case "$1 $2" in
+          "whoami "*) [ -e "\(allowed)" ] && echo '{"user_uuid":"u"}' || { echo "not signed in" >&2; exit 1; } ;;
+          "item get") [ -e "\(allowed)" ] || { echo asked >> "\(asked)"; touch "\(allowed)"; }
+                      echo '{"id":"o1","fields":[{"id":"username","purpose":"USERNAME","value":"op-user"},{"id":"password","purpose":"PASSWORD","value":"op-secret"}]}' ;;
+          *) exit 2 ;;
+        esac
+        """
+        let path = folder.appendingPathComponent("op").path
+        try script.write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+        let op = OnePasswordCLI(tool: ManagerTool(names: ["op"], key: "OP", at: path))
+        let login = V.Login(provider: PasswordManagers.onePassword, item: "o1", title: "Fixture", user: "op-user", urls: ["https://site.test"])
+        let first = try await op.secret(login)
+        #expect(first.password == "op-secret" && first.proven)
+        let second = try await op.secret(login)
+        #expect(second.password == "op-secret" && !second.proven)
+        #expect(try String(contentsOfFile: asked, encoding: .utf8).split(separator: "\n").count == 1)
+    }
+
     @Test func bitwardenEndToEndAgainstAStandIn() async throws {
         let stand = try standIn()
         let bw = BitwardenCLI(tool: ManagerTool(names: ["bw"], key: "BW", at: stand.path))
@@ -255,6 +307,9 @@ struct ManagerVaultTests {
         #expect(logins.map(\.user) == ["fixture-user"])
         let secret = try await bw.secret(logins[0])
         #expect(secret.password == "fixture-password")
+        // Opened with the saved unlock password: nobody was asked for it,
+        // so Yab's own Touch ID still stands before it fills.
+        #expect(!secret.proven)
         try await bw.save(host: "example.com", user: "new-user", password: "right-new")
         let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: stand.created)) as? [String: Any]
         let login = saved?["login"] as? [String: Any]

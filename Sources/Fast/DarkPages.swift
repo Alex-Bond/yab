@@ -256,16 +256,31 @@ enum DarkPages {
     /// a Light theme with a Dark space has dark sites, and a Dark theme with
     /// a Light space keeps them.
     static var windowDark: Bool {
-        NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            || Store.settings.string(forKey: "backdrop.mode") == LookMode.dark.rawValue
+        windowDark(lookMode: prefs?.lookMode ?? Store.settings.string(forKey: "backdrop.mode") ?? "")
     }
 
-    /// The theme or the space's Look changed: every tab gets what it now
-    /// should, when the answer to "dark?" is not the one it had.
+    static func windowDark(lookMode: String) -> Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            || lookMode == LookMode.dark.rawValue
+    }
+
+    /// A background tab belongs to its own space, not the last window or
+    /// space that wrote backdrop.mode (#1606).
+    static func windowDark(for tab: Tab) -> Bool {
+        guard let browser = tab.delegate as? Browser else { return windowDark }
+        let mode: String
+        if let parked = browser.parked.first(where: { $0.value.tabs.contains { $0 === tab } }),
+           let space = browser.spaces.first(where: { $0.id == parked.key }) {
+            mode = space.paint?.mode ?? browser.prefs.lookMode
+        } else {
+            mode = browser.prefs.lookMode
+        }
+        return windowDark(lookMode: mode)
+    }
+
+    /// Every tab decides in its own window and space. One global dark bit
+    /// cannot tell whether a second space's appearance changed.
     static func appearanceChanged() {
-        let dark = windowDark
-        guard dark != wasDark else { return }
-        wasDark = dark
         refresh()
     }
 
@@ -303,9 +318,10 @@ enum DarkPages {
 
     static func decision(for tab: Tab, url: URL?, host: String?) -> DarkDecision {
         let mode = DarkMode.read()
-        guard active(windowDark: windowDark, mode: mode) else { return .none }
+        let dark = windowDark(for: tab)
+        guard active(windowDark: dark, mode: mode) else { return .none }
         let host = host ?? PageScripts.host(of: url ?? tab.address)
-        return decide(mode: mode, windowDark: windowDark, eligible: eligible(tab, url: url), choice: choice(host),
+        return decide(mode: mode, windowDark: dark, eligible: eligible(tab, url: url), choice: choice(host),
                       darkSite: DarkLists.shared.isDark(url ?? tab.address), learned: learned(host))
     }
 
@@ -447,8 +463,7 @@ enum DarkPages {
         watching = NSApp.observe(\.effectiveAppearance, options: [.new]) { _, _ in
             MainActor.assumeIsolated { DarkPages.appearanceChanged() }
         }
-        wasDark = windowDark
-        if active(windowDark: wasDark) { DarkLists.shared.warm() }
+        if active(windowDark: windowDark) { DarkLists.shared.warm() }
         // Dark Reader the extension turned on or off: Yab's own stands
         // aside, or comes back.
         if #available(macOS 15.4, *) {
@@ -461,7 +476,6 @@ enum DarkPages {
     }
     private static var watching: NSKeyValueObservation?
     private static var extensionWatch: AnyCancellable?
-    private static var wasDark = false
 
     // MARK: Switch to Yab's
 

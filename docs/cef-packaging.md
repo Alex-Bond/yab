@@ -52,8 +52,23 @@ Executable names match their apps. Bundle ids derive from the parent:
 `.helper`, `.helper.gpu`, `.helper.renderer`, `.helper.plugin`, `.helper.alerts`.
 Versions and minimum macOS version come from the parent. The real YabCore host
 configures these subprocess paths explicitly; the main executable remains `yab`.
-All helpers are LSUIElement apps. Alerts also carries `NSUserNotificationAlertStyle=alert`,
+All helpers declare both `LSUIElement` and `LSBackgroundOnly`: they are subprocess bundles, not launchable browser copies. Alerts also carries `NSUserNotificationAlertStyle=alert`,
 following Chromium's [alert plist](https://chromium.googlesource.com/chromium/src/+/156.0.8078.48/chrome/app/helper-alerts-Info.plist).
+
+The helpers are built as Chromium's are (`YabCore/CMakeLists.txt`). The plain
+helper, GPU and Plugin are `YabCore/src/helper_lean.c`: a C main that enters
+the sandbox, loads the framework and calls `cef_execute_process` with no app.
+They link libSystem alone and export nothing, as `Google Chrome Helper` links
+libSystem and libsandbox. The renderer is `helper.mm`, the one child with a
+CefApp of Yab's (MediaRenderer), so the one with CEF's C++ wrapper. The Alerts
+helper is the lean main plus `site_notice_center.mm`. YabCore routes Chrome's
+notification service (`--utility-sub-type=mac_notifications.mojom.MacNotificationProvider`)
+to the Alerts helper, as Chromium does with `kChildProcessHelperAlerts`; every
+other utility goes to the plain helper. The Alerts helper hands what Chromium
+would post to the browser process as one Mach message a change, to a name
+checked in for that process alone (`<bundle id>.YabNotices.<pid>`). Nothing goes
+through a file or a socket. The browser counts a message only from its own
+child running the Alerts helper.
 
 Signing proceeds inside out: framework Mach-O leaves, framework, helpers,
 existing Dock tile plug-in, updater, parent. Every signature enables hardened

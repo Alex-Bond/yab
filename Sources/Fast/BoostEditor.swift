@@ -97,11 +97,11 @@ final class BoostEditor: ObservableObject {
         origin = placementOrigin
             ?? (siteControls && ExtensionPanel.shared.isShown ? ExtensionPanel.shared.sourceRect : nil)
             ?? Extensions.of(browser).anchors[Extensions.menuAnchor]?.view.flatMap { anchor in
-                anchor.window === tab.built?.window ? Self.screenRect(anchor) : nil
+                anchor.window === tab.builtPage?.window ? Self.screenRect(anchor) : nil
             }
         // Command-field entry has no popover to hand over. With its door
         // hidden, use the same top-edge fallback as Site Controls.
-        if origin == nil, let content = tab.built?.window?.contentView {
+        if origin == nil, let content = tab.builtPage?.window?.contentView {
             let y = content.isFlipped ? 44 : content.bounds.maxY - 44
             origin = content.window?.convertToScreen(content.convert(
                 CGRect(x: content.bounds.midX, y: y, width: 1, height: 1), to: nil))

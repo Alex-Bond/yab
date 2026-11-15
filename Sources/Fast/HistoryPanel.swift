@@ -239,7 +239,7 @@ struct HistoryPanelView: View {
         let site = Browser.site(entry.host)
         let when = model.seen[Diary.key(entry.url)]
         return PullRow(title: entry.title, detail: entry.current ? "Now" : when.map(PanelTime.short) ?? entry.host, lit: lit) {
-            Mark(icon: Favicons.shared.cached(entry.host) ?? Favicons.shared.cached(site),
+            Mark(icon: Favicons.shared.pageIcon(entry.url) ?? Favicons.shared.cached(entry.host) ?? Favicons.shared.cached(site),
                  letter: site.first.map { String($0).uppercased() } ?? "•", size: 20)
         }
         .opacity(entry.current && !lit ? 0.55 : 1)

@@ -294,13 +294,11 @@ final class Hints: ObservableObject {
     private var again = false
 
     private func show(empty: Bool, command: Bool, found: [Hint], watching: Bool, dismissed: Set<String>) {
-        // Where claude and codex are is asked of a login shell, once. Until
-        // it answers, an agent's rows stand as they were; what yab notices
-        // itself needs no agent and shows meanwhile.
+        // Passive CLI discovery reads install locations, never login scripts.
         guard let shell = Shell.cached else {
             if !finding {
                 finding = true
-                Task { _ = await Shell.find(); refresh() }
+                Task { _ = await Shell.find(resolvingLogin: false); refresh() }
             }
             compose()
             return

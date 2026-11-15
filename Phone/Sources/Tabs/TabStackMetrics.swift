@@ -97,6 +97,12 @@ extension Metrics {
         /// A card swiped up past 120 (or thrown, the speed carried 0.2 s) closes.
         static let closeDistance: CGFloat = 120
         static let closeProjection: CGFloat = 0.2
+        static let minimumThrowSpeed: CGFloat = 450
+        static let throwAcceleration: CGFloat = 3000
+        static let pinchTravel: CGFloat = 0.4
+        static let pinchCommit: CGFloat = 0.35
+        /// After the capsule turns the space, its cards follow the lens home this long.
+        static let pageSettle: CFTimeInterval = 0.8
         /// Pulled down or past the ends, the cards resist.
         static let rubber: CGFloat = 60
         /// Let go, the cards page on to the next card once thrown 0.15 of a
@@ -194,8 +200,7 @@ extension Motion {
     /// meters: the slower of each one's springs (TabGalleryTiming).
     static let tabsOpen = spring("tabsOpen", response: TabGalleryTiming.stackToCard.response, damping: TabGalleryTiming.stackToCard.damping)
     static let tabsCardOpen = spring("tabsCardOpen", response: TabGalleryTiming.cardToPage.response, damping: TabGalleryTiming.cardToPage.damping)
-    /// A card swiped up flies away; the rest close the gap.
-    static let tabsCardFly = easeIn("tabsCardFly", 0.25)
+    /// After a thrown card clears the screen, the rest close the gap.
     static let tabsReflow = spring("tabsReflow", response: TabGalleryTiming.stackToCard.response, damping: TabGalleryTiming.stackToCard.damping)
     /// A card let go short of closing, and the cards let go after a scroll.
     static let tabsCardBack = spring("tabsCardBack", response: TabGalleryTiming.cardToStack.response, damping: TabGalleryTiming.cardToStack.damping)

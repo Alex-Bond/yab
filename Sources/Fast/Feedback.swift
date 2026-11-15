@@ -156,7 +156,7 @@ enum FeedbackSheet {
         guard let content = window.contentView else { return nil }
         var pages: [NSView] = []
         func look(_ view: NSView) {
-            if view is PageView { pages.append(view); return }
+            if view is PageView || view is ChromiumPage { pages.append(view); return }
             view.subviews.forEach(look)
         }
         look(content)
@@ -367,7 +367,14 @@ enum FeedbackSheet {
         if draft.includeDiagnostics {
             fields["diagnostics"] = diagnostics
         }
-        if draft.files.isEmpty {
+        // ACP stderr is not accepted by the site's typed event schema.
+        // Carry its recent, redacted tail as a diagnostic attachment under
+        // the existing toggle and upload limits, alongside the person's files.
+        let signInLog = draft.includeDiagnostics ? GeminiSignInLog.shared.recent : nil
+        let log = signInLog.flatMap { data in
+            draft.files.count < FeedbackFile.most && draft.files.reduce(0, { $0 + $1.size }) + data.count <= FeedbackFile.room ? data : nil
+        }
+        if draft.files.isEmpty && log == nil {
             request.timeoutInterval = 15
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try? JSONSerialization.data(withJSONObject: fields)
@@ -392,6 +399,14 @@ enum FeedbackSheet {
                 line("Content-Type: \(file.mime)")
                 line("")
                 body.append(data)
+                line("")
+            }
+            if let log {
+                line("--\(boundary)")
+                line("Content-Disposition: form-data; name=\"file\"; filename=\"gemini-signin-diagnostics.txt\"")
+                line("Content-Type: text/plain")
+                line("")
+                body.append(log)
                 line("")
             }
             line("--\(boundary)--")

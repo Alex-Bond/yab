@@ -81,8 +81,12 @@ extension Browser {
         if devOpen { pickDevPane(.elements) } else { openDevTools(.elements) }
     }
 
-    /// ⌥⌘J: the card on Console.
+    /// ⌥⌘J: the card on Console, or away: pressed
+    /// again with the card out in the window, on whatever pane, it goes
+    /// (feedback #1467). In a window of its own it comes forward on
+    /// Console instead, as Chromium's undocked tools do.
     func showConsole() {
+        if devOpen || devComing, !devDetached { closeDevTools(); return }
         if devOpen { pickDevPane(.console) } else { openDevTools(.console) }
         consolePanel.focusPrompt = true
     }
@@ -91,7 +95,7 @@ extension Browser {
     /// otherwise WebKit's picker, in the card: the next click on the page
     /// picks what Elements shows, and again, the picking stops.
     func inspectElement() {
-        if let tab = chromiumDevFront, devOpen || devFront == nil { pickWithChromium(tab); return }
+        if let tab = toolsFront, tab.page.engine == .chromium, devOpen || devFront == nil { pickWithChromium(tab); return }
         if devPicking { stopPickingElement(); return }
         if devFront != nil, !devOpen {
             toggleMeasure()

@@ -7,6 +7,23 @@ import Testing
 struct VideoSaveTests {
     private let base = URL(string: "https://video.twimg.com/amplify_video/1849/pl/master.m3u8?tag=16")!
 
+    @Test func nativeSourceDoesNotSaveAnOlderRightClickedVideo() {
+        let source = URL(string: "https://video.twimg.com/current.mp4")!
+        let old = PointedMedia(src: "blob:https://x.com/old", playlists: ["https://example.com/old.m3u8"])
+        let media = VideoSave.pointed(source: source, heard: old, audio: false)
+        #expect(VideoSave.route(media) == .download(source))
+        #expect(media.playlists.isEmpty)
+        let blob = URL(string: old.src)!
+        #expect(VideoSave.pointed(source: blob, heard: old, audio: false) == old)
+        #expect(VideoSave.pointed(source: source, heard: nil, audio: true).audio)
+    }
+
+    @Test func menuExplainsWhenThereIsNoDirectFile() {
+        #expect(VideoSave.downloadTitle(PointedMedia(src: "blob:https://x.com/clip")) == "Download Video (No Direct File)")
+        #expect(VideoSave.downloadTitle(PointedMedia(src: "")) == "Video Download Unavailable")
+        #expect(VideoSave.downloadTitle(PointedMedia(src: "https://example.com/clip.mp4")) == "Download Video")
+    }
+
     @Test func plainFileIsADownload() {
         let media = PointedMedia(src: "https://example.com/clip.mp4")
         #expect(VideoSave.route(media) == .download(URL(string: "https://example.com/clip.mp4")!))

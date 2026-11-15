@@ -19,6 +19,37 @@ extension Bench {
                                  browser: Browser, answer: @escaping ([String: Any]) -> Void) -> Bool {
         guard Store.testing else { return false }
         switch request["op"] as? String {
+        case "nav-health":
+            // Observe a busy page without waiting behind its input queue.
+            // Test-only, read-only native IPC; no renderer script is evaluated.
+            Task { @MainActor in
+                do {
+                    let (core, remote) = try await page.endpoint()
+                    let state = try await core.request("media.read", params: ["tab": .string(remote)])
+                    let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state))
+                    answer(["value": value])
+                } catch { answer(["error": String(describing: error)]) }
+            }
+            return true
+        case "feature-rejection":
+            // Exercise the real serialized feature-command error route.
+            page.command("page.cdpForTesting", ["command": .string("Yab.nonexistentFeature")])
+            Task { @MainActor in
+                await page.queueTail?.value
+                answer(page.surfaceState)
+            }
+            return true
+        case "peek-pressure":
+            guard tab.id == browser.activeID, page.window != nil,
+                  let x = request["x"] as? Double, let y = request["y"] as? Double,
+                  x.isFinite, y.isFinite, page.bounds.contains(CGPoint(x: x, y: y)) else {
+                answer(["error": "Pressure probe needs a point in the active page"]); return true
+            }
+            let point = CGPoint(x: x, y: y)
+            page.receivePressure(stage: 1, amount: 0.8, point: point)
+            page.receivePressure(stage: 2, amount: 1, point: point)
+            page.receivePressure(stage: 0, amount: 0, point: point)
+            answer(["sent": true]); return true
         case "nav-options-batch":
             // The exact ExtensionOptionsRestoreTests putAway/bringBack seam.
             // Timed tidy and automatic sleep keep their separate real guards.
@@ -68,6 +99,59 @@ extension Bench {
                 }]); return true
             default: answer(["error": "put-away or bring-back required"]); return true
             }
+        case "nav-pointer":
+            // Exercise the person's AppKit pointer route, not scripts.input's
+            // separate CDP coordinate API. Points are in the visible page.
+            guard Store.testing, let window = page.window,
+                  let x = request["x"] as? Double, let y = request["y"] as? Double,
+                  x.isFinite, y.isFinite else { answer(["error": "native pointer requires a finite point and test window"]); return true }
+            let at = page.convert(NSPoint(x: x, y: page.isFlipped ? y : page.bounds.height - y), to: nil)
+            func send(_ type: NSEvent.EventType) {
+                guard let event = NSEvent.mouseEvent(with: type, location: at, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else { return }
+                switch type {
+                case .leftMouseDown: page.mouseDown(with: event)
+                case .leftMouseUp: page.mouseUp(with: event)
+                default: page.mouseMoved(with: event)
+                }
+            }
+            send(.mouseMoved)
+            if request["hover"] as? Bool != true { send(.leftMouseDown); send(.leftMouseUp) }
+            answer(["delivered": true]); return true
+        case "nav-pinch":
+            // Two fingers over the page in front, as the trackpad hands them
+            // to the app: gesture events posted to the queue, so whatever is
+            // under the fingers takes them through AppKit. "scale" is what
+            // the fingers would make of the page, "steps" events "gap"
+            // seconds apart, at "x", "y" in points of the page from its top
+            // left. "double" taps twice instead (Smart Zoom).
+            guard let window = page.window else { answer(["error": "no page in a window"]); return true }
+            let frame = page.convert(page.bounds, to: nil)
+            let at = NSPoint(x: frame.minX + (request["x"] as? Double ?? Double(frame.width / 2)),
+                             y: frame.maxY - (request["y"] as? Double ?? Double(frame.height / 2)))
+            if request["double"] as? Bool == true {
+                guard let event = Bench.smartMagnify(at: at, in: window) else { answer(["error": "no gesture event"]); return true }
+                NSApp.postEvent(event, atStart: false)
+                answer(["eventType": Int(event.type.rawValue)]); return true
+            }
+            let steps = max(request["steps"] as? Int ?? 60, 1), gap = request["gap"] as? Double ?? 0.008
+            let each = pow(request["scale"] as? Double ?? 2, 1 / Double(steps)) - 1
+            var moves: [(NSEvent.Phase, Double)] = [(.began, 0)]
+            moves += Array(repeating: (.changed, each), count: steps)
+            moves.append((.ended, 0))
+            let events = moves.compactMap { Bench.magnify($0.1, phase: $0.0, at: at, in: window) }
+            guard events.count == moves.count, events.allSatisfy({ $0.type == .magnify }) else {
+                answer(["error": "no magnify event", "types": events.map { Int($0.type.rawValue) }]); return true
+            }
+            for (index, event) in events.enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + gap * Double(index)) { NSApp.postEvent(event, atStart: false) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + gap * Double(events.count) + 0.05) {
+                answer(["events": events.count, "phases": events.map { Int($0.phase.rawValue) }.prefix(3).map { $0 },
+                        "magnification": Double(events[1].magnification)])
+            }
+            return true
         case "nav-swipe":
             answer(["gesture": page.swipe.swipeGesture, "settled": page.swipe.swipeSettled,
                     "pull": tab.pull.map { ["listed": $0.listed, "armed": $0.armed, "back": $0.back,
@@ -97,6 +181,46 @@ extension Bench {
                 } catch { answer(["error": String(describing: error)]) }
             }
             return true
+        case "dev-file-panel":
+            guard let panel = page.window?.attachedSheet as? NSSavePanel else { answer(["shown": false]); return true }
+            let state: [String: Any] = ["shown": true, "open": panel is NSOpenPanel,
+                                        "name": panel.nameFieldStringValue, "window": panel.windowNumber]
+            if request["cancel"] as? Bool == true { panel.cancel(nil) }
+            answer(state); return true
+        case "nav-save-panel":
+            // Drive the actual AppKit save sheet; never answer CEF directly.
+            guard let panel = page.window?.attachedSheet as? NSSavePanel,
+                  !(panel is NSOpenPanel) else { answer(["shown": false]); return true }
+            let state: [String: Any] = ["shown": true, "name": panel.nameFieldStringValue,
+                                        "window": panel.windowNumber]
+            if request["cancel"] as? Bool == true { panel.cancel(nil) }
+            else if let path = request["path"] as? String, path.hasPrefix("/") {
+                let url = URL(fileURLWithPath: path)
+                panel.directoryURL = url.deletingLastPathComponent()
+                panel.nameFieldStringValue = url.lastPathComponent
+                panel.ok(nil)
+            }
+            answer(state); return true
+        case "sys-cdp":
+            // A raw DevTools command, for what a Mac can't be made to do from
+            // a farm job (offline, memory pressure). evals/chromium-system.
+            guard let name = request["command"] as? String else { answer(["error": "command required"]); return true }
+            Task { @MainActor in
+                do {
+                    let fields = try JSONDecoder().decode([String: JSONValue].self, from: JSONSerialization.data(withJSONObject: request["params"] ?? [String: Any]()))
+                    let value = try await page.navigationRequest("page.cdpForTesting", ["command": .string(name), "params": .object(fields),
+                        "session": .string(request["cdpSession"] as? String ?? "")])
+                    answer(["value": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(value), options: .fragmentsAllowed)) ?? NSNull()])
+                } catch { answer(["error": String(describing: error)]) }
+            }
+            return true
+        case "sys-window":
+            // Where the page's window is, its display and whether AX has the tree.
+            answer(["screen": page.window?.screen?.localizedName ?? "", "scale": page.window?.backingScaleFactor ?? 0,
+                    "accessibility": page.remoteAccessibility.element != nil, "dragging": page.dragState.source != nil,
+                    "find": tab.finder.shown, "tip": page.tipText, "inputSource": page.inputContext?.selectedKeyboardInputSource ?? "",
+                    "windows": BrowserWindows.shared.openWindows().count])
+            return true
         case "nav-crash":
             Task { @MainActor in _ = try? await page.navigationRequest("page.crashForTesting") }
             answer(["ok": true]); return true
@@ -106,6 +230,21 @@ extension Bench {
                 let step = browser.hoard.meter.steps[fetch.id]
                 return ["name": fetch.name, "failed": fetch.failed, "received": step?.got ?? 0, "total": step?.total ?? 0] as [String: Any]
             }])
+            return true
+        case "nav-image-bytes":
+            // A picture's bytes as Copy Image takes them (Browser.imageData),
+            // or as ⌘F reads them with `largest`: their size and pixels.
+            guard let address = (request["url"] as? String).flatMap(URL.init(string:)) else { answer(["error": "url required"]); return true }
+            Task { @MainActor in
+                let began = Date()
+                let data = await Browser.imageData(address, from: tab, largest: request["largest"] as? Int)
+                let source = data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) }
+                let properties = source.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] }
+                answer(["bytes": data?.count ?? 0, "width": properties?[kCGImagePropertyPixelWidth] as? Int ?? 0,
+                        "height": properties?[kCGImagePropertyPixelHeight] as? Int ?? 0,
+                        "type": source.flatMap { CGImageSourceGetType($0) as String? } ?? "",
+                        "ms": Int(Date().timeIntervalSince(began) * 1000)])
+            }
             return true
         case "nav-save-pdf":
             guard let path = request["folder"] as? String else { answer(["error": "folder required"]); return true }
@@ -131,6 +270,7 @@ extension Bench {
                 if let content = sheet.contentView { _ = cancel(content) }
             }
             answer(["sheet": sheet?.windowNumber ?? 0, "printed": Browser.printed?.absoluteString ?? "",
+                    "nativeRequestObserved": page.nativePrintRequestID != nil,
                     "preview": page.printPreviewForTesting]); return true
         case "nav-zoom":
             if request["reset"] as? Bool == true { tab.resetZoom() }
@@ -157,6 +297,42 @@ extension Bench {
             answer(["string": board.string(forType: .string) ?? "",
                     "types": board.types?.map(\.rawValue) ?? [],
                     "image": NSImage(pasteboard: board).map { [$0.size.width, $0.size.height] } ?? []])
+            return true
+        case "nav-print-file":
+            // What the print sheet would print, saved to `path` instead of
+            // shown: the page's printed PDF through the sheet's own print
+            // operation (printOperation(for:)), with only its destination
+            // changed to a file (Save as PDF). `source`: the PDF itself.
+            guard let path = request["path"] as? String else { answer(["error": "path required"]); return true }
+            Task { @MainActor in
+                do {
+                    let data = try await page.printedPDF()
+                    if let source = request["source"] as? String { try data.write(to: URL(fileURLWithPath: source), options: .atomic) }
+                    guard let document = PDFDocument(data: data), let operation = page.printOperation(for: document) else {
+                        answer(["error": "no print operation"]); return
+                    }
+                    let info = operation.printInfo
+                    // `landscape`: the paper turned in the sheet after the pages were made.
+                    if request["landscape"] as? Bool == true { info.orientation = .landscape }
+                    info.jobDisposition = .save
+                    info.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = URL(fileURLWithPath: path)
+                    operation.printInfo = info
+                    operation.showsPrintPanel = false
+                    operation.showsProgressPanel = false
+                    let ran = operation.run()
+                    let first = document.page(at: 0)?.bounds(for: .mediaBox) ?? .zero
+                    answer(["saved": ran, "path": path, "pages": document.pageCount,
+                            "sourcePage": [first.width, first.height],
+                            "paper": [info.paperSize.width, info.paperSize.height],
+                            "margins": [info.topMargin, info.leftMargin, info.bottomMargin, info.rightMargin]])
+                } catch { answer(["error": error.localizedDescription]) }
+            }
+            return true
+        case "nav-veils":
+            // Hide Elements as the window sees it: picking or not, and what
+            // Site Controls lists as hidden on this site.
+            answer(["veiling": browser.veiling, "host": browser.hereHost ?? "",
+                    "hidden": browser.hereVeils.map { ["selector": $0.selector, "label": $0.label] }])
             return true
         case "nav-ask-print":
             // window.print() from the page itself, as a site's Print button.

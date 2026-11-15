@@ -41,12 +41,38 @@ enum DownloadFolder {
 
     /// The ordinary save panel, also replaceable by a native test's own
     /// answer so destination selection can be checked without showing UI.
-    @MainActor static func choose(_ name: String, in folder: URL) -> URL? {
+    /// Its answer comes later, never from a modal loop: Chromium's download
+    /// arrives inside a main-actor job (ChromiumProcess's event loop), and
+    /// a modal loop there kept the main queue from the work the panel's own
+    /// service needs to connect. AppKit then said "The save file operation
+    /// failed to connect to the open and save panel service" over the
+    /// panel, every time (#1715, #1726, #1731). `begin` leaves the job at
+    /// once, as the page's own file panels do (Dialogs).
+    @MainActor static func choose(_ name: String, in folder: URL, _ done: @escaping @MainActor (URL?) -> Void) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
         panel.directoryURL = folder
         panel.canCreateDirectories = true
-        return panel.runModal() == .OK ? panel.url : nil
+        panel.begin { response in
+            MainActor.assumeIsolated { done(response == .OK ? panel.url : nil) }
+        }
+    }
+
+    /// A folder for downloads, the same way: Settings' and a Space's
+    /// choosers, whose pick can arrive inside a job of its own (#1711).
+    @MainActor static func chooseFolder(starting folder: URL?, _ done: @escaping @MainActor (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = folder
+        panel.prompt = SettingsWords.text("Use This Folder")
+        panel.begin { response in
+            MainActor.assumeIsolated {
+                guard response == .OK, let url = panel.url else { return }
+                done(url)
+            }
+        }
     }
 
     /// Where a file goes when its folder is closed to Yab.

@@ -95,7 +95,7 @@ public enum Update {
     /// again.
     public static let retry: TimeInterval = 60 * 60
 
-    public struct Release: Equatable, Sendable {
+    public struct Release: Equatable, Sendable, Codable {
         public let version: String
         public let build: Int
         /// The ZIP, for the updater.
@@ -152,7 +152,7 @@ public enum Update {
 
         /// An older build that runs here: what a copy turned off Nightly
         /// builds on a build newer than Stable can go back to. Never an
-        /// update (Swap refuses it, notNewer): it goes in from its disk image.
+        /// automatic update: only an explicit channel selection may install it.
         public func isBehind(build currentBuild: Int) -> Bool {
             build < currentBuild && runsHere
         }
@@ -359,7 +359,8 @@ public enum Update {
     /// wrong. One word from a short list, nothing else about the Mac.
     public enum Failure {
         public static let key = "update.failed"
-        /// What trying again within the hour won't change.
+        /// What trying again within the hour won't change, and so the only
+        /// failures that send the app to the disk image (Updater.landing).
         public static let lasting: Set<String> = [Swap.Refused.unsignedHere.rawValue, Swap.Refused.readOnly.rawValue]
 
         public static func reason(_ error: Error) -> String {
@@ -434,6 +435,87 @@ public enum Swap {
         target.deletingLastPathComponent().appendingPathComponent(target.lastPathComponent + ".old")
     }
 
+    /// A verified download waits outside the running bundle. Chromium's
+    /// sandbox grants name the bundle paths at engine startup: following a
+    /// rename with an fd does not move those grants with the files.
+    public struct Prepared: Codable {
+        public let release: Update.Release
+        public let allowDowngrade: Bool
+    }
+
+    static func preparationRoot(at place: URL) -> URL {
+        place.deletingLastPathComponent().appendingPathComponent("." + place.lastPathComponent + ".update")
+    }
+
+    static func preparedApp(at place: URL) -> URL {
+        preparationRoot(at: place).appendingPathComponent("incoming.app")
+    }
+
+    public static var prepared: Prepared? {
+        let root = preparationRoot(at: target)
+        guard let data = try? Data(contentsOf: root.appendingPathComponent("release.json")),
+              let waiting = try? JSONDecoder().decode(Prepared.self, from: data),
+              let incoming = info(of: preparedApp(at: target)),
+              incoming["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier,
+              Int(incoming["CFBundleVersion"] as? String ?? "") == waiting.release.build
+        else { return nil }
+        return waiting
+    }
+
+    /// The only transaction here replaces a previous prepared download.
+    /// The installed app is never renamed, even when another release arrives.
+    static func prepare(_ fresh: URL, release: Update.Release, allowDowngrade: Bool,
+                        replacing staged: Int?, scratch: URL, at place: URL,
+                        identifier: String?) throws {
+        let files = FileManager.default
+        let root = preparationRoot(at: place), incoming = preparedApp(at: place)
+        guard let identifier else { throw Refused.move }
+        if files.fileExists(atPath: root.path) {
+            guard try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]).isDirectory == true,
+                  try root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true
+            else { throw Refused.move }
+            guard files.fileExists(atPath: incoming.path) else { throw Refused.move }
+        }
+        if files.fileExists(atPath: incoming.path) {
+            guard let previous = info(of: incoming), previous["CFBundleIdentifier"] as? String == identifier,
+                  let build = Int(previous["CFBundleVersion"] as? String ?? ""), staged == nil || staged == build
+            else { throw Refused.move }
+        } else if staged != nil { throw Refused.move }
+        // Payload and selection are one directory transaction. A failed
+        // metadata write must not replace the previously ready download.
+        let next = scratch.appendingPathComponent("preparing")
+        try files.createDirectory(at: next, withIntermediateDirectories: true)
+        let waiting = Prepared(release: release, allowDowngrade: allowDowngrade)
+        try JSONEncoder().encode(waiting).write(to: next.appendingPathComponent("release.json"), options: .atomic)
+        try files.moveItem(at: fresh, to: next.appendingPathComponent("incoming.app"))
+        let previous = scratch.appendingPathComponent("previous-preparation")
+        let existed = files.fileExists(atPath: root.path)
+        if existed { try files.moveItem(at: root, to: previous) }
+        do { try files.moveItem(at: next, to: root) }
+        catch {
+            if existed { try? files.moveItem(at: previous, to: root) }
+            throw Refused.move
+        }
+    }
+
+    /// Only the sealed helper, after the app and its engine have exited.
+    /// Recheck the signature and exact selected build before touching the app.
+    public static func completePrepared(build: Int, proceed: () -> Bool) throws {
+        guard let waiting = prepared, waiting.release.build == build else { throw Refused.plist }
+        guard let team = teamID(of: target) else { throw Refused.unsignedHere }
+        guard let current = info(of: target), current["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier,
+              let currentBuild = Int(current["CFBundleVersion"] as? String ?? "")
+        else { throw Refused.plist }
+        try checkBuild(build, current: currentBuild, selected: build, allowDowngrade: waiting.allowDowngrade)
+        let fresh = preparedApp(at: target), root = preparationRoot(at: target)
+        try verify(fresh, team: team, selected: build, allowDowngrade: waiting.allowDowngrade)
+        guard proceed() else { throw Stopped() }
+        try swap(fresh)
+        Update.Settle.installed(build: build, in: Store.settings, now: Date())
+        try? FileManager.default.removeItem(at: root)
+        sweep()
+    }
+
     /// `proceed` is asked once more just before the two renames, after the
     /// download and the checks: the agent says no if the app was opened
     /// meanwhile, and the bundle is left as it was (`Stopped`).
@@ -441,7 +523,10 @@ public enum Swap {
     /// `replacing`, the build this run already swapped in (still waiting for
     /// its restart): the new one takes that one's place, and the bundle this
     /// process runs from, set aside as `.old`, is left alone (`replace`).
-    public static func install(_ release: Update.Release, replacing staged: Int? = nil, proceed: () -> Bool = { true }) async throws {
+    /// `allowDowngrade` is only for an explicitly confirmed channel switch;
+    /// feed checks and the background agent leave it false.
+    public static func install(_ release: Update.Release, replacing staged: Int? = nil, allowDowngrade: Bool = false,
+                               deferUntilExit: Bool = false, proceed: () -> Bool = { true }) async throws {
         let files = FileManager.default
         // No Team ID on this build means it was signed ad hoc, a development
         // build. Nothing is ever swapped in under an app that could not be
@@ -459,7 +544,10 @@ public enum Swap {
             for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: target, create: true
         )) ?? files.temporaryDirectory.appendingPathComponent("yab-update-\(release.build)", isDirectory: true)
         try files.createDirectory(at: scratch, withIntermediateDirectories: true)
-        defer { try? files.removeItem(at: scratch) }
+        defer {
+            forgetRegistration(in: scratch)
+            try? files.removeItem(at: scratch)
+        }
 
         let zip = scratch.appendingPathComponent("yab.zip")
         try await download(release.archive, to: zip)
@@ -471,8 +559,19 @@ public enum Swap {
         guard let fresh = try files.contentsOfDirectory(at: unpacked, includingPropertiesForKeys: nil)
             .first(where: { $0.pathExtension == "app" })
         else { throw Refused.archive }
-        try verify(fresh, team: team, above: staged)
+        try verify(fresh, team: team, above: staged, selected: release.build, allowDowngrade: allowDowngrade)
+        // Verification can expose the unpacked app to LaunchServices.
+        // It is only a staging copy, never an application to launch.
+        forgetRegistration(in: fresh)
         guard proceed() else { throw Stopped() }
+        if deferUntilExit {
+            let place = target, identifier = Bundle.main.bundleIdentifier
+            try await MainActor.run {
+                try prepare(fresh, release: release, allowDowngrade: allowDowngrade,
+                            replacing: staged, scratch: scratch, at: place, identifier: identifier)
+            }
+            return
+        }
         guard let staged else { return try swap(fresh) }
         // On the main thread, where a quit is decided: a Restart pressed
         // meanwhile finds one build or the other in place, never neither.
@@ -518,16 +617,25 @@ public enum Swap {
         ditto.arguments = ["-x", "-k", zip.path, folder.path]
         ditto.standardOutput = FileHandle.nullDevice
         ditto.standardError = FileHandle.nullDevice
-        try ditto.run()
+        try ditto.runValidated()
         ditto.waitUntilExit()
         guard ditto.terminationStatus == 0 else { throw Refused.archive }
     }
 
+    /// The archive must contain precisely the build selected from the feed.
+    /// Older builds remain refused unless the person explicitly chose a channel.
+    static func checkBuild(_ incoming: Int, current: Int, staged: Int? = nil,
+                           selected: Int, allowDowngrade: Bool = false) throws {
+        guard incoming > 0, incoming == selected else { throw Refused.plist }
+        guard incoming > max(current, staged ?? 0)
+                || (allowDowngrade && incoming != (staged ?? current)) else { throw Refused.notNewer }
+    }
+
     /// A bundle is not trusted because it arrived. It is trusted because it
-    /// is this app, newer, with a Developer ID signature from the same team
+    /// is this app at the selected build, with a Developer ID signature from the same team
     /// as the one running that holds up under the strict check, for every
     /// architecture and everything nested inside it.
-    private static func verify(_ bundle: URL, team: String, above staged: Int? = nil) throws {
+    private static func verify(_ bundle: URL, team: String, above staged: Int? = nil, selected: Int, allowDowngrade: Bool) throws {
         let plist = bundle.appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: plist),
               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
@@ -535,9 +643,8 @@ public enum Swap {
         guard info["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier else {
             throw Refused.wrongApp
         }
-        guard Int(info["CFBundleVersion"] as? String ?? "") ?? 0 > max(Update.build, staged ?? 0) else {
-            throw Refused.notNewer
-        }
+        try checkBuild(Int(info["CFBundleVersion"] as? String ?? "") ?? 0,
+                       current: Update.build, staged: staged, selected: selected, allowDowngrade: allowDowngrade)
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(bundle as CFURL, [], &code) == errSecSuccess, let code else {
             throw Refused.unsigned
@@ -594,6 +701,8 @@ public enum Swap {
             try? files.moveItem(at: aside, to: target)
             throw Refused.move
         }
+        forgetRegistration(in: aside)
+        registration(target, remove: false)
     }
 
     /// A newer build in place of the one swapped in earlier in this run.
@@ -603,12 +712,17 @@ public enum Swap {
     /// this process runs from (`.old`) is never touched.
     public static func replace(
         _ staged: Int, with fresh: URL, scratch: URL, at place: URL,
-        identifier: String? = Bundle.main.bundleIdentifier
+        identifier: String? = Bundle.main.bundleIdentifier,
+        registrationChanged: ((URL, Bool) -> Void)? = nil
     ) throws {
         let files = FileManager.default
         guard let identifier, let info = info(of: place), info["CFBundleIdentifier"] as? String == identifier,
               Int(info["CFBundleVersion"] as? String ?? "") == staged
         else { throw Refused.move }
+        // Unregister the still-existing staging bundle before moving it;
+        // lsregister cannot inspect a path once its bundle has moved away.
+        if let registrationChanged { registrationChanged(fresh, true) }
+        else { forgetRegistration(in: fresh) }
         let old = scratch.appendingPathComponent("replaced.app")
         try files.moveItem(at: place, to: old)
         do {
@@ -616,6 +730,15 @@ public enum Swap {
         } catch {
             try? files.moveItem(at: old, to: place)
             throw Refused.move
+        }
+        if let registrationChanged {
+            registrationChanged(old, true)
+            registrationChanged(place, false)
+        } else {
+            // The old staging path and the replaced copy must not survive
+            // in Launchpad; only the successfully installed path is kept.
+            forgetRegistration(in: old)
+            registration(place, remove: false)
         }
     }
 
@@ -639,6 +762,30 @@ public enum Swap {
               info(of: aside)?["CFBundleIdentifier"] as? String == identifier,
               info(of: place)?["CFBundleIdentifier"] as? String == identifier
         else { return }
+        forgetRegistration(in: aside)
         try? FileManager.default.removeItem(at: aside)
+    }
+
+    /// Only bundles owned by this update transaction. Never sweep another
+    /// installed/dev app by identifier or reset the person's LS database.
+    private static func forgetRegistration(in root: URL) {
+        let files = FileManager.default
+        if info(of: root) != nil { registration(root, remove: true) }
+        guard let entries = files.enumerator(at: root, includingPropertiesForKeys: nil) else { return }
+        for case let url as URL in entries where url.pathExtension == "app" {
+            registration(url, remove: true)
+        }
+    }
+
+    private static func registration(_ bundle: URL, remove: Bool) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+        process.arguments = (remove ? ["-u"] : ["-f"]) + [bundle.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        // LS maintenance is best effort: failure must not undo a verified
+        // update or delete the only remaining valid copy.
+        try? process.runValidated()
+        if process.isRunning { process.waitUntilExit() }
     }
 }

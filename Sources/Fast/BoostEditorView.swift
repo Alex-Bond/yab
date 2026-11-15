@@ -61,7 +61,7 @@ struct BoostEditorLayer: View {
     /// Where the choice stands: under the thing clicked, in this layer's
     /// own points, kept inside the window.
     private func pickSpot(_ choice: BoostEditor.Choice, in size: CGSize) -> CGPoint? {
-        guard let rect = choice.rect, let web = editor.tab?.built, let window = web.window, let view = box.view else { return nil }
+        guard let rect = choice.rect, let web = editor.tab?.builtPage, let window = web.window, let view = box.view else { return nil }
         let zoom = web.pageZoom * web.magnification
         var spot = CGRect(x: rect.minX * zoom, y: rect.minY * zoom, width: rect.width * zoom, height: rect.height * zoom)
         if !web.isFlipped { spot.origin.y = web.bounds.height - spot.maxY }
@@ -504,7 +504,7 @@ struct BoostEditorView: View {
             // Retire a text control's cursor rectangle after SwiftUI has
             // inserted/removed its native view, even under a still pointer.
             DispatchQueue.main.async {
-                if let window = editor.tab?.built?.window { BoostEditorPointer.Area.refresh(in: window) }
+                if let window = editor.tab?.builtPage?.window { BoostEditorPointer.Area.refresh(in: window) }
             }
         }
     }

@@ -26,6 +26,8 @@ struct SettingsAnchorTests {
                 if let match = line.firstMatch(of: handed), let name = match.output[1].substring {
                     whole.insert(String(name))
                 }
+                // The Shortcuts page builds its rows' ids in one list.
+                if line.contains("(\"key:\" + ") { starts.insert("key:") }
                 guard let at = line.range(of: ".settingsAnchor(") else { continue }
                 for match in line[at.upperBound...].matches(of: literal) {
                     guard let name = match.output[1].substring.map(String.init), !name.isEmpty else { continue }
@@ -52,6 +54,20 @@ struct SettingsAnchorTests {
         #expect(Set(items.map(\.page)) == [.agents, .developers])
         #expect(!SettingsItem.all.contains { $0.id == "ai-outside-agents" })
         #expect(SettingsPage.agents.master?.title == "Let agents use Yab")
+    }
+
+    /// Settings search finds "Allow in private tabs" on Extensions, so
+    /// both engines' Extensions pages draw its row: the Chromium page
+    /// once had none, and the result scrolled nowhere (feedback #1894).
+    @MainActor @Test func privateTabsRowOnBothEnginePages() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/Fast")
+        let webKit = try String(contentsOf: sources.appendingPathComponent("ExtensionsUI.swift"), encoding: .utf8)
+        let chromium = try String(contentsOf: sources.appendingPathComponent("ChromiumExtensionsUI.swift"), encoding: .utf8)
+        #expect(webKit.contains("PrivateTabs(prefs: browser.prefs)"))
+        #expect(chromium.contains("ExtensionsPage.PrivateTabs(prefs: browser.prefs)"))
+        #expect(webKit.contains(".settingsAnchor(\"extensions-private\")"))
+        #expect(SettingsItem.all.contains { $0.id == "extensions-private" && $0.page == .extensions })
     }
 
     @MainActor @Test func everyIndexedRowHasItsAnchor() throws {

@@ -35,10 +35,24 @@ enum LinkCardRules {
     static let script = #"""
     (() => {
       let caretAt = 0, painted = null;
+      // Match Peek's hit test: elementFromPoint on the document stops at a
+      // shadow host, and closest() cannot walk out of a shadow root.
+      const anchorAt = (x, y) => {
+        let el = document.elementFromPoint(x, y);
+        while (el && el.shadowRoot) {
+          const inner = el.shadowRoot.elementFromPoint(x, y);
+          if (!inner || inner === el) break;
+          el = inner;
+        }
+        for (; el; el = el.parentNode instanceof ShadowRoot ? el.parentNode.host : el.parentNode) {
+          if (el instanceof Element && el.matches('a[href]')) return el;
+        }
+        return null;
+      };
       addEventListener("pointerdown", () => { caretAt = Date.now(); }, true);
       window.__yabLinkCardInfo = (x, y, width, pretend) => {
         const unit = innerWidth / width;
-        let a = document.elementFromPoint(x * unit, y * unit)?.closest("a[href]");
+        let a = anchorAt(x * unit, y * unit);
         const host = (pretend || location.hostname).replace(/^www\./, "").toLowerCase();
         // DDG's address is another anchor in the same result: Arc hangs
         // its card from the title instead of from that line of the address.
@@ -55,7 +69,7 @@ enum LinkCardRules {
       window.__yabLinkCardLightAt = (x,y,on) => {
         if (painted) { painted.remove(); painted = null; }
         if (!on) return;
-        const a = document.elementFromPoint(x,y)?.closest("a[href]");
+        const a = anchorAt(x,y);
         if (a) {
           const b=a.getBoundingClientRect(), overlay=document.createElement("div");
           overlay.setAttribute("aria-hidden","true");

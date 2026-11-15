@@ -1841,8 +1841,67 @@
         run();
         return {run, stop, skip};
     }
+    // Yab: the shadow hosts this document has, as the page-world proxy
+    // (darkreader-proxy.js) tells of every attachShadow since the document
+    // started, and the full walks of the whole document find the rest
+    // (declarative shadow roots the parser makes). A change's own subtree is
+    // then never walked element by element to find hosts (#1889: those walks,
+    // three per added node, were most of the engine's time on each change).
+    const knownShadowHosts = new Set();
+    const knownShadowHostSet = new WeakSet();
+    let shadowHostsTold = false;
+    function rememberShadowHost(host) {
+        if (host instanceof Element && !knownShadowHostSet.has(host)) {
+            knownShadowHostSet.add(host);
+            knownShadowHosts.add(new WeakRef(host));
+        }
+    }
+    document.addEventListener("__yabdark__host", (e) =>
+        rememberShadowHost(e.composedPath()[0])
+    );
+    document.addEventListener(
+        "__yabdark__hostsTold",
+        () => (shadowHostsTold = true),
+        {once: true}
+    );
+    document.dispatchEvent(new CustomEvent("__yabdark__hosts"));
+    // The whole document is still walked, and so is anything the parser is
+    // still adding: only it makes shadow roots without attachShadow.
+    function knowsShadowHosts(root) {
+        return (
+            shadowHostsTold &&
+            document.readyState !== "loading" &&
+            root !== document &&
+            root !== document.documentElement
+        );
+    }
     function iterateShadowHosts(root, iterator) {
         if (root == null) {
+            return;
+        }
+        if (knowsShadowHosts(root)) {
+            const found = [];
+            if (root instanceof Element && root.childElementCount === 0) {
+                if (root.shadowRoot) {
+                    found.push(root);
+                }
+            } else {
+                for (const ref of knownShadowHosts) {
+                    const node = ref.deref();
+                    if (!node) {
+                        knownShadowHosts.delete(ref);
+                    } else if (node.shadowRoot && root.contains(node)) {
+                        found.push(node);
+                    }
+                }
+            }
+            for (const node of found) {
+                if (node.classList.contains("surfingkeys_hints_host")) {
+                    continue;
+                }
+                iterator(node);
+                iterateShadowHosts(node.shadowRoot, iterator);
+            }
             return;
         }
         const walker = document.createTreeWalker(
@@ -1864,6 +1923,7 @@
             if (node.classList.contains("surfingkeys_hints_host")) {
                 continue;
             }
+            rememberShadowHost(node);
             iterator(node);
             iterateShadowHosts(node.shadowRoot, iterator);
         }
@@ -1979,8 +2039,20 @@
             let hadHugeMutationsBefore = false;
             let subscribedForReadyState = false;
             observer = new MutationObserver((mutations) => {
-                if (isHugeMutation(mutations)) {
-                    if (!hadHugeMutationsBefore || isDOMReady()) {
+                // Yab: hosts made off the page and put in by this change.
+                if (shadowHostsTold) {
+                    document.dispatchEvent(
+                        new CustomEvent("__yabdark__pendingHosts")
+                    );
+                }
+                // Yab: once the document is parsed, a change of a thousand
+                // nodes is taken in as what it is, its own subtrees, like any
+                // other, rather than by a walk of the whole document (#1889:
+                // a list drawn anew inside Speedometer's large DOM made every
+                // step a rescan of thirteen thousand elements). While the
+                // parser is still at work it stays one walk at the end.
+                if (isHugeMutation(mutations) && !isDOMReady()) {
+                    if (!hadHugeMutationsBefore) {
                         observerCallbacks.forEach(({onHugeMutations}) =>
                             onHugeMutations(root)
                         );
@@ -6009,34 +6081,44 @@
             attrObservers.get(root).disconnect();
         }
         const discoveredNodes = new WeakSet();
-        function discoverNodes(node) {
-            getInlineStyleElements(node).forEach((el) => {
-                if (discoveredNodes.has(el)) {
-                    return;
-                }
-                discoveredNodes.add(el);
-                elementStyleDidChange(el);
-            });
-            iterateShadowHosts(node, (n) => {
-                if (discoveredNodes.has(n)) {
-                    return;
-                }
-                discoveredNodes.add(n);
-                shadowRootDiscovered(n.shadowRoot);
-                deepWatchForInlineStyles(
-                    n.shadowRoot,
-                    elementStyleDidChange,
-                    shadowRootDiscovered
-                );
-            });
+        // Yab: the inline styles of every node of a change first, their
+        // shapes' sizes read in one pass (measureSVGFills), then the shadow
+        // hosts.
+        function discoverNodes(nodes) {
+            const found = [];
+            nodes.forEach((node) =>
+                getInlineStyleElements(node).forEach((el) => {
+                    if (discoveredNodes.has(el)) {
+                        return;
+                    }
+                    discoveredNodes.add(el);
+                    found.push(el);
+                })
+            );
+            measureSVGFills(found);
+            found.forEach((el) => elementStyleDidChange(el));
+            nodes.forEach((node) =>
+                iterateShadowHosts(node, (n) => {
+                    if (discoveredNodes.has(n)) {
+                        return;
+                    }
+                    discoveredNodes.add(n);
+                    shadowRootDiscovered(n.shadowRoot);
+                    deepWatchForInlineStyles(
+                        n.shadowRoot,
+                        elementStyleDidChange,
+                        shadowRootDiscovered
+                    );
+                })
+            );
         }
         const treeObserver = createOptimizedTreeObserver(root, {
             onMinorMutations: (_root, {additions}) => {
-                additions.forEach((added) => discoverNodes(added));
+                discoverNodes(additions);
                 variablesStore.matchVariablesAndDependents();
             },
             onHugeMutations: () => {
-                discoverNodes(root);
+                discoverNodes([root]);
                 variablesStore.matchVariablesAndDependents();
             }
         });
@@ -6057,9 +6139,10 @@
                 }
                 if (INLINE_STYLE_ATTRS.includes(m.attributeName)) {
                     handledTargets.add(target);
-                    elementStyleDidChange(target);
                 }
             });
+            measureSVGFills(handledTargets);
+            handledTargets.forEach((target) => elementStyleDidChange(target));
             variablesStore.matchVariablesAndDependents();
         });
         const attrObserver = new MutationObserver((mutations) => {
@@ -6153,6 +6236,65 @@
         return false;
     }
     const SMALL_SVG_THRESHOLD = 32;
+    // Yab: whether a shape's fill is a ground or an ink comes from its size.
+    // Read one shape at a time, between the writes for the one before, each
+    // getBoundingClientRect restyled the page anew (#1889: thousands of
+    // style recalcs on a chart). Before a run of elements is overridden, the
+    // sizes of all its shapes are read in one pass (measureSVGFills), and
+    // each override then takes its own, still writing in its own call as
+    // Dark Reader does. The fills' custom properties move no box, so the
+    // sizes are the ones read one by one.
+    // Sizes read for the run of overrides that follows in the same task.
+    let svgFillRoles = new WeakMap();
+    let svgFillRolesKept = false;
+    const svgFillsWaiting = [];
+    function svgFillRole(element) {
+        const root = getSVGElementRoot(element);
+        if (!root) {
+            return null;
+        }
+        let isSVGSmall = svgRootSizeTestResults.get(root);
+        if (isSVGSmall === undefined) {
+            const svgBounds = root.getBoundingClientRect();
+            isSVGSmall =
+                svgBounds.width * svgBounds.height <= SMALL_SVG_THRESHOLD ** 2;
+            svgRootSizeTestResults.set(root, isSVGSmall);
+        }
+        if (isSVGSmall) {
+            return false;
+        }
+        const {width, height} = element.getBoundingClientRect();
+        return width > SMALL_SVG_THRESHOLD || height > SMALL_SVG_THRESHOLD;
+    }
+    function measureSVGFills(elements) {
+        if (!isReadyStateComplete()) {
+            return;
+        }
+        if (!svgFillRolesKept) {
+            svgFillRolesKept = true;
+            queueMicrotask(() => {
+                svgFillRolesKept = false;
+                svgFillRoles = new WeakMap();
+            });
+        }
+        forEach(elements, (element) => {
+            if (
+                element instanceof SVGElement &&
+                !(element instanceof SVGTextElement) &&
+                element.hasAttribute("fill")
+            ) {
+                svgFillRoles.set(element, svgFillRole(element));
+            }
+        });
+    }
+    function takeSVGFillRole(element) {
+        if (svgFillRoles.has(element)) {
+            const role = svgFillRoles.get(element);
+            svgFillRoles.delete(element);
+            return role;
+        }
+        return svgFillRole(element);
+    }
     const svgNodesRoots = new WeakMap();
     const svgRootSizeTestResults = new WeakMap();
     function getSVGElementRoot(svgElement) {
@@ -6406,29 +6548,9 @@
                 if (value !== "none" && value !== "currentColor") {
                     if (!(element instanceof SVGTextElement)) {
                         const handleSVGElement = () => {
-                            let isSVGSmall = false;
-                            const root = getSVGElementRoot(element);
-                            if (!root) {
+                            const isBg = takeSVGFillRole(element);
+                            if (isBg === null) {
                                 return;
-                            }
-                            if (svgRootSizeTestResults.has(root)) {
-                                isSVGSmall = svgRootSizeTestResults.get(root);
-                            } else {
-                                const svgBounds = root.getBoundingClientRect();
-                                isSVGSmall =
-                                    svgBounds.width * svgBounds.height <=
-                                    SMALL_SVG_THRESHOLD ** 2;
-                                svgRootSizeTestResults.set(root, isSVGSmall);
-                            }
-                            let isBg;
-                            if (isSVGSmall) {
-                                isBg = false;
-                            } else {
-                                const {width, height} =
-                                    element.getBoundingClientRect();
-                                isBg =
-                                    width > SMALL_SVG_THRESHOLD ||
-                                    height > SMALL_SVG_THRESHOLD;
                             }
                             setCustomProp(
                                 "fill",
@@ -6439,7 +6561,11 @@
                         if (isReadyStateComplete()) {
                             handleSVGElement();
                         } else {
-                            addReadyStateCompleteListener(handleSVGElement);
+                            svgFillsWaiting.push(element);
+                            addReadyStateCompleteListener(() => {
+                                measureSVGFills(svgFillsWaiting.splice(0));
+                                handleSVGElement();
+                            });
                         }
                     } else {
                         setCustomProp("fill", "color", value);
@@ -6820,6 +6946,53 @@
     function cleanLoadingLinks() {
         rejectorsForLoadingLinks.clear();
     }
+    // Yab: identical small style elements in one tree (an icon set's <svg>s,
+    // each carrying the same <style>) share one override, placed after the
+    // last of them. Every earlier copy's override was overridden anyway by
+    // the copies after it and by the last copy's own override, the same
+    // rules at a later place, so the page looks the same with one sheet of
+    // ours instead of one per copy: 416 more sheets for every element's
+    // style to be matched against in each of Speedometer's Complex DOM pages.
+    const styleTwins = new WeakMap();
+    function twinGroups(root) {
+        let groups = styleTwins.get(root);
+        if (!groups) {
+            groups = new Map();
+            styleTwins.set(root, groups);
+        }
+        return groups;
+    }
+    // The last copy in tree order holds the override, decided once the
+    // copies of one batch are in.
+    function settleTwins(group) {
+        if (group.settling) {
+            return;
+        }
+        group.settling = true;
+        queueMicrotask(() => {
+            group.settling = false;
+            let last = null;
+            for (const member of group.members) {
+                if (!member.element.isConnected) {
+                    continue;
+                }
+                if (
+                    !last ||
+                    last.element.compareDocumentPosition(member.element) &
+                        Node.DOCUMENT_POSITION_FOLLOWING
+                ) {
+                    last = member;
+                }
+            }
+            if (last === group.holder) {
+                return;
+            }
+            const old = group.holder;
+            group.holder = last;
+            old && old.drop();
+            last && last.promote();
+        });
+    }
     function manageStyle(element, {update, loadingStart, loadingEnd}) {
         const inMode = getStyleInjectionMode();
         let syncStyle = null;
@@ -7069,12 +7242,100 @@
             return {rules};
         }
         let forceRenderStyle = false;
+        // Yab: this element's place among identical copies (styleTwins).
+        let twins = null;
+        const twin = {
+            element,
+            drop() {
+                if (!syncStyle) {
+                    return;
+                }
+                syncStylePositionWatcher && syncStylePositionWatcher.stop();
+                removeNode(syncStyle);
+                isOverrideEmpty = true;
+            },
+            promote() {
+                forceRenderStyle = true;
+                update();
+            }
+        };
+        // What makes two copies the same: their rules as the page has them
+        // now, scripts' changes included, and the attributes that decide
+        // whether and where they apply. Small sheets only, read cheaply.
+        function twinKey(rules) {
+            if (
+                inMode !== "next" ||
+                element instanceof HTMLLinkElement ||
+                corsCopies.has(element) ||
+                rules.length > 64 ||
+                (element.textContent ?? "").length > 8192
+            ) {
+                return null;
+            }
+            let key = `${element.getAttribute("media") ?? ""}\n${element.getAttribute("title") ?? ""}\n${element.getAttribute("type") ?? ""}`;
+            for (let i = 0; i < rules.length; i++) {
+                key += `\n${rules[i].cssText}`;
+            }
+            return key;
+        }
+        function leaveTwins() {
+            const group = twins;
+            if (!group) {
+                return;
+            }
+            twins = null;
+            group.members.delete(twin);
+            if (group.members.size === 0) {
+                twinGroups(group.root).delete(group.key);
+            }
+            if (group.holder === twin) {
+                group.holder = null;
+                settleTwins(group);
+            }
+        }
+        // Whether this element puts its own override in.
+        function joinTwins(rules) {
+            const key = twinKey(rules);
+            const root = key === null ? null : element.getRootNode();
+            if (twins && (twins.key !== key || twins.root !== root)) {
+                leaveTwins();
+            }
+            if (key === null) {
+                return true;
+            }
+            if (!twins) {
+                const groups = twinGroups(root);
+                let group = groups.get(key);
+                if (!group) {
+                    group = {
+                        key,
+                        root,
+                        members: new Set(),
+                        holder: null,
+                        settling: false
+                    };
+                    groups.set(key, group);
+                }
+                group.members.add(twin);
+                twins = group;
+                if (group.holder) {
+                    settleTwins(group);
+                } else {
+                    group.holder = twin;
+                }
+            }
+            return twins.holder === twin;
+        }
         function render(theme, ignoreImageAnalysis) {
             const rules = getRulesSync();
             if (!rules) {
                 return;
             }
             cancelAsyncOperations = false;
+            if (!joinTwins(rules)) {
+                twin.drop();
+                return;
+            }
             function removeCSSRulesFromSheet(sheet) {
                 if (!sheet) {
                     return;
@@ -7162,6 +7423,7 @@
         }
         function destroy() {
             pause();
+            leaveTwins();
             corsCopies.delete(element);
             removeNode(syncStyle);
             loadingEnd();
@@ -7180,6 +7442,20 @@
         const maxMoveCount = 10;
         let moveCount = 0;
         function restore() {
+            // Yab: a copy moved may now be the last of its twins, or in
+            // another tree.
+            if (twins) {
+                if (twins.root !== element.getRootNode()) {
+                    leaveTwins();
+                    forceRenderStyle = true;
+                    update();
+                    return;
+                }
+                settleTwins(twins);
+                if (twins.holder !== twin) {
+                    return;
+                }
+            }
             if (!syncStyle) {
                 return;
             }
@@ -7912,6 +8188,9 @@
             }
             return prevStylesByRoot.get(root);
         };
+        // Yab: every style known in any tree, for a change that takes out
+        // more than there are (handleMinorTreeMutations).
+        const knownStyles = new Set();
         currentStyles.forEach((node) => {
             let root = node;
             while ((root = root.parentNode)) {
@@ -7921,6 +8200,7 @@
                 ) {
                     const prevStyles = getPrevStyles(root);
                     prevStyles.add(node);
+                    knownStyles.add(node);
                     break;
                 }
             }
@@ -7950,6 +8230,8 @@
             const prevStyles = getPrevStyles(root);
             createdStyles.forEach((s) => prevStyles.add(s));
             removedStyles.forEach((s) => prevStyles.delete(s));
+            createdStyles.forEach((s) => knownStyles.add(s));
+            removedStyles.forEach((s) => knownStyles.delete(s));
             if (
                 createdStyles.size + removedStyles.size + movedStyles.size >
                 0
@@ -7971,11 +8253,24 @@
                     createdStyles.add(style)
                 )
             );
-            deletions.forEach((node) =>
-                getManageableStyles(node).forEach((style) =>
-                    removedStyles.add(style)
-                )
-            );
+            // Yab: of what was taken out, only the styles known matter. A
+            // list drawn anew a hundred times in one step (jQuery's TodoMVC)
+            // takes out ten thousand items: the known styles that are gone,
+            // in this tree or in a shadow root taken out with its host, are
+            // found without searching each item.
+            if (deletions.size > knownStyles.size) {
+                knownStyles.forEach((style) => {
+                    if (!style.isConnected) {
+                        removedStyles.add(style);
+                    }
+                });
+            } else {
+                deletions.forEach((node) =>
+                    getManageableStyles(node).forEach((style) =>
+                        removedStyles.add(style)
+                    )
+                );
+            }
             moves.forEach((node) =>
                 getManageableStyles(node).forEach((style) =>
                     movedStyles.add(style)
@@ -8314,7 +8609,9 @@
                 })
             );
         }
-        invertStyle.textContent = rules.join("\n");
+        // Yab: written only when it changes, as every shadow root asks for it
+        // again (setStyleText).
+        setStyleText(invertStyle, rules.join("\n"));
     }
     function createStaticStyleOverrides() {
         const fallbackStyle = createOrUpdateStyle(
@@ -8392,17 +8689,44 @@
         injectStaticStyle(overrideStyle, document.head.lastChild, "override");
     }
     const shadowRootsWithOverrides = new Set();
+    // Yab: a shadow root is told it was found by the style watcher and again
+    // by the inline style watcher. The second time its three sheets are
+    // already there with these texts: writing the same text and putting a
+    // node back where it is took each out and in again, and its tree was
+    // restyled twice for nothing.
+    function setStyleText(style, text) {
+        if (style.textContent !== text) {
+            style.textContent = text;
+        }
+    }
+    function placeAfter(root, node, before) {
+        const next = before ? before.nextSibling : root.firstChild;
+        if (next !== node) {
+            root.insertBefore(node, next);
+        }
+    }
+    let shadowFixesText = {css: null, theme: null, text: ""};
+    function shadowFixesCSS() {
+        const css = fixes && fixes.css ? fixes.css : "";
+        if (shadowFixesText.css !== css || shadowFixesText.theme !== theme) {
+            shadowFixesText = {
+                css,
+                theme,
+                text: css ? replaceCSSTemplates(css) : ""
+            };
+        }
+        return shadowFixesText.text;
+    }
     function createShadowStaticStyleOverridesInner(root) {
         const inlineStyle = createOrUpdateStyle("darkreader--inline", root);
-        inlineStyle.textContent = getInlineOverrideStyle();
-        root.insertBefore(inlineStyle, root.firstChild);
+        setStyleText(inlineStyle, getInlineOverrideStyle());
+        placeAfter(root, inlineStyle, null);
         const overrideStyle = createOrUpdateStyle("darkreader--override", root);
-        overrideStyle.textContent =
-            fixes && fixes.css ? replaceCSSTemplates(fixes.css) : "";
-        root.insertBefore(overrideStyle, inlineStyle.nextSibling);
+        setStyleText(overrideStyle, shadowFixesCSS());
+        placeAfter(root, overrideStyle, inlineStyle);
         const invertStyle = createOrUpdateStyle("darkreader--invert", root);
         setInversionStyleValue(invertStyle);
-        root.insertBefore(invertStyle, overrideStyle.nextSibling);
+        placeAfter(root, invertStyle, overrideStyle);
         shadowRootsWithOverrides.add(root);
     }
     function delayedCreateShadowStaticStyleOverrides(root) {
@@ -8495,6 +8819,7 @@
                 push(inlineStyleElements, elements);
             }
         });
+        measureSVGFills(inlineStyleElements);
         inlineStyleElements.forEach((el) =>
             overrideInlineStyle(
                 el,
@@ -8671,6 +8996,7 @@
                     INLINE_STYLE_SELECTOR
                 );
                 if (inlineStyleElements.length > 0) {
+                    measureSVGFills(inlineStyleElements);
                     forEach(inlineStyleElements, (el) =>
                         overrideInlineStyle(
                             el,

@@ -499,7 +499,7 @@ struct Notice: View {
 
     /// With nothing passing, what stays: an agent waiting on you, or nothing.
     private var callTarget: NoticeCallTarget? {
-        guard browsers, let calling = agents.calling,
+        guard browsers, Agents.speaks(in: browser), let calling = agents.calling,
               let tab = agents.browser?.tabs.first(where: { $0.id == calling.tab }),
               tab.handoff != nil, !agents.sealed(tab), !Agents.inCorner(tab) else { return nil }
         return NoticeCallTarget(tab: tab.id, question: tab.handoffNotice?.id)

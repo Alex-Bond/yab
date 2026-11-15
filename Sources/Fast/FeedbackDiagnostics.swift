@@ -17,10 +17,15 @@ final class FeedbackDiagnostics {
         case importFailed
         /// The actual runner that failed, with only its HTTP status as code.
         case claudeRequestFailed, codexRequestFailed, cursorRequestFailed, geminiRequestFailed
+        /// Chromium's helper (YabCore) went away, and with it every Chromium
+        /// page; those on screen load again by themselves (helperExited).
+        /// `reason` says how (HelperEnd), `code` its exit status or signal.
+        /// Before this, that reload left no trace (feedback #1984).
+        case helperLost
 
         /// Events a site older than this build may not know yet, and
         /// turn the whole of the diagnostics down for (`snapshots`).
-        static let newer: Set<Kind> = [.importFailed, .chatClose, .systemWoke,
+        static let newer: Set<Kind> = [.importFailed, .chatClose, .systemWoke, .helperLost,
                                       .claudeRequestFailed, .codexRequestFailed, .cursorRequestFailed, .geminiRequestFailed]
     }
     /// Only phases and two booleans, never a chat, tab, provider or its words.
@@ -70,6 +75,11 @@ final class FeedbackDiagnostics {
     func slept(_ reason: SleepReason) {
         sleeps[reason, default: Count()].record(at: clock())
         lastSleep = reason
+    }
+
+    /// Chromium's helper went, as an event of the last five minutes.
+    func helperLost(_ end: HelperEnd, code: Int?, recovering: Bool) {
+        record(.helperLost, code: code, word: end.rawValue + (recovering ? "" : ".stopped"))
     }
 
     func reloadedAfterTermination(reason: PageEnd?) {
@@ -127,13 +137,13 @@ final class FeedbackDiagnostics {
     /// `code`: a number of our own, when there is no error to take one from.
     /// `reason`: why a page's process ended, as WebKit said, none when it
     /// didn't say. Kept as its word and, as the code, WebKit's number.
-    func record(_ kind: Kind, error: Error? = nil, code: Int? = nil, extensionID: String? = nil, reason: PageEnd? = nil) {
+    func record(_ kind: Kind, error: Error? = nil, code: Int? = nil, extensionID: String? = nil, reason: PageEnd? = nil, word: String? = nil) {
         let now = clock()
         entries.removeAll { now - $0.at > 300 }
         let error = error as NSError?
         let domain = error.map { [NSURLErrorDomain, "WKErrorDomain"].contains($0.domain) ? $0.domain : "other" }
         entries.append(Entry(at: now, kind: kind, code: error?.code ?? code ?? reason?.rawValue, domain: domain,
-                             extensionID: Self.storeID(extensionID), reason: reason?.word))
+                             extensionID: Self.storeID(extensionID), reason: word ?? reason?.word))
         if entries.count > 200 { entries.removeFirst(entries.count - 200) }
     }
 
@@ -223,7 +233,7 @@ final class FeedbackDiagnostics {
             state.windows = browsers.count
             state.tabs = tabs.count
             state.asleepTabs = tabs.filter(\.asleep).count
-            state.loadedTabs = tabs.filter { $0.webKitOnly("WebKit feedback metrics", build: false) != nil && !$0.asleep }.count
+            state.loadedTabs = tabs.filter { $0.builtPage != nil && !$0.asleep }.count
             state.screens = NSScreen.screens.prefix(16).map {
                 ["x": Int($0.frame.minX), "y": Int($0.frame.minY),
                  "width": Int($0.frame.width), "height": Int($0.frame.height),
@@ -240,7 +250,7 @@ final class FeedbackDiagnostics {
                 state.extensions = Extensions.shared.installed.compactMap { item in
                     guard let id = FeedbackDiagnostics.storeID(item.id) else { return nil }
                     var entry: [String: Any] = ["id": id, "version": FeedbackDiagnostics.version(item.version), "enabled": item.enabled]
-                    let here = FileManager.default.fileExists(atPath: Extensions.onePasswordApp.path)
+                    let here = Extensions.onePasswordApp != nil
                     if let link = FeedbackDiagnostics.appLink(id, refused: Extensions.shared.unconnected,
                                                               answered: Extensions.shared.onePasswordAnswered, appHere: here) {
                         entry["app"] = link
@@ -298,12 +308,16 @@ final class FeedbackDiagnostics {
     }
 
     static func page(of tab: Tab, front: Bool) async -> [String: Any] {
-        var out: [String: Any] = ["front": front, "woken": tab.arrival.woken,
+        var out: [String: Any] = ["front": front, "woken": tab.arrival.woken, "engine": tab.engineKind.rawValue,
                                   "loadedOutOfWindow": tab.arrival.outOfWindow, "loadedBehind": tab.arrival.behind]
-        guard let web = tab.webKitOnly("WebKit feedback metrics", build: false), !tab.asleep else {
+        if tab.asleep {
             out["asleep"] = true
             return out
         }
+        // A Chromium page is awake all the same; only WebKit's own numbers
+        // below are missing (#1927, #1930 came in saying "asleep" while
+        // their page was being scrolled).
+        guard let web = tab.webKitOnly("WebKit feedback metrics", build: false) else { return out }
         out.merge(await page(of: web)) { first, _ in first }
         return out
     }
@@ -439,4 +453,16 @@ final class FeedbackDiagnostics {
         }
         return nil
     }
+}
+
+/// How Chromium's helper went, in a fixed word: never its error's text.
+enum HelperEnd: String {
+    /// It exited by itself (`code`, its status), or was ended by a signal
+    /// (`code`, the signal: a crash or a kill).
+    case exited, signal
+    /// The connection went while the helper still ran: the client refused
+    /// what it sent (a protocol violation), or its socket failed.
+    case protocolViolation, transport, disconnected
+    /// It never answered its first hello.
+    case notStarted
 }

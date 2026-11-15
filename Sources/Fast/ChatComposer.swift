@@ -136,8 +136,9 @@ struct ChatComposer: View {
         }
         .onAppear {
             watchPresses()
-            // Words left unsent when the column went come back with it.
-            if words.isEmpty { words = attach.words }
+            // Words left unsent when the column went come back with it:
+            // this chat's own.
+            if words.isEmpty { words = attach.words(for: chat?.id) }
             if attach.fill > 0, words.isEmpty { words = attach.filling }
             syncDoneKey()
             // Built as the column comes out: the cursor goes in once it
@@ -149,8 +150,12 @@ struct ChatComposer: View {
             syncDoneKey()
             if !words.isEmpty { ChatComposer.caretToEnd(of: words, in: browser) }
         }
-        .onChange(of: words) { _, now in attach.words = now; syncDoneKey() }
+        .onChange(of: words) { _, now in
+            attach.words = now
+            syncDoneKey()
+        }
         .onChange(of: focused) { _, now in
+            AgentSetupModel.shared.showing(composerSurface, now)
             attach.typing = now
             syncDoneKey()
             // A question is coming: the chips' pages read ahead (PageWords).
@@ -165,7 +170,10 @@ struct ChatComposer: View {
         .onReceive(browser.changes(\.chatOpen)) { open in
             if !open { focused = false }
         }
-        .onChange(of: chat?.id) { _, _ in
+        .onChange(of: chat?.id) { _, now in
+            // Another chat in the column: its own unsent words in the
+            // field, those typed for the one before kept as that one's.
+            words = attach.words(for: now)
             syncDoneKey()
             // Another chat in the column: the edit was the one before's.
             if browser.chatEditing != nil, editing == nil { browser.chatEditing = nil }
@@ -179,6 +187,7 @@ struct ChatComposer: View {
             if let presses { NSEvent.removeMonitor(presses) }
             presses = nil
             returnKey.clear()
+            AgentSetupModel.shared.showing(composerSurface, false)
             attach.typing = false
             if attach.finishableChatID == chat?.id { attach.finishableChatID = nil }
         }
@@ -195,8 +204,12 @@ struct ChatComposer: View {
             if !words.isEmpty { ChatComposer.caretToEnd(of: words, in: browser) }
         }
         .onReceive(browser.changes(\.chatDraft).compactMap { $0 }) { draft in
-            words = draft
+            // Kept as the draft of the chat it is for (Browser.chatDraft),
+            // which may be one about to come into the column: shown once
+            // it is this field's chat.
             browser.chatDraft = nil
+            guard attach.words(for: chat?.id) == draft else { return }
+            words = draft
             guard browser.chatOpen, !browser.chatMoving else { return }
             focused = true
             ChatComposer.caretToEnd(of: draft, in: browser)
@@ -285,6 +298,9 @@ struct ChatComposer: View {
                 // Before AppKit's input context can commit and clear the
                 // mark, remember which Return belonged to this text client.
                 returnKey.hear(event, in: window.firstResponder)
+                // A key typed here: a person asks, so readiness is looked at
+                // where the chat would run (AgentSetupModel.asked), not at launch.
+                MainActor.assumeIsolated { AgentSetupModel.shared.asked() }
                 return event
             }
             guard browser.chatOpen, browser.chatMovement.target != false,
@@ -330,7 +346,7 @@ struct ChatComposer: View {
     }
 
     private var input: some View {
-        TextField("", text: $words, axis: .vertical)
+        TextField("", text: typed, axis: .vertical)
             .textFieldStyle(.plain)
             .font(.system(size: 13.5))
             .lineLimit(1...8)
@@ -370,7 +386,7 @@ struct ChatComposer: View {
                 let event = NSApp.currentEvent
                 let handled = returnKey.run(event, in: event?.window?.firstResponder ?? NSApp.keyWindow?.firstResponder,
                                             modifiers: press.modifiers,
-                                            newline: { words.append("\n") },
+                                            newline: { put(words + "\n") },
                                             pick: {
                                                 guard words.isEmpty, let asking, choosing else { return false }
                                                 return ChatChoosing.shared.pickLit(asking)
@@ -414,6 +430,18 @@ struct ChatComposer: View {
                 }
                 return .ignored
             }
+    }
+
+    /// The words as they are typed: kept as the draft of the chat the field
+    /// shows as they are, so they stay that chat's (ChatAttach).
+    private var typed: Binding<String> {
+        Binding(get: { words }, set: { put($0) })
+    }
+
+    /// The field's words, and this chat's draft with them.
+    private func put(_ text: String) {
+        words = text
+        attach.keep(text, for: chat?.id)
     }
 
     /// The empty field of a finished chat, Done on its button, offers Done
@@ -598,13 +626,19 @@ struct ChatComposer: View {
             browser.toaster.pop(problem, mark: "iphone")
             return
         }
+        // A new chat may have been opened before the connection changed.
+        // Keep its draft and attachments when Settings must reconnect it.
+        if ChatComposer.connectsFirst(newChat: chat == nil, answering: asking != nil && choosing, ready: Agents.ready) {
+            TaskLine.connect()
+            return
+        }
         // Your words go up into their line (SendFlight), taken from the
         // field before it empties; not an answer to a question over it,
         // nor words that wait in the queue: those have no line to go to.
         if !text.isEmpty, !(asking != nil && choosing), !(later && live) {
             SendFlight.takeOff(text, in: BrowserWindows.shared.window(for: browser), bubble: true)
         }
-        words = ""
+        put("")
         attach.menu = false
         // A question over the field: these words are its answer.
         if let asking, choosing {
@@ -612,7 +646,7 @@ struct ChatComposer: View {
             return
         }
         let items = attached
-        attach.clear()
+        attach.clear(for: chat?.id)
         // Said again in other words: the chat goes on from that message.
         if let editing, let chat {
             browser.chatEditing = nil
@@ -629,9 +663,20 @@ struct ChatComposer: View {
         }
     }
 
+    /// This window's composer, while it has the keys (AgentSetupModel.showing).
+    private var composerSurface: String { "composer." + (browser.windowID?.uuidString ?? "main") }
+
+    /// Whether Return takes you to Settings › AI to connect instead of
+    /// sending: only for a new chat no agent would start (Agents.ready).
+    /// An answer to a question over the field, or words to a chat already
+    /// running, go to what asked.
+    static func connectsFirst(newChat: Bool, answering: Bool, ready: Bool) -> Bool {
+        newChat && !answering && !ready
+    }
+
     /// The edit put aside: the field empty, the chat as it was.
     private func cancelEdit() {
-        words = ""
+        put("")
         browser.chatEditing = nil
     }
 
@@ -664,6 +709,18 @@ struct ChatComposer: View {
         if !mail.isEmpty { session.mail = true }
         // The page it began from goes into its folder with the tabs it opens.
         tabs.first?.began = session.id
+        // A refused launch deliberately isn't admitted as an agent session.
+        // It is still a submitted chat: keep the words and failure before
+        // pointing the column at its id, or the cleared field leads nowhere.
+        if session.state == .failed, Agents.shared.session(session.id) == nil {
+            var failed = Agents.shared.chat(of: session)
+            failed.model = browser.chatChoice.model
+            failed.effort = browser.chatChoice.effort
+            failed.items.put(ChatItem(id: UUID().uuidString, kind: .asked,
+                detail: (session.carrying.last ?? []).joined(separator: "\n"),
+                text: text, state: .done), at: Date())
+            Chats.shared.keep(failed)
+        }
         Folders.shared.refresh()
         if keep { browser.keepChat(session.id) }
         return session
@@ -1562,6 +1619,19 @@ enum ChatAttachment: Equatable, Identifiable {
             + quotes.map { "q:" + short($0) }
     }
 
+    /// What a message with tabs attached is about, for the agent: those
+    /// tabs, not the pages earlier turns of the chat worked on.
+    @MainActor static func subject(_ tabs: [Tab]) -> String {
+        let named = tabs.map(Bench.short).joined(separator: ", ")
+        return tabs.count == 1
+            ? "This message is about that tab (\(named)): it is the page they mean, whatever earlier turns of this chat were about. "
+                + "Do what they ask there, in that tab, and don't look for another page to do it on or ask which page they mean; "
+                + "if it can't be done there, say plainly what stops you. "
+            : "This message is about those tabs (\(named)): they are the pages they mean, whatever earlier turns of this chat were about. "
+                + "Do what they ask there, and don't look for other pages to do it on or ask which pages they mean; "
+                + "if it can't be done there, say plainly what stops you. "
+    }
+
     /// The tabs and files said ahead of the words, for the agent.
     @MainActor static func said(tabs: [Tab], files: [URL], quotes: [String] = [], mail: [MailRef] = [], folders: [Nest] = [], in browser: Browser? = nil) -> String {
         var out = ""
@@ -1573,6 +1643,10 @@ enum ChatAttachment: Equatable, Identifiable {
             out += "The user points you at their tab \(Bench.short(tab)) (\(tab.address?.absoluteString ?? "")), \"\(tab.title)\". "
                 + PageWords.said(tab)
         }
+        // The chip is the message's subject: an agent told only "points you
+        // at" went back to the page its chat began on (a Figma members page
+        // attached, the agent off to an older Notion tab, 2026-11-14).
+        if !tabs.isEmpty { out += ChatAttachment.subject(tabs) }
         if !files.isEmpty {
             // A picture the agents can't open (HEIC from an iPhone, TIFF)
             // is given as a copy they can, beside the file itself.
@@ -1690,13 +1764,24 @@ enum ChatAttachment: Equatable, Identifiable {
 
 /// What the column's field carries: the window's, so a file dropped on the
 /// whole column lands in it. With nothing touched, a new chat is about the
-/// tab in front.
+/// tab in front. One field shows every chat, but what is typed or added in
+/// it and not sent yet is the chat's it was typed in, by its id ("" for a
+/// new chat): another chat brought into the column shows its own, never
+/// the one before's, which went to the wrong agent (feedback #1238).
 @MainActor
 final class ChatAttach: ObservableObject {
-    @Published private(set) var items: [ChatAttachment] = []
-    @Published private(set) var touched = false
-    /// The field's words, kept while the column is away, and whether the
-    /// field has the keys; its draft stays when the column is put away.
+    /// What was added by hand to each chat's field, by `key`.
+    private struct Hand: Equatable {
+        var items: [ChatAttachment] = []
+        var touched = false
+    }
+    @Published private var hands: [String: Hand] = [:]
+    /// Each chat's unsent words, by `key`. Not published: the field keeps
+    /// its own words as they are typed, and reads these when its chat
+    /// changes or it is built again.
+    private var drafts: [String: String] = [:]
+    /// The words of the field on screen, and whether the field has the
+    /// keys; a chat's own draft stays when the column is put away.
     var words = ""
     /// Words put in the field from outside it, each time `fill` moves.
     var filling = ""
@@ -1726,8 +1811,29 @@ final class ChatAttach: ObservableObject {
     }
 
     private func base(chat: Chat?, browser: Browser) -> [ChatAttachment] {
-        if touched { return items }
+        let hand = hands[Self.key(chat?.id)] ?? Hand()
+        if hand.touched { return hand.items }
         return chat == nil ? ChatComposer.page(browser.chatPage).map { [.tab($0.id)] } ?? [] : []
+    }
+
+    /// Whose field it is: a chat's id, or "" for a new chat.
+    nonisolated static func key(_ chat: String?) -> String { chat ?? "" }
+
+    /// What the chat's field holds unsent: its words.
+    func words(for chat: String?) -> String { drafts[Self.key(chat)] ?? "" }
+
+    /// The words typed in this chat's field, kept as its own.
+    func keep(_ words: String, for chat: String?) {
+        drafts[Self.key(chat)] = words.isEmpty ? nil : words
+    }
+
+    /// What was added by hand to this chat's field.
+    func items(for chat: String?) -> [ChatAttachment] { hands[Self.key(chat)]?.items ?? [] }
+
+    /// A chat gone for good: nothing of its field is kept.
+    func forget(_ chat: String) {
+        drafts[chat] = nil
+        if hands[chat] != nil { hands[chat] = nil }
     }
 
     /// In mail: for a new chat, the email or list in front; for a chat
@@ -1746,51 +1852,57 @@ final class ChatAttach: ObservableObject {
     /// Anything here by hand, which can go with no words. The tab in front,
     /// on its own, is only what a new chat is about anyway.
     func carried(chat: Chat?, browser: Browser) -> Bool {
-        guard touched else { return false }
+        guard let hand = hands[Self.key(chat?.id)], hand.touched else { return false }
         let front = chat == nil ? ChatComposer.page(browser.chatPage).map { ChatAttachment.tab($0.id) } : nil
-        return items.contains { $0 != front }
+        return hand.items.contains { $0 != front }
     }
 
     /// From here on by hand, starting from what was going by default; mail's
-    /// own offer keeps following what mail shows.
-    private func adopt(chat: Chat?, browser: Browser) {
-        guard !touched else { return }
-        items = base(chat: chat, browser: browser)
-        touched = true
+    /// own offer keeps following what mail shows. Then `change` to it.
+    private func adopt(chat: Chat?, browser: Browser, _ change: (inout [ChatAttachment]) -> Void) {
+        let key = Self.key(chat?.id)
+        var hand = hands[key] ?? Hand()
+        if !hand.touched {
+            hand.items = base(chat: chat, browser: browser)
+            hand.touched = true
+        }
+        change(&hand.items)
+        hands[key] = hand
     }
 
-    /// Exactly these, as a chat about a page starts with them.
+    /// Exactly these, as a new chat about a page starts with them: its
+    /// field's, the chat that is about to come into the column.
     func set(_ items: [ChatAttachment]) {
-        self.items = items
-        touched = true
+        hands[Self.key(nil)] = Hand(items: items, touched: true)
         menu = false
     }
 
     func toggle(_ tab: Tab, chat: Chat?, browser: Browser) {
-        adopt(chat: chat, browser: browser)
-        if let index = items.firstIndex(of: .tab(tab.id)) { items.remove(at: index) } else { items.append(.tab(tab.id)); PageWords.warm(tab) }
+        adopt(chat: chat, browser: browser) { items in
+            if let index = items.firstIndex(of: .tab(tab.id)) { items.remove(at: index) } else { items.append(.tab(tab.id)); PageWords.warm(tab) }
+        }
     }
 
     func add(_ item: ChatAttachment, chat: Chat?, browser: Browser) {
-        adopt(chat: chat, browser: browser)
         if case .tab(let id) = item, let tab = browser.chatTab(id) { PageWords.warm(tab) }
         if case .folder(let id) = item, let nest = browser.nests.first(where: { $0.id == id }) { ChatAttachment.warm(nest, in: browser) }
-        if !items.contains(item) { items.append(item) }
+        adopt(chat: chat, browser: browser) { items in
+            if !items.contains(item) { items.append(item) }
+        }
     }
 
     func remove(_ item: ChatAttachment, chat: Chat?, browser: Browser) {
-        if let ref = item.mail, !items.contains(item) {
+        if let ref = item.mail, !items(for: chat?.id).contains(item) {
             droppedMail = ref.id
             objectWillChange.send()
             return
         }
-        adopt(chat: chat, browser: browser)
-        items.removeAll { $0 == item }
+        adopt(chat: chat, browser: browser) { items in items.removeAll { $0 == item } }
     }
 
-    func clear() {
-        items = []
-        touched = false
+    /// Sent, or put aside: nothing added by hand to this chat's field.
+    func clear(for chat: String?) {
+        if hands[Self.key(chat)] != nil { hands[Self.key(chat)] = nil }
         menu = false
         droppedMail = nil
     }

@@ -18,8 +18,8 @@ import WebKit
 //   (RFC 8291) and the box never learns which site a subscription is for.
 // - While Yab runs, a WebSocket to the box brings each message at once; it
 //   is decrypted here (WebPushCrypto) and handed to WebKit, which wakes the
-//   site's service worker with a push event, page or no page, as macOS's push
-//   daemon would (`_processPushMessage:`). What the worker shows comes to
+//   site's service worker with a push event, page or no page, as WebKit's
+//   push daemon would (`_processPushMessage:`). What the worker shows comes to
 //   SiteNotices like any of its notifications, and a click opens its page.
 //
 // Only for a site allowed to notify, never in a private window, and a site
@@ -47,6 +47,10 @@ final class WebPush: NSObject {
         var secret: String
         var auth: String
         var made: Date
+        /// The Chromium profile whose worker hears it, while the site's page
+        /// last came from Chromium; nil when it last came from WebKit. A site
+        /// that moves engines keeps its endpoint: only this changes.
+        var profile: String?
 
         var keys: WebPushCrypto.Keys? {
             guard let raw = Data(urlBase64: secret), let privateKey = try? P256.KeyAgreement.PrivateKey(rawRepresentation: raw),
@@ -110,12 +114,13 @@ final class WebPush: NSObject {
     }
 
     /// The same key gets the subscription there is; another key, the page
-    /// must unsubscribe first.
-    func subscribe(origin: String, scope: String, store: String?, key: String) async throws -> Record {
+    /// must unsubscribe first, as the Push API asks.
+    func subscribe(origin: String, scope: String, store: String?, key: String, profile: String? = nil) async throws -> Record {
         if let known = subscription(origin: origin, scope: scope, store: store) {
             guard known.key == key else {
                 throw Trouble.refused("InvalidStateError", "A subscription with a different applicationServerKey already exists.")
             }
+            heard(known, on: profile)
             return known
         }
         guard let base = Self.base else { throw Trouble.refused("AbortError", "Push service not available.") }
@@ -126,7 +131,7 @@ final class WebPush: NSObject {
         }
         let keys = WebPushCrypto.Keys.make()
         let record = Record(id: id, endpoint: endpoint, origin: origin, scope: scope, store: store, key: key,
-                            secret: keys.privateKey.rawRepresentation.urlBase64, auth: keys.auth.urlBase64, made: Date())
+                            secret: keys.privateKey.rawRepresentation.urlBase64, auth: keys.auth.urlBase64, made: Date(), profile: profile)
         // Another request may have saved while this one waited on the box.
         state = current() ?? state
         state.subs.removeAll { $0.origin == origin && $0.scope == scope && $0.store == store }
@@ -134,6 +139,15 @@ final class WebPush: NSObject {
         save(state)
         connect()
         return record
+    }
+
+    /// The site's page is on this engine now: so is its worker, the one
+    /// that hears the next push. Never both, so nothing arrives twice.
+    func heard(_ record: Record, on profile: String?) {
+        guard record.profile != profile, var state = current(),
+              let index = state.subs.firstIndex(where: { $0.id == record.id }) else { return }
+        state.subs[index].profile = profile
+        save(state)
     }
 
     func unsubscribe(origin: String, scope: String, store: String?) async -> Bool {
@@ -369,10 +383,37 @@ final class WebPush: NSObject {
         note["bytes"] = plain?.count ?? 0
         note["result"] = "handed"
         let store = record.store.flatMap(UUID.init(uuidString:)).map(Spaces.store(identified:)) ?? Store.websites
-        Self.process(store, scope: scope, data: plain) { [weak self] shown in
-            guard let self, let index = self.delivered.lastIndex(where: { ($0["sub"] as? String) == sub }) else { return }
-            self.delivered[index]["shown"] = shown
+        let toWebKit = { [weak self] in
+            Self.process(store, scope: scope, data: plain) { [weak self] shown in
+                guard let self, let index = self.delivered.lastIndex(where: { ($0["sub"] as? String) == sub }) else { return }
+                self.delivered[index]["shown"] = shown
+            }
         }
+        guard let profile = record.profile else { note["engine"] = "webkit"; return toWebKit() }
+        note["engine"] = "chromium"
+        // A worker that isn't there any more, or a payload that isn't text,
+        // which is all DevTools' door takes: WebKit's, rather than nowhere.
+        Task { @MainActor [weak self] in
+            let text = plain.map { String(decoding: $0, as: UTF8.self) } ?? ""
+            let fits = plain.map { Data(text.utf8) == $0 } ?? true
+            var delivered = false
+            if fits { delivered = await Self.toChromium(profile: profile, origin: record.origin, scope: record.scope, text: text) }
+            guard let self, let index = self.delivered.lastIndex(where: { ($0["sub"] as? String) == sub }) else { return }
+            self.delivered[index]["worker"] = delivered
+            if !delivered { self.delivered[index]["engine"] = "webkit"; toWebKit() }
+        }
+    }
+
+    /// A worker in Chromium, through the helper (YabCore/src/site_push.inc).
+    private static func toChromium(profile: String, origin: String, scope: String, text: String) async -> Bool {
+        guard let core = try? await ChromiumProcess.shared.connection() else { return false }
+        _ = try? await core.openProfile(profile, privateMode: false)
+        await ChromiumPermissions.opened(profile, core: core)
+        await ChromiumClearingDebt.settle(profile, core: core)
+        let reply = try? await core.request("push.deliver", params: [
+            "profile": .string(profile), "origin": .string(SiteNotices.webKitOrigin(origin)),
+            "scope": .string(scope), "data": .string(text)])
+        return reply?["delivered"] == .bool(true)
     }
 
     /// WebKit's door for a push, the one Safari's daemon uses: the worker
@@ -443,7 +484,7 @@ final class WebPush: NSObject {
         return ["base": Self.base?.absoluteString ?? "", "box": state?.box ?? "", "opened": state?.opened ?? false,
                 "connected": connected, "socket": socket != nil,
                 "subs": state?.subs.map { ["id": $0.id, "origin": $0.origin, "scope": $0.scope, "store": $0.store ?? "",
-                                           "endpoint": $0.endpoint, "key": $0.key] } ?? [],
+                                           "endpoint": $0.endpoint, "key": $0.key, "engine": $0.profile == nil ? "webkit" : "chromium"] } ?? [],
                 "delivered": delivered]
     }
 }
@@ -452,7 +493,7 @@ final class WebPush: NSObject {
 
 /// yab's side of the page's pushManager (push-page.js), in yab's own world.
 /// The frame's origin is WebKit's to say, never the page's.
-final class PushRelay: NSObject, WKScriptMessageHandlerWithReply {
+final class PushRelay: NSObject, WKScriptMessageHandlerWithReply, PageScriptReplying {
     static let name = "yabPush"
     static let shared = PushRelay()
     static let asked = "yab-push-ask"
@@ -464,19 +505,46 @@ final class PushRelay: NSObject, WKScriptMessageHandlerWithReply {
         replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void
     ) {
         MainActor.assumeIsolated {
-            guard let body = message.body as? [String: Any], let kind = body["kind"] as? String else { return replyHandler(nil, "Not a request") }
             let frame = message.frameInfo.securityOrigin
             let origin = Browser.origin(scheme: frame.protocol, host: frame.host, port: frame.port)
+            let store = message.webView?.configuration.websiteDataStore
+            handle(message.body, origin: origin, store: store?.isPersistent == true ? .some(store?.identifier?.uuidString) : nil,
+                   profile: nil, replyHandler)
+        }
+    }
+
+    /// The same request from a Chromium page, whose frame's origin is the
+    /// helper's word. Its space's store names the subscription, as WebKit's
+    /// does, so the site keeps it whichever engine shows it.
+    func receive(_ message: PageScriptMessage, reply: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        MainActor.assumeIsolated {
+            let source = message.frame.origin
+            let origin = Browser.origin(scheme: source.scheme, host: source.host, port: source.port)
+            guard let page = message.sourceView as? ChromiumPage, !page.privateMode, let store = page.navigationTab?.pageStore else {
+                return reply(["error": "NotSupportedError", "message": "Push isn't available here."], nil)
+            }
+            handle(message.body, origin: origin, store: store.isPersistent ? .some(store.identifier?.uuidString) : nil,
+                   profile: page.profile, reply)
+        }
+    }
+
+    /// `store`: nil where nothing is kept, a private window.
+    @MainActor
+    private func handle(_ message: Any, origin: String, store: String??, profile: String?,
+                        _ replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        do {
+            guard let body = message as? [String: Any], let kind = body["kind"] as? String else { return replyHandler(nil, "Not a request") }
             let refuse = { (name: String, text: String) in replyHandler(["error": name, "message": text], nil) }
             // Only a page's own scope, in a store that keeps things: never a private window.
             guard let scope = (body["scope"] as? String).flatMap(URL.init(string:)), Browser.origin(of: scope) == origin,
-                  let store = message.webView?.configuration.websiteDataStore, store.isPersistent
+                  let storeID = store
             else { return refuse("NotSupportedError", "Push isn't available here.") }
-            let storeID = store.identifier?.uuidString
             let push = WebPush.shared
             switch kind {
             case "get":
-                replyHandler(push.subscription(origin: origin, scope: scope.absoluteString, store: storeID)?.reply ?? NSNull(), nil)
+                let known = push.subscription(origin: origin, scope: scope.absoluteString, store: storeID)
+                if let known { push.heard(known, on: profile) }
+                replyHandler(known?.reply ?? NSNull(), nil)
             case "unsubscribe":
                 Task { @MainActor in
                     let gone = await push.unsubscribe(origin: origin, scope: scope.absoluteString, store: storeID)
@@ -487,7 +555,7 @@ final class PushRelay: NSObject, WKScriptMessageHandlerWithReply {
                 let key = body["key"] as? String ?? ""
                 Task { @MainActor in
                     do {
-                        let record = try await push.subscribe(origin: origin, scope: scope.absoluteString, store: storeID, key: key)
+                        let record = try await push.subscribe(origin: origin, scope: scope.absoluteString, store: storeID, key: key, profile: profile)
                         replyHandler(record.reply, nil)
                     } catch let trouble as WebPush.Trouble {
                         refuse(trouble.name, trouble.message)
@@ -503,7 +571,9 @@ final class PushRelay: NSObject, WKScriptMessageHandlerWithReply {
 
     /// In the page, before anything of the site's runs: pushManager and
     /// PushSubscription, as WebKit would have them with a push daemon.
-    static let page = PageScript.load("push-page", vars: ["ANSWERED": answered, "ASKED": asked])
+    static let page = PageScript.load("push-page", vars: ["ANSWERED": answered, "ASKED": asked, "OVERRIDE": "false"])
+    /// Chromium has a pushManager of its own, on Google's push service.
+    static let chromiumPage = PageScript.load("push-page", vars: ["ANSWERED": answered, "ASKED": asked, "OVERRIDE": "true"])
 
     /// In yab's world: the page's request handed over as it is, the answer
     /// dispatched back.

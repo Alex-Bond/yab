@@ -21,21 +21,22 @@ final class FormRelay: NSObject, PageScriptReceiving {
         // never the page's (RelayGuard). Everything else is the main frame's.
         guard message.frame.isMain else {
             let origin = message.frame.origin
-            guard ["submit", "name", "settled", "focus"].contains(kind),
+            guard ["load", "submit", "name", "settled", "focus"].contains(kind),
                   ["https", "http"].contains(origin.scheme.lowercased()), !origin.host.isEmpty
             else { return }
-            let frame = (host: origin.host.lowercased(), clear: origin.scheme.lowercased() == "http")
             MainActor.assumeIsolated {
                 switch kind {
+                case "load":
+                    tab?.builtPage?.run(Self.framePayload, in: .yab, frame: message.frame)
                 case "submit":
                     tab?.sentSignIn(user: body["user"] as? String ?? "", password: body["password"] as? String ?? "",
-                                    frame: frame)
+                                    frame: message.frame)
                 case "name":
-                    tab?.namedAccount(body["user"] as? String ?? "", on: frame.host)
+                    tab?.namedAccount(body["user"] as? String ?? "", on: origin.host.lowercased())
                 case "focus":
                     tab?.frameCaret(body, in: message.frame)
                 default:
-                    tab?.settleSignIn(navigated: false)
+                    tab?.settleSignIn(navigated: false, frame: message.frame)
                 }
             }
             return
@@ -109,6 +110,8 @@ final class FormRelay: NSObject, PageScriptReceiving {
                     tab?.fieldFresh = body["fresh"] as? Bool ?? false
                     tab?.fieldEmpty = body["empty"] as? Bool ?? true
                     tab?.fieldEmail = Tab.asksEmail(body)
+                    tab?.fieldWebAuthn = body["webauthn"] as? Bool ?? false
+                    tab?.fieldWebAuthnForm = body["webauthnForm"] as? Bool ?? false
                     tab?.fieldAutomatic = body["automatic"] as? Bool ?? false
                     tab?.fieldDocument = body["document"] as? String
                     tab?.fieldIdentity = body["field"] as? String
@@ -154,10 +157,13 @@ final class FormRelay: NSObject, PageScriptReceiving {
     /// the passkey path and strand you there. Taken away, they go straight to
     /// the password. Signed with the entitlement, as releases are, this is
     /// on, and yab carries out the sites' requests itself (Passkeys.swift).
-    static var passkeysOffered: Bool {
-        get { Store.settings.bool(forKey: "passkeys") }
-        set { Store.settings.set(newValue, forKey: "passkeys") }
-    }
+    ///
+    /// Held for this run only, from the person's switch and what the build
+    /// can do (Preferences.offersPasskeys). It was kept under the switch's
+    /// own synced key, where a launch that couldn't do passkeys wrote its
+    /// false for every Mac (#1936, #1944).
+    nonisolated(unsafe) static var passkeysOffered =
+        Preferences.offersPasskeys(in: Store.settings, possible: Preferences.entitledToPasskeys)
 
     /// Only the passkey object goes. navigator.credentials itself stays: sites
     /// use it for stored passwords too, and that half still works.
@@ -175,8 +181,10 @@ final class FormRelay: NSObject, PageScriptReceiving {
     static let script = PageScript.load("forms", vars: ["GROUND": DropFrame.ground])
         + "\n" + PageScript.load("snippets", vars: ["GROUND": DropFrame.ground])
 
-    /// The same script in the frames, where it only hears a sign-in sent:
-    /// no lists, no snippets, nothing said about the caret.
-    static let frameScript = "if (window.top !== window) {\n"
+    /// Ordinary subframes get only an event-driven login bootstrap.
+    static let frameScript = PageScript.load("forms-frame-loader")
+
+    /// Loaded into the requesting frame, never into every ad/editor frame.
+    static let framePayload = "if (window.top !== window) {\n"
         + PageScript.load("forms", vars: ["GROUND": DropFrame.ground]) + "\n}"
 }

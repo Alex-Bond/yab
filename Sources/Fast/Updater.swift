@@ -7,8 +7,8 @@ import YabUpdate
 //
 // No framework: one small JSON file next to the download, read every hour
 // while the app is up and whenever asked. For a newer build, the ZIP is
-// fetched quietly, checked, and put where this bundle is, so the next time
-// the app opens, it is the new one.
+// fetched quietly and checked beside this bundle. Once the app and its
+// engine exit, the sealed helper puts it in place for the next launch.
 // Chrome's way, without Chrome's machinery. A plain release relaunches on
 // its own only once nobody is at the Mac (idle, locked or asleep) and
 // nothing would be lost, as Arc does; a page you are reading is not
@@ -95,11 +95,26 @@ final class Updater: ObservableObject {
         case none
         /// The ZIP is on its way, or being looked over.
         case fetching(Release)
-        /// Swapped in; it runs at the next launch.
+        /// Verified beside the running app; installed after its processes exit.
         case ready(Release)
-        /// Couldn't be swapped in from here, so the disk image is offered
-        /// instead, the same as the first time.
+        /// Can't be swapped in on this Mac at all (Failure.lasting: the
+        /// folder Yab is in takes no rename, a copy with no signature to
+        /// check the new one against), so the disk image is offered instead,
+        /// the same as the first time.
         case offered(Release)
+    }
+
+    /// Where a build that was being fetched leaves the stage. In place, it
+    /// is ready. One that couldn't be put in place sends this Mac to the
+    /// disk image only when no update can ever go in here; any other
+    /// failure (the download cut off, the Mac asleep halfway, a file in the
+    /// way) was this attempt's, and the stage goes back to none, so Check
+    /// Now and the hourly check try again in place. Every failure used to
+    /// offer the disk image, and Update then downloaded a 280 MB DMG into the
+    /// browser until Yab was quit (Alpha chat, 0.46.25).
+    nonisolated static func landing(_ release: Release, failure: String?) -> Stage {
+        guard let failure else { return .ready(release) }
+        return Failure.lasting.contains(failure) ? .offered(release) : .none
     }
 
     @Published private(set) var stage: Stage = .none
@@ -107,15 +122,21 @@ final class Updater: ObservableObject {
     @Published private(set) var checking = false
     /// When the file was last read, for the line in Settings.
     @Published private(set) var lastChecked: Date?
+    /// The newer build whose last try to go in place failed for a reason
+    /// that may pass (`landing`): Settings names it, with Check Now, rather
+    /// than calling this one up to date.
+    @Published private(set) var missed: Release?
     /// Where a line goes when there is one to say, handed over at launch.
     private var say: ((String) -> Void)?
 
     private init() {
-        // The bundle a swap set aside goes once this process is done with
-        // it, see Swap.sweep for why not sooner.
+        // A normal quit installs too, after the engine has gone. The helper
+        // waits for process exits; no bundle moves from this callback.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-        ) { _ in Swap.sweep() }
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.installOnQuit() }
+        }
     }
 
     /// At launch: once an hour, quietly. A test run, pointed at its own feed,
@@ -124,6 +145,11 @@ final class Updater: ObservableObject {
         self.say = say
         Swap.sweep()
         guard Updater.enabled else { return }
+        if case .none = stage, let waiting = Swap.prepared,
+           waiting.release.build > Updater.build || (waiting.allowDowngrade && waiting.release.build != Updater.build) {
+            stage = .ready(waiting.release)
+            restartWhenAway()
+        }
         Agent.enroll()
         // The day between updates counts from now if this build is new here.
         _ = Settle.since(build: Updater.build, in: Store.settings, now: Date())
@@ -165,6 +191,7 @@ final class Updater: ObservableObject {
         let defaults = Store.settings
         let failure = Failure.pending(in: defaults)
         let again = Count.again(in: defaults, now: Date())
+        let channel = defaults.bool(forKey: Updater.nightlyKey)
         Task { [weak self] in
             let (reached, found) = await Updater.fetch(failure: failure, again: again)
             guard let self else { return }
@@ -175,10 +202,13 @@ final class Updater: ObservableObject {
             lastChecked = now
             defaults.set(now, forKey: Updater.checkedKey)
             defaults.removeObject(forKey: Updater.soonerKey)
+            // A response from the previous channel cannot install after a toggle.
+            guard defaults.bool(forKey: Updater.nightlyKey) == channel else { done(nil); return }
             guard let found, found.isUpdate(from: Updater.version, build: Updater.build, asked: asked), found.runsHere else {
                 // A build already swapped in stays ready whatever the feed
                 // says now.
                 if case .ready = stage {} else { stage = .none }
+                missed = nil
                 done(nil)
                 return
             }
@@ -198,19 +228,40 @@ final class Updater: ObservableObject {
                 done(nil)
                 return
             }
-            done(found)
+            // On its way before anyone is told: the Yab menu's answer is a
+            // modal alert that says it is downloading, and the download
+            // waited behind it until OK was pressed.
             take(found)
+            done(found)
         }
     }
 
-    /// Stable's build, when it is older than this one: Nightly builds was
-    /// just turned off here, so the saved channel's feed is Stable's. Not a
-    /// check: nothing is counted (`again`), nothing is taken. Nil with a
-    /// newer build under way, which is the build the next launch runs.
+    /// After Nightly is turned off, wait for an already-started swap before
+    /// offering Stable. Its replacement must preserve the running .old bundle.
     func stableBehind() async -> Release? {
-        guard Updater.enabled, stage == .none else { return nil }
+        guard Updater.enabled else { return nil }
+        while checking || replacing != nil || fetching {
+            guard !Store.settings.bool(forKey: Updater.nightlyKey), !Task.isCancelled else { return nil }
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return nil }
+        }
+        guard !Store.settings.bool(forKey: Updater.nightlyKey) else { return nil }
         let (_, found) = await Updater.fetch(failure: nil, again: true)
-        return found.flatMap { $0.isBehind(build: Updater.build) ? $0 : nil }
+        guard !Store.settings.bool(forKey: Updater.nightlyKey) else { return nil }
+        let build: Int
+        if case .ready(let staged) = stage { build = staged.build } else { build = Updater.build }
+        return found.flatMap { $0.isBehind(build: build) ? $0 : nil }
+    }
+
+    private var fetching: Bool {
+        if case .fetching = stage { return true }
+        return false
+    }
+
+    /// Only the existing Go back to Stable confirmation calls this. Routine
+    /// checks and the background updater still refuse older builds.
+    func installStable(_ release: Release) {
+        guard !Store.settings.bool(forKey: Updater.nightlyKey), release.runsHere else { return }
+        take(release, allowDowngrade: true)
     }
 
     /// Fetch it, check it, swap it in, unless one is already on its way.
@@ -220,22 +271,24 @@ final class Updater: ObservableObject {
     /// 1365). The newer one takes the place of the one in place, never of
     /// the bundle this process runs from (`.old`, Swap.replace), and the one
     /// in place stays ready, Restart and all, until it has.
-    private func take(_ release: Release) {
+    private func take(_ release: Release, allowDowngrade: Bool = false) {
         let staged: Int?
         switch stage {
         case .fetching: return
         case .ready(let inPlace):
-            guard release.replaces(inPlace), replacing == nil else { return }
+            guard replacing == nil, release.replaces(inPlace)
+                    || (allowDowngrade && release.build != inPlace.build && release.runsHere) else { return }
             replacing = release
             staged = inPlace.build
         case .none, .offered:
             stage = .fetching(release)
+            missed = nil
             staged = nil
         }
         Task.detached(priority: .utility) {
             let failure: String?
             do {
-                try await Swap.install(release, replacing: staged)
+                try await Swap.install(release, replacing: staged, allowDowngrade: allowDowngrade, deferUntilExit: true)
                 failure = nil
             } catch {
                 failure = Failure.reason(error)
@@ -254,7 +307,6 @@ final class Updater: ObservableObject {
             // why is said to the site all the same.
             guard let failure else {
                 stage = .ready(release)
-                Settle.installed(build: release.build, in: Store.settings, now: Date())
                 restartWhenAway()
                 return
             }
@@ -263,10 +315,10 @@ final class Updater: ObservableObject {
         }
         guard case .fetching(let fetching) = stage, fetching == release else { return }
         // The Update button and the note written by it say so (UpdateDoodle).
-        stage = failure == nil ? .ready(release) : .offered(release)
+        stage = Updater.landing(release, failure: failure)
+        if stage == .none { missed = release }
         guard let failure else {
-            // The day before the next Stable update counts from now.
-            Settle.installed(build: release.build, in: Store.settings, now: Date())
+            // The Stable day starts when the helper actually installs it.
             restartWhenAway()
             return
         }
@@ -309,44 +361,32 @@ final class Updater: ObservableObject {
         restartWhenAway(every: tick)
     }
 
-    /// Quit, and come back as the new one. A shell waits for this process
-    /// to be gone before asking macOS to open the bundle again, `open` on a
-    /// running app only brings it forward. The process being gone is not
-    /// enough: LaunchServices keeps it listed a moment longer, and an `open`
-    /// in that moment sends the dead one a reopen event (procNotFound) and
-    /// launches nothing, so the shell also waits, up to 5 s, for the bundle
-    /// id to leave lsappinfo. Quitting goes through NSApp so everything that
-    /// is written on the way out is written, the same as ⌘Q. `behind`, for
-    /// a restart nobody asked for while another app is in front: the new Yab
-    /// opens without coming in front of it.
+    /// The sealed updater helper waits for this process to exit and asks
+    /// LaunchServices to open its own app. Quit only after it has started.
     func relaunch(behind: Bool = false) {
-        let waiter = Process()
-        waiter.executableURL = URL(fileURLWithPath: "/bin/sh")
-        waiter.arguments = [
-            "-c", """
-            while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
-            i=0
-            while [ $i -lt 50 ] && [ -n "$(/usr/bin/lsappinfo find bundleid="$2")" ]; do sleep 0.1; i=$((i+1)); done
-            shift 2; exec "$@"
-            """,
-            "sh", String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundleIdentifier ?? "",
-        ] + Updater.reopen(behind: behind)
-        try? waiter.run()
+        LaunchJournal.record("update.relaunch", target: Bundle.main.bundleURL)
+        let build: Int?
+        if case .ready = stage, let waiting = Swap.prepared { build = waiting.release.build }
+        else { build = nil }
+        do { try Relaunch.start(bundle: Bundle.main.bundleURL, behind: behind, installing: build) }
+        catch { return }
+        finishing = true
         Links.leaving = true
         NSApp.terminate(nil)
     }
 
-    /// `open` and what to give it: the bundle, and, for a test run, the
-    /// variables that made it a test run, since `open` starts from a fresh
-    /// environment and a relaunch must not land on the real data.
-    private static func reopen(behind: Bool) -> [String] {
-        var arguments = ["/usr/bin/open"] + (behind ? ["-g"] : [])
-        for key in ["YAB_PROBE", "YAB_FEED", "YAB_HISTORY", "YAB_TEST_KEYCHAIN"] {
-            if let value = ProcessInfo.processInfo.environment[key] {
-                arguments += ["--env", "\(key)=\(value)"]
-            }
+    private var finishing = false
+
+    private func installOnQuit() {
+        guard !finishing, let waiting = Swap.prepared,
+              waiting.release.build > Updater.build || (waiting.allowDowngrade && waiting.release.build != Updater.build) else { return }
+        do {
+            try Relaunch.start(bundle: Bundle.main.bundleURL, installing: waiting.release.build, reopen: false)
+            finishing = true
+        } catch {
+            Failure.keep(Failure.reason(error), in: Store.settings)
+            NSLog("Yab: couldn't start the prepared update installer: %@", String(describing: error))
         }
-        return arguments + [Bundle.main.bundleURL.path]
     }
 
 

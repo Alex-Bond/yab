@@ -235,6 +235,27 @@ struct TabCardPose: Equatable {
 /// card (`Closing`): it grows into its page, the cards lying on it fly
 /// into the circle, the rest stay and go.
 enum TabGalleryMotion {
+    static func interactiveOpening(_ i: Int, layout: TabGalleryLayout, stack: TabStackGeometry,
+                                   progress: CGFloat) -> TabCardPose {
+        let a = opening(i, layout: layout, stack: stack, t: 0)
+        let b = rest(i, layout: layout, focus: layout.initialFocus)
+        let p = min(max(progress, 0), 1)
+        if p == 0 { return a }
+        if p == 1 { return b }
+        var pose = b
+        pose.rect = mix(a.rect, b.rect, p)
+        pose.angle = lerp(a.angle, b.angle, p)
+        pose.radius = lerp(a.radius, b.radius, p)
+        pose.cropTop = lerp(a.cropTop, b.cropTop, p)
+        pose.opacity = Double(lerp(CGFloat(a.opacity), CGFloat(b.opacity), p))
+        pose.veil = Double(lerp(CGFloat(a.veil), CGFloat(b.veil), p))
+        pose.icon = b.icon * Double(p)
+        pose.title = b.title * Double(p)
+        pose.rim = lerp(a.rim, b.rim, p)
+        pose.labelScale = lerp(a.labelScale, b.labelScale, p)
+        return pose
+    }
+
     /// What a card does as All Tabs closes: the one chosen grows into its
     /// page; one lying on it that the stack shows next flies into that card
     /// of the circle; any other stays where it is and goes.

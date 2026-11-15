@@ -184,6 +184,8 @@ extension Agents {
     enum Cornered: Hashable {
         /// A chat's question (mail) while its column isn't out with it.
         case chat(String)
+        /// An app-owned outgoing mail, independent of the calling session.
+        case mail(String)
         /// A send or a chat's question asked on a tab of yours that isn't
         /// the agent's: never at the foot of someone else's page.
         case tab(Tab.ID)
@@ -236,9 +238,18 @@ extension Agents {
         return root.agent != .external && !root.quiet && !root.sealed
     }
 
+    /// Whether a window speaks for your agents at all: their questions in
+    /// its corner, "… needs you" over its page. A private window doesn't:
+    /// agents never work in its tabs, and it shows nothing of the rest of
+    /// Yab (none of your spaces, none of their looks), so it doesn't call
+    /// you to them either (#1520). Your other windows still do, and the
+    /// Mac's banner when Yab is behind.
+    static func speaks(in browser: Browser) -> Bool { browser.windowPurpose == .normal }
+
     /// Every question the corner holds, the oldest first: the one in front
     /// is answered, the rest wait under it.
     func corneredAll(in browser: Browser) -> [Cornered] {
+        guard Self.speaks(in: browser) else { return [] }
         var held: [Cornered] = []
         for session in sessions where session.permit != nil && root(of: session.id) == session.id {
             // Its home in sight: the column out with this chat, which is
@@ -251,7 +262,32 @@ extension Agents {
             if let key = (tab.permit ?? tab.sending?.permit)?.key, folded.contains(key) { continue }
             held.append(.tab(tab.id))
         }
-        return held
+        held += mailRequests.map { .mail($0.id) }
+        // A tab reorder, a new session, or a send becoming a toast does not
+        // change request arrival order. Stable ties preserve the prior order.
+        return held.enumerated().sorted {
+            let left = cornerOrder($0.element, in: browser)
+            let right = cornerOrder($1.element, in: browser)
+            return left == right ? $0.offset < $1.offset : left < right
+        }.map(\.element)
+    }
+
+    private func cornerOrder(_ held: Cornered, in browser: Browser) -> UInt64 {
+        if let permit = cornerPermit(held, in: browser) { return permit.askOrder }
+        if case .tab(let id) = held {
+            return browser.everyTab.first { $0.id == id }?.handoffNotice?.askOrder ?? .max
+        }
+        return .max
+    }
+
+    func cornerPermit(_ held: Cornered, in browser: Browser) -> AgentPermit? {
+        switch held {
+        case .chat(let id): return session(id)?.permit
+        case .mail(let id): return mailRequest(id)?.permit
+        case .tab(let id):
+            let tab = browser.everyTab.first { $0.id == id }
+            return tab?.permit ?? tab?.sending?.permit
+        }
     }
 
     /// The id the notification queue holds this question under, so the
@@ -259,6 +295,7 @@ extension Agents {
     func noticeID(_ held: Cornered, in browser: Browser) -> String {
         switch held {
         case .chat(let id): return "agent.permit.\(id)"
+        case .mail(let id): return "agent.mailAsk." + id
         case .tab(let id): return browser.everyTab.first { $0.id == id }?.handoffNotice?.id ?? "\(held)"
         }
     }
@@ -267,7 +304,25 @@ extension Agents {
     /// window nothing is typed into. False when the corner has none.
     func cornerKeyed(_ event: NSEvent, in browser: Browser) -> Bool {
         guard let held = cornered(in: browser) else { return false }
+        if let shown = AskStand.shared.presented[ObjectIdentifier(browser)],
+           !shown.actionable || shown.held != held || shown.key != cornerPermit(held, in: browser)?.key {
+            // During departure the next head is not on screen yet. Consume
+            // approval keys without sending them to that unseen card or page.
+            return [36, 76, 53].contains(event.keyCode) || Keymap.shared.matches(event, .confirmDanger)
+        }
         switch held {
+        case .mail(let id):
+            guard let request = mailRequest(id) else { return false }
+            if case .going = request.phase { return [36, 76, 53].contains(event.keyCode) }
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if event.keyCode == 53 && flags.isEmpty { answerMail(id, yes: false); return true }
+            if [36, 76].contains(event.keyCode), flags.isEmpty {
+                browser.toaster.pop("Send with", mark: "hand.raised", keys: Keymap.shared.keys(.confirmDanger)?.caps ?? [])
+                return true
+            }
+            guard Keymap.shared.matches(event, .confirmDanger) else { return false }
+            answerMail(id, yes: true)
+            return true
         case .chat(let id):
             let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
             guard [36, 76, 53].contains(event.keyCode), flags.isEmpty, let permit = session(id)?.permit else { return false }
@@ -318,6 +373,17 @@ final class AskStand: ObservableObject {
     /// The windows whose stand is on screen now, by their browser, for a
     /// test world to ask (ask-stand).
     var drawn: [ObjectIdentifier: Int] = [:]
+    struct Presented {
+        var held: Agents.Cornered?
+        var key: String?
+        var actionable: Bool
+    }
+    /// The actual card, also used to keep keyboard and fixture answers from
+    /// reaching an unseen next head during the outgoing card's animation.
+    var presented: [ObjectIdentifier: Presented] = [:]
+    var frames: [ObjectIdentifier: CGRect] = [:]
+    var questionCards: [ObjectIdentifier: [String: String]] = [:]
+
     /// What each card shows, made once a question (ApprovalDetailBuilder
     /// reads the store).
     private var made: [String: AskContent] = [:]
@@ -337,6 +403,7 @@ final class AskStand: ObservableObject {
         guard let browser = Agents.shared.browser, Agents.shared.cornered(in: browser).map({ held in
             switch held {
             case .chat(let id): return Agents.shared.session(id)?.permit == permit
+            case .mail(let id): return Agents.shared.mailRequest(id)?.permit == permit
             case .tab(let id): return browser.everyTab.first(where: { $0.id == id }).map { ($0.permit ?? $0.sending?.permit) == permit } ?? false
             }
         }) == true else { return }
@@ -405,55 +472,148 @@ struct AskStandView: View {
     @ObservedObject private var columnChat = ColumnChat.shared
     @Namespace private var fold
     @Environment(\.accessibilityReduceMotion) private var still
+    @State private var shown: Item?
+    @State private var shownCount = 0
+    @State private var changing = false
+    @State private var leavingCard = false
+    @State private var retiring: String?
+    @State private var questionHeight: CGFloat = 0
 
     var body: some View {
-        let _ = (seen, columnChat.id)
+        let _ = columnChat.id
         let held = agents.corneredAll(in: browser)
-        let ghost = stand.ghosts.last
+        let source = items(held: held, ghost: stand.ghosts.last).first
         VStack(alignment: .trailing, spacing: 8) {
-            ForEach(items(held: held, ghost: ghost)) { item in
-                card(item, count: held.count > 1 ? "1 of \(held.count)" : nil)
-                .background(alignment: .top) {
-                    if item.held != nil, held.count > 1 {
-                        Color.clear.agentCardFrame()
-                            .brightness(-0.16)
-                            .scaleEffect(0.95, anchor: .top)
-                            .offset(y: -10)
-                            .transition(.opacity)
+            // Toasts have a separate layout identity. A card is never moved
+            // from index 0 to the bottom of a changing ForEach on approval.
+            ForEach(stand.toasts.filter { identity($0.permit) != shown?.id }) { toast in
+                card(Item(id: "toast." + identity(toast.permit), toast: toast, permit: toast.permit), count: nil)
+                    .transition(.opacity)
+            }
+            if shown != nil || !held.isEmpty {
+                // Retain the question's space while it folds and leaves.
+                // Undo toasts must never drop into the next Send hit target.
+                ZStack(alignment: .bottomTrailing) {
+                    if let shown {
+                        card(shown, count: shownCount > 1 ? "1 of \(shownCount)" : nil)
+                            .onAppear { stand.questionCards[ObjectIdentifier(browser), default: [:]][shown.id] = shown.permit?.key ?? shown.id; remember() }
+                            .onDisappear { removed(shown.id) }
+                            .id(shown.id)
+                            .background(alignment: .top) {
+                                if shown.held != nil, shownCount > 1 {
+                                    Color.clear.agentCardFrame().brightness(-0.16)
+                                        .scaleEffect(0.95, anchor: .top).offset(y: -10)
+                                }
+                            }
+                            .opacity(leavingCard ? 0 : 1)
+                            .offset(y: leavingCard ? 12 : 0)
+                            .allowsHitTesting(!changing && shown.id == source?.id)
+                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                                stand.frames[ObjectIdentifier(browser)] = $0
+                                if shown.phase.acceptsAnswer, shown.toast == nil, !leavingCard {
+                                    questionHeight = max(questionHeight, $0.height)
+                                }
+                            }
+                            .transition(.asymmetric(insertion: arriving, removal: .identity))
                     }
                 }
-                .transition(arriving)
+                .frame(width: AgentAskCard.width,
+                       height: held.isEmpty || questionHeight == 0 ? nil : questionHeight,
+                       alignment: .bottomTrailing)
             }
         }
-        .animation(still ? Motion.quick : AskMotion.arrive, value: held)
-        .animation(still ? Motion.quick : AskMotion.arrive, value: held.first.map(cardID))
-        .animation(still ? Motion.quick : AskMotion.fold, value: stand.toasts)
-        .animation(still ? Motion.quick : AskMotion.leave, value: stand.ghosts)
-        .onChange(of: held.first) { _, front in
-            // Behind other apps the Mac's banner carries it (AgentNotices.say).
-            if let front, NSApp.isActive { AskSound.play(for: agents.noticeID(front, in: browser)) }
+        .onChange(of: source?.id) { _, _ in reconcile() }
+        .onChange(of: source?.phase) { _, _ in reconcile() }
+        .onChange(of: held.count) { _, _ in reconcile() }
+        .onChange(of: stand.toasts) { _, _ in reconcile() }
+        .onChange(of: stand.ghosts) { _, _ in reconcile() }
+        .onAppear {
+            stand.drawn[ObjectIdentifier(browser), default: 0] += 1
+            reconcile()
         }
-        .onAppear { stand.drawn[ObjectIdentifier(browser), default: 0] += 1 }
-        .onDisappear { stand.drawn[ObjectIdentifier(browser), default: 1] -= 1 }
-        // A tab's question lives on the tab, which SwiftUI doesn't watch:
-        // its four fields say when one comes, runs or goes.
-        .onReceive(asked) { _ in seen &+= 1 }
+        .onDisappear {
+            stand.drawn[ObjectIdentifier(browser), default: 1] -= 1
+            stand.presented[ObjectIdentifier(browser)] = nil
+            stand.frames[ObjectIdentifier(browser)] = nil
+            stand.questionCards[ObjectIdentifier(browser)] = nil
+        }
     }
 
-    @State private var seen = 0
+    private func next() -> Item? {
+        items(held: agents.corneredAll(in: browser), ghost: stand.ghosts.last).first
+    }
 
-    /// Any tab's question changing: asked, its words, its choices, a yes
-    /// running (Tab.relay), and nothing else a page does.
-    private var asked: AnyPublisher<Void, Never> {
-        Publishers.MergeMany(browser.everyTab.flatMap { tab -> [AnyPublisher<Void, Never>] in
-            [tab.relay.publisher(\.permit, of: tab).map { _ in () }.eraseToAnyPublisher(),
-             tab.relay.publisher(\.handoff, of: tab).map { _ in () }.eraseToAnyPublisher(),
-             tab.relay.publisher(\.choices, of: tab).map { _ in () }.eraseToAnyPublisher(),
-             tab.relay.publisher(\.sending, of: tab).map { _ in () }.eraseToAnyPublisher()]
-        })
-        .dropFirst(browser.everyTab.count * 4)
-        .receive(on: RunLoop.main)
-        .eraseToAnyPublisher()
+    private func remember() {
+        stand.presented[ObjectIdentifier(browser)] = .init(held: shown?.held, key: shown?.permit?.key,
+                                                          actionable: shown != nil && !changing && shown?.phase.acceptsAnswer == true
+                                                            && shown.map { stand.questionCards[ObjectIdentifier(browser)]?[$0.id] != nil } == true)
+        AssistantApprovals.shared.seen(in: browser)
+    }
+
+    private func install() {
+        guard let incoming = next() else { shown = nil; questionHeight = 0; remember(); return }
+        changing = true
+        withAnimation(still ? Motion.quick : AskMotion.arrive, completionCriteria: .removed) {
+            shown = incoming
+            shownCount = agents.corneredAll(in: browser).count
+        } completion: {
+            changing = false
+            remember()
+            // An answer on another device may have arrived during insertion.
+            reconcile()
+        }
+        remember()
+        if let held = incoming.held, NSApp.isActive { AskSound.play(for: agents.noticeID(held, in: browser)) }
+    }
+
+    /// Serial presentation uses animation completion, not a guessed delay.
+    /// The answered card leaves from its own footer anchor before the next
+    /// card is mounted. Arrivals meanwhile only change the waiting queue.
+    private func reconcile() {
+        guard !changing else { return }
+        guard let current = shown else { install(); return }
+        if let source = next(), source.id == current.id {
+            shown = source
+            shownCount = agents.corneredAll(in: browser).count
+            remember()
+            return
+        }
+        if current.toast == nil, let toast = stand.toasts.first(where: { identity($0.permit) == current.id }) {
+            changing = true
+            remember()
+            withAnimation(still ? Motion.quick : AskMotion.fold, completionCriteria: .removed) {
+                shown?.toast = toast
+                if current.phase.acceptsAnswer { shown?.phase = .going(since: Date()) }
+            } completion: {
+                depart()
+            }
+        } else { depart() }
+    }
+
+    private func depart() {
+        changing = true
+        remember()
+        withAnimation(still ? Motion.quick : AskMotion.leave, completionCriteria: .removed) {
+            leavingCard = true
+        } completion: {
+            var immediate = Transaction(); immediate.disablesAnimations = true
+            retiring = shown?.id
+            withTransaction(immediate) {
+                shown = nil
+            }
+            remember()
+        }
+    }
+
+    private func removed(_ id: String) {
+        stand.questionCards[ObjectIdentifier(browser), default: [:]][id] = nil
+        guard retiring == id else { return }
+        // SwiftUI may retain a transitioning view after its animation has
+        // completed. Mount the next identity only once the old one is gone.
+        retiring = nil
+        leavingCard = false
+        changing = false
+        install()
     }
 
     private var arriving: AnyTransition {
@@ -467,8 +627,8 @@ struct AskStandView: View {
     }
 
     @ViewBuilder private func card(_ item: Item, count: String?) -> some View {
-        // One AgentAskCard for the whole life of a permit. Changing to a
-        // toast changes its inputs, never its view identity or its footer.
+        // The active card keeps its footer through answering and folding.
+        // Its toast is mounted separately after that card has left in place.
         if let permit = item.permit {
             AgentAskCard(content: item.ghost?.content ?? stand.content(permit, tab: item.tab), permit: permit,
                 phase: item.ghost.map { .said($0.words, good: $0.good) } ?? item.phase,
@@ -484,11 +644,15 @@ struct AskStandView: View {
         case .chat(let id):
             return AskActions(no: { agents.answer(chat: id, yes: false, key: permit.key) },
                               yes: { _ in agents.answer(chat: id, yes: true, key: permit.key) })
+        case .mail(let id):
+            return AskActions(no: { agents.answerMail(id, yes: false) }, yes: { _ in agents.answerMail(id, yes: true) })
         case .tab:
             guard let tab = item.tab else { return AskActions(no: {}, yes: { _ in }) }
             return AskActions(
-                no: { if tab.sending?.failure != nil { agents.dropSending(tab) } else { agents.answer(tab, yes: false) } },
-                yes: { user in if tab.sending?.failure != nil { agents.sendAgain(tab) } else { agents.answer(tab, yes: true, as: user) } },
+                no: { if tab.sending?.permit == permit, tab.sending?.failure != nil { agents.dropSending(tab) }
+                    else if tab.permit?.askOrder == permit.askOrder, tab.permit == permit { agents.answer(tab, yes: false) } },
+                yes: { user in if tab.sending?.permit == permit, tab.sending?.failure != nil { agents.sendAgain(tab) }
+                    else if tab.permit?.askOrder == permit.askOrder, tab.permit == permit { agents.answer(tab, yes: true, as: user) } },
                 always: { agents.always(tab) }, never: { agents.never(tab) },
                 stop: { if let session = agents.session(permit.session) { _ = agents.stop(session.id) } })
         }
@@ -512,6 +676,10 @@ struct AskStandView: View {
             shown.append(Item(id: identity(ghost.permit), ghost: ghost, permit: ghost.permit))
         } else if let front = held.first {
             switch front {
+            case .mail(let id):
+                if let request = agents.mailRequest(id) {
+                    shown.append(Item(id: identity(request.permit), held: front, permit: request.permit, phase: request.phase))
+                }
             case .chat(let id):
                 shown.append(Item(id: cardID(front), held: front, permit: agents.session(id)?.permit))
             case .tab(let id):
@@ -522,7 +690,6 @@ struct AskStandView: View {
                 }
             }
         }
-        shown += stand.toasts.map { Item(id: identity($0.permit), toast: $0, permit: $0.permit) }
         return shown
     }
 
@@ -530,6 +697,7 @@ struct AskStandView: View {
         let permit: AgentPermit?
         switch held {
         case .chat(let id): permit = agents.session(id)?.permit
+        case .mail(let id): permit = agents.mailRequest(id)?.permit
         case .tab(let id):
             let tab = browser.everyTab.first { $0.id == id }
             permit = tab?.permit ?? tab?.sending?.permit

@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// General's engine row: the default with its mark, and at the foot of its
@@ -11,7 +12,7 @@ struct EngineGeneralRows: View {
         if EngineRules.available {
             SettingsRow("Default engine") {
                 DropMenu("Default engine",
-                         options: EngineDefault.allCases.map { DropOption(title: $0.title, value: $0, picture: $0.mark) },
+                         options: EngineDefault.offered.map { DropOption(title: $0.title, value: $0, picture: $0.mark) },
                          selection: Binding(get: { engine.standard }, set: { EngineRules.choose($0) }),
                          inset: TableCell.inset, small: NSSize(width: 14, height: 14), trailing: true,
                          link: DropLink(title: SettingsPage.engine.title) { model.go(.engine) })
@@ -27,7 +28,7 @@ private extension EngineDefault {
     var mark: NSImage? {
         switch self {
         case .auto: Glyphs.image("yab.fork", side: 16)
-        case .webKit: Self.logo("webkit")
+        case .webKit, .webKitFirst: Self.logo("webkit")
         case .chromium: Self.logo("chromium")
         }
     }
@@ -41,40 +42,30 @@ private extension EngineDefault {
 }
 
 /// General › Engines for Sites, as round 2 drew the table in Air Traffic
-/// Control's language (the site bare, its engine in a MenuCell, search and
-/// Add Site… above, Remove on a right click), then the built-in rules in a
-/// muted group, each with its reason, each overridable.
+/// Control's language (the site bare, its engine in a MenuCell, Remove on a
+/// right click): the owner's sites, if any, then the built-in rules in a
+/// muted group, each with its reason, each overridable. Its search and
+/// Add Site… stand in the toolbar (EngineToolbar).
 struct EnginePage: View {
     @ObservedObject private var model = EngineRulesModel.shared
-    @State private var words = ""
+    @ObservedObject var search: EngineSearch
 
-    private var needle: String { words.trimmingCharacters(in: .whitespaces).lowercased() }
-
-    private func shown(_ texts: String...) -> Bool {
-        needle.isEmpty || texts.contains { $0.lowercased().contains(needle) }
+    private func shown(_ text: String) -> Bool {
+        let needle = search.words.trimmingCharacters(in: .whitespacesAndNewlines)
+        return needle.isEmpty || ShortcutsPage.says(text, needle)
     }
 
     var body: some View {
-        Section {
-            let own = model.own.filter { shown($0.host) }
-            ForEach(own) { rule in
-                EngineOwnRow(rule: rule)
-                    .settingsAnchor("engine-rule:" + rule.host)
+        let own = model.own.filter { shown($0.host) }
+        let builtIn = EngineBuiltInRule.all.filter { shown(([$0.name, $0.reason] + $0.domains).joined(separator: " ")) }
+        if !own.isEmpty {
+            Section {
+                ForEach(own) { rule in
+                    EngineOwnRow(rule: rule)
+                        .settingsAnchor("engine-rule:" + rule.host)
+                }
             }
-            if own.isEmpty {
-                Text(needle.isEmpty ? "No sites yet" : "No sites match")
-                    .foregroundStyle(.secondary)
-            }
-        } header: {
-            HStack(spacing: 8) {
-                EngineSearchField(words: $words)
-                Button("Add Site…") { EngineSiteEditing.shared.open() }
-                    .settingsButton()
-            }
-            .textCase(nil)
-            .settingsAnchor("engine-rules")
         }
-        let builtIn = EngineBuiltInRule.all.filter { shown($0.name, $0.reason, $0.domains.joined(separator: " ")) }
         if !builtIn.isEmpty {
             Section {
                 ForEach(builtIn) { rule in
@@ -82,27 +73,77 @@ struct EnginePage: View {
                 }
             }
         }
+        if own.isEmpty, builtIn.isEmpty {
+            Section {
+                Text("No sites found").foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
-/// The page's search: the field the table's sites are found with.
-private struct EngineSearchField: View {
-    @Binding var words: String
+/// What the page's search holds, for the table and the toolbar's field.
+@MainActor
+final class EngineSearch: ObservableObject {
+    @Published var words = ""
+}
 
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-        HStack(spacing: 6) {
-            Symbol("magnifyingglass", size: 12)
-                .foregroundStyle(.secondary)
-            TextField("", text: $words, prompt: Text("Search sites").foregroundStyle(.secondary))
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
+/// The page's glass in the toolbar, beside back and forward: Shortcuts'
+/// search, and Add Site… as a toolbar button of the same kind as Shortcuts'
+/// Filters.
+@MainActor
+final class EngineToolbar: NSObject {
+    static let searchID = NSToolbarItem.Identifier("SearchSettingsEngineSearch")
+    static let addID = NSToolbarItem.Identifier("SearchSettingsEngineAdd")
+    static var identifiers: [NSToolbarItem.Identifier] { [searchID, addID] }
+
+    let search: ToolbarSearch
+    private weak var toolbar: NSToolbar?
+    private var following: AnyCancellable?
+
+    init(search words: EngineSearch, window: NSWindow) {
+        search = ToolbarSearch(id: Self.searchID, label: "Search sites", prompt: "Search sites", window: window,
+                               words: { words.words }, typed: { words.words = $0 })
+        super.init()
+        following = words.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.search.sync() }
         }
-        .padding(.horizontal, 8)
-        .frame(height: 28)
-        .frame(maxWidth: .infinity)
-        .background(shape.fill(Palette.ground)) // design: a search field's well, not a card (round 2's field)
-        .overlay(shape.strokeBorder(Palette.hairline, lineWidth: 1)) // design: the field's edge, as drawn
+    }
+
+    func attach(to toolbar: NSToolbar, visible: Bool) {
+        self.toolbar = toolbar
+        search.attach(to: toolbar)
+        toolbar.keep(Self.identifiers, shown: visible)
+        if !visible { search.detach() }
+    }
+
+    func item(for id: NSToolbarItem.Identifier) -> NSToolbarItem? {
+        if id == Self.searchID { return search.item() }
+        guard id == Self.addID else { return nil }
+        let item = NSToolbarItem(itemIdentifier: id)
+        item.label = "Add Site…"
+        item.title = "Add Site…"
+        item.target = self
+        item.action = #selector(add(_:))
+        item.isBordered = true
+        item.visibilityPriority = .high
+        return item
+    }
+
+    @objc private func add(_ sender: Any?) { EngineSiteEditing.shared.open() }
+
+    /// How the toolbar stands, for a probe.
+    var state: [String: Any] {
+        ["searching": search.searching, "focused": search.field?.currentEditor() != nil,
+         "noFocusRing": search.field?.focusRingType == NSFocusRingType.none,
+         "adding": EngineSiteEditing.shared.draft != nil,
+         "items": toolbar?.items.map(\.itemIdentifier.rawValue) ?? []]
+    }
+
+    /// AppKit's own button for Add Site…, for a probe to press.
+    func addButton(in view: NSView?) -> NSButton? {
+        guard let view else { return nil }
+        if let button = view as? NSButton, button.title == "Add Site…" || button.accessibilityLabel() == "Add Site…" { return button }
+        return view.subviews.lazy.compactMap { self.addButton(in: $0) }.first
     }
 }
 

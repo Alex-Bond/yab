@@ -187,11 +187,15 @@ final class MemberStamp: ObservableObject {
 
     /// Yab came out in 2026; nothing was used with it before 2025, nor tomorrow.
     nonisolated static func plausible(_ day: Date) -> Bool {
-        day >= Date(timeIntervalSince1970: 1_735_689_600) && day <= Date().addingTimeInterval(86_400)
+        // Compare scalars: the SDK weak-links Date >= / <= to new Foundation
+        // symbols on macOS 27.2, absent on the reporter's 27.2 runtime.
+        let seconds = day.timeIntervalSince1970
+        return seconds.isFinite && seconds >= 1_735_689_600 && seconds <= Date().timeIntervalSince1970 + 86_400
     }
 
     private static func day(_ seconds: Double) -> Date? {
-        seconds > 0 ? Date(timeIntervalSince1970: seconds) : nil
+        guard seconds.isFinite, seconds >= 1_735_689_600, seconds <= Date().timeIntervalSince1970 + 86_400 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 
     /// The anniversaries reached by now, oldest first: one postmark each.
@@ -200,7 +204,7 @@ final class MemberStamp: ObservableObject {
         guard let since else { return [] }
         let first = calendar.startOfDay(for: since)
         var days: [Date] = []
-        while days.count < 200, let next = calendar.date(byAdding: .year, value: days.count + 1, to: first), next <= now {
+        while days.count < 200, let next = calendar.date(byAdding: .year, value: days.count + 1, to: first), next.timeIntervalSince1970 <= now.timeIntervalSince1970 {
             days.append(next)
         }
         return days

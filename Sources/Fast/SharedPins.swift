@@ -241,6 +241,7 @@ enum SharedPins {
         var pin: String?
         var name: String?
         var customMark: String?
+        var pair: PairMark?
 
         init(_ entry: Session.Entry) {
             key = entry.id
@@ -248,6 +249,24 @@ enum SharedPins {
             name = entry.name
             customMark = entry.customMark
         }
+    }
+
+    struct PairMark: Equatable {
+        var first: String?
+        var second: String?
+        var share: Double
+    }
+
+    /// Pair membership and its divider are shared metadata too. A pair can
+    /// change without changing either entry (Separate, or the divider).
+    static func marks(_ entries: [Session.Entry], pairs: [Session.Pair]) -> [Mark] {
+        var marks = entries.map(Mark.init)
+        for pair in pairs where entries.indices.contains(pair.first) && entries.indices.contains(pair.second) {
+            let mark = PairMark(first: entries[pair.first].id, second: entries[pair.second].id, share: pair.share)
+            marks[pair.first].pair = mark
+            marks[pair.second].pair = mark
+        }
+        return marks
     }
 
     /// The shared pins as last written or followed, in any window: a write
@@ -334,13 +353,13 @@ extension Browser {
     /// they are changed, at once, before one of them can write the list it
     /// had over this one. Only windows on screen are told; a test's browser
     /// is no window.
-    func toldPins(_ entries: [Session.Entry]) {
-        let marks = entries.map(SharedPins.Mark.init)
+    func toldPins(_ entries: [Session.Entry], pairs: [Session.Pair]) {
+        let marks = SharedPins.marks(entries, pairs: pairs)
         guard marks != SharedPins.known else { return }
         SharedPins.known = marks
         let windows = BrowserWindows.shared.normalBrowsers
         guard windows.contains(where: { $0 === self }) else { return }
-        for other in windows where other !== self && other.pinsShared { other.followPins(entries) }
+        for other in windows where other !== self && other.pinsShared { other.followPins(entries, pairs: pairs) }
     }
 
     /// The pins in a row being written as they are now, whatever pinned or
@@ -609,15 +628,15 @@ extension Browser {
     /// the list's letter, name and icon, one it hasn't made asleep, one gone
     /// closed. `addresses`: from sync, where a pin asleep, and not on screen,
     /// takes the address another device left it on, as a space's tabs do.
-    func followPins(_ entries: [Session.Entry], addresses: Bool = false) {
+    func followPins(_ entries: [Session.Entry], pairs savedPairs: [Session.Pair] = [], addresses: Bool = false) {
         guard windowPurpose == .normal, pinsShared else { return }
         guard let mine = sharedPins else {
             // Never read in here: their file is them. Another window wrote
             // it already; what sync brought is written now.
-            if addresses { Session.write(now: true, space: Space.pinsID, .init(tabs: entries, active: 0)) }
+            if addresses { Session.write(now: true, space: Space.pinsID, .init(tabs: entries, active: 0, pairs: savedPairs.isEmpty ? nil : savedPairs)) }
             return
         }
-        SharedPins.known = entries.map(SharedPins.Mark.init)
+        SharedPins.known = SharedPins.marks(entries, pairs: savedPairs)
         var byKey = Dictionary(mine.compactMap { tab in tab.everywhere.map { ($0, tab) } }, uniquingKeysWith: { a, _ in a })
         var next: [Tab] = []
         for entry in entries {
@@ -635,6 +654,20 @@ extension Browser {
                 next.append(made)
             }
         }
+        let byEntry = Dictionary(next.compactMap { tab in tab.everywhere.map { ($0, tab.id) } },
+                                 uniquingKeysWith: { first, _ in first })
+        let made = Dictionary(uniqueKeysWithValues: entries.enumerated().compactMap { index, entry in
+            entry.id.flatMap(UUID.init(uuidString:)).flatMap { byEntry[$0] }.map { (index, $0) }
+        })
+        let restored = Pair.restore(savedPairs, made: made)
+        let sharedIDs = Set(mine.map(\.id) + next.map(\.id))
+        let pairedIDs = Set(restored.flatMap { [$0.first, $0.second] })
+        // Replace the shared pins' pairs, including an explicit separation;
+        // leave this window's other splits alone.
+        let retained = pairs.filter {
+            !(sharedIDs.contains($0.first) && sharedIDs.contains($0.second))
+                && !pairedIDs.contains($0.first) && !pairedIDs.contains($0.second)
+        }
         // Gone elsewhere: closed here, but a call or an agent's work in one
         // stays, a tab of the row it is in.
         for tab in byKey.values {
@@ -648,8 +681,12 @@ extension Browser {
         }
         if showsShared(spaceID) {
             lay(next + tabs.filter { $0.everywhere == nil })
+            pairs = retained + restored
         } else {
-            parked[Space.pinsID] = Parked(tabs: next.filter { tab in !tabs.contains { $0 === tab } }, active: nil, order: next.map(\.id))
+            let here = Set(tabs.map(\.id))
+            pairs = retained + restored.filter { here.contains($0.first) && here.contains($0.second) }
+            parked[Space.pinsID] = Parked(tabs: next.filter { tab in !tabs.contains { $0 === tab } }, active: nil,
+                                         pairs: restored.filter { !here.contains($0.first) || !here.contains($0.second) }, order: next.map(\.id))
         }
         writeSession(now: true)
     }

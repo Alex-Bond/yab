@@ -42,7 +42,7 @@ enum ShowYab {
         }
     }
 
-    private static func bring() {
+    static func bring() {
         if Headless.hidden { Headless.show(.person) }
         NSApp.activate()
         guard let window = BrowserWindows.shared.lastWindow else {

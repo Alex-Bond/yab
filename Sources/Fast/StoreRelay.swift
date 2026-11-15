@@ -40,6 +40,7 @@ final class StoreRelay: NSObject, PageScriptReceiving {
     (function () {
       if (location.hostname !== 'chromewebstore.google.com' || window.__yabStore) return;
       var state = { installed: [], busy: null };
+      var pairs = new Map(), watchers = [];
 
       function pageID() {
         var m = location.pathname.match(/\\/detail\\/(?:[^\\/]+\\/)?([a-p]{32})/);
@@ -50,7 +51,7 @@ final class StoreRelay: NSObject, PageScriptReceiving {
         var buttons = document.querySelectorAll('button[disabled]');
         for (var i = 0; i < buttons.length; i++) {
           var b = buttons[i];
-          if (!b.dataset.yab && /chrome/i.test(b.textContent || '')) return b;
+          if (b.dataset.yab !== 'add' && !pairs.has(b) && /chrome/i.test(b.textContent || '')) return b;
         }
         return null;
       }
@@ -60,6 +61,10 @@ final class StoreRelay: NSObject, PageScriptReceiving {
       function bannerOf(button) {
         var box = null, up = button.parentElement;
         while (up && up !== document.body) {
+          // A hidden promo is already handled. Walking past it on the next
+          // redraw can reach the extension header while its controls rebuild.
+          if (up.dataset.yab === 'banner' || up.dataset.yab === 'promo') return null;
+          if (up.querySelector('h1')) break;
           if (up.querySelector('button[disabled], button[data-yab]')) break;
           if ((up.innerText || '').length > 160) break;
           box = up;
@@ -95,7 +100,8 @@ final class StoreRelay: NSObject, PageScriptReceiving {
         var walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
         var node, last = null;
         while ((node = walker.nextNode())) { if (node.nodeValue.trim()) last = node; }
-        if (last) last.nodeValue = text; else button.textContent = text;
+        if (last) { if (last.nodeValue !== text) last.nodeValue = text; }
+        else if (button.textContent !== text) button.textContent = text;
       }
 
       function render(ours) {
@@ -103,25 +109,45 @@ final class StoreRelay: NSObject, PageScriptReceiving {
         var installed = !!id && state.installed.indexOf(id) >= 0;
         var busy = !!id && state.busy === id;
         label(ours, installed ? 'Added to Yab' : (busy ? 'Adding…' : 'Add to Yab'));
-        ours.disabled = installed || busy;
+        if (ours.disabled !== (installed || busy)) ours.disabled = installed || busy;
       }
 
       function mend() {
+        // Only the small install control's container is observed. Disconnect
+        // while writing our own nodes so a repair cannot trigger itself.
+        watchers.forEach(function (watcher) { watcher.disconnect(); });
+        watchers = [];
         hideBanner();
-        if (!pageID()) return;
-        var original = theirs();
-        if (original && original.parentNode) {
+        pairs.forEach(function (ours, original) {
+          if (!original.isConnected) { ours.remove(); pairs.delete(original); return; }
+          // Hydration can remove our sibling but retain the marked original.
+          // Keep the pair, rather than mistaking the marker for a live button.
+          if (original.nextElementSibling !== ours) original.after(ours);
+          if (original.style.display !== 'none') original.style.display = 'none';
+        });
+        var original;
+        while (pageID() && (original = theirs()) && original.parentNode) {
           var ours = original.cloneNode(true);
           ['disabled', 'jsaction', 'jscontroller', 'jsname', 'jslog', 'aria-describedby'].forEach(function (name) {
             ours.removeAttribute(name);
           });
           ours.dataset.yab = 'add';
+          pairs.set(original, ours);
           original.dataset.yab = 'theirs';
           original.style.display = 'none';
           original.parentNode.insertBefore(ours, original.nextSibling);
           window.webkit.messageHandlers.yabStore.postMessage({ placed: pageID() });
         }
         renderAll();
+        var roots = new Set();
+        pairs.forEach(function (_, original) { roots.add(original.parentElement); });
+        roots.forEach(function (root) {
+          if (!root || root === document.body || root === document.documentElement) return;
+          var watcher = new MutationObserver(mend);
+          watcher.observe(root, { childList: true, subtree: true, attributes: true,
+                                  attributeFilter: ['disabled', 'aria-label', 'style'] });
+          watchers.push(watcher);
+        });
       }
 
       // The store keeps the pages it has left, hidden, beside the one it shows.
@@ -184,14 +210,18 @@ final class StoreRelay: NSObject, PageScriptReceiving {
         landed: landed
       };
 
-      // The store is one page that rewrites itself: whatever it redraws, mend
-      // again. A timer rather than a frame, a tab out of sight gets no frames.
-      var queued = false;
-      new MutationObserver(function () {
-        if (queued) return;
-        queued = true;
-        setTimeout(function () { queued = false; mend(); }, 60);
-      }).observe(document.documentElement, { childList: true, subtree: true });
+      // Discovery is an insertion/visibility event, including a new SPA
+      // header. No whole-document observer or polling on the store or any
+      // other page. A custom property animates without changing any pixels.
+      var discovery = document.createElement('style');
+      discovery.textContent = '@keyframes yab-store-discovery { from { --yab-store-seen: 0; } to { --yab-store-seen: 1; } }' +
+        'button:not([data-yab]), [role="dialog"]:not([data-yab]) { animation-name: yab-store-discovery !important; animation-duration: 0.001s !important; animation-iteration-count: 1 !important; }';
+      window.addEventListener('animationstart', function (event) {
+        if (event.animationName === 'yab-store-discovery') mend();
+      }, true);
+      window.addEventListener('pageshow', mend);
+      if (window.navigation) window.navigation.addEventListener('navigatesuccess', mend);
+      (document.head || document.documentElement).appendChild(discovery);
       mend();
     })();
     """

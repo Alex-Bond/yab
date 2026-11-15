@@ -31,15 +31,17 @@ final class LocalNetworkFixture: @unchecked Sendable {
     private var routes: [String: Reply] = [:]
     private var accepted = 0
     private(set) var port: UInt16 = 0
-    var root: String { "http://127.0.0.1:\(port)" }
+    private let host: String
+    var root: String { "http://\(host):\(port)" }
     var requests: [Request] { locked { received } }
     var messages: [Data] { locked { packets } }
     var tcpConnections: Int { locked { accepted } }
 
-    init() throws {
+    init(ipv6: Bool = false) throws {
+        host = ipv6 ? "[::1]" : "127.0.0.1"
         let parameters = NWParameters.tcp
         let selected = NWEndpoint.Port(rawValue: 0)!
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: selected)
+        parameters.requiredLocalEndpoint = .hostPort(host: ipv6 ? .ipv6(.loopback) : .ipv4(.loopback), port: selected)
         listener = try NWListener(using: parameters)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { state in

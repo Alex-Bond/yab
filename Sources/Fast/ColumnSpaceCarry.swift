@@ -201,6 +201,12 @@ final class ColumnSpaceCarry {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
+    /// Dwell timers can change the hand without another pointer event.
+    func refreshHand() {
+        guard !overlaying, drawing else { return }
+        draw()
+    }
+
     private func draw() {
         guard let browser, let pages, let overlay, let cell else { return }
         if let parent = overlay.superview { overlay.frame = pages.convert(pages.bounds, to: parent) }
@@ -208,8 +214,9 @@ final class ColumnSpaceCarry {
         let width = max(20, pages.bounds.width - 2 * SideBar.margin - indent)
         let row = ColumnItem(id: item.id, kind: item.kind, indent: indent, y: 0, height: SideBar.row, x: 0, width: width)
         cell.frame = CGRect(x: SideBar.margin + indent, y: point.y - gripY, width: width, height: SideBar.row)
+        let hold = overlaying ? ColumnCell.Hold(lifted: true) : (source?.drawn(item).hold ?? ColumnCell.Hold(lifted: true))
         cell.bind(row, ColumnCell.Context(browser: browser, look: pages.carryLook, liveID: liveID),
-                  hold: ColumnCell.Hold(lifted: true), force: true)
+                  hold: hold, force: true)
         var lean = overlaying ? ColumnCell.Lean() : (source?.drawn(item).lean ?? ColumnCell.Lean())
         if SpaceDrop.shared.slot != nil { lean.scale = 0.94 }
         cell.lean(lean, ColumnMotion.follow)
@@ -266,6 +273,7 @@ final class ColumnSpaceCarry {
 
     var state: [String: Any] {
         var out: [String: Any] = ["home": home.uuidString, "paging": overlaying, "drawing": drawing,
+                                  "compact": cell?.current?.hold.compact ?? false,
                                   "tabs": tabs.map { $0.id.uuidString }, "gap": gap ?? -1,
                                   "slot": SpaceDrop.shared.slot?.uuidString ?? ""]
         if let overlay, let cell, let window = overlay.window, let content = window.contentView {

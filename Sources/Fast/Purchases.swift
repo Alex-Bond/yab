@@ -65,22 +65,24 @@ final class Purchases: ObservableObject {
     private(set) var version = 0
     private var read: Date?
     private var reading = false
-    /// What each mail read as last time, by `Purchases.key`: a mail's words
-    /// don't change, so a refresh reads only mail it hasn't read before.
-    /// Every candidate read again every ten minutes was the owner's whole
-    /// 400 days, 8,000 mails, and the run took longer than the ten minutes
-    /// it waited, so one core never rested (2026-10-25).
+    /// What each mail read as, by `Purchases.key`: a mail's words don't
+    /// change, so a refresh reads only mail it hasn't read before. Every
+    /// candidate read again every ten minutes was the owner's whole 400
+    /// days, 8,000 mails, and the run took longer than the ten minutes it
+    /// waited, so one core never rested (2026-10-25).
     private var known = Known()
 
     struct Known: Sendable, Codable {
-        /// The build that read them: another build may read mail otherwise.
-        var build = Purchases.build
+        /// The rules that read them (MailPurchases.rules): other rules may
+        /// read mail otherwise. Not the build: each update, and on a Nightly
+        /// that is every few hours, threw all of this away, and a run cut
+        /// short by a quit saved nothing, so the same mail was read for ever
+        /// (2026-10-31: 56 to 120% of a core seven minutes after launch).
+        var rules = MailPurchases.rules
         var found: [String: MailPurchase] = [:]
         var none: Set<String> = []
         var count: Int { found.count + none.count }
     }
-
-    nonisolated static let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "dev"
 
     /// `known` kept between launches, so a launch reads only the mail that
     /// came since the last one: reading all of it again was minutes of a
@@ -89,7 +91,7 @@ final class Purchases: ObservableObject {
 
     nonisolated static func loadKnown() -> Known {
         guard let data = try? Data(contentsOf: knownFile),
-              let known = try? JSONDecoder().decode(Known.self, from: data), known.build == build else { return Known() }
+              let known = try? JSONDecoder().decode(Known.self, from: data), known.rules == MailPurchases.rules else { return Known() }
         return known
     }
 
@@ -99,13 +101,12 @@ final class Purchases: ObservableObject {
     }
     private var loaded = false
 
-    /// A mail as it was read: its id and account, and how much of it was
-    /// there (the snippet first, the words when they arrive), and whether
-    /// it went to the bin or spam since.
-    nonisolated static func key(_ message: MailMessage, account: String) -> String {
-        let gone = !message.labels.isDisjoint(with: ["SENT", "SPAM", "TRASH", "DRAFT"])
-        return account + "|" + message.id + "|" + String(message.text?.utf8.count ?? -1) + "|"
-            + String(message.html?.utf8.count ?? -1) + "|" + String(message.snippet.utf8.count) + (gone ? "|gone" : "")
+    /// A mail as it was read: its id and account, how much of it was there
+    /// (the snippet first, its words when they arrive, and gone again when
+    /// old bodies are let go), and whether it went to the bin or spam since.
+    nonisolated static func key(_ head: MailPurchaseHead, account: String) -> String {
+        let gone = !head.labels.isDisjoint(with: ["SENT", "SPAM", "TRASH", "DRAFT"])
+        return account + "|" + head.id + "|" + (head.body ? "1" : "0") + (head.html ? "1" : "0") + "|" + String(head.snippet) + (gone ? "|gone" : "")
     }
 
     /// How far back mail is read for purchases.
@@ -116,6 +117,13 @@ final class Purchases: ObservableObject {
     nonisolated static let unusedDays = 30
     /// The receipts listed.
     static let receiptsKept = 400
+    /// Mails taken from the store at a time: a pass never holds more bodies.
+    nonisolated static let batch = 20
+    /// Unread mail between saves, so a quit loses a minute's reading at most.
+    nonisolated static let saveEvery = 200
+    /// After each batch it rests this many times what the batch took, so a
+    /// first reading of 400 days takes a quarter of a core at the very most.
+    nonisolated static let restShare = 3.0
 
     /// Purchases a test world hands over (bench `purchases` seed), with
     /// the last visit of each site; nil reads the mail.
@@ -142,53 +150,98 @@ final class Purchases: ObservableObject {
         let load = !loaded
         loaded = true
         let began = Date()
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .background).async {
             let before = load ? Purchases.loadKnown() : before
-            let (items, kept, fresh) = Purchases.pass(engines, since: since, now: now, before: before)
-            if fresh > 0 || kept.count != before.count { Purchases.saveKnown(kept) }
-            var all = items
-            let hosts = Array(Set(all.compactMap(\.purchase.host)))
-            let visits = AgentHistory.lastVisits(to: hosts, days: Purchases.window)
-            for index in all.indices { all[index].opened = all[index].purchase.host.flatMap { visits[$0] } }
-            DispatchQueue.main.async {
-                self.reading = false
-                self.known = kept
-                // Ten minutes from when this one ended, not began: a long
-                // run is never followed by the next at once.
-                self.read = now.addingTimeInterval(Date().timeIntervalSince(began))
-                self.apply(all, now: now)
+            /// The visits of each site, then the lists.
+            func show(_ items: [Item], kept: Known, done: Bool) {
+                var all = items
+                let hosts = Array(Set(all.compactMap(\.purchase.host)))
+                let visits = AgentHistory.lastVisits(to: hosts, days: Purchases.window)
+                for index in all.indices { all[index].opened = all[index].purchase.host.flatMap { visits[$0] } }
+                DispatchQueue.main.async {
+                    self.known = kept
+                    if done {
+                        self.reading = false
+                        // Ten minutes from when this one ended, not began: a
+                        // long run is never followed by the next at once.
+                        self.read = now.addingTimeInterval(Date().timeIntervalSince(began))
+                    }
+                    self.apply(all, now: now)
+                }
             }
+            let (items, kept, fresh) = Purchases.pass(engines, since: since, now: now, before: before) { items, kept in
+                Purchases.saveKnown(kept)
+                show(items, kept: kept, done: false)
+            }
+            if fresh > 0 || kept.count != before.count { Purchases.saveKnown(kept) }
+            show(items, kept: kept, done: true)
         }
     }
 
     /// One reading of every account's candidates: what `before` read is
-    /// taken as it was, the rest read now (`fresh`, how many); `kept` is
-    /// what was read of the mail still there.
-    nonisolated static func pass(_ engines: [(String, MailStore)], since: Date, now: Date, before: Known) -> (items: [Item], kept: Known, fresh: Int) {
-        var all: [Item] = []
+    /// taken as it was, without touching its body; the rest (`fresh`, how
+    /// many) read now, a few bodies at a time, resting between batches.
+    /// `reached` hears what is known so far before the first batch and
+    /// every `saveEvery` mails, so nothing read is lost to a quit and the
+    /// lists don't wait for a long first reading. `kept` is what was read
+    /// of the mail still there.
+    nonisolated static func pass(_ engines: [(String, MailStore)], since: Date, now: Date, before: Known,
+                                 rest: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+                                 reached: ([Item], Known) -> Void = { _, _ in }) -> (items: [Item], kept: Known, fresh: Int) {
         var kept = Known()
-        var fresh = 0
+        var order: [(key: String, account: String)] = []
+        var unread: [(store: MailStore, heads: [(key: String, id: String)])] = []
         for (account, store) in engines {
-            for message in store.purchaseCandidates(since: since) {
-                let key = Purchases.key(message, account: account)
-                let purchase: MailPurchase?
+            var waiting: [(key: String, id: String)] = []
+            for head in store.purchaseHeads(since: since) {
+                let key = Purchases.key(head, account: account)
+                order.append((key, account))
                 if let found = before.found[key] {
-                    purchase = found
+                    kept.found[key] = found
                 } else if before.none.contains(key) {
-                    purchase = nil
-                } else {
-                    purchase = MailPurchases.read(message, now: now)
-                    fresh += 1
-                }
-                if let purchase {
-                    kept.found[key] = purchase
-                    all.append(Item(purchase: purchase, account: account))
-                } else {
                     kept.none.insert(key)
+                } else {
+                    waiting.append((key, head.id))
                 }
             }
+            if !waiting.isEmpty { unread.append((store, waiting)) }
         }
-        return (all, kept, fresh)
+        func items() -> [Item] {
+            // Newest first in each account, as the store gave them.
+            order.compactMap { one in kept.found[one.key].map { Item(purchase: $0, account: one.account) } }
+        }
+        if unread.isEmpty { return (items(), kept, 0) }
+        reached(items(), kept)
+        var fresh = 0
+        var saved = 0
+        for (store, heads) in unread {
+            for start in stride(from: 0, to: heads.count, by: Purchases.batch) {
+                let began = DispatchTime.now().uptimeNanoseconds
+                let some = heads[start..<min(start + Purchases.batch, heads.count)]
+                let keys = Dictionary(some.map { ($0.id, $0.key) }, uniquingKeysWith: { first, _ in first })
+                // Each mail in a pool of its own: this thread's isn't drained
+                // until the pass ends, and regexes leave plenty in it.
+                autoreleasepool {
+                    for message in store.messages(ids: some.map(\.id)) {
+                        guard let key = keys[message.id] else { continue }
+                        autoreleasepool {
+                            if let purchase = MailPurchases.read(message, now: now) {
+                                kept.found[key] = purchase
+                            } else {
+                                kept.none.insert(key)
+                            }
+                            fresh += 1
+                        }
+                    }
+                }
+                if fresh - saved >= Purchases.saveEvery {
+                    saved = fresh
+                    reached(items(), kept)
+                }
+                rest(Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9 * Purchases.restShare)
+            }
+        }
+        return (items(), kept, fresh)
     }
 
     private func apply(_ all: [Item], now: Date) {

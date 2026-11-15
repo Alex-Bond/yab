@@ -63,6 +63,28 @@ static bool HTMLLoadRequest(Tab& tab, NSString* method, NSDictionary* p, NSStrin
   if (![method isEqual:@"tab.loadHTML"]) return false;
   NSString* url = S(p, @"url");
   if (!url.length || ![p[@"html"] isKindOfClass:NSString.class]) { Reply(request, nil, @"url and html are required"); return true; }
+  // Chromium 156 GoogleURLLoaderThrottle::WillProcessResponse requires
+  // parsed_headers for the Web Store domains (including their subdomains).
+  // CEF's StreamReaderURLLoader does not create them for custom responses.
+  // Refuse before arming a response or navigating: storage carry can fail
+  // safely, whereas serving an empty document here kills the whole helper.
+  // Match extension_urls::IsWebstoreDomain, not just /webstore paths.
+  CefURLParts parts;
+  if (CefParseURL(Key(url), parts)) {
+    std::string scheme = CefString(&parts.scheme).ToString();
+    std::string host = CefString(&parts.host).ToString();
+    if (!host.empty() && host.back() == '.') host.pop_back();
+    auto domain = [&host](const std::string& name) {
+      return host == name || (host.size() > name.size() &&
+          host.compare(host.size() - name.size(), name.size(), name) == 0 &&
+          host[host.size() - name.size() - 1] == '.');
+    };
+    if ((scheme == "http" || scheme == "https") &&
+        (domain("chrome.google.com") || domain("chromewebstore.google.com"))) {
+      Reply(request, nil, @"Synthetic HTML is unavailable on Chrome Web Store domains");
+      return true;
+    }
+  }
   { std::lock_guard<std::mutex> lock(htmlMutex); htmlPending[tab.browser->GetIdentifier()] = {CanonicalPageURL(Key(url)), Key(p[@"html"])}; }
   tab.browser->GetMainFrame()->LoadURL(Key(url));
   Reply(request);

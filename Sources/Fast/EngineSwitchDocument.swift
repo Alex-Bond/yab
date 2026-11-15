@@ -8,8 +8,10 @@ final class EngineSwitchDocument {
     let url: URL
     let script: WKUserScript
 
+    static let limit = 512 * 1024
+
     init(url: URL, json: String) throws {
-        guard json.utf8.count <= 512 * 1024,
+        guard json.utf8.count <= Self.limit,
               let data = json.data(using: .utf8),
               let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               value["url"] as? String == url.absoluteString else { throw EngineSwitchDocumentError.invalidSnapshot }
@@ -74,8 +76,10 @@ final class EngineSwitchDocument {
             checked:node.checked || false,selected:node.tagName === 'SELECT' ? Array.from(node.options)
               .flatMap((option,i) => option.selected ? [i] : []) : null}];
         });
-        return JSON.stringify({url:location.href,local:entries('localStorage'),session:entries('sessionStorage'),
+        const json = JSON.stringify({url:location.href,local:entries('localStorage'),session:entries('sessionStorage'),
           fields,x:scrollX,y:scrollY});
+        // Over the limit stays in the page: only a refusal crosses the IPC.
+        return json.length > limit ? '{"oversized":true}' : json;
         """
         // A hung source page must not prevent switching away from it. The
         // callback can still arrive after timeout/retirement; answer once.
@@ -89,7 +93,7 @@ final class EngineSwitchDocument {
                 }
             }
             RunLoop.main.add(deadline, forMode: .common)
-            page.call(body, arguments: ["expected": url.absoluteString], in: .client, gesture: false) { result in
+            page.call(body, arguments: ["expected": url.absoluteString, "limit": Self.limit], in: .client, gesture: false) { result in
                 guard !answered else { return }
                 answered = true
                 deadline.invalidate()

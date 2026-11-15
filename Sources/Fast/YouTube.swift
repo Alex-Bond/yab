@@ -4,34 +4,49 @@ import WebKit
 // from youtube.com and googlevideo.com, the same places the video does,
 // and the player is told when to play one in the same answer that tells it
 // what the video is. So that answer is changed on its way in: the ad
-// schedule (adPlacements, playerAds, adSlots) is taken out of the data in
-// the page, out of JSON.parse and out of Response.json, and the player
-// never goes into ad mode. The idea and much of the script are Lean's
-// (PageScripts.swift), MIT, see THIRD_PARTY_NOTICES.md.
+// schedule (adPlacements, adSlots, and playerAds in the first page) is
+// taken out, and the player never goes into ad mode. The idea and the first
+// script are Lean's (PageScripts.swift), MIT, see THIRD_PARTY_NOTICES.md.
 //
 // It runs in the page's own world, at the start of the document, on
 // youtube.com only: yab's world (Web.world) sees the page's DOM but not
-// its fetch or its JSON, which are what the player reads. A YouTube player
-// embedded in another site's page is not covered: it is a frame, and the
-// script is for the main frame of youtube.com.
+// its fetch, which is what the player reads. A YouTube player embedded in
+// another site's page is not covered: it is a frame, and the script is for
+// the main frame of youtube.com.
+//
+// YouTube tests the page for exactly this (kevlar's detection list, read
+// 2026-11-07, request 1969): it parses a made-up player answer full of
+// adPlacements with JSON.parse, with Response.json and with a fetch of a
+// data: address dressed as /youtubei/v1/player, and calls the page a
+// blocker's if anything comes back changed; it puts a #player-ads bait on
+// the page and looks whether it is hidden; and the player itself counts an
+// ad that runs faster than 2.5x, or a Skip pressed by a script (an
+// untrusted click), as an "abnormality". Any of these puts up "Ad blockers
+// are not allowed", once the server has sent the wall along. So, as uBlock
+// Origin does on www.youtube.com today: JSON.parse and Response.json are
+// left alone; only real answers from the player's three addresses are
+// changed, picked by the address the request really goes to (Request's own
+// url getter, which an instance can't lie to), and only in their text; an
+// ad that plays anyway is only muted.
 //
 // The page can see what is done in its world, so as little as possible is
-// left for it to find: JSON.parse and Response.json are the page's own
-// functions behind a Proxy, which still say they are native code; what the
-// script keeps is in its own closure; nothing is written on the page's
-// elements or under a global name. Switching off reaches it by an event
-// whose name is made fresh at each launch.
+// left for it to find: fetch is the page's own function behind a Proxy,
+// which still says it is native code; what the script keeps is in its own
+// closure; nothing is written on the page's elements or under a global
+// name. Switching off reaches it by an event whose name is made fresh at
+// each launch.
 //
-// If an ad plays all the same, it is muted and run at 16x, skipped when the
-// skip button can really be pressed (on a live stream, where an ad can be
-// part of the stream, only muted), and afterwards the sound, the speed
-// and the play state are put back, a pause of yours left alone. That part
+// If an ad plays all the same, it is muted, and afterwards the sound and
+// the play state are put back, a pause of yours left alone. That part
 // waits on the player's class and on the video's own events; nothing ticks
 // on a YouTube page while no ad is showing.
 
 enum YouTube {
     // Keep the player's requests and skip controls usable when an ad gets
     // through. These exceptions apply only on YouTube, not on other sites.
+    // #player-ads is YouTube's own bait: an element of that id put on the
+    // page and checked for display none (uBlock Origin spares it the same
+    // way, quick-fixes, 2025-06).
     static let filters = """
     @@||youtube.com/api/stats/ads$domain=youtube.com
     @@||youtube.com/pagead/$domain=youtube.com
@@ -48,6 +63,7 @@ enum YouTube {
     youtube.com#@#.ytp-ad-message-container
     youtube.com#@#.ytp-ad-image-overlay
     youtube.com#@#.ytp-ad-overlay-container
+    youtube.com#@##player-ads
     """
 
     static func runs(on host: String?) -> Bool {
@@ -73,12 +89,12 @@ enum YouTube {
         try { if (sessionStorage.getItem(retryKey) === '1') return; } catch (e) {}
         var name = '\#(name)';
         var call = Reflect.apply, then = Promise.prototype.then, dispatch = EventTarget.prototype.dispatchEvent;
+        var parse = JSON.parse;
         // Already here, from the start of the document: it says so.
         var asked = { here: false };
         try { call(dispatch, window, [new CustomEvent(name, { detail: asked })]); } catch (e) {}
         if (asked.here) return;
 
-        var keys = ['adPlacements', 'playerAds', 'adSlots'];
         var on = true;
         var undo = [];
         var yielding = false;
@@ -108,52 +124,39 @@ enum YouTube {
             return !/playerCaptchaViewModel|not a bot|sign in to confirm/i.test(screen + ' ' + (ps.reason || '')) &&
                 /support\.google\.com\/youtube\/answer\/3037019(?:[?#"'\/]|$)/.test(screen);
         }
-
-        function shallow(o) {
-            for (var i = 0; i < keys.length; i++) {
-                try { if (Object.prototype.hasOwnProperty.call(o, keys[i])) delete o[keys[i]]; } catch (e) {}
-            }
-        }
-        // Only an answer shaped like the player's is walked, with a budget,
-        // so the rest of YouTube's JSON costs a property check. Moving
-        // from one video to the next, get_watch answers with a list whose
-        // parts carry the player's answer.
-        function playerish(o) {
-            try { return !!(o && typeof o === 'object' && (o.playabilityStatus || o.streamingData || o.playerResponse || (o.responseContext && o.contents))); } catch (e) { return false; }
-        }
-        function strip(o) {
-            if (!on || !o || typeof o !== 'object') return;
-            if (wall(o)) { stepBack(); return; }
-            shallow(o);
-            if (!(playerish(o) || (Array.isArray(o) && o.some(playerish)))) return;
-            var stack = [o], seen = new WeakSet(), budget = 20000;
-            while (stack.length && budget-- > 0) {
-                var n = stack.pop();
-                if (!n || typeof n !== 'object' || seen.has(n)) continue;
-                seen.add(n);
-                if (wall(n)) { stepBack(); return; }
-                shallow(n);
-                if (Array.isArray(n)) { for (var a = 0; a < n.length; a++) stack.push(n[a]); }
-                else { for (var k in n) { try { stack.push(n[k]); } catch (e) {} } }
-            }
+        function walled(o) {
+            if (!o || typeof o !== 'object') return false;
+            if (wall(o) || wall(o.playerResponse)) return true;
+            if (Array.isArray(o)) for (var i = 0; i < o.length; i++) if (o[i] && (wall(o[i]) || wall(o[i].playerResponse))) return true;
+            return false;
         }
 
-        // The first video's data is written into the page itself, so the
-        // two globals it lands in are caught as they are assigned.
-        ['ytInitialPlayerResponse', 'ytInitialData'].forEach(function(key) {
+        // The first video's answer is written into the page itself, as
+        // ytInitialPlayerResponse; it is caught as it is assigned.
+        var first = ['adPlacements', 'playerAds', 'adSlots'];
+        (function(key) {
             try {
-                var value = window[key];
-                strip(value);
+                var value;
+                function take(v) {
+                    if (on && v && typeof v === 'object') {
+                        if (wall(v)) stepBack();
+                        for (var i = 0; i < first.length; i++) {
+                            try { if (Object.prototype.hasOwnProperty.call(v, first[i])) delete v[first[i]]; } catch (e) {}
+                        }
+                    }
+                    return v;
+                }
+                value = take(window[key]);
                 Object.defineProperty(window, key, {
                     configurable: true,
                     get: function() { return value; },
-                    set: function(v) { strip(v); value = v; }
+                    set: function(v) { value = take(v); }
                 });
                 undo.push(function() {
                     Object.defineProperty(window, key, { value: value, writable: true, configurable: true, enumerable: true });
                 });
             } catch (e) {}
-        });
+        })('ytInitialPlayerResponse');
 
         // The page's own function behind a Proxy: called the same, and read
         // the same. WebKit prints a Proxy as "function ProxyObject()", so
@@ -171,55 +174,77 @@ enum YouTube {
         wrap(Function.prototype, 'toString', function(native) {
             return function(target, self, args) { return call(native, masks.get(self) || self, args); };
         });
-        wrap(JSON, 'parse', function(native) {
-            return function(target, self, args) {
-                var value = call(native, self, args);
-                if (on) { try { strip(value); } catch (e) {} }
-                return value;
-            };
-        });
-        // fetch(…).then(r => r.json()) parses natively, past JSON.parse.
-        wrap(window.Response && Response.prototype, 'json', function(native) {
+
+        // Every later video comes by fetch: the player's own answer, the
+        // watch page's streamed get_watch (player and page in one), and a
+        // link resolved before it is opened. Only those three, on YouTube,
+        // by the address the request really goes to: YouTube's own test
+        // fetches a data: address with its url made to read
+        // /youtubei/v1/player, and Request.prototype's getter is not fooled.
+        var requestURL, urlHref, readText, NativeResponse, NativeURL;
+        try {
+            requestURL = Object.getOwnPropertyDescriptor(Request.prototype, 'url').get;
+            urlHref = Object.getOwnPropertyDescriptor(URL.prototype, 'href').get;
+            readText = Response.prototype.text;
+            NativeResponse = Response; NativeURL = URL;
+        } catch (e) {}
+        var paths = /^\/youtubei\/v1\/(?:player|get_watch|navigation\/resolve_url)$/;
+        function watched(input) {
+            try {
+                var raw = input instanceof Request ? call(requestURL, input, [])
+                    : input instanceof NativeURL ? call(urlHref, input, []) : typeof input === 'string' ? input : null;
+                if (raw === null) return false;
+                var u = new NativeURL(raw, location.href);
+                return u.protocol === 'https:' && (u.hostname === 'youtube.com' || /\.youtube\.com$/.test(u.hostname)) && paths.test(u.pathname);
+            } catch (e) { return false; }
+        }
+        // Renamed in the text, not taken out of a parsed object: the same
+        // bytes wherever the answer is read (json, text or its stream) and
+        // the same length, so nothing about the answer's size changes.
+        var renames = /"(?:adPlacements|adSlots)"/g;
+        function renamed(key) { return key === '"adSlots"' ? '"noSlots"' : '"noPlacements"'; }
+        function retell(response) {
+            if (!on || !response || !response.ok) return response;
+            return call(then, call(readText, response, []), [function(text) {
+                if (on) {
+                    if (text.indexOf('UNPLAYABLE') >= 0 && text.indexOf('3037019') >= 0) {
+                        try { if (walled(parse(text.replace(/^\)\]\}'\s*/, '')))) stepBack(); } catch (e) {}
+                    }
+                    text = text.replace(renames, renamed);
+                }
+                var told = new NativeResponse(text, { status: response.status, statusText: response.statusText, headers: response.headers });
+                try {
+                    Object.defineProperties(told, {
+                        url: { value: response.url }, redirected: { value: response.redirected }, type: { value: response.type }
+                    });
+                } catch (e) {}
+                return told;
+            }]);
+        }
+        if (requestURL && urlHref && readText) wrap(window, 'fetch', function(native) {
             return function(target, self, args) {
                 var answer = call(native, self, args);
-                if (!on) return answer;
-                return call(then, answer, [function(value) { try { strip(value); } catch (e) {} return value; }]);
+                if (!on || !watched(args[0])) return answer;
+                return call(then, answer, [retell]);
             };
         });
 
-        // If one plays anyway. What was changed on a video is kept here,
-        // not on the element.
+        // If one plays anyway: muted, and nothing more. The player counts
+        // an ad that runs faster than 2.5x, one sent to its end, and a Skip
+        // the page presses itself (an untrusted click) as an abnormality,
+        // and that is what brings the wall. What was changed on a video is
+        // kept here, not on the element.
         var player = null, watcher = null, timer = 0, ended = 0, yours = false, inAd = false, touched = 0;
         var retiredAd = false, adVideos = [];
         var kept = new WeakMap(), stopped = new WeakMap();
         function showing() { return !!(player && player.classList.contains('ad-showing')); }
         function videos() { return player ? player.querySelectorAll('video') : []; }
-        // A live stream: the player says so in its class and its data, and
-        // a stream with no end at all is one wherever it plays.
-        function live(v) {
-            try {
-                if (player && (player.classList.contains('ytp-live') || player.querySelector('.ytp-live, .ytp-live-badge-is-livehead'))) return true;
-                var data = player && typeof player.getVideoData === 'function' ? player.getVideoData() : null;
-                if (data && data.isLive) return true;
-            } catch (e) {}
-            return v.duration === Infinity;
-        }
-        function skipper() {
-            var buttons = document.querySelectorAll('.ytp-skip-ad-button,.ytp-ad-skip-button,.ytp-ad-skip-button-modern');
-            for (var i = 0; i < buttons.length; i++) {
-                var b = buttons[i];
-                // "Skip in 5": there, and not yet pressable.
-                if (!b.disabled && b.offsetParent !== null && b.clientWidth > 0) return b;
-            }
-            return null;
-        }
         function restore(v) {
             var was = kept.get(v);
             if (!was) return;
             // The player or the person may already have chosen the content's
-            // sound/speed. Only undo values this fallback still owns.
+            // sound. Only undo what this fallback still owns.
             if (was.forcedMute && v.muted === true) v.muted = was.muted;
-            if (was.forcedRate && v.playbackRate === 16) v.playbackRate = was.rate;
             kept.delete(v);
         }
         function restoreAll() {
@@ -248,36 +273,16 @@ enum YouTube {
                 try {
                     if (ad) {
                         var was = kept.get(v);
+                        // Once the source changes, the class can lag behind
+                        // a video that is yours.
                         if (was && v.currentSrc !== was.src) { retire(); return; }
                         if (!was) {
-                            was = { muted: v.muted, rate: v.playbackRate || 1, src: v.currentSrc, forcedMute: false, forcedRate: false };
+                            was = { muted: v.muted, src: v.currentSrc, forcedMute: false };
                             kept.set(v, was);
                             adVideos.push(v);
                         }
                         v.muted = true;
                         was.forcedMute = true;
-                        var skip = skipper();
-                        if (skip) skip.click();
-                        if (retiredAd || !showing() || v.currentSrc !== was.src || Array.prototype.indexOf.call(videos(), v) < 0) {
-                            retire();
-                            return;
-                        }
-                        // On a live stream an ad can be stitched into the
-                        // stream itself: run fast, or sent to its end, it
-                        // would take the stream on with it, as much as an
-                        // hour past the edge. Only quiet there.
-                        if (!live(v)) {
-                            v.playbackRate = 16;
-                            was.forcedRate = true;
-                            // To its end, as well as the button: a skip that
-                            // doesn't take still ends the ad. Only the ad it
-                            // started on: once the source changes, the class
-                            // can lag behind a video that is yours.
-                            if (v.currentSrc === was.src && isFinite(v.duration) && v.duration > 0 && v.duration < 180 && v.currentTime < v.duration - 0.5) {
-                                v.currentTime = v.duration - 0.2;
-                            }
-                        }
-                        if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
                     } else {
                         restore(v);
                         // Just after an ad the player can sit paused at 0:00;

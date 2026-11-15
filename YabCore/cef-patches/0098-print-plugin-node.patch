@@ -1,0 +1,17 @@
+--- a/chrome/browser/printing/print_view_manager.cc
++++ b/chrome/browser/printing/print_view_manager.cc
+@@ -641,8 +641,12 @@
+     return;
+   }
+ 
+-  if (auto hook = extensions::GetExternalExtensionHooks().print_request;
+-      hook && !params->webnode_only) {
++  // A plugin's own Print, the PDF viewer's button among them, asks for its
++  // node alone (webnode_only). The embedder prints that node's frame, and a
++  // frame with the PDF plugin prints the plugin's document
++  // (PrintRenderFrameHelper::PrintWithParams). Left to Chrome's preview, the
++  // tab is dimmed for a dialog this embedding never shows.
++  if (auto hook = extensions::GetExternalExtensionHooks().print_request) {
+     // Nothing to resume: this request has no suspended script.
+     if (hook(web_contents(), render_frame_host, /*scripted=*/false,
+              base::DoNothing())) {

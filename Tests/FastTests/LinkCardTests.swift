@@ -129,6 +129,41 @@ struct LinkCardTests {
         #expect(LinkSummary.Preview.words(" One  two\nthree four five six seven eight nine ", limit: 8) == "One two three four five six seven eight")
     }
 
+    /// The document's hit test stops at a shadow host; Peek and cards must
+    /// find the same nested anchor and keep its real origin.
+    @Test func nestedShadowLinksSharePeekOriginAndHoverHighlight() async throws {
+        let view = PageView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: WKWebViewConfiguration())
+        let web: any PageHandle = view
+        defer { view.stopLoading() }
+        web.navigate(html: "<div id=host style='position:fixed;left:100px;top:100px;width:240px;height:100px'></div>",
+                     base: URL(string: "https://fixture.example/"))
+        for _ in 0..<100 {
+            if (try? await web.run("!!document.querySelector('#host')", in: .yab)) as? Bool == true { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        _ = try await web.run(PeekOrigin.script(force: true), in: .yab)
+        _ = try await web.run(LinkCardRules.script, in: .yab)
+        _ = try await web.run("""
+        const root = document.querySelector('#host').attachShadow({mode:'open'});
+        root.innerHTML = '<div id=inner style="width:240px;height:100px"></div>';
+        root.querySelector('#inner').attachShadow({mode:'open'}).innerHTML = '<a href="/article" target="_blank" style="display:block;width:240px;height:100px"><b>Article</b></a>';
+        """, in: .yab)
+        let card = try await web.run("__yabLinkCardInfo(160,140,innerWidth,'')", in: .yab) as? [String: Any]
+        #expect(card?["url"] as? String == "https://fixture.example/article")
+        _ = try await web.run("__yabLinkCardLightAt(160,140,true)", in: .yab)
+        #expect(try await web.run("document.querySelectorAll('[aria-hidden=true]').length", in: .yab) as? Int == 1)
+        _ = try await web.run("__yabLinkCardLightAt(160,140,false)", in: .yab)
+        #expect(try await web.run("document.querySelectorAll('[aria-hidden=true]').length", in: .yab) as? Int == 0)
+        _ = try await web.run("""
+        const a = document.querySelector('#host').shadowRoot.querySelector('#inner').shadowRoot.querySelector('a');
+        a.querySelector('b').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,composed:true,altKey:true,button:0}));
+        """, in: .yab)
+        let origin = try await web.run("__yabPeekFrom(true)", in: .yab) as? [NSNumber]
+        #expect(origin?.count == 6)
+        #expect(origin?.first?.doubleValue == 100)
+        #expect(try await web.run("__yabPeekForce(160,140,innerWidth)", in: .yab) as? String == "https://fixture.example/article")
+    }
+
     /// Real DOM hit testing: Shift must yield to an existing range.
     @Test func selectionIsCheckedOnTheActualAnchor() async throws {
         let view = PageView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: WKWebViewConfiguration())

@@ -4,11 +4,9 @@ import UIKit
 import SyncKit
 #endif
 
-/// New Tab as one card in the space's color, as tall as the screen allows:
-/// the capsule of spaces on top (the agreed Safari-style one: a recessed
-/// track, the current name always in the middle under a glass lens), the
-/// space's pins, what it keeps and today's tabs under it, the field at its
-/// foot. Private is the first page; the eyes and the capsule both go there.
+/// New Tab as one card in the space's color, as tall as the screen allows.
+/// The phone puts its picker in the foot; the tablet keeps the capsule on
+/// top. The space's pins, kept rows and today's tabs fill the card. Private is the first page; the eyes and the capsule both go there.
 /// Typed words keep the card's height: the space gives way, the capsule
 /// steps back, and the rows stand at the foot over the field.
 
@@ -201,6 +199,7 @@ struct SpacePagesCard: View {
         let dark = darkness(at: f) > 0.5
         let bottomRoom = Metrics.NewTab.cardPadding.bottom + fieldExtraHeight
         ZStack(alignment: .top) {
+            ZStack(alignment: .top) {
             background(at: f)
             // Out of the plate: its glass flows into the space's color, never see-through.
             Rectangle().fill(.regularMaterial)
@@ -211,6 +210,10 @@ struct SpacePagesCard: View {
                 .opacity(Double(min(max((reveal - 0.06) / 0.18, 0), 1)))
                 .allowsHitTesting(!typing)
                 .accessibilityHidden(typing)
+            }
+            // All Tabs' computer: the cards give way to the space in place, through a blur.
+            .blur(radius: Metrics.NewTab.sidebarBlur * app.field.sidebarBlur)
+            .opacity(Double(1 - app.field.sidebarBlur))
             TypedRows(rows: shownRows, shown: typing, dark: dark, bottomRoom: bottomRoom,
                       fill: WordRowView.bestFill(dark: dark))
                 // Under the capsule, which stays in sight over the space.
@@ -225,7 +228,26 @@ struct SpacePagesCard: View {
                     app.field.putKeyboardAway()
                     pager.jump = next
                 })
-            if showsCapsule {
+            if app.field.sheetAllowed && !app.workspace.tabletControls && !app.surfaces.fieldBeside {
+                // All Tabs' head in the same places: Settings at the left, and
+                // at the right the dots where its computer was, come through a blur.
+                HStack {
+                    Button { app.openSettingsFromSpaces(at: nil) } label: {
+                        Glyph(SettingsFieldRow.glyph, size: Metrics.Chrome.spaceEmoji, color: dark ? .white : Ink.primary)
+                            .frame(width: Metrics.touch, height: Metrics.touch)
+                            .glassEffect(.regular.interactive(), in: Circle())
+                    }
+                    .accessibilityLabel("Settings")
+                    .accessibilityIdentifier("newtab.settings")
+                    Spacer()
+                    SpacesMoreMenu(dark: dark)
+                        .blur(radius: Metrics.NewTab.sidebarBlur * app.field.sidebarBlur)
+                        .opacity(Double(1 - app.field.sidebarBlur))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, Metrics.NewTab.inset)
+                .padding(.top, capsuleTopNow)
+            } else if showsCapsule {
                 // Search results replace the rows, not the space selector.
                 CardCapsule(names: names, current: pages.firstIndex(of: page ?? "") ?? Int(f.rounded()), position: f,
                             width: capsuleWidth, dark: dark, more: app.field.sheetAllowed) { i in
@@ -300,7 +322,7 @@ struct SpacePagesCard: View {
                 // A private tab's own field is private already: its words stay in that tab.
                 if !app.field.isPrivate, !onlyPrivate { app.field.setPrivate(true) }
             } else {
-                pager.spaceID = now
+                app.selectSpacePage(now)
                 if app.field.isPrivate { app.field.setPrivate(false) }
             }
         }
@@ -911,7 +933,8 @@ private struct SpacePage: View {
                 // Now, less what this page shows already: the tab open on the
                 // Mac is often one of the space's own, in its row above, and
                 // with the Mac's Today on it leads the Mac's line instead.
-                let others = now.filter { item in
+                let pageNow = now.filter { $0.id != "mac" } + (NewTabContent.macNow(app, in: space.id).map { [$0] } ?? [])
+                let others = pageNow.filter { item in
                     if !macs.isEmpty, item.id == "mac" { return false }
                     if case let .go(id) = item.action { return space.tab(id) == nil }
                     return true
@@ -1226,7 +1249,7 @@ private struct TypedRows: View {
                     ForEach(groups) { group in
                         ForEach(group.rows.reversed()) { entry in
                             Button { app.choose(entry.row) } label: {
-                                WordRowView(row: entry.row, best: entry.index == 0 && !keyCopies, dark: dark)
+                                WordRowView(row: entry.row, best: entry.index == 0 && !keyCopies, dark: dark, isPrivate: app.field.isPrivate)
                             }
                             .buttonStyle(WordRowPress(best: entry.index == 0 && !keyCopies, fill: fill))
                             .accessibilityIdentifier(entry.index == 0 ? "field.best" : "field.row.\(entry.index)")
@@ -1284,7 +1307,7 @@ private struct TypedRows: View {
 /// approved capsule.js) stepped every frame and its drawing (the recess,
 /// the Liquid Glass lens, the names at 45 %), following the card's pages
 /// and turning them. A vertical finger on it is the card's own drag.
-private struct CardCapsule: View {
+struct CardCapsule: View {
     typealias C = Metrics.Column
     let names: [String]
     let current: Int
@@ -1293,6 +1316,11 @@ private struct CardCapsule: View {
     let dark: Bool
     /// The three dots at the right, in place of the gear (it moved to the foot).
     var more = false
+    /// In a foot between + and Done: no mark or gear at its sides, the whole width its own.
+    var bare = false
+    /// One model for the phone's foot: All Tabs' capsule and the sidebar's are
+    /// the same capsule, so nothing moves as one hands over to the other.
+    var shared: CardCapsuleDriver?
     let pick: (Int) -> Void
     let sheetDrag: (CGFloat, Bool, CGFloat) -> Void
     /// Yab's mark on the left, tapped: About Yab.
@@ -1300,7 +1328,8 @@ private struct CardCapsule: View {
     /// The gear on the right: Settings.
     let settings: () -> Void
 
-    @State private var driver = CardCapsuleDriver()
+    @State private var own = CardCapsuleDriver()
+    private var driver: CardCapsuleDriver { shared ?? own }
     @State private var axis: Axis?
     /// Where the capsule stands on the screen: the finger is read in the
     /// screen's own points, which stand still while the spaces follow it down.
@@ -1327,9 +1356,10 @@ private struct CardCapsule: View {
                              in: LensShape(rect: lens, radius: CapsuleModel.lensHeight / 2, scale: 1 + 0.08 * pose.press))
             // Yab's mark, bare, and Settings' gear on glass at the capsule's
             // sides: they step out as a finger widens it, as the column's buttons do.
+            if !bare {
             HStack(spacing: 0) {
                 Button(action: about) {
-                    YabMark(size: 30)
+                    YabMark(size: Metrics.NewTab.spacesHeaderMark)
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .frame(width: Metrics.touch, height: Metrics.touch)
                         .contentShape(Rectangle())
@@ -1360,6 +1390,7 @@ private struct CardCapsule: View {
             .frame(width: width, height: h)
             .opacity(Double(1 - pose.side))
             .allowsHitTesting(pose.side < 0.5)
+            }
         }
         .frame(width: width, height: h)
         .contentShape(Rectangle())
@@ -1386,9 +1417,9 @@ private struct CardCapsule: View {
                     if let i = driver.up(v.location.x - screenFrame.minX) { pick(i) }
                 }
         )
-        .onAppear { driver.configure(names: names, current: current, width: width) }
-        .onChange(of: names) { _, now in driver.configure(names: now, current: current, width: width) }
-        .onChange(of: width) { _, now in driver.configure(names: names, current: current, width: now) }
+        .onAppear { driver.configure(names: names, current: current, width: width, bare: bare) }
+        .onChange(of: names) { _, now in driver.configure(names: now, current: current, width: width, bare: bare) }
+        .onChange(of: width) { _, now in driver.configure(names: names, current: current, width: now, bare: bare) }
         .onChange(of: position) { _, now in driver.follow(now, index: current) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("newtab.capsule")
@@ -1432,7 +1463,10 @@ private struct CardCapsule: View {
 /// Steps the capsule's model on the screen's refresh while anything moves.
 @MainActor
 @Observable
-private final class CardCapsuleDriver {
+final class CardCapsuleDriver {
+    /// The phone's foot capsule, All Tabs' and the sidebar's.
+    static let foot = CardCapsuleDriver()
+
     private(set) var pose = CapsulePose.rest(mid: 0)
     @ObservationIgnored private(set) var track = CapsuleTrack(names: [])
     @ObservationIgnored private var model = CapsuleModel(track: CapsuleTrack(names: []), current: 0, mid: 0,
@@ -1446,15 +1480,16 @@ private final class CardCapsuleDriver {
 
     var touching: Bool { model.isTouched }
 
-    func configure(names: [String], current: Int, width: CGFloat) {
+    func configure(names: [String], current: Int, width: CGFloat, bare: Bool = false) {
         guard names != self.names || abs(width - self.width) > 0.5 else { return }
         self.names = names
         self.width = width
         track = CapsuleTrack(names: names)
         model = CapsuleModel(track: track, current: current, mid: width / 2,
-                             // At rest it keeps 24 clear of Yab's mark and the gear (12 in, 44 wide).
-                             restWidth: min(Metrics.Column.barWidth - Metrics.Column.capsuleInset * 2, width - 2 * (12 + Metrics.touch + 24)),
-                             wideWidth: min(Metrics.Column.barWidth, width - 24), pair: names.count == 2)
+                             // At rest it keeps 24 clear of Yab's mark and the gear (12 in, 44 wide);
+                             // bare between + and Done, the room between them is all its own.
+                             restWidth: bare ? width : min(Metrics.Column.barWidth - Metrics.Column.capsuleInset * 2, width - 2 * (12 + Metrics.touch + 24)),
+                             wideWidth: bare ? width : min(Metrics.Column.barWidth, width - 24), pair: names.count == 2)
         publish()
     }
 
@@ -1819,6 +1854,14 @@ extension AppModel {
 
     func newChatFromSpaces() {
         newChat(asPage: ChatPagePresentation.newChat)
+    }
+
+    /// Keep the browser and its saved selection with the public page on screen.
+    /// Address editing only previews spaces; it still belongs to its original tab.
+    func selectSpacePage(_ id: Space.ID) {
+        guard browser.space(id)?.isPrivate == false else { return }
+        NewTabPager.shared.spaceID = id
+        if field.mode == .newTab, browser.spaceID != id { browser.showSpace(id) }
     }
 
     /// Typed words or Now from New Tab open in the space on the card.

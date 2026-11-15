@@ -62,6 +62,7 @@ def package(out, result):
         info = plistlib.loads((helper / 'Contents/Info.plist').read_bytes())
         assert info['CFBundleIdentifier'].startswith(app_info['CFBundleIdentifier'] + '.helper')
         assert info['LSUIElement'] is True
+        assert info['LSBackgroundOnly'] is True
         if helper.stem.endswith('(Alerts)'):
             assert info['NSUserNotificationAlertStyle'] == 'alert'
         sign = run(['codesign', '-dvv', '--entitlements', ':-', str(helper)], capture=True).stdout

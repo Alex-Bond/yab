@@ -45,8 +45,9 @@ enum PasswordManagers {
         Provider(id: protonPass, name: "Proton Pass", bundles: ["me.proton.pass.electron"], apps: ["Proton Pass.app"],
                  unlockPage: "popup.html"),
         Provider(id: dashlane, name: "Dashlane", bundles: [], apps: ["Dashlane.app"], unlockPage: "index.html"),
+        // Its own tab for signing in, which its worker opens; it has no popup.html.
         Provider(id: lastPass, name: "LastPass", bundles: ["com.lastpass.LastPass"], apps: ["LastPass.app"],
-                 unlockPage: "popup.html"),
+                 unlockPage: "login.html"),
         Provider(id: nordPass, name: "NordPass", bundles: ["com.nordsec.nordpass"],
                  apps: ["NordPass.app", "NordPass® Password Manager & Digital Vault.app"], unlockPage: "app.html",
                  pageTags: ["nordpass-"]),
@@ -115,13 +116,13 @@ enum PasswordManagers {
 
     /// Apple Passwords can be connected only once Apple lets Yab's helper run.
     @MainActor static func selectable(_ id: String) -> Bool {
-        canonical(id) != apple || Preferences.entitledToPasskeys
+        canonical(id) != apple || ApplePasswords.mayRun
     }
 
     /// The icon its extension ships: the installed one's, or the copy Yab
     /// carries for one not in Yab yet. Never drawn by Yab.
     @MainActor static func icon(_ id: String) -> NSImage? {
-        if let installed = installed(id), let image = Extensions.here.icon(for: installed.id, side: 28) {
+        if let installed = installed(id), let image = ManagerExtensions.shared.icon(installed.id, side: 28) {
             return image
         }
         let id = canonical(id)
@@ -137,6 +138,22 @@ enum PasswordManagers {
     @MainActor private static var carried: [String: NSImage?] = [:]
 
     // MARK: - on this Mac
+
+    /// Lit by lookAround, off the main thread.
+    static let appFound = "App on this Mac"
+
+    /// What Connect still has to set up: its extension, and 1Password's yes
+    /// in its app. 1Password's app is optional, its extension works alone.
+    @MainActor static func leftToSetUp(_ id: String) -> Bool {
+        guard let item = installed(id) else { return true }
+        guard provider(id)?.allows == true, Connections.shared.here[canonical(id)] == appFound else { return false }
+        return !Extensions.here.onePasswordAnswered.contains(item.id)
+    }
+
+    /// One unlock choice and nothing to set up: Connect has nothing to ask.
+    @MainActor static func connectsAtOnce(_ id: String) -> Bool {
+        !yabMayUnlock(id) && !leftToSetUp(id) && Connections.shared.connection(id) == nil
+    }
 
     /// Where the sheet found it: its extension in Yab, its app, or its
     /// extension in another browser's profile. Nil when it isn't here.
@@ -157,14 +174,14 @@ enum PasswordManagers {
         var out: [String: String] = [:]
         var rest: [String] = []
         for provider in providers where provider.id != apple {
-            if appHere(provider) { out[provider.id] = "App on this Mac" } else { rest.append(provider.id) }
+            if appHere(provider) { out[provider.id] = appFound } else { rest.append(provider.id) }
         }
         for (id, browser) in inBrowsers(rest, in: sources) { out[id] = "In \(browser)" }
         return out
     }
 
     /// The first of these browsers holding each extension in a profile:
-    /// the profiles Local State lists (Default when it lists none) and the
+    /// the discovered profile directories (without reading Local State) and the
     /// folder itself, each asked for Extensions/<id> only. No walk of the
     /// browser's folders and no sorting by use, which cost thousands of
     /// file checks a call.
@@ -262,7 +279,7 @@ enum PasswordManagers {
 
     /// The managers whose extension is in Yab and on.
     @MainActor static var extensionsOn: Set<String> {
-        Set(Extensions.here.installed.filter(\.enabled).map { canonical($0.id) })
+        Set(ManagerExtensions.shared.installed.filter(\.enabled).map { canonical($0.id) })
     }
 
     /// Password managers by their store ids beyond the ones Connect lists:
@@ -290,20 +307,35 @@ enum PasswordManagers {
         // Apple Passwords connected is Yab's own list (ApplePasswords.swift):
         // the iCloud Passwords extension, on beside it, doesn't take the box.
         let native = appleNative
-        return Extensions.here.installed.first { $0.enabled && isManager($0) && !(native && canonical($0.id) == apple) }
+        return ManagerExtensions.shared.installed.first { $0.enabled && isManager($0) && !(native && canonical($0.id) == apple) }
+    }
+
+    /// The manager extension that has this tab's sign-in boxes: fieldOwner,
+    /// where extensions run. On a private tab they don't unless Settings ›
+    /// Extensions › Allow in private tabs lets them (Web.configuration), so
+    /// there none has the box and Yab's own list is the one, as Chromium's own
+    /// passwords fill in Incognito. Stepping aside there for an extension
+    /// that wasn't on the page left nothing at all to fill (#1303).
+    @MainActor static func fieldOwner(on tab: Tab) -> Installed? {
+        extensionsRun(on: tab) ? fieldOwner : nil
+    }
+
+    /// Whether extensions reach this tab's pages.
+    @MainActor static func extensionsRun(on tab: Tab) -> Bool {
+        !tab.shy || Store.settings.bool(forKey: "extensions.private")
     }
 
     /// Apple Passwords connected, in a Yab that may run its helper: Yab
     /// lists, fills and keeps its logins itself, no extension needed.
     @MainActor static var appleNative: Bool {
-        Preferences.entitledToPasskeys && Connections.shared.connection(apple) != nil
+        ApplePasswords.mayRun && Connections.shared.connection(apple) != nil
     }
 
     /// Apple Passwords connected: the iCloud Passwords extension turned off,
     /// so its menu doesn't come up under Yab's list on every sign-in box.
     @MainActor static func quietAppleExtension() {
-        for item in Extensions.here.installed where item.enabled && Extensions.iCloudPasswords.contains(item.id) {
-            Extensions.here.setEnabled(item.id, false)
+        for item in ManagerExtensions.shared.installed where item.enabled && Extensions.iCloudPasswords.contains(item.id) {
+            ManagerExtensions.shared.setEnabled(item.id, false)
         }
     }
 
@@ -313,12 +345,12 @@ enum PasswordManagers {
     /// out of those boxes then.
     @MainActor static func walletOwner(cards: Bool) -> Installed? {
         let key = cards ? "privacy.services.autofillCreditCardEnabled" : "privacy.services.autofillAddressEnabled"
-        return Extensions.here.installed.first { $0.enabled && Extensions.settings(for: $0.id)[key] as? Bool == false }
+        return ManagerExtensions.shared.installed.first { $0.enabled && Extensions.settings(for: $0.id)[key] as? Bool == false }
     }
 
     /// The installed extension of a manager, by any of its ids.
     @MainActor static func installed(_ id: String) -> Installed? {
-        Extensions.here.installed.first { canonical($0.id) == canonical(id) }
+        ManagerExtensions.shared.installed.first { canonical($0.id) == canonical(id) }
     }
 
     /// While a manager's extension is on, connected or not, it saves new
@@ -336,10 +368,25 @@ enum PasswordManagers {
     struct Source: Equatable {
         var yab: Bool
         var saver: String?
+        /// Apple Passwords connected and read by Yab itself (appleNative):
+        /// the saver, but the question is Yab's own card, not an extension's.
+        var asksForApple = false
         /// Yab offers to save a sign-in.
         var yabSaves: Bool { yab && saver == nil }
         /// Yab puts a recent login in by itself, with no manager beside it.
         var yabFillsAlone: Bool { yab && saver == nil }
+
+        /// Settings › Passwords › Offer to save passwords, as Chromium draws
+        /// its own (credentials_enable_service): the person's switch while
+        /// Yab is the one asking, into its keychain or into Apple Passwords,
+        /// and held, off, only while a manager's extension asks on its own,
+        /// as Chromium holds a pref an extension controls. Apple Passwords
+        /// connected used to hold it off too, though Yab's card still asked
+        /// (register 2497).
+        func offerSwitch(saves: Bool) -> (on: Bool, enabled: Bool) {
+            let ours = saver == nil || asksForApple
+            return (ours && saves, ours)
+        }
     }
 
     /// Opens the manager: its app, else its extension's own page in a tab.
@@ -350,9 +397,19 @@ enum PasswordManagers {
             NSWorkspace.shared.openApplication(at: app, configuration: .init(), completionHandler: nil)
             return
         }
-        guard let item = installed(id), let context = Extensions.here.contexts[item.id],
-              let page = provider(id)?.unlockPage, let browser else { return }
-        browser.open(context.baseURL.appendingPathComponent(page), foreground: true)
+        openPage(id, in: browser)
+    }
+
+    /// Its extension's own page in a tab, in front of Settings: where a
+    /// person signs in to it or unlocks it. A manager signed out shows its
+    /// sign-in or its introduction there. False when there is no such page.
+    @MainActor @discardableResult static func openPage(_ id: String, in browser: Browser?) -> Bool {
+        guard let browser, let item = installed(id), let page = provider(id)?.unlockPage,
+              let base = ManagerExtensions.shared.base(item.id) else { return false }
+        browser.open(base.appendingPathComponent(page), foreground: true)
+        // Settings stays open, behind the page.
+        BrowserWindows.shared.window(for: browser)?.makeKeyAndOrderFront(nil)
+        return true
     }
 }
 
@@ -413,6 +470,10 @@ extension PasswordManagers {
         /// One manager's Connect page, or the list of the others for nil.
         func openConnect(_ id: String?) {
             card = nil
+            if let id, PasswordManagers.connectsAtOnce(id) {
+                connectAndSignIn(id, mode: .you)
+                return
+            }
             SettingsWindow.shared.model?.open(.passwords, item: id.map(PasswordManagersPlace.connect) ?? PasswordManagersPlace.connect)
         }
 
@@ -495,7 +556,18 @@ extension PasswordManagers {
             look()
             lit(id)
             // Apple Passwords pairs with its helper: the code at once.
-            if id == apple, pair, Preferences.entitledToPasskeys { Task { await ApplePasswordsPairing.pair() } }
+            if id == apple, pair, ApplePasswords.mayRun { Task { await ApplePasswordsPairing.pair() } }
+            return true
+        }
+
+        /// Connected from Settings: back on Passwords, and a manager new to
+        /// Yab opens its own page, since it has to be signed in to.
+        @discardableResult
+        func connectAndSignIn(_ id: String, mode: Mode, password: String? = nil) -> Bool {
+            let first = connection(id) == nil
+            guard connect(id, mode: mode, password: password) else { return false }
+            leaveConnect()
+            if first { PasswordManagers.openPage(id, in: BrowserWindows.shared.activeBrowser) }
             return true
         }
 
@@ -541,7 +613,7 @@ extension PasswordManagers {
         func row(_ id: String) -> Row {
             // Apple Passwords goes through its helper, not an extension, and
             // its Touch ID is the person's own.
-            if PasswordManagers.canonical(id) == PasswordManagers.apple, Preferences.entitledToPasskeys { return .youUnlock }
+            if PasswordManagers.canonical(id) == PasswordManagers.apple, ApplePasswords.mayRun { return .youUnlock }
             let item = PasswordManagers.installed(id)
             let refused = item.map { Extensions.here.unconnected.contains($0.id) } ?? false
             return PasswordManagers.row(installed: item != nil, enabled: item?.enabled == true, refused: refused,

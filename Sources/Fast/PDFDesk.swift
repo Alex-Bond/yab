@@ -822,8 +822,28 @@ final class PDFPaper: ObservableObject {
 
     // MARK: the bytes
 
-    private static let dataSelector = NSSelectorFromString("_dataForDisplayedPDF")
     private static let nameSelector = NSSelectorFromString("_suggestedFilenameForDisplayedPDF")
+
+    /// WebKit's main resource is the displayed response, including its PDF
+    /// plugin data. _dataForDisplayedPDF is an iOS getter, absent on macOS.
+    /// Bind this asynchronous read to the navigation, including same-URL reloads.
+    static func displayedBytes(_ web: PageView, _ done: @escaping @MainActor (Data?) -> Void) {
+        let selector = NSSelectorFromString("_getMainResourceDataWithCompletionHandler:")
+        guard web.webKitShowsPDF, !web.isLoading, web.responds(to: selector) else { done(nil); return }
+        let navigation = web.navigationEvents.documentNavigation
+        let url = web.url
+        typealias Reply = @convention(block) (NSData?, NSError?) -> Void
+        typealias Read = @convention(c) (AnyObject, Selector, Reply) -> Void
+        let reply: Reply = { [weak web] data, error in
+            MainActor.assumeIsolated {
+                guard let web, error == nil, !web.isLoading, web.webKitShowsPDF,
+                      web.url == url, web.navigationEvents.documentNavigation == navigation,
+                      let data, data.length > 0 else { done(nil); return }
+                done(data as Data)
+            }
+        }
+        unsafeBitCast(web.method(for: selector), to: Read.self)(web, selector, reply)
+    }
 
     /// The PDF the tab shows, as it came: WebKit's own copy, or the same
     /// address read again with the tab's cookies.
@@ -839,10 +859,16 @@ final class PDFPaper: ObservableObject {
             return
         }
         guard let store = tab.webKitStore("Authenticated WebKit PDF source") else { return done(nil) }
-        if let web = tab.webKitOnly("WebKit PDF data preservation", build: false), web.responds(to: dataSelector),
-           let data = web.perform(dataSelector)?.takeUnretainedValue() as? Data, !data.isEmpty {
-            return done(data)
+        guard let web = tab.webKitOnly("WebKit PDF data preservation", build: false) else { done(nil); return }
+        let source = tab.address
+        displayedBytes(web) { data in
+            guard tab.builtPage === web, tab.address == source else { done(nil); return }
+            if let data { done(data); return }
+            fetchWebKitBytes(of: tab, store: store, done)
         }
+    }
+
+    private static func fetchWebKitBytes(of tab: Tab, store: WKWebsiteDataStore, _ done: @escaping (Data?) -> Void) {
         guard let url = tab.address ?? tab.webKitOnly("WebKit PDF data preservation", build: false)?.url else { return done(nil) }
         if url.isFileURL {
             DispatchQueue.global(qos: .userInitiated).async {

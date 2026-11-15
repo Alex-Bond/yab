@@ -25,7 +25,7 @@ final class WelcomeFieldTests: XCTestCase {
         app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
         app.terminate()
         app.launch()
-        let notNow = app.buttons["welcome.start"]
+        let notNow = app.buttons["welcome.skip"]
         XCTAssertTrue(notNow.waitForExistence(timeout: 15))
         XCTAssertTrue(TransitionCatalog.wait { notNow.isHittable })
         save(app, "Cold profile before Not Now")
@@ -54,6 +54,49 @@ final class WelcomeFieldTests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.exists, "erasing keeps the search field focused")
         save(app, "Cold New Tab cleared without rows")
         assertNoRows(app)
+    }
+
+    /// 1813: Use Without a Mac, then Yab quit on a later page (here Open
+    /// Links in Yab?): the next launch opens the browser, not the welcome
+    /// again from its first page. The pages after the answer still run on
+    /// the launch that answered it.
+    func testQuitAfterUsingWithoutAMacNeverBringsTheWelcomeBack() {
+        let app = XCUIApplication()
+        let suite = UUID().uuidString
+        app.launchArguments = ["-YabProfileDirectory", profile.path, "-YabSettingsSuite", suite]
+        app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
+        app.terminate()
+        app.launch()
+        let welcome = app.descendants(matching: .any)["welcome"]
+        XCTAssertTrue(welcome.waitForExistence(timeout: 15), "a cold profile is welcomed")
+        tap(app.buttons["welcome.start"])
+        tap(app.buttons["welcome.withoutMac"])
+        // The field's page, then Private's: the answer written down hides neither.
+        tap(app.buttons["welcome.next"])
+        tap(app.buttons["welcome.next"])
+        let last = app.buttons["welcome.makeDefault"]
+        XCTAssertTrue(last.waitForExistence(timeout: 8) || app.textFields["field.input"].exists,
+                      "the welcome ran to its last page")
+        if last.exists { XCTAssertTrue(welcome.exists, "Open Links in Yab? is still the welcome's") }
+        save(app, "Without a Mac, at the last page")
+
+        app.terminate()
+        app.launch()
+        // The browser of a profile with no tabs: its empty home, or New
+        // Tab's field where a launch opens it.
+        let home = app.descendants(matching: .any)["empty.home"]
+        let input = app.textFields["field.input"]
+        XCTAssertTrue(TransitionCatalog.wait(15) { home.exists || input.exists || welcome.exists },
+                      "neither the browser nor the welcome came up")
+        save(app, "Relaunched after the quit")
+        XCTAssertFalse(welcome.exists, "the welcome came back after Use Without a Mac")
+        XCTAssertFalse(app.buttons["welcome.start"].exists)
+    }
+
+    private func tap(_ button: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(button.waitForExistence(timeout: 8), "no \(button)", file: file, line: line)
+        button.waitUntilStill()
+        button.tap()
     }
 
     /// The space stands in New Tab, and the typed rows' list, in the tree

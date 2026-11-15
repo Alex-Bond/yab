@@ -66,9 +66,10 @@ final class SyncCenter: ObservableObject {
         self.lookFor = lookFor
     }
 
-    @Published private(set) var on = false
+    let capabilityAnswerers = AssistantAnswererNames()
+    @Published private(set) var on = false { didSet { refreshAssistantAnswererNames() } }
     @Published private(set) var state: SyncClient.State = .off
-    @Published private(set) var devices: [SyncClient.Listed] = []
+    @Published private(set) var devices: [SyncClient.Listed] = [] { didSet { refreshAssistantAnswererNames() } }
     /// The Recovery Key, shown once, right after sync is turned on.
     @Published var recovery: String?
     /// The code this Mac shows while it waits to be let in, or the code of
@@ -108,6 +109,7 @@ final class SyncCenter: ObservableObject {
     @Published private(set) var joinAgreed = false
     /// The key that code's Mac sent, held until Join.
     private var heldKey: Seal?
+    var awaitingJoinConfirmation: Bool { heldKey != nil && !joinAgreed }
     /// Two accounts became one from a code typed here: Add a Device is done.
     @Published private(set) var joinedByCode = 0
     private var separateLooked = Date.distantPast
@@ -162,7 +164,7 @@ final class SyncCenter: ObservableObject {
         }
     }
 
-    private(set) var journal: Journal?
+    private(set) var journal: Journal? { didSet { refreshAssistantAnswererNames() } }
     private(set) var client: SyncClient?
     /// When each chat that went up had last moved: one that hasn't moved
     /// since isn't read again (SyncChats).
@@ -400,19 +402,21 @@ final class SyncCenter: ObservableObject {
         asking = Pairing.wait(joining, base: Self.base, transport: pairingTransport ?? WebTransport()) { result in
             DispatchQueue.main.async { [self] in
                 guard self.joining?.code == joining.code else { return }
-                self.joining = nil
-                self.joiningInvited = false
                 self.asking = nil
                 switch result {
                 case let .success(seal):
                     joinTrouble = nil
                     if self.seal != nil {
+                        // Let In can arrive before this Mac's Join. Keep
+                        // its code and digits visible until its own yes.
                         heldKey = seal
                         settleHeld()
                     } else {
                         join(seal)
                     }
                 case let .failure(failure):
+                    self.joining = nil
+                    self.joiningInvited = false
                     // Why, said, never the page quietly back to Turn On as
                     // it was; and a code of this Mac's own back on screen
                     // when the other Mac's didn't work or this one's ran out.
@@ -735,7 +739,11 @@ final class SyncCenter: ObservableObject {
     // MARK: Running
 
     private func begin(_ seal: Seal) {
-        if let activateAccount { return activateAccount(self, seal) }
+        if let activateAccount {
+            // The injected activation omits the client, not membership.
+            self.seal = seal
+            return activateAccount(self, seal)
+        }
         joiningAddons = [:]
         guard let journal = try? Journal(path: Store.file("sync.sqlite").path, device: Self.device.id) else { return }
         ContextPrivacy.shared.attachSync(journal)
@@ -887,8 +895,25 @@ final class SyncCenter: ObservableObject {
         // opens: the first hello then sends this Mac's side and brings the
         // account's, and the two are put together field by field.
         for collection in [SyncShapes.space, SyncShapes.tab, SyncShapes.bookmark, SyncShapes.setting, SyncShapes.file, SyncShapes.icon, SyncShapes.routine, SyncShapes.memory, SyncShapes.visit, SyncShapes.answer, SyncChats.chat, SyncWallet.login, SyncAddons.ext, SyncAddons.plugin, SyncNow.now, SyncShapes.project] { due.insert(collection) }
-        flush()
+        flush(after: { [weak self] _ in self?.drawUnshown() })
         client.start()
+    }
+
+    /// What the journal holds and the rows never drew (Journal.unshown):
+    /// a relaunch between a delivery's merge and its rows, the update's
+    /// among them, left those records in the journal only, and the line
+    /// brings them again unchanged, so nothing else would draw them.
+    private func drawUnshown() {
+        guard let journal, syncs(.tabs), !leaving else { return }
+        syncFlushing.async { [weak self] in
+            let records = [SyncShapes.tab, SyncShapes.folder, SyncShapes.pair].flatMap { journal.unshown($0) }
+            guard !records.isEmpty else { return }
+            let fetched = Self.fetch(for: records, from: journal)
+            DispatchQueue.main.sync {
+                guard let self, self.journal === journal, !self.leaving else { return }
+                self.adopt(records, fetched: fetched)
+            }
+        }
     }
 
     private func watch() {
@@ -1242,36 +1267,85 @@ final class SyncCenter: ObservableObject {
     }
 
     nonisolated private static func reconcileRows(_ rows: [UUID: Session.Shape], into journal: Journal, device: String) throws {
-        let living = journal.living(SyncShapes.tab)
-        let orders = Dictionary(living.compactMap { record in
+        let every = journal.all(SyncShapes.tab)
+        let living = every.filter { $0.alive() }
+        let orders = Self.previousOrders(rows, journal: Dictionary(living.compactMap { record in
             record["order"]?.string.map { (record.id, $0) }
-        }, uniquingKeysWith: { first, _ in first })
+        }, uniquingKeysWith: { first, _ in first }), shown: journal.shown(SyncShapes.tab).compactMapValues { $0["order"]?.string })
         // Today is each device's own: this Mac's tabs of today are written
         // as its own, and another device's are never closed for missing here.
         let marked = SyncShapes.marked
-        let out = SyncShapes.rows(rows, orders: orders, device: device, owner: SyncShapes.owners(living, marked: marked))
+        var out = SyncShapes.rows(rows, orders: orders, device: device, owner: SyncShapes.owners(living, marked: marked))
+        // Catch-up pages go by sequence too: a folder opened, renamed or
+        // moved since its tabs were written comes pages after them, and a
+        // folder can come before the folder it is in. A row draws a folder
+        // only from its record, so until that comes it shows its tabs
+        // loose. That is no move out of it: a link to a folder this journal
+        // has never held stays, and a folder nothing here names yet was
+        // never drawn here, so it isn't removed for missing from the rows.
+        // A fresh Mac's first sync took every tab whose folder came late
+        // out of it, and those folders away, on every device (row 1895).
+        let folders = journal.all(SyncShapes.folder)
+        let held = Set(folders.map(\.id))
+        let livingFolders = folders.filter { $0.alive() }
+        out.tabs = SyncShapes.keepingLinks(out.tabs, had: living, held: held)
+        out.folders = SyncShapes.keepingLinks(out.folders, had: livingFolders, held: held)
+        let named = Set((living + livingFolders).compactMap { $0["folder"]?.string })
+        // Nor a pair whose other tab hasn't come yet.
+        let heldTabs = Set(every.map(\.id))
         // Catch-up pages are ordered by sequence. A space renamed after its
         // tabs can arrive in a later page: absence from local rows is not a
         // close until this Mac has received that space. Tombstones count as
         // known, so deleting a space still removes its rows.
         let represented = Set(rows.keys.map(\.uuidString))
-        let knownSpaces = Set(journal.all(SyncShapes.space).map(\.id))
+        let spaceRecords = journal.all(SyncShapes.space)
+        let knownSpaces = Set(spaceRecords.map(\.id))
+        let goneSpaces = Set(spaceRecords.filter { !$0.alive() }.map(\.id)).subtracting(represented)
         func awaitingSpace(_ record: SyncKit.Record) -> Bool {
             guard let parent = record["parent"]?.string else { return false }
             return !represented.contains(parent) && !knownSpaces.contains(parent)
         }
+        // A space removed takes what was in it, drawn here or not.
+        func orphaned(_ record: SyncKit.Record) -> Bool {
+            record["parent"]?.string.map(goneSpaces.contains) ?? false
+        }
+        // Three-way (Journal.reconcile's `shown`): only what these files
+        // changed since they were last read goes up, so rows that haven't
+        // drawn what the journal already holds are no edit (register 2589).
         try journal.reconcile(SyncShapes.tab, out.tabs, within: {
             !awaitingSpace($0) && !SyncShapes.elsewhere($0, device: device, marked: marked)
-        })
+        }, shown: true, orphaned: orphaned)
         // Nor the folders and pairs of those tabs: another Mac's folder of
         // today's tabs, or two of its tabs side by side, are never in this
         // Mac's rows, and removing them for it broke that Mac's (row 965).
         let away = living.filter { SyncShapes.elsewhere($0, device: device, marked: marked) }
         let awayIDs = Set(away.map(\.id)), awayFolders = Set(away.compactMap { $0["folder"]?.string })
-        try journal.reconcile(SyncShapes.folder, out.folders, within: { !awaitingSpace($0) && !awayFolders.contains($0.id) })
+        try journal.reconcile(SyncShapes.folder, out.folders, within: {
+            !awaitingSpace($0) && !awayFolders.contains($0.id) && named.contains($0.id)
+        }, shown: true, orphaned: orphaned)
         try journal.reconcile(SyncShapes.pair, out.pairs, within: { pair in
-            !awaitingSpace(pair) && !pair.id.split(separator: "|").contains { awayIDs.contains(String($0)) }
-        })
+            let ids = pair.id.split(separator: "|").map(String.init)
+            return !awaitingSpace(pair) && !ids.contains(where: awayIDs.contains) && ids.allSatisfy(heldTabs.contains)
+        }, shown: true, orphaned: orphaned)
+    }
+
+    /// The keys a row's tabs are written from. A row in the journal's order
+    /// (drawn from it, or moved here to the same) takes the journal's keys;
+    /// one that isn't still stands as its files last said, so it takes the
+    /// keys they were written with: a row that didn't move gives the same
+    /// keys back, and only a move made here gives new ones. The journal's
+    /// keys laid over an old row made every tab the other Mac moved look
+    /// moved here, and the old order went up as now's (register 2589).
+    nonisolated static func previousOrders(_ rows: [UUID: Session.Shape], journal: [String: String], shown: [String: String]) -> [String: String] {
+        var out = journal
+        for shape in rows.values {
+            let ids = shape.tabs.compactMap(\.id)
+            let keyed = ids.filter { journal[$0] != nil }
+            let inOrder = keyed == keyed.sorted { (journal[$0]!, $0) < (journal[$1]!, $1) }
+            if inOrder { continue }
+            for id in ids { if let key = shown[id] { out[id] = key } }
+        }
+        return out
     }
 
     /// Local row mutations and incoming records meet in this main-thread
@@ -1446,7 +1520,7 @@ final class SyncCenter: ObservableObject {
         if paths.contains("scopes.json") { Scopes.reload() }
         if paths.contains("quick-actions.json") { QuickActions.shared.reload() }
         if paths.contains("short-names.json") { ShortNames.shared.reload() }
-        if paths.contains("hidden.json") { for browser in browsers { browser.curtain.reload() } }
+        if paths.contains("hidden.json") { Curtain.shared.reload() }
         if paths.contains("commands.json") { for browser in browsers { browser.selectionCommands.load() } }
         if paths.contains("mail/snippets.noindex/snippets.json") { MailSnippets.shared.load() }
     }
@@ -1636,11 +1710,23 @@ final class SyncCenter: ObservableObject {
                     }
                 }
                 space.brought = local[space.id]?.brought
-                space.signedInAs = local[space.id]?.signedInAs
-                space.signInWith = local[space.id]?.signInWith
+                // Pre-profile devices have no field; preserve imported links then.
+                if !records.contains(where: { $0.id == space.id.uuidString && $0.stamps["signInWith"] != nil }) {
+                    space.signInWith = local[space.id]?.signInWith
+                    space.signedInAs = local[space.id]?.signedInAs
+                } else if local[space.id]?.profileID == space.profileID {
+                    // An echo of unchanged membership is not a manual detach
+                    // from the imported profile; a later Bring In still uses it.
+                    space.signedInAs = local[space.id]?.signedInAs
+                }
                 space.mutedSites = local[space.id]?.mutedSites
                 return space
             }
+            // Catch-up is paged: absence from the journal is not a deletion.
+            // In particular a renamed space may arrive after its pins. Keep
+            // its local session until an explicit tombstone says it is gone.
+            let known = Set(journal.all(SyncShapes.space).map(\.id))
+            fresh += Spaces.read().filter { !known.contains($0.id.uuidString) }
             // A remote deletion may remove Personal too. Keep one local
             // space only when the incoming list has none at all.
             if fresh.isEmpty {
@@ -1663,6 +1749,7 @@ final class SyncCenter: ObservableObject {
             }
             let tabs = fetched.tabs ?? journal.all(SyncShapes.tab), folders = fetched.folders ?? journal.all(SyncShapes.folder)
             let pairs = fetched.pairs ?? journal.all(SyncShapes.pair)
+            let held = Set(tabs.map(\.id))
             let localSpaces = Set(Spaces.read().map(\.id))
             let known = SharedPins.on ? localSpaces.union([Space.firstID]) : localSpaces
             // A tab gone to another space, a folder's with it, leaves the
@@ -1682,10 +1769,10 @@ final class SyncCenter: ObservableObject {
                     // Pairs pinned as one go to the pins' file with them (PinPairs.swift).
                     let pinPairs = SharedPins.pinPairs(shape)
                     if let primary {
-                        if !virtual { primary.adopt(rest, in: id) }
+                        if !virtual { primary.adopt(rest, in: id, held: held) }
                         else { Session.write(now: true, space: Space.pinsID, .init(tabs: pins, active: 0, pairs: pinPairs.isEmpty ? nil : pinPairs)) }
                         for window in SharedPins.windows(with: primary) where window.pinsShared {
-                            window.followPins(pins, addresses: true)
+                            window.followPins(pins, pairs: pinPairs, addresses: true)
                         }
                     } else {
                         if !virtual { Session.write(now: true, space: id, rest) }
@@ -1693,8 +1780,12 @@ final class SyncCenter: ObservableObject {
                     }
                     continue
                 }
-                if let primary { primary.adopt(shape, in: id) } else { Session.write(now: true, space: id, shape) }
+                if let primary { primary.adopt(shape, in: id, held: held) } else { Session.write(now: true, space: id, shape) }
             }
+            // The rows as drawn now are read back at once, so they are what
+            // the next difference is measured from (Journal's `shown`): a tab
+            // that just came and is closed right after still goes.
+            DispatchQueue.main.async { [weak self] in self?.changed(SyncShapes.tab) }
         }
 
         if by[SyncShapes.bookmark] != nil {
@@ -1866,7 +1957,11 @@ extension Browser {
     /// asleep, tabs closed elsewhere go, the rest take their new names,
     /// pins, folders and places. The page on screen keeps its address; an
     /// agent's tabs, private ones and a call stay where they are.
-    func adopt(_ shape: Session.Shape, in space: UUID) {
+    /// `held`: every tab record sync's journal has, removed ones too. A tab
+    /// here whose record it never had was never anywhere else, so nothing
+    /// closed it elsewhere: it stays, where it is. Nil: the shape is the
+    /// whole row (a snapshot put back).
+    func adopt(_ shape: Session.Shape, in space: UUID, held: Set<String>? = nil) {
         let onScreen = space == spaceID
         var row = onScreen ? tabs : parked[space]?.tabs ?? []
         let active = onScreen ? activeID : parked[space]?.active
@@ -1889,7 +1984,19 @@ extension Browser {
         // Gone elsewhere: closed here too, unless it never syncs. The shared
         // pins come as the first space's, and are followed apart from any
         // space's row (SharedPins.swift).
-        let synced = row.filter { !$0.shy && !$0.bench && !travels($0) && $0.everywhere == nil }
+        let syncing = row.filter { !$0.shy && !$0.bench && !travels($0) && $0.everywhere == nil }
+        // Not in the shape, and never in the journal: a tab opened here
+        // since this delivery read the rows, or one with no page sync writes
+        // yet (a link's new tab before its first address, a chrome:// page).
+        // Taken for closed elsewhere, it closed the moment it opened, the
+        // window landing on another tab (feedback #1877).
+        let unheld = held.map { held in
+            syncing.filter { tab in
+                let key = KeptEverywhere.key(tab).uuidString
+                return !wanted.contains(key) && !held.contains(key)
+            }
+        } ?? []
+        let synced = syncing.filter { tab in !unheld.contains { $0 === tab } }
         let closing = synced.filter { !wanted.contains(KeptEverywhere.key($0).uuidString) }
         var nextActive = active
         if let active, closing.contains(where: { $0.id == active }) {
@@ -1962,12 +2069,21 @@ extension Browser {
         }
         // What doesn't sync keeps its place at the end of the row, the
         // shared pins theirs at its head.
-        let staying = row.filter { !syncedIDs.contains($0.id) }
+        let staying = row.filter { tab in !syncedIDs.contains(tab.id) && !unheld.contains { $0 === tab } }
         for tab in closing {
             AgentPage.forget(tab)
             tab.close()
         }
-        row = staying.filter { $0.everywhere != nil } + made + staying.filter { $0.everywhere == nil }
+        var next = staying.filter { $0.everywhere != nil } + made + staying.filter { $0.everywhere == nil }
+        // One sync never had keeps its place: after the tab before it.
+        for tab in unheld {
+            let at = row.firstIndex { $0 === tab } ?? 0
+            let prior = row[..<at].last { earlier in next.contains { $0 === earlier } }
+            let index = prior.flatMap { prior in next.firstIndex { $0 === prior } }.map { $0 + 1 }
+                ?? staying.filter { $0.everywhere != nil }.count
+            next.insert(tab, at: index)
+        }
+        row = next
 
         // Pairs by the ids in the new row. A pair with a tab that doesn't
         // sync is this window's own, just as that tab is: an unrelated sync

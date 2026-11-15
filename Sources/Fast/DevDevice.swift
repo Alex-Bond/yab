@@ -181,6 +181,11 @@ extension Tab {
         let was = self.device
         self.device = device
         if remember { DevMemory.remember(device) }
+        if let chromium = builtPage as? ChromiumPage {
+            // Its size and scale come with the stage's next layout, as WebKit's do.
+            if device == nil { chromium.emulate(nil, scale: 1) }
+            return
+        }
         guard let web = webKitOnly("WebKit device emulation", build: false) else { return }
         if device?.userAgent != was?.userAgent { web.customUserAgent = device?.userAgent }
         if device == nil { DeviceStage.scale(web, 1) }

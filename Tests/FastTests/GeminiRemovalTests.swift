@@ -16,7 +16,7 @@ struct GeminiRemovalTests {
         // Discover without launching a provider or touching its profile.
         fixture.consent.revoke("gemini")
         let setup = AgentSetupModel(status: AgentSetup.Status(), consent: fixture.consent)
-        await setup.look(find: { Shell.Found(claude: nil, gemini: "/fixture/agy", env: [:]) },
+        await setup.look(find: { _ in Shell.Found(claude: nil, gemini: "/fixture/agy", env: [:]) },
                          readStatus: { AgentSetup.Status() })
         fixture.consent.grant("gemini")
         account.enabled = true
@@ -94,7 +94,7 @@ struct GeminiRemovalTests {
     @Test func missingCLIHasNoPermanentRowAndAddStartsSetup() async throws {
         try await world { setup, consent, _ in
             consent.revoke("gemini")
-            await setup.look(find: { Shell.Found(claude: nil, env: [:]) }, readStatus: { AgentSetup.Status() })
+            await setup.look(find: { _ in Shell.Found(claude: nil, env: [:]) }, readStatus: { AgentSetup.Status() })
             #expect(!setup.showsGemini)
             setup.addAccount("gemini", Browser(windowID: UUID()))
             #expect(setup.flow == .installing("gemini"))

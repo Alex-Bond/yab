@@ -2,14 +2,8 @@ import AppKit
 import Foundation
 import SQLite3
 
-// What the other browsers hold, counted for Bring In, kept a few minutes.
-//
-// Opening Settings counted every browser on this Mac afresh: Arc's
-// passwords, cards, bookmarks, its whole history and its cookies, read from
-// copies of its files, each time the window opened (row 1039). Now what was
-// counted is kept with the size and date of every file it came from, so
-// Settings opened again shows the card at once with what is known, and
-// only a count whose files changed is read again, off the main thread.
+// Counts and file stamps are available only inside an explicit import.
+// Discovery and Settings opening must not even stat credential paths.
 
 /// The parts of a browser that are counted apart, each from its own files.
 enum BringPart: String, CaseIterable, Sendable {
@@ -21,6 +15,7 @@ enum BringPart: String, CaseIterable, Sendable {
 /// count; reading them costs a few stat calls, never the file.
 enum BringStamp {
     static func stamps(_ source: Chromium.Source) -> [BringPart: String] {
+        guard source.credentialAccess else { return [:] }
         let profiles = source.profiles
         func each(_ names: [String]) -> [URL] {
             profiles.flatMap { profile in names.map { profile.appendingPathComponent($0) } }
@@ -75,6 +70,7 @@ struct BringTally {
 
     static func read(_ source: Chromium.Source, _ parts: Set<BringPart>) -> BringTally {
         var out = BringTally()
+        guard source.credentialAccess else { return out }
         if parts.contains(.passwords) { out.passwords = Chromium.loginCount(source) }
         if parts.contains(.wallet) {
             let wallet = Chromium.walletCount(source)

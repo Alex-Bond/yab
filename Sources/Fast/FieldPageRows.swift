@@ -291,13 +291,13 @@ extension Browser {
     /// Read the live document on each opening, including videos added since
     /// load. A late answer from a previous page never changes this field.
     func refreshPageRows(_ tab: Tab?) {
-        guard let tab, let web = tab.built, !tab.isBlank else { return }
+        guard let tab, let web = tab.builtPage, !tab.isBlank else { return }
         let address = tab.address
-        web.callAsyncQuietly("""
+        web.call("""
         return {video: !!document.querySelector('video'), language: document.documentElement.lang || '',
                 sample: (document.body?.innerText || '').slice(0, 2000)};
-        """, in: nil, in: Web.world) { [weak self, weak tab, weak web] result in
-            guard let self, let tab, tab.built === web, tab.address == address,
+        """, in: .yab, gesture: false) { [weak self, weak tab, weak web] result in
+            guard let self, let tab, tab.builtPage === web, tab.address == address,
                   let data = (try? result.get()) as? [String: Any] else { return }
             tab.fieldPageFacts = FieldPageFacts(address: address, video: data["video"] as? Bool == true,
                 language: FieldPageRows.language(data["language"] as? String ?? "", sample: data["sample"] as? String ?? ""))

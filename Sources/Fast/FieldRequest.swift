@@ -150,7 +150,7 @@ enum RequestReader {
         if let read = RequestModel.shared.answer(words) {
             // Jev may pick no site the words still name ("on clerk", out of
             // the dozen it was shown): the words' own then.
-            let host = read.host ?? RequestModel.tokens(words).lazy.filter { $0.count >= 4 }.compactMap { History.shared.host(named: $0) }.first
+            let host = read.host ?? RequestModel.tokens(words).lazy.filter { $0.count >= 4 }.compactMap { History.current.host(named: $0) }.first
             // A setting the words spell out ("compact sidebar"), even when
             // Jev took them for a search: a word of it typed, in a few words.
             var kind = read.kind
@@ -195,7 +195,7 @@ enum RequestReader {
         guard let verb = verbs.first(where: { lower.range(of: $0.value.pattern, options: .regularExpression) != nil }),
               let named = match(#"\b(?:on|in|at|from) ([a-z0-9][a-z0-9.-]+)\s*(?:,|$)"#, lower) ?? match(#"\b(?:on|in|at|from) ([a-z0-9][a-z0-9.-]+)\b"#, lower)
         else { return nil }
-        return Reading(kind: verb.key, host: History.shared.host(named: named), named: named)
+        return Reading(kind: verb.key, host: History.current.host(named: named), named: named)
     }
 
     static func build(_ reading: Reading, _ words: String, _ browser: Browser) -> FieldRequest? {
@@ -273,7 +273,7 @@ enum RequestReader {
         guard let repo = match(#"^(?:github )?issue (?:in |for )?([a-z0-9._-]+)\s*[:,-]"#, lower),
               let colon = words.firstIndex(where: { ":,-".contains($0) }) else { return nil }
         let title = words[words.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-        guard title.count >= 3, let path = History.shared.repo(named: repo) else { return nil }
+        guard title.count >= 3, let path = History.current.repo(named: repo) else { return nil }
         var url = URLComponents(string: "https://github.com/\(path)/issues/new")!
         url.queryItems = [URLQueryItem(name: "title", value: title)]
         return FieldRequest(title: "New issue in \(path)", site: "GitHub", symbol: "exclamationmark.circle", tint: .labelColor,
@@ -329,7 +329,7 @@ enum RequestReader {
         let site = reading.named.map { $0.contains(".") ? Address.siteName(host) : $0.prefix(1).uppercased() + $0.dropFirst() }
             ?? Address.siteName(host)
         var fields: [FieldRequest.Field] = [.init(label: "Asked", value: words, source: "your words")]
-        fields.append(.init(label: "Where", value: site, source: "you went there \(History.shared.count(host: host)) times"))
+        fields.append(.init(label: "Where", value: site, source: "you went there \(History.current.count(host: host)) times"))
         for check in verb.checks { fields.append(.init(label: check, value: "will check on \(site)", state: .check)) }
         let note = "Do it on \(host). Ask me only to sign in, to pay, or if the words can be read two ways; stop before anything that pays."
         let yours = verb.plan.lastIndex { $0.contains("yours") || $0.lowercased().hasPrefix("stop") }

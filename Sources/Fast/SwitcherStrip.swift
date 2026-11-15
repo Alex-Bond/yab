@@ -173,7 +173,7 @@ final class StripStageView: NSView {
         guard x >= 0, y >= 0, y <= SwitcherStrip.tile.height + SwitcherStrip.titleGap + SwitcherStrip.titleHeight else { return nil }
         let index = Int(x / step)
         guard held.indices.contains(index), x - CGFloat(index) * step <= SwitcherStrip.tile.width else { return nil }
-        return index
+        return switcher.visibleIndices.lowerBound + index
     }
 
     override func updateTrackingAreas() {
@@ -194,7 +194,7 @@ final class StripStageView: NSView {
     /// A click on a tile lands there.
     override func mouseUp(with event: NSEvent) {
         guard up, let index = tile(at: convert(event.locationInWindow, from: nil)) else { return }
-        browser.landSwitch(on: held[index])
+        browser.landSwitch(on: switcher.order[index])
     }
 
     override func layout() {
@@ -221,11 +221,11 @@ final class StripStageView: NSView {
         // that showing it starts animations and nothing else.
         if switcher.open, !switcher.order.isEmpty {
             if !up && !switcher.showing { dark = browser.active?.under == .dark }
-            held = switcher.order
+            held = switcher.visibleIndices.map { switcher.order[$0] }
             homes = switcher.homes
-            at = switcher.at
+            at = switcher.at - switcher.visibleIndices.lowerBound
             // One row: the up and down arrows go round it.
-            switcher.across = max(1, held.count)
+            switcher.across = Switcher.columns
             render()
         }
         if switcher.showing != up {

@@ -11,6 +11,23 @@ final class PinnedTabArtworkTests: XCTestCase {
         return try XCTUnwrap(renderer.uiImage)
     }
 
+    func testStackRedrawsWhenASyncedSiteIconArrives() throws {
+        let artwork = SyncFolderArtwork()
+        artwork.replace(account: "icons", icons: [])
+        let tab = Tab(id: "stack-site", title: "Example", site: "Example", icon: "example", url: "https://example.test")
+        let stack = TabStackView(frame: CGRect(x: 0, y: 0, width: 48, height: 48))
+        stack.show(front: tab, back: nil, pictures: 0, artwork: artwork, picture: { _ in nil })
+        let before = TabIcons.renders
+        let pixels = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).pngData { context in
+            UIColor.systemBlue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 24, height: 24))
+        }
+        let icon = try XCTUnwrap(SyncIcon(Record(collection: SyncCollection.icon, id: "site-stack.png",
+            fields: ["data": .string(pixels.base64EncodedString()), "origin": .string("https://example.test")])))
+        artwork.apply(account: "icons", id: icon.id, icon: icon)
+        stack.show(front: tab, back: nil, pictures: 0, artwork: artwork, picture: { _ in nil })
+        XCTAssertEqual(TabIcons.renders, before + 1)
+    }
+
     func testPinnedIconsUseTheMacDrawingEmojiAndUploadedImage() throws {
         let artwork = SyncFolderArtwork()
         let png = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { context in

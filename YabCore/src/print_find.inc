@@ -21,6 +21,8 @@ struct PDFStream {
   NSFileHandle* file = nil;
   NSString* request = nil;
   unsigned long long size = 0;
+  NSString* documentURL = nil;
+  uint64_t generation = 0;
 };
 static std::map<std::string, PDFStream> pdfStreams;
 static void ClosePDFStream(std::string token, bool dispatch = true) {
@@ -98,7 +100,64 @@ class NativePDFDone final : public CefPdfPrintCallback {
   IMPLEMENT_REFCOUNTING(NativePDFDone);
 };
 #endif
+static bool PDFSourceCurrent(const Tab& tab,uint64_t generation,NSString* url) {
+  if(tab.closing || !tab.browser || tab.documentGeneration!=generation)return false;
+  auto frame=tab.browser->GetMainFrame();
+  return frame && [Str(frame->GetURL()) isEqual:url];
+}
 static bool PrintFindRequest(Tab& tab, NSString* method, NSDictionary* p, NSString* request) {
+  if ([method isEqual:@"page.pdf.source"]) {
+    const std::string id = tab.id;
+    const uint64_t generation = tab.documentGeneration;
+    NSString* token=S(p,@"stream");
+    if(![[NSUUID alloc] initWithUUIDString:token] || pdfStreams.count(Key(token))) {
+      Reply(request,nil,@"PDF source requires a fresh stream identity");return true;
+    }
+    auto frame=tab.browser ? tab.browser->GetMainFrame() : nullptr;
+    if(!frame || tab.closing) { Reply(request,nil,@"PDF document is no longer available");return true; }
+    NSString* url = Str(frame->GetURL());
+    NSURL* address = [NSURL URLWithString:url];
+    NSString* scheme = address.scheme.lowercaseString;
+    if ([scheme isEqual:@"file"]) {
+      NSError* error = nil;
+      NSFileHandle* file = [NSFileHandle fileHandleForReadingFromURL:address error:&error];
+      NSNumber* size = nil;
+      [address getResourceValue:&size forKey:NSURLFileSizeKey error:&error];
+      if (!file || error || !size) { [file closeFile]; Reply(request,nil,error.localizedDescription ?: @"PDF file is unavailable"); return true; }
+      PDFStream stream{id,nil}; stream.file=file; stream.size=size.unsignedLongLongValue;
+      stream.documentURL=url; stream.generation=generation;
+      pdfStreams.emplace(Key(token),std::move(stream));
+      Reply(request,@{@"stream":token,@"url":url}); return true;
+    }
+    if ((! [scheme isEqual:@"https"] && ![scheme isEqual:@"http"]) || address.user || address.password) {
+      Reply(request,nil,@"The PDF source must be the current HTTP(S) document or local file"); return true;
+    }
+    if(!tab.scripts.mainFrame.length) { Reply(request,nil,@"PDF document has no current network frame");return true; }
+    PDFStream pending{id,nil};pending.documentURL=url;pending.generation=generation;pending.request=request;
+    pdfStreams.emplace(Key(token),std::move(pending));
+    CDP(tab,@"Network.loadNetworkResource",@{@"frameId":tab.scripts.mainFrame,
+        @"url":url,@"options":@{@"disableCache":@NO,@"includeCredentials":@YES}},
+      [id,generation,url,token,request](NSDictionary* result,NSString* error) {
+        auto current=tabs.find(id);
+        NSDictionary* resource=result[@"resource"];
+        NSString* handle=S(resource,@"stream");
+        bool live=current!=tabs.end() && PDFSourceCurrent(current->second,generation,url);
+        auto stream=pdfStreams.find(Key(token));
+        if(stream==pdfStreams.end()) {
+          if(handle.length && current!=tabs.end())CDP(current->second,@"IO.close",@{@"handle":handle},Ignore);
+          return; // Closing/navigation already retired the pending reply.
+        }
+        stream->second.request=nil;
+        if(error || !live || ![resource[@"success"] boolValue] || !handle.length) {
+          if(handle.length && current!=tabs.end())CDP(current->second,@"IO.close",@{@"handle":handle},Ignore);
+          ClosePDFStream(Key(token));
+          Reply(request,nil,error ?: @"PDF source changed or its network response is unavailable"); return;
+        }
+        stream->second.handle=handle;
+        Reply(request,@{@"stream":token,@"url":url});
+      });
+    return true;
+  }
   if ([method isEqual:@"print.source.release"]) {
 #if YABCORE_NATIVE_PRINT_SOURCE
     NSString* source=S(p,@"source");
@@ -129,7 +188,17 @@ static bool PrintFindRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
     return true;
   }
   if ([method isEqual:@"page.printPDF"]) {
-    if (pdfStreams.size() >= 16) { Reply(request, nil, @"Too many open PDF streams"); return true; }
+    // No count of streams: each belongs to its tab and goes when read, closed
+    // or the tab closes; DevTools' IO streams have no count either.
+    // As Chromium prints by default: the sheet's paper (Letter when unsaid),
+    // 1 cm margins and 100% scale. Half an inch here, then the sheet's own
+    // inch around a page fitted inside it, cut the edges of a receipt (#2001).
+    auto inches = [&](NSString* key, double fallback) {
+      NSNumber* value = [p[key] isKindOfClass:NSNumber.class] ? p[key] : nil;
+      double v = value ? value.doubleValue : fallback;
+      return std::isfinite(v) && v >= 1 && v <= 50 ? v : fallback;
+    };
+    const double paperWidth = inches(@"paperWidth", 8.5), paperHeight = inches(@"paperHeight", 11), margin = 1 / 2.54;
     if (p[@"printSource"]) {
 #if YABCORE_NATIVE_PRINT_SOURCE
       NSString* source=S(p,@"printSource");
@@ -144,9 +213,9 @@ static bool PrintFindRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
       NSString* path=[directory stringByAppendingPathComponent:@"original.pdf"];
       PDFStream stream{tab.id,nil};stream.source=source;stream.directory=directory;stream.path=path;stream.request=request;
       pdfStreams.emplace(Key(token),std::move(stream));
-      CefPdfPrintSettings settings;settings.print_background=true;settings.paper_width=8.5;settings.paper_height=11;
-      settings.margin_type=PDF_PRINT_MARGIN_CUSTOM;settings.margin_top=.5;settings.margin_bottom=.5;
-      settings.margin_left=.5;settings.margin_right=.5;
+      CefPdfPrintSettings settings;settings.print_background=true;settings.paper_width=paperWidth;settings.paper_height=paperHeight;
+      settings.margin_type=PDF_PRINT_MARGIN_CUSTOM;settings.margin_top=margin;settings.margin_bottom=margin;
+      settings.margin_left=margin;settings.margin_right=margin;
       bool accepted=tab.browser->GetHost()->PrintNativeSourceToPDF(Key(source),Key(path),settings,new NativePDFDone(Key(token)));
       if(!accepted)ClosePDFStream(Key(token));
 #else
@@ -156,8 +225,8 @@ static bool PrintFindRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
     }
     std::string id = tab.id;
     CDP(tab, @"Page.printToPDF", @{@"transferMode": @"ReturnAsStream", @"printBackground": @YES,
-        @"paperWidth": @8.5, @"paperHeight": @11, @"marginTop": @0.5, @"marginBottom": @0.5,
-        @"marginLeft": @0.5, @"marginRight": @0.5, @"preferCSSPageSize": @NO},
+        @"paperWidth": @(paperWidth), @"paperHeight": @(paperHeight), @"marginTop": @(margin), @"marginBottom": @(margin),
+        @"marginLeft": @(margin), @"marginRight": @(margin), @"scale": @1, @"preferCSSPageSize": @NO},
       [id, request](NSDictionary* result, NSString* error) {
         auto current = tabs.find(id);
         NSString* handle = S(result, @"stream");
@@ -173,7 +242,13 @@ static bool PrintFindRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
   auto stream = pdfStreams.find(token);
   if (stream == pdfStreams.end() || stream->second.tab != tab.id) { Reply(request, nil, @"Unknown PDF stream"); return true; }
   if ([method isEqual:@"page.pdf.close"]) { ClosePDFStream(token); Reply(request); return true; }
-  if(stream->second.directory) {
+  if (stream->second.documentURL && !PDFSourceCurrent(tab,stream->second.generation,stream->second.documentURL)) {
+    ClosePDFStream(token);Reply(request,nil,@"PDF document changed during its read");return true;
+  }
+  if(stream->second.documentURL && stream->second.request) {
+    Reply(request,nil,@"PDF source is still opening");return true;
+  }
+  if(stream->second.directory || stream->second.file) {
     auto& file=stream->second;
     if(!file.file || file.request) {Reply(request,nil,@"Native PDF export has not completed");return true;}
     NSError* error=nil;
@@ -190,6 +265,12 @@ static bool PrintFindRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
     [token, request](NSDictionary* result, NSString* error) {
       auto stream = pdfStreams.find(token);
       if (stream == pdfStreams.end()) { Reply(request, nil, @"PDF stream closed"); return; }
+      if(stream->second.documentURL) {
+        auto tab=tabs.find(stream->second.tab);
+        if(tab==tabs.end() || !PDFSourceCurrent(tab->second,stream->second.generation,stream->second.documentURL)) {
+          ClosePDFStream(token);Reply(request,nil,@"PDF document changed during its read");return;
+        }
+      }
       stream->second.bytes += [S(result, @"data") length];
       if (error || stream->second.bytes > 90 * 1024 * 1024) {
         ClosePDFStream(token); Reply(request, nil, error ?: @"Printed PDF exceeds the stream limit"); return;

@@ -118,6 +118,7 @@ final class QuestionAnchor {
         let frame = placement.frame.insetBy(dx: -12, dy: -12)
         if panel.frame != frame { panel.setFrame(frame, display: panel.isVisible) }
         if !panel.isVisible {
+            panel.prepareFirstResponder()
             panel.orderFront(nil)
             // The helper is the active app while its code is up, so a key
             // panel alone gets no keys: bring Yab forward once, and the code
@@ -135,6 +136,28 @@ final class QuestionAnchor {
 final class QuestionAnchorPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// The card's field is the view AppKit makes first responder as the
+    /// panel first goes on screen (`-[NSWindow _setUpFirstResponder]`, from
+    /// ordering it in), its `initialFirstResponder`; SwiftUI's half is the
+    /// strip's `defaultFocus` (ApplePasswordsPairing.CodeStrip). Left to
+    /// them, both took the first item of the key loop, which with keyboard
+    /// navigation on is the Not Now button, so the code typed went nowhere
+    /// until a click on the strip (R2564). A panel keeps its first
+    /// responder each time it becomes key again, as when Yab comes back to
+    /// the front.
+    func prepareFirstResponder() {
+        guard initialFirstResponder == nil, let content = contentView else { return }
+        initialFirstResponder = Self.field(in: content)
+    }
+
+    static func field(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable, !field.isHiddenOrHasHiddenAncestor { return field }
+        for child in view.subviews {
+            if let field = field(in: child) { return field }
+        }
+        return nil
+    }
 }
 
 @MainActor

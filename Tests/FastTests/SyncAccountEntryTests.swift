@@ -211,6 +211,35 @@ struct SyncAccountEntryTests {
         #expect(box.unexpected == 0)
     }
 
+    @Test func lettingInFirstKeepsTheJoiningMacsOwnConfirmationVisible() async throws {
+        let world = try World()
+        defer { world.restore() }
+        let box = HeldPairing()
+        let account = Account()
+        let center = account.center(box)
+        defer { center.stopAsking(); box.finish() }
+        center.startSyncing()
+        let original = center.account
+        center.askToJoin(invite: "K7QM-4XTD")
+        let joining = try #require(center.joining)
+        let digits = try #require(center.joiningCheck)
+        let end = Date().addingTimeInterval(30)
+        while !box.isWaiting(joining), Date() < end { try await Task.sleep(for: .milliseconds(10)) }
+        try #require(box.isWaiting(joining))
+        try box.answer(joining, with: Seal.make())
+        await drainMainQueue()
+
+        #expect(center.awaitingJoinConfirmation)
+        #expect(center.joiningInvited && center.joining?.code == joining.code)
+        #expect(center.joiningCheck == digits, "Join must remain reachable after the host's Let In")
+        #expect(!center.joinAgreed && center.account == original)
+        #expect(account.kept.count == 1 && account.activated.count == 1,
+                "The host's yes alone must not change this Mac's account")
+        center.stopAsking()
+        #expect(center.joiningCheck == nil && !center.awaitingJoinConfirmation)
+        #expect(center.account == original, "Cancel leaves this Mac's account intact")
+    }
+
     private func ask(_ center: SyncCenter, _ box: HeldPairing) async throws -> Joining {
         center.askToJoin()
         let joining = try #require(center.joining)

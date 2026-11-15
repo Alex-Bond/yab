@@ -585,12 +585,19 @@ enum ContextConsent {
         return Agents.shared.setUpMemory(grant: grant)
     }
 
+    /// Verbs that only report a task's own state and result to whoever
+    /// started it (`yab "…"`, `yab session resume`). They read no page,
+    /// history or memory, so a task that has ended, and so lost its
+    /// admission, still answers them with its result.
+    static let watching: Set<String> = ["agent-wait"]
+
     /// Pure metadata check before any tab lookup, cookies, JS or remote reader.
     static func preflight(_ request: [String: Any], lookup: ((String) -> Agents.Session?)? = nil) -> String? {
         guard let id = request["session"] as? String else { return nil }
         let known: Agents.Session?
         if let lookup { known = lookup(id) } else { known = Agents.shared.session(id) }
         guard let session = known else { return "This task is no longer available." }
+        if watching.contains(request["do"] as? String ?? ""), !session.knowing, !session.memoryOnly { return nil }
         guard (session.state.live || session.remembering), session.admission.valid else { return "This task's permission expired. Start a new task." }
         if session.memoryEpoch != ContextPrivacy.shared.epoch { return "This context was cleared. Start a new task." }
         let verb = request["do"] as? String ?? ""

@@ -50,18 +50,17 @@ struct AppearanceScriptTests {
             fonts.size = size
             PageAppearance.install(fonts, in: controller)
             let scripts = controller.userScripts
-            try #require(scripts.count == injected.count + 2,
+            // 16 is the default: no fonts of one's own, no script for them.
+            try #require(scripts.count == injected.count + (size == 16 ? 1 : 2),
                          "Repeated updates must not accumulate extension scripts")
             #expect(scripts.contains { $0 === sentinel })
             for script in injected {
                 #expect(scripts.filter { $0 === script }.count == 1)
             }
             let appearance = scripts.filter { $0.source.hasPrefix(PageAppearance.marker) }
-            #expect(appearance.count == 1)
+            #expect(appearance.count == (size == 16 ? 0 : 1))
             // The script embeds a JSON dictionary whose key order can vary.
-            if size == 16 {
-                #expect(appearance.first?.source.contains("font-size:") == false)
-            } else {
+            if size != 16 {
                 #expect(appearance.first?.source.contains("font-size: \(size)px") == true)
             }
         }

@@ -78,6 +78,9 @@ enum PageSave {
                 }
             }
         case "png":
+            if let chromium = tab.page as? ChromiumPage {
+                return chromiumPicture(chromium, write: write, done: done)
+            }
             tab.page.pdf(rect: nil) { result in
                 MainActor.assumeIsolated {
                     guard case .success(let data) = result else {
@@ -106,6 +109,24 @@ enum PageSave {
                     done(.failure(error))
                 }
             }
+        }
+    }
+
+    /// Chromium's printed pages are sheets, not one long page: the document
+    /// is drawn whole for this picture instead.
+    private static func chromiumPicture(_ page: ChromiumPage, write: @escaping (Data) -> Void, done: @escaping @MainActor (Result<URL, Error>) -> Void) {
+        Task { @MainActor in
+            do {
+                let sizes = try await page.run("[document.documentElement.scrollWidth, document.documentElement.scrollHeight, window.scrollX, window.scrollY]", in: .yab, gesture: false) as? [Double] ?? []
+                guard sizes.count == 4 else { throw Failure("Couldn\u{2019}t draw the page as a picture") }
+                let zoom = page.pageZoom * page.magnification
+                let rect = CGRect(x: -sizes[2] * zoom, y: -sizes[3] * zoom, width: max(sizes[0] * zoom, 1), height: max(sizes[1] * zoom, 1))
+                let image = try await page.snapshot(PageShot(rect: rect, afterUpdates: false))
+                guard let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+                    throw Failure("Couldn\u{2019}t draw the page as a picture")
+                }
+                write(png)
+            } catch { done(.failure(error)) }
         }
     }
 

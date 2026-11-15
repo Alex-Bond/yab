@@ -32,7 +32,7 @@ struct DiaProfilesTests {
         try JSONSerialization.data(withJSONObject: ["version": 1, "containers": containers])
             .write(to: root.appendingPathComponent("StorableProfileContainers.json"))
         let source = Chromium.Source(name: "Dia", folder: "Dia/User Data", service: "", account: "", bundle: TabImport.dia, dataRoot: data)
-        return (root, source)
+        return (root, source.authorizingImport())
     }
 
     /// A browser with one shared space on screen and nothing brought before.
@@ -150,6 +150,23 @@ struct DiaProfilesTests {
         let made = browser.spaces.filter { $0.signedInAs?.hasPrefix("Dia:") == true }
         #expect(Set(made.compactMap(\.signedInAs)) == ["Dia:Profile 1", "Dia:Profile 2"])
         #expect(made.allSatisfy { $0.ownSignIns })
+        #expect(browser.profileSpaces(from: source) == 0)
+    }
+
+    @Test(arguments: [true, false]) func systemAndGuestProfilesNeverBecomeSpaces(_ named: Bool) throws {
+        guard Store.testing else { return }
+        let previous = Spaces.read(), sharing = Spaces.sharing
+        let (browser, _) = browser()
+        let (root, source) = try fixture(profiles: ["Default": "Personal", "Profile 1": "Work",
+                                                   "System Profile": "SYSTEM_PROFILE", "Guest Profile": "Guest"], tabs: [:])
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            for space in browser.spaces where !space.isFirst { Session.erase(space: space.id) }
+            Spaces.write(previous); Spaces.sharing = sharing
+        }
+        if !named { try FileManager.default.removeItem(at: source.root.appendingPathComponent("Local State")) }
+        #expect(browser.profileSpaces(from: source) == 1)
+        #expect(browser.spaces.filter { $0.signedInAs?.hasPrefix("Dia:") == true }.compactMap(\.signedInAs) == ["Dia:Profile 1"])
         #expect(browser.profileSpaces(from: source) == 0)
     }
 

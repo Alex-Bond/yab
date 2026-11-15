@@ -304,7 +304,7 @@ final class GoingBackTests: XCTestCase {
         app.terminate()
         app.launch()
         // A fresh profile is a first run: the welcome stands over the page.
-        let notNow = app.buttons["welcome.start"]
+        let notNow = app.buttons["welcome.skip"]
         let input = app.textFields["field.input"]
         XCTAssertTrue(notNow.waitForExistence(timeout: 15))
         app.passWelcome()

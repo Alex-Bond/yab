@@ -27,7 +27,7 @@ final class SleepHush {
     /// Every page view there is (PageView registers itself), weakly.
     let pages = NSHashTable<WKWebView>.weakObjects()
     /// What pausing a page does; a stand-in for tests.
-    var pause: (WKWebView) -> Void = { $0.pauseAllMediaPlayback(completionHandler: nil) }
+    var pause: (WKWebView) -> Void = { $0.pauseAllMediaPlayback(completionHandler: {}) }
     /// Only attached remote pages: reading this list never starts a helper
     /// or wakes a sleeping tab. ChromiumProcess keeps its entries weakly.
     var remotePages: () -> [ChromiumPage] = { ChromiumProcess.shared.livePages }

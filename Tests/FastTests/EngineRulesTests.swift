@@ -24,9 +24,9 @@ struct EngineRulesTests {
     }
 
     @Test func autoSparesMemoryOnlyForChromiumWithNoRule() {
-        // Auto, memory tight: WebKit.
+        // Auto, memory tight: still Chromium. Auto sends only the built-in rules' sites to WebKit.
         #expect(EngineRules.decide(held: nil, own: .recommended, builtIn: nil, base: .chromium, auto: true, tight: true)
-                == EngineDecision(kind: .webKit, source: .spared))
+                == EngineDecision(kind: .chromium, source: .standard))
         // Chromium picked by name ignores memory.
         #expect(EngineRules.decide(held: nil, own: .recommended, builtIn: nil, base: .chromium, auto: false, tight: true).kind == .chromium)
         // A rule wins over memory, both ways.
@@ -46,6 +46,10 @@ struct EngineRulesTests {
         #expect(sites.builtIn(for: URL(string: "https://chromewebstore.google.com/detail/x")!)?.kind == .chromium)
         #expect(sites.builtIn(for: URL(string: "https://checkout.stripe.com/pay/1")!)?.rule == "applepay")
         #expect(sites.builtIn(for: URL(string: "https://notnetflix.com/")!) == nil)
+        // Crunchyroll's player needs Widevine, which Yab's Chromium lacks (register 1394).
+        let crunchyroll = sites.builtIn(for: URL(string: "https://www.crunchyroll.com/watch/G4VUQ1ZKW")!)
+        #expect(crunchyroll?.rule == "crunchyroll" && crunchyroll?.kind == .webKit)
+        #expect(ChromiumDRM.requiresWebKit(URL(string: "https://static.crunchyroll.com/")!))
         let rule = EngineBuiltInRule.all.first { $0.id == "netflix" }!
         sites.set(.chromium, for: rule)
         #expect(sites.builtIn(for: netflix)?.kind == .chromium)
@@ -77,10 +81,57 @@ struct EngineRulesTests {
         defer { done() }
         let plain = URL(string: "https://plain.test/")!
         #expect(sites.auto)
-        #expect(sites.decide(.chromium, at: plain, tight: true).kind == .webKit)
+        #expect(sites.decide(.chromium, at: plain, tight: true).kind == .chromium)
         sites.store.set("chromium", forKey: EngineRules.defaultKey)
         #expect(!sites.auto)
         #expect(sites.decide(.chromium, at: plain, tight: true).kind == .chromium)
+    }
+
+    @Test func webKitFirstMovesOnlyATabWithNoRuleWhileMemoryIsTight() {
+        func first(own: SiteEngineChoice = .recommended, builtIn: (rule: String, kind: PageEngineKind)? = nil,
+                   held: PageEngineKind? = nil, tight: Bool = true) -> EngineDecision {
+            EngineRules.decide(held: held, own: own, builtIn: builtIn, base: .webKit, auto: false, webKitFirst: true, tight: tight)
+        }
+        #expect(first(tight: false) == EngineDecision(kind: .webKit, source: .standard))
+        #expect(first() == EngineDecision(kind: .chromium, source: .spared))
+        // Rules win, both ways: Spotify and the like stay on WebKit.
+        #expect(first(builtIn: (rule: "spotify", kind: .webKit)) == EngineDecision(kind: .webKit, source: .builtIn("spotify")))
+        #expect(first(own: .webKit) == EngineDecision(kind: .webKit, source: .own))
+        #expect(first(held: .webKit) == EngineDecision(kind: .webKit, source: .tab))
+        #expect(first(builtIn: (rule: "chromewebstore", kind: .chromium)).source == .builtIn("chromewebstore"))
+        // A tab on Chromium by its own history stays there: only Auto goes the other way.
+        #expect(EngineRules.decide(held: nil, own: .recommended, builtIn: nil, base: .chromium, auto: false, webKitFirst: true,
+                                   tight: true) == EngineDecision(kind: .chromium, source: .standard))
+    }
+
+    @Test func webKitFirstReadsFromTheStoredName() {
+        let (sites, done) = world()
+        defer { done() }
+        let plain = URL(string: "https://plain.test/")!
+        sites.store.set(EngineDefault.webKitFirst.rawValue, forKey: EngineRules.defaultKey)
+        #expect(sites.webKitFirst && !sites.auto)
+        #expect(sites.decide(.webKit, at: plain, tight: true) == EngineDecision(kind: .chromium, source: .spared))
+        #expect(sites.decide(.webKit, at: plain, tight: false) == EngineDecision(kind: .webKit, source: .standard))
+        #expect(sites.decide(.webKit, at: URL(string: "https://open.spotify.com/")!, tight: true).kind == .webKit)
+        // WebKit picked by name keeps the old stored value and looks at nothing.
+        sites.store.set(EngineDefault.auto.rawValue, forKey: EngineRules.defaultKey)
+        #expect(sites.decide(.webKit, at: plain, tight: true) == EngineDecision(kind: .webKit, source: .standard))
+    }
+
+    @Test func theMenuNamesWebKitFirstAndEachChoiceHasItsEngine() {
+        #expect(EngineDefault.allCases.map(\.title) == ["Auto", "WebKit", "WebKit First", "Chromium"])
+        #expect(EngineDefault.allCases.map(\.base) == [.chromium, .webKit, .webKit, .chromium])
+    }
+
+    @Test func aRestoredSessionTakesTheDefaultOnWebPagesOnly() {
+        // A session from a WebKit-only version: no engine, so saved is WebKit.
+        let page = URL(string: "https://plain.test/")!, own = URL(string: "chrome-extension://abc/page.html")!
+        #expect(EngineRules.restored(saved: .webKit, url: page, standard: .chromium) == .chromium)
+        #expect(EngineRules.restored(saved: .webKit, url: nil, standard: .chromium) == .chromium)
+        #expect(EngineRules.restored(saved: .webKit, url: own, standard: .chromium) == .webKit)
+        #expect(EngineRules.restored(saved: .webKit, url: page, standard: nil) == .webKit)
+        // A tab that memory moved comes back on the default, memory looked at anew.
+        #expect(EngineRules.restored(saved: .chromium, url: page, standard: .webKit) == .webKit)
     }
 
     @Test func factoryKeepsWebKitWithoutChromium() {

@@ -8,9 +8,14 @@ import Observation
 @MainActor
 @Observable
 final class BrowserStore {
-    private(set) var spaces: [Space]
+    private(set) var spaces: [Space] { didSet { revision &+= 1 } }
     /// The space in front.
-    private(set) var spaceID: Space.ID
+    private(set) var spaceID: Space.ID { didSet { revision &+= 1 } }
+    /// Counts every change to the spaces and the space in front: what is
+    /// worked out from them (New Tab's content, the profile's capture, the
+    /// lookups below) keys on it instead of comparing every tab again.
+    private(set) var revision = 0
+    @ObservationIgnored private var lookup: Lookup?
     /// The ordinary place to return to when opening the eyes in Private.
     private(set) var ordinarySpaceID: Space.ID
     private let fixturesEnabled: Bool
@@ -63,7 +68,32 @@ final class BrowserStore {
     var allTabs: [Tab] { spaces.flatMap(\.allTabs) }
 
     /// The tab in front on the Mac, in any space.
-    var onMac: Tab? { allTabs.first { $0.onMac } }
+    var onMac: Tab? { lookups.onMac }
+
+    /// The first public tab showing an address, in `allTabs`' order. New
+    /// Tab asks this for each of its rows on every draw; scanning every tab
+    /// of every space for each one kept a launch busy until iOS ended it.
+    func openTab(at url: String) -> Tab? { lookups.byURL[url] }
+
+    private struct Lookup {
+        var revision: Int
+        var onMac: Tab?
+        var byURL: [String: Tab]
+    }
+
+    /// Made once per revision. Reading `revision` keeps a view that asks
+    /// this observing the spaces, as reading them did.
+    private var lookups: Lookup {
+        if let lookup, lookup.revision == revision { return lookup }
+        var made = Lookup(revision: revision, onMac: nil, byURL: [:])
+        for tab in allTabs {
+            if made.onMac == nil, tab.onMac { made.onMac = tab }
+            guard !tab.isPrivate, let url = tab.navigationURL?.absoluteString, made.byURL[url] == nil else { continue }
+            made.byURL[url] = tab
+        }
+        lookup = made
+        return made
+    }
 
     /// The tabs a swipe on the plate pages through, in the space in front.
     var pagingOrder: [Tab] { space.pagingOrder }
@@ -79,6 +109,7 @@ final class BrowserStore {
 
     /// Shows a tab, wherever it is: its space comes in front and its folder opens.
     func select(_ id: Tab.ID) {
+        Links.trace("select \(id) previous=\(tab?.id ?? "nil")")
         guard let owner = space(holding: id), let i = spaces.firstIndex(where: { $0.id == owner.id }) else { return }
         guard permitEntry(to: owner, then: { [weak self] in self?.select(id) }) else { return }
         spaces[i].current = id
@@ -147,7 +178,7 @@ final class BrowserStore {
     /// Changing sign-ins reloads pages in the same space; it never moves tabs.
     func setSpaceSignIns(_ id: Space.ID, own: Bool) {
         guard let space = space(id), !space.isPrivate, space.ownSignIns != own else { return }
-        edit(id) { $0.ownSignIns = own }
+        edit(id) { $0.ownSignIns = own; $0.signInWith = nil }
         if macAsleep { pendingForMac += 1 }
     }
 
@@ -289,6 +320,7 @@ final class BrowserStore {
     /// same on the Mac, M7): an address the space already has brings that
     /// row up instead, to the top of today's if it is one of them.
     func open(_ tab: Tab, in space: Space.ID? = nil, deduplicate: Bool = true) {
+        Links.trace("open tab=\(tab.id) url=\(tab.address)")
         var target = space ?? spaceID
         var tab = tab
         if tab.isPrivate && self.space(target)?.isPrivate != true { target = privateSpaceID() }
@@ -423,13 +455,6 @@ final class BrowserStore {
         edit(owner.id) { space in
             if space.current == id { space.current = Self.heir(of: id, in: space) }
         }
-    }
-
-    /// Nothing in front: the empty screen a phone shows before anything is
-    /// opened. The first run ends there, with the Mac's tabs kept where they
-    /// are and shown as rows, not as a page (Welcome/FirstRun.toEnd).
-    func showNothing() {
-        edit(space.id) { $0.current = nil }
     }
 
     /// Where a tab stands in its space, for Undo after a close.

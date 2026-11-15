@@ -1,0 +1,84 @@
+diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
+index 552bacd..5fdf344 100644
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -107,6 +107,20 @@ namespace extensions {
+ 
+ namespace {
+ 
++// Yab: |candidate| is |profile|, or with |include_incognito| any
++// off-the-record profile of it. Chrome has one, the primary; Yab's private
++// windows are each their own unique off-the-record profile of a space's
++// profile (CEF 0092), and a spanning extension allowed in private tabs must
++// find their windows and tabs as Chrome's finds its incognito ones.
++bool IsProfileOrPrivateSide(const Profile* candidate, const Profile* profile,
++                            bool include_incognito) {
++  if (!candidate || !profile) return false;
++  if (candidate == profile) return true;
++  return include_incognito && candidate->IsOffTheRecord() &&
++         !profile->IsOffTheRecord() &&
++         candidate->GetOriginalProfile() == profile;
++}
++
+ // Whether to disable tab list editing for testing purposes.
+ bool g_disable_tab_list_editing_for_testing = false;
+ 
+@@ -331,7 +345,9 @@ WindowController* ExtensionTabUtil::GetControllerInProfileWithId(
+        *WindowControllerList::GetInstance()) {
+     const Profile* controller_profile = window_controller->profile();
+     if ((controller_profile == profile ||
+-         controller_profile == incognito_profile) &&
++         controller_profile == incognito_profile ||
++         IsProfileOrPrivateSide(controller_profile, profile,
++                                also_match_incognito_profile)) &&
+         window_controller->GetWindowId() == window_id) {
+       return window_controller;
+     }
+@@ -666,7 +682,8 @@ bool ExtensionTabUtil::GetTabById(int tab_id,
+     bool is_alive = window->GetBrowserWindowInterface() &&
+                     !window->GetBrowserWindowInterface()->IsDeleteScheduled();
+     bool profile_matches =
+-        window->profile() == profile || window->profile() == incognito_profile;
++        window->profile() == profile || window->profile() == incognito_profile ||
++        IsProfileOrPrivateSide(window->profile(), profile, include_incognito);
+     if (!is_alive || !profile_matches) {
+       continue;
+     }
+@@ -805,7 +822,9 @@ bool ExtensionTabUtil::GetGroupById(
+           : nullptr;
+   for (WindowController* target_window : *WindowControllerList::GetInstance()) {
+     if (target_window->profile() != profile &&
+-        target_window->profile() != incognito_profile) {
++        target_window->profile() != incognito_profile &&
++        !IsProfileOrPrivateSide(target_window->profile(), profile,
++                                include_incognito)) {
+       continue;
+     }
+     BrowserWindowInterface* target_browser =
+@@ -881,7 +900,9 @@ bool ExtensionTabUtil::GetSplitById(int split_id,
+           : nullptr;
+   for (WindowController* target_window : *WindowControllerList::GetInstance()) {
+     if (target_window->profile() != profile &&
+-        target_window->profile() != incognito_profile) {
++        target_window->profile() != incognito_profile &&
++        !IsProfileOrPrivateSide(target_window->profile(), profile,
++                                include_incognito)) {
+       continue;
+     }
+     BrowserWindowInterface* target_browser =
+@@ -1050,11 +1071,13 @@ ExtensionTabUtil::GetAllActiveWebContentsForContext(
+           ? profile->GetPrimaryOTRProfile(/*create_if_needed=*/false)
+           : nullptr;
+   ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+-      [profile, incognito_profile,
++      [profile, incognito_profile, include_incognito,
+        &active_contents](BrowserWindowInterface* browser) {
+         const Profile* browser_profile = browser->GetProfile();
+         if (browser_profile == profile ||
+-            browser_profile == incognito_profile) {
++            browser_profile == incognito_profile ||
++            IsProfileOrPrivateSide(browser_profile, profile,
++                                   include_incognito)) {
+           TabListInterface* tab_list = TabListInterface::From(browser);
+           if (tab_list) {
+             content::WebContents* tab_contents =

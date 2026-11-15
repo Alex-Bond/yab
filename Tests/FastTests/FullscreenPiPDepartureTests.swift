@@ -205,7 +205,8 @@ struct FullscreenPiPDepartureTests {
         let tab = try await f.page("app-\(state)")
         f.browser.activeID = tab.id
         tab.noisy = true
-        try await f.js(tab, "__policy.answer='fallback'")
+        try await f.js(tab, "__policy.hold='pip'")
+        let picture = try f.picture(tab)
         try f.set(tab, mode: .ordinary, onSpace: true, sourceOnSpace: true, usable: false,
                   sourceHidden: state == "hidden", sourceMinimized: state == "minimized")
         let leave = state == "hidden" ? NSApplication.didHideNotification : NSWindow.didMiniaturizeNotification
@@ -214,10 +215,14 @@ struct FullscreenPiPDepartureTests {
         NotificationCenter.default.post(name: leave, object: object)
         #expect(f.pending.count == 1)
         try f.fire()
+        try #require(try await f.wait(tab, "pip", 1))
+        f.browser.webView(requireNativeWebKitFixture(tab, "FullscreenPiPDepartureTests"), hasVideoInPictureInPictureDidChange: true)
+        try #require(f.browser.take(picture))
+        try await f.js(tab, "__policy.resolve('pip')")
         let installed = try await Loaded.until(8) { f.browser.floating == tab.id && f.browser.floater.showing }
         try #require(installed)
         #expect(try await f.count(tab, "pip") == 1)
-        #expect(try await f.count(tab, "on") == 1)
+        #expect(try await f.count(tab, "on") == 0)
         // Activation of another Yab window, or pausing the floated video,
         // does not return to the still hidden/minimized source.
         tab.noisy = false
@@ -297,7 +302,7 @@ struct FullscreenPiPDepartureTests {
         #expect(try await f.count(tab, "pip") == 0)
     }
 
-    @Test(arguments: ["pip", "on"])
+    @Test(arguments: ["pip"])
     func returningWhileHiddenSourceAnswersCannotReopenPiP(_ held: String) async throws {
         try requireWorld()
         let f = Fixture(); defer { f.close() }
@@ -416,19 +421,22 @@ struct FullscreenPiPDepartureTests {
         #expect(f.browser.floating == nil)
     }
 
-    @Test func delayedExtractionCleansOnlyItsOwnedPageOnReturn() async throws {
+    @Test func refusedNativeRequestNeverExtractsTheDocument() async throws {
         try requireWorld()
         let f = Fixture(); defer { f.close() }
         let tab = try await f.page("late-extraction")
         f.browser.activeID = tab.id
-        try await f.js(tab, "__policy.answer='fallback';__policy.hold='on'")
+        try await f.js(tab, "__policy.hold='pip'")
         try f.set(tab)
         f.changed(); try f.fire()
-        try #require(try await f.wait(tab, "on", 1))
+        try #require(try await f.wait(tab, "pip", 1))
         try f.set(tab, onSpace: true, sourceOnSpace: true)
         f.browser.appBack()
-        try await f.js(tab, "__policy.resolve(['floating',640,360])")
-        #expect(try await f.wait(tab, "off", 1))
+        try await f.js(tab, "__policy.resolve('refused:NotSupportedError')")
+        let finished = try await Loaded.until(8) { f.browser.fullscreenDeparture.benchIssued == nil }
+        #expect(finished)
+        #expect(try await f.count(tab, "on") == 0)
+        #expect(try await f.count(tab, "off") == 0)
         #expect(f.browser.floating == nil && !f.browser.floater.showing)
     }
 
@@ -466,7 +474,7 @@ struct FullscreenPiPDepartureTests {
         try f.set(old)
         f.changed(); try f.fire()
         try #require(try await f.wait(old, "pip", 1))
-        f.browser.float(manual)
+        f.browser.benchLiftPage(manual, quietly: false)
         let shown = try await Loaded.until(8) { f.browser.floating == manual.id && f.browser.floater.showing }
         try #require(shown)
         f.browser.webView(requireNativeWebKitFixture(old, "FullscreenPiPDepartureTests"), hasVideoInPictureInPictureDidChange: true)

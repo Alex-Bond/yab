@@ -299,6 +299,7 @@ final class WebPool: NSObject {
     }
 
     @objc func appDidBecomeActive() {
+        Links.trace("pagesActive front=\(front ?? "nil") stopped=\(stoppedAway)")
         appAway = false
         if pageInteractionsEnabled { comeBackDownloads() }
         reloadStoppedPages()
@@ -341,6 +342,7 @@ final class WebPool: NSObject {
 
     /// A page whose process stopped, loaded again in its own view and store.
     private func revive(_ id: Tab.ID) {
+        Links.trace("revive tab=\(id)")
         stoppedAway.remove(id)
         guard live[id] != nil else { return }
         log.info("reloading the stopped page of \(id, privacy: .public)")
@@ -537,6 +539,7 @@ final class WebPool: NSObject {
     }
 
     private func navigationStarted(_ id: Tab.ID, in view: WKWebView, navigation: WKNavigation?) {
+        Links.trace("loadStart tab=\(id) url=\(String(describing: view.url)) away=\(appAway)")
         downloadConversions[id] = nil
         if javaScriptDialog?.tab == id || httpAuthentication?.tab == id { suspendPageDialogs() }
         if let previous = activeNavigations[id], previous !== navigation { retiredNavigations.add(previous) }
@@ -651,6 +654,7 @@ final class WebPool: NSObject {
 
     /// The web view for a tab, made and restored when it has none.
     func view(for tab: Tab) -> WKWebView {
+        Links.trace("view tab=\(tab.id) url=\(tab.address) away=\(appAway) stopped=\(stoppedAway.contains(tab.id))")
         if let view = live[tab.id], !matchesStore(view, for: tab) {
             invalidateWebsiteStore(tab.id, for: tab)
         }
@@ -822,6 +826,7 @@ final class WebPool: NSObject {
     }
 
     private func navigationEnded(_ id: Tab.ID, in view: WKWebView, _ navigation: WKNavigation?) {
+        Links.trace("loadEnd tab=\(id) url=\(String(describing: view.url))")
         guard let navigation, refreshNavigations[id] === navigation else { return }
         endRefresh(id, in: view)
     }
@@ -2051,6 +2056,7 @@ extension WebPool: WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Links.trace("processTerminated url=\(String(describing: webView.url)) away=\(appAway)")
         guard let id = tabsByView[ObjectIdentifier(webView)] else { return }
         log.error("web content process ended: \(id, privacy: .public) front=\(self.front == id) away=\(self.appAway) state=\(UIApplication.shared.applicationState.rawValue) recoveries=\(self.recoveries[id, default: 0]) url=\(webView.url != nil)")
         downloadOrigins[id] = nil; downloadConversions[id] = nil

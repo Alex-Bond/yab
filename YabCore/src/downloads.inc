@@ -1,4 +1,11 @@
 // Download objects remain native; the app receives copied state and UUIDs.
+// File publication belongs to Yab. Synchronizing Chromium's extension journal
+// is an additional SDK capability, advertised before the app chooses to use it.
+#if defined(CEF_YAB_DOWNLOAD_PUBLICATION_VERSION) && CEF_YAB_DOWNLOAD_PUBLICATION_VERSION >= 2
+static constexpr bool nativeDownloadPublication = true;
+#else
+static constexpr bool nativeDownloadPublication = false;
+#endif
 struct NativeDownload {
   std::string tab;
   NSString* token;
@@ -31,14 +38,40 @@ static void UpdateDownload(CefRefPtr<CefBrowser> browser, CefRefPtr<CefDownloadI
 }
 static bool BeginDownload(Tab* tab, CefRefPtr<CefDownloadItem> item, NSString* name,
                            CefRefPtr<CefBeforeDownloadCallback> callback) {
-  if (!tab || tab->internal || !tab->adopted || nativeDownloads.size() >= 128) return true;
+  // No count of downloads: Chrome has none (DownloadRequestLimiter asks
+  // about a page's automatic ones, it doesn't count). Past a fixed 128 held
+  // here (interrupted ones stay for Try Again) every new one was dropped.
+  if (!tab || tab->internal || !tab->adopted) return true;
   auto& download = nativeDownloads[{tab->browser->GetIdentifier(), item->GetId()}];
   download.tab = tab->id; download.token = NSUUID.UUID.UUIDString;
   download.destination = callback; download.announced = true;
   NSMutableDictionary* opened = [@{@"download": download.token, @"url": Str(item->GetURL()),
-      @"originalURL": Str(item->GetOriginalUrl()), @"name": name, @"mime": Str(item->GetMimeType()), @"total": @(item->GetTotalBytes())} mutableCopy];
+      @"originalURL": Str(item->GetOriginalUrl()), @"name": name, @"mime": Str(item->GetMimeType()),
+      @"nativeId": @(item->GetId()), @"publication": @(nativeDownloadPublication), @"total": @(item->GetTotalBytes())} mutableCopy];
   [opened addEntriesFromDictionary:DownloadProvenance(item)];
   Event(@"download.open", tab, opened);
+  return true;
+}
+
+static bool DownloadPublicationRequest(NSString* method, NSDictionary* p, NSString* request) {
+  if (![method isEqual:@"download.published"]) return false;
+#if defined(CEF_YAB_DOWNLOAD_PUBLICATION_VERSION) && CEF_YAB_DOWNLOAD_PUBLICATION_VERSION >= 2
+  const auto profile = profiles.find(Key(S(p, @"profile")));
+  const int64_t identifier = [p[@"nativeId"] longLongValue];
+  if (profile == profiles.end() || !profile->second.ready || identifier <= 0 ||
+      identifier > UINT32_MAX || ![S(p, @"previousPath") isAbsolutePath] || ![S(p, @"path") isAbsolutePath]) {
+    Reply(request, nil, @"Invalid native download publication"); return true;
+  }
+  const bool published = profile->second.context->SetDownloadPublishedPath(
+      identifier, Key(S(p, @"previousPath")), Key(S(p, @"path")));
+  Reply(request, published ? @{@"published": @YES} : nil,
+        published ? nil : @"Native download publication was rejected");
+#else
+  // This SDK can't move Chromium's record to the published path. The file is
+  // already published by Swift; only Chromium's own path for it stays the
+  // finished part's, so the download completes instead of failing.
+  Reply(request, @{@"published": @NO}, nil);
+#endif
   return true;
 }
 static bool DownloadRequest(NSString* tab, NSString* method, NSDictionary* p, NSString* request) {

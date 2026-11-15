@@ -3,7 +3,9 @@ import Darwin
 
 /// Launch arguments use UserDefaults' argument domain, so LaunchServices does
 /// not have to preserve an environment variable. Installed CEF builds accept
-/// an explicit preference; environment overrides stay development-only.
+/// an explicit preference and with none are on Chromium: Auto, for a new
+/// install and for an update from a WebKit-only version alike. Environment
+/// overrides stay development-only.
 enum PageEngineSelection {
     static let key = "YabPageEngine"
 
@@ -46,6 +48,7 @@ enum PageEngineSelection {
         // Refuse the hidden opt-in even in development/test worlds on Intel
         // (including an Intel slice running under Rosetta). Never launch an
         // arm64-only helper from an unsupported app slice.
-        return choice == .chromium && !supportsChromium ? .webKit : choice
+        if choice == .chromium, !supportsChromium { return .webKit }
+        return choice ?? (bundledChromium && supportsChromium ? .chromium : nil)
     }
 }

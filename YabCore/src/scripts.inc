@@ -1,4 +1,11 @@
+#include "script_errors.h"
 // Included in core.mm so page scripts share its bounded CDP transport.
+// An expression's value as the client reads a function's: undefined apart from null.
+static NSDictionary* WholeValue(NSDictionary* r) {
+  NSDictionary* result = r[@"result"];
+  if ([result[@"type"] isEqual:@"undefined"]) return @{@"absent": @YES};
+  return @{@"value": result[@"value"] ?: NSNull.null};
+}
 static void ScriptTree(Tab& tab, NSDictionary* tree) {
   NSDictionary* frame = tree[@"frame"];
   if (S(frame, @"id").length) {
@@ -10,36 +17,51 @@ static void ScriptTree(Tab& tab, NSDictionary* tree) {
   for (NSDictionary* child in tree[@"childFrames"]) ScriptTree(tab, child);
 }
 using ScriptCommands = std::vector<std::pair<NSString*, NSDictionary*>>;
+// All sent at once: a session keeps its commands in order, and a paused
+// out-of-process frame waits for these, not for one round trip after another.
+// `deadline`: the asking request's (RequestDue), 0 for Yab's own 15 s.
 static void ScriptRun(std::string tab, NSString* session, std::shared_ptr<ScriptCommands> commands,
-                      size_t index, Completion done) {
+                      double deadline, Completion done) {
   auto found = tabs.find(tab);
   if (found == tabs.end() || found->second.closing) { done(nil, @"Tab closed"); return; }
-  if (index == commands->size()) { done(@{}, nil); return; }
-  auto [method, params] = commands->at(index);
-  CDP(found->second, method, params, [tab, session, commands, index, done, method](NSDictionary* result, NSString* error) {
-    if (error) { done(nil, error); return; }
+  if (commands->empty()) { done(@{}, nil); return; }
+  auto left = std::make_shared<size_t>(commands->size());
+  auto failure = std::make_shared<NSString*>(nil);
+  for (auto& [method, params] : *commands) {
+    NSString* name = method;
     auto current = tabs.find(tab);
-    if (current == tabs.end()) { done(nil, @"Tab closed"); return; }
-    if ([method isEqual:@"Page.getFrameTree"]) {
-      ScriptTree(current->second, result[@"frameTree"]);
-      if (!session.length) current->second.scripts.mainFrame = S(result[@"frameTree"][@"frame"], @"id");
-    }
-    if ([method isEqual:@"Page.addScriptToEvaluateOnNewDocument"] && result[@"identifier"])
-      current->second.scripts.identifiers[Key(session)].push_back(result[@"identifier"]);
-    ScriptRun(tab, session, commands, index + 1, done);
-  }, session);
+    if (current == tabs.end() || current->second.closing) { *failure = *failure ?: @"Tab closed"; if (--*left == 0) done(nil, *failure); continue; }
+    CDP(current->second, method, params, [tab, session, left, failure, done, name](NSDictionary* result, NSString* error) {
+      auto owner = tabs.find(tab);
+      if (error && !ScriptRemovalAlreadyGone(name, error) && !StackCaptureOptional(name)) *failure = *failure ?: error;
+      else if (owner == tabs.end()) *failure = *failure ?: @"Tab closed";
+      else if ([name isEqual:@"Page.getFrameTree"]) {
+        ScriptTree(owner->second, result[@"frameTree"]);
+        if (!session.length) owner->second.scripts.mainFrame = S(result[@"frameTree"][@"frame"], @"id");
+      } else if ([name isEqual:@"Page.addScriptToEvaluateOnNewDocument"] && result[@"identifier"])
+        owner->second.scripts.identifiers[Key(session)].push_back(result[@"identifier"]);
+      if (--*left == 0) { if (*failure) done(nil, *failure); else done(@{}, nil); }
+    }, session, deadline);
+  }
 }
-static NSString* ScriptBridge(NSArray* names) {
+// One name to a world: V8 takes a binding's name once it is live in any context,
+// so a world added to a page that already ran would get nothing under the old one.
+static NSString* ScriptRelayName(NSString* world) {
+  return [NSString stringWithFormat:@"yabScriptRelay_%zx", std::hash<std::string>{}(Key(world))];
+}
+static NSString* ScriptBridge(NSArray* names, NSString* world) {
   return [NSString stringWithFormat:@R"JS((()=>{
     const pending=new Map(); let serial=0;
     const prefix=Array.from(crypto.getRandomValues(new Uint32Array(4)),n=>n.toString(16)).join('-');
-    const send=globalThis.yabScriptRelay;
+    const send=globalThis[%@];
+    Object.defineProperty(globalThis,'yabScriptRelay',{value:send,configurable:true});
     const handlers=Object.create(null);
     for(const name of %@) handlers[name]={postMessage(body){
       if(pending.size>=128) return Promise.reject(new Error('Too many relay requests'));
       const id=prefix+':'+String(++serial);
       return new Promise((resolve,reject)=>{
-        const timer=setTimeout(()=>{pending.delete(id);reject(new Error('Relay timed out'))},20000);
+        // A passkey waits for a person at the Mac's own sheet.
+        const timer=setTimeout(()=>{pending.delete(id);reject(new Error('Relay timed out'))},name==='yabPasskeys'?600000:20000);
         pending.set(id,{resolve,reject,timer});
         try {send(JSON.stringify({id,name,body}));} catch(error){clearTimeout(timer);pending.delete(id);reject(error)}
       });
@@ -51,9 +73,11 @@ static NSString* ScriptBridge(NSArray* names) {
     },configurable:true});
     Object.defineProperty(globalThis,'webkit',{value:{messageHandlers:handlers},configurable:true});
   })();
-  )JS", JSON(names)];
+  )JS", JSON(ScriptRelayName(world)), JSON(names)];
 }
-static void ScriptSetup(Tab& tab, NSString* session, bool immediately, Completion done) {
+// `fresh`: worlds this install binds for the first time; their bridges also
+// run in the documents already up, so a script run there now can reach Yab.
+static void ScriptSetup(Tab& tab, NSString* session, bool immediately, Completion done, NSSet* fresh = nil, double deadline = 0) {
   auto commands = std::make_shared<ScriptCommands>();
   auto old = tab.scripts.identifiers.find(Key(session));
   if (old != tab.scripts.identifiers.end()) {
@@ -66,9 +90,9 @@ static void ScriptSetup(Tab& tab, NSString* session, bool immediately, Completio
   for (NSString* world in tab.scripts.relays) {
     NSArray* names = tab.scripts.relays[world];
     if (!names.count) continue;
-    commands->push_back({@"Runtime.addBinding", @{@"name": @"yabScriptRelay", @"executionContextName": world}});
-    NSMutableDictionary* bridge = [@{@"source": ScriptBridge(names), @"worldName": world} mutableCopy];
-    if (immediately) bridge[@"runImmediately"] = @YES;
+    commands->push_back({@"Runtime.addBinding", @{@"name": ScriptRelayName(world), @"executionContextName": world}});
+    NSMutableDictionary* bridge = [@{@"source": ScriptBridge(names, world), @"worldName": world} mutableCopy];
+    if (immediately || [fresh containsObject:world]) bridge[@"runImmediately"] = @YES;
     commands->push_back({@"Page.addScriptToEvaluateOnNewDocument", bridge});
   }
   for (NSDictionary* script in tab.scripts.definitions) {
@@ -81,7 +105,7 @@ static void ScriptSetup(Tab& tab, NSString* session, bool immediately, Completio
     if (immediately) params[@"runImmediately"] = @YES;
     commands->push_back({@"Page.addScriptToEvaluateOnNewDocument", params});
   }
-  ScriptRun(tab.id, session, commands, 0, done);
+  ScriptRun(tab.id, session, commands, deadline, done);
 }
 // CSS prefers-color-scheme and the ground before a page paints, as the
 // app's view would give them in WebKit. Each target (main and every
@@ -103,10 +127,18 @@ static void ScriptAttach(Tab& tab, NSString* session, Completion done) {
   auto commands = std::make_shared<ScriptCommands>();
   commands->push_back({@"Page.enable", @{}});
   commands->push_back({@"Runtime.enable", @{}});
+  if (!StackCaptureKept()) commands->push_back(StackCaptureOff());
   commands->push_back({@"Page.getFrameTree", @{}});
+  // The page's view here is never on screen, so AppKit can't hold a drag for
+  // it. The app's view does: a drag the page starts goes there as page.drag.
+  if (!session.length) commands->push_back({@"Input.setInterceptDrags", @{@"enabled": @YES}});
   // Pause new out-of-process frames until their scripts and bindings exist.
+  // Chromium 156 pauses both worker and worklet threads before the browser
+  // applies this filter (DevToolsAgent::WorkerThreadCreated). Both must get
+  // a session to resume them, even though only frames need our scripts.
   commands->push_back({@"Target.setAutoAttach", @{@"autoAttach": @YES, @"waitForDebuggerOnStart": @YES,
-    @"flatten": @YES, @"filter": @[@{@"type": @"iframe", @"exclude": @NO}, @{@"exclude": @YES}]}});
+    @"flatten": @YES, @"filter": @[@{@"type": @"iframe", @"exclude": @NO}, @{@"type": @"worker", @"exclude": @NO},
+      @{@"type": @"worklet", @"exclude": @NO}, @{@"exclude": @YES}]}});
   ScriptAppearance(tab, *commands);
   ScriptRun(tab.id, session, commands, 0, [id = tab.id, session, done](NSDictionary*, NSString* error) {
     auto found = tabs.find(id);
@@ -130,7 +162,42 @@ static NSDictionary* ScriptFrame(const Tab& tab, const ScriptContext& context) {
   return @{@"token": context.token, @"frameId": context.frame, @"main": @(main), @"url": href,
     @"scheme": url.scheme ?: @"", @"host": url.host ?: @"", @"port": url.port ?: @0};
 }
+// Runtime.enable, which every session here needs for its contexts and
+// bindings, makes V8 wrap each console argument and each thrown exception for
+// that session, in the object group "console", and hold every one until the
+// group is released or the document goes. Chrome with DevTools closed holds
+// none of them: a long-lived page that logs kept everything it logged, here
+// only. Nothing in Yab reads them, so each session's group is released as the
+// messages come: one release per burst, since one in flight takes everything
+// wrapped before it, and one more after it if more came meanwhile. V8's own
+// message store (1,000 messages, the same as Chromium's) is left alone.
+static void ConsoleReleaseSend(std::string id, std::string session) {
+  auto found = tabs.find(id);
+  if (found == tabs.end()) return;
+  if (found->second.closing || (!session.empty() && !found->second.scripts.sessions.count(session))) {
+    found->second.scripts.consoleRelease.erase(session); return;
+  }
+  CDP(found->second, @"Runtime.releaseObjectGroup", @{@"objectGroup": @"console"}, [id, session](NSDictionary*, NSString* error) {
+    auto found = tabs.find(id);
+    if (found == tabs.end()) return;
+    auto state = found->second.scripts.consoleRelease.find(session);
+    if (state == found->second.scripts.consoleRelease.end()) return;
+    if (state->second == 2 && !error) { state->second = 1; ConsoleReleaseSend(id, session); }
+    else found->second.scripts.consoleRelease.erase(state);
+  }, @(session.c_str()));
+}
+static void ConsoleRelease(Tab& tab, NSString* session) {
+  int& state = tab.scripts.consoleRelease[Key(session)];
+  if (state) { state = 2; return; }
+  state = 1;
+  // Not from inside the observer's notification (see Target.attachedToTarget).
+  std::string id = tab.id, key = Key(session);
+  dispatch_async(dispatch_get_main_queue(), ^{ ConsoleReleaseSend(id, key); });
+}
 static void ScriptEvent(Tab& tab, NSString* method, NSDictionary* params, NSString* session) {
+  if ([method isEqual:@"Runtime.consoleAPICalled"] || [method isEqual:@"Runtime.exceptionThrown"]) {
+    ConsoleRelease(tab, session); return;
+  }
   if ([method isEqual:@"Page.frameNavigated"]) {
     NSDictionary* frame = params[@"frame"];
     if (S(frame, @"id").length) {
@@ -172,12 +239,18 @@ static void ScriptEvent(Tab& tab, NSString* method, NSDictionary* params, NSStri
   } else if ([method isEqual:@"Target.attachedToTarget"]) {
     NSString* child = S(params, @"sessionId");
     std::string id = tab.id;
-    if (![S(params[@"targetInfo"], @"type") isEqual:@"iframe"] || !child.length) return;
+    NSString* type = S(params[@"targetInfo"], @"type");
+    if (!child.length || !([type isEqual:@"iframe"] || [type isEqual:@"worker"] || [type isEqual:@"worklet"])) return;
     // Not from inside the observer's notification: the commands it sends may
     // be answered at once, which would nest a second one.
     dispatch_async(dispatch_get_main_queue(), ^{
       auto found = tabs.find(id);
       if (found == tabs.end() || found->second.closing) return;
+      if ([type isEqual:@"worker"] || [type isEqual:@"worklet"]) {
+        CDP(found->second, @"Runtime.runIfWaitingForDebugger", @{}, Ignore, child);
+        CDP(found->second, @"Target.detachFromTarget", @{@"sessionId": child}, Ignore);
+        return;
+      }
       ScriptAttach(found->second, child, [id](NSDictionary*, NSString* error) {
         auto found = tabs.find(id);
         if (error && found != tabs.end()) Event(@"script.error", &found->second, @{@"message": error});
@@ -185,7 +258,7 @@ static void ScriptEvent(Tab& tab, NSString* method, NSDictionary* params, NSStri
     });
   } else if ([method isEqual:@"Target.detachedFromTarget"]) {
     NSString* child = S(params, @"sessionId");
-    tab.scripts.sessions.erase(Key(child)); tab.scripts.identifiers.erase(Key(child));
+    tab.scripts.sessions.erase(Key(child)); tab.scripts.identifiers.erase(Key(child)); tab.scripts.consoleRelease.erase(Key(child));
     for (auto it = tab.scripts.contexts.begin(); it != tab.scripts.contexts.end();) {
       if ([it->second.session isEqual:child]) it = tab.scripts.contexts.erase(it); else ++it;
     }
@@ -201,7 +274,7 @@ static void ScriptEvent(Tab& tab, NSString* method, NSDictionary* params, NSStri
         it = tab.scripts.contexts.erase(it);
       else ++it;
     }
-  } else if ([method isEqual:@"Runtime.bindingCalled"] && [S(params, @"name") isEqual:@"yabScriptRelay"]) {
+  } else if ([method isEqual:@"Runtime.bindingCalled"] && [S(params, @"name") hasPrefix:@"yabScriptRelay_"]) {
     const ScriptContext* context = nullptr;
     for (auto& [key, value] : tab.scripts.contexts)
       if ([value.session isEqual:session] && value.id == [params[@"executionContextId"] intValue]) { context = &value; break; }
@@ -222,36 +295,101 @@ static void ScriptEvent(Tab& tab, NSString* method, NSDictionary* params, NSStri
 // navigation starts, and the scripts must be in before the first document.
 // So the agent is asked for with a blank document, which the first real load
 // takes out of the history again (OnLoadEnd), and the request waits for it.
-static void ScriptWithAgent(std::string id, Completion ready, double deadline = 0) {
+// `deadline`: the asking request's own (a page's scripts may wait as long as
+// its load does: a renderer comes up late on a loaded Mac, not never).
+static void ScriptWithAgent(std::string id, Completion ready, double deadline = 0, double asked = 0) {
   auto found = tabs.find(id);
   if (found == tabs.end() || found->second.closing) { ready(nil, @"Tab closed"); return; }
   Tab& tab = found->second;
   if (tab.domainsReady) { ready(@{}, nil); return; }
-  if (deadline == 0) {
-    deadline = Now() + 15;
+  if (asked == 0) {
+    asked = Running();
+    if (deadline == 0) deadline = asked + 15;
     if (tab.scriptBootstrapAllowed && tab.browser && !tab.browser->HasDocument() && !tab.scripts.blankFirst) {
       tab.scripts.blankFirst = true;
       if (getenv("YAB_CEF_TRACE_CDP")) fprintf(stderr, "YabCore script bootstrap: tab=%s browser=%d at=%.6f\n", id.c_str(), tab.browser->GetIdentifier(), Now());
       tab.browser->GetMainFrame()->LoadURL("about:blank");
     }
   }
-  if (Now() > deadline) { ready(nil, @"DevTools did not attach"); return; }
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-    ScriptWithAgent(id, ready, deadline);
+  if (Running() > deadline) { ready(nil, @"DevTools did not attach"); return; }
+  // Every 5 ms while an agent is due, then every 50: eighty tabs waiting on
+  // renderers no longer wake the main thread 16,000 times a second.
+  int64_t every = Running() - asked < 1 ? 5 : 50;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, every * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    ScriptWithAgent(id, ready, deadline, asked);
   });
 }
+// A tab's scripts are nearly all every tab's, and each arrives as its own copy
+// of a megabyte: one copy of each text, however many tabs keep it.
+static NSArray* ScriptsShared(NSArray* scripts) {
+  static NSHashTable<NSString*>* texts = [NSHashTable weakObjectsHashTable];
+  NSMutableArray* shared = [NSMutableArray arrayWithCapacity:scripts.count];
+  for (NSDictionary* script in scripts) {
+    NSString* source = script[@"source"];
+    NSString* known = [texts member:source];
+    if (!known) { [texts addObject:source]; known = source; }
+    NSMutableDictionary* copy = [script mutableCopy];
+    copy[@"source"] = known;
+    [shared addObject:copy];
+  }
+  return shared;
+}
+// Sets of page scripts the client defined once for this connection
+// (YabCoreClient's ScriptBundles keeps at most 32 idle and forgets the rest);
+// scripts.install names one instead of carrying its megabyte again. The
+// client's count is the bound: sets in use by installs in flight can't be
+// forgotten, and up to 128 installs fly at once, so a fixed 64 here refused
+// a define while many tabs of different sites loaded.
+static NSMutableDictionary<NSString*, NSArray*>* scriptBundles = [NSMutableDictionary new];
+static void ClearScriptBundles() { [scriptBundles removeAllObjects]; }
+// No count of scripts: Yab's own and every userscript and boost a person
+// added, as Chromium takes any number of content and user scripts. The wire
+// bounds a message's bytes.
+static NSString* ScriptsInvalid(id scripts) {
+  if (![scripts isKindOfClass:NSArray.class]) return @"Invalid scripts or relays";
+  for (id script in scripts) {
+    if (![script isKindOfClass:NSDictionary.class] || !S(script, @"source").length || S(script, @"world").length > 128 || [S(script, @"world") hasPrefix:@"__yab"])
+      return @"Invalid page script";
+  }
+  return nil;
+}
+static bool ScriptBundleRequest(NSString* method, NSDictionary* params, NSString* request) {
+  if (![method isEqual:@"scripts.define"] && ![method isEqual:@"scripts.forget"]) return false;
+  NSString* name = S(params, @"bundle");
+  if (!name.length || name.length > 128) { Reply(request, nil, @"Invalid script bundle"); return true; }
+  if ([method isEqual:@"scripts.forget"]) { [scriptBundles removeObjectForKey:name]; Reply(request); return true; }
+  if (NSString* invalid = ScriptsInvalid(params[@"scripts"])) { Reply(request, nil, invalid); return true; }
+  scriptBundles[name] = ScriptsShared(params[@"scripts"]);
+  Reply(request); return true;
+}
+// A request's deadline, as the client gave it (Request in core.mm), for the
+// waits it makes: 0 when it has none left.
+static double RequestDue(NSString* request) {
+  auto due = requests.find(Key(request));
+  return due != requests.end() ? due->second : 0;
+}
 static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSString* request) {
-  if (!tab.domainsReady && ([method isEqual:@"scripts.appearance"] || [method isEqual:@"scripts.install"])) {
+  // No renderer behind the tab: the one it had ended (a crash, memory, a
+  // page that stopped answering) and no document has come since, or Chrome
+  // discarded it. Its DevTools session holds what it is sent for the next
+  // renderer, which only the navigation the client queues after these
+  // requests brings; waiting for their answers held that navigation until
+  // the CDP deadline and failed it: "The page couldn't load", 15 s after
+  // coming back to any tab whose renderer ended behind another, until ⌘R
+  // (feedback #1788). So they are sent, kept, and answered at once.
+  bool noRenderer = tab.crashed || tab.discarded;
+  if (!tab.domainsReady && !noRenderer && ([method isEqual:@"scripts.appearance"] || [method isEqual:@"scripts.install"])) {
     ScriptWithAgent(tab.id, [id = tab.id, method, params, request](NSDictionary*, NSString* error) {
       auto found = tabs.find(id);
       if (error || found == tabs.end()) { Reply(request, nil, error ?: @"Tab closed"); return; }
       ScriptRequest(found->second, method, params, request);
-    });
+    }, RequestDue(request));
     return true;
   }
   if ([method isEqual:@"scripts.input"]) {
     NSString* kind = S(params, @"kind");
     auto commands = std::make_shared<ScriptCommands>();
+    DragScriptInput(kind, *commands, true);
     int modifiers = [params[@"modifiers"] intValue];
     if ([kind isEqual:@"text"]) commands->push_back({@"Input.insertText", @{@"text": S(params, @"text")}});
     else if ([kind isEqual:@"key"]) {
@@ -266,6 +404,7 @@ static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSSt
         NSDictionary* editing = @{@"a": @"selectAll", @"c": @"copy", @"v": @"paste", @"x": @"cut", @"z": @"undo"};
         NSString* command = editing[[S(params, @"key") lowercaseString]];
         if ([command isEqual:@"undo"] && (modifiers & 8)) command = @"redo";
+        if ([command isEqual:@"paste"] && (modifiers & 8)) command = @"pasteAndMatchStyle";
         if (command) key[@"commands"] = @[command];
       }
       if (modifiers == 2 && [[S(params, @"key") lowercaseString] isEqual:@"d"])
@@ -281,6 +420,7 @@ static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSSt
         @"button": S(params, @"button").length ? S(params, @"button") : @"none", @"buttons": params[@"buttons"] ?: @0,
         @"clickCount": params[@"clickCount"] ?: @0, @"modifiers": @(modifiers)}});
     } else { Reply(request, nil, @"Unknown script input"); return true; }
+    DragScriptInput(kind, *commands, false);
     ScriptRun(tab.id, @"", commands, 0, [request](NSDictionary* value, NSString* error) { Reply(request, value, error); });
     return true;
   }
@@ -310,15 +450,27 @@ static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSSt
     NSAppearance* wanted = [NSAppearance appearanceNamed:[scheme isEqual:@"dark"] ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
     if (wanted && ![NSApp.appearance.name isEqual:wanted.name]) NSApp.appearance = wanted;
     tab.scripts.appearance = stored;
+    // No agent yet: ScriptAttach applies it when one comes.
+    if (!tab.domainsReady) { Reply(request, @{}); return true; }
     auto sessions = std::make_shared<std::vector<std::string>>(tab.scripts.sessions.begin(), tab.scripts.sessions.end());
     if (sessions->empty()) sessions->push_back("");
+    if (noRenderer) {
+      for (const auto& session : *sessions) {
+        auto commands = std::make_shared<ScriptCommands>();
+        ScriptAppearance(tab, *commands);
+        ScriptRun(tab.id, @(session.c_str()), commands, 0, Ignore);
+      }
+      Reply(request, @{}); return true;
+    }
     auto remaining = std::make_shared<size_t>(sessions->size());
     auto failure = std::make_shared<NSString*>(nil);
     for (const auto& session : *sessions) {
       auto commands = std::make_shared<ScriptCommands>();
       ScriptAppearance(tab, *commands);
-      ScriptRun(tab.id, @(session.c_str()), commands, 0, [request, remaining, failure](NSDictionary*, NSString* error) {
-        if (error) *failure = error;
+      ScriptRun(tab.id, @(session.c_str()), commands, RequestDue(request), [id = tab.id, session, request, remaining, failure](NSDictionary*, NSString* error) {
+        auto owner = tabs.find(id);
+        if (owner == tabs.end()) *failure = @"Tab closed";
+        else if (ScriptSessionErrorMatters(@(session.c_str()), owner->second.scripts.sessions.count(session), error)) *failure = error;
         if (--*remaining) return;
         Reply(request, @{}, *failure);
       });
@@ -327,14 +479,15 @@ static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSSt
   }
   if ([method isEqual:@"scripts.install"]) {
     id scripts = params[@"scripts"], relays = params[@"relays"];
-    if (![scripts isKindOfClass:NSArray.class] || [scripts count] > 128 || ![relays isKindOfClass:NSDictionary.class]) {
-      Reply(request, nil, @"Invalid scripts or relays"); return true;
+    if (params[@"immediately"] && ![params[@"immediately"] isKindOfClass:NSNumber.class]) {
+      Reply(request, nil, @"Invalid immediate script installation"); return true;
     }
-    for (id script in scripts) {
-      if (![script isKindOfClass:NSDictionary.class] || !S(script, @"source").length || S(script, @"world").length > 128 || [S(script, @"world") hasPrefix:@"__yab"]) {
-        Reply(request, nil, @"Invalid page script"); return true;
-      }
+    if (S(params, @"bundle").length) {
+      scripts = scriptBundles[S(params, @"bundle")];
+      if (!scripts) { Reply(request, nil, @"Unknown script bundle"); return true; }
     }
+    if (![relays isKindOfClass:NSDictionary.class]) { Reply(request, nil, @"Invalid scripts or relays"); return true; }
+    if (NSString* invalid = ScriptsInvalid(scripts)) { Reply(request, nil, invalid); return true; }
     for (NSString* world in relays) {
       id names = relays[world];
       if (!world.length || world.length > 128 || [world hasPrefix:@"__yab"] || ![names isKindOfClass:NSArray.class] || [names count] > 64) {
@@ -345,19 +498,34 @@ static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSSt
       }
     }
     if (tab.scripts.applying) { Reply(request, nil, @"Scripts are already being installed"); return true; }
-    tab.scripts.definitions = scripts; tab.scripts.relays = relays;
+    // A world added to an install already in place; a first install runs
+    // nothing in the document up now, as before.
+    NSMutableSet* fresh = [NSMutableSet set];
+    if (tab.scripts.relays.count)
+      for (NSString* world in relays) if (!tab.scripts.relays[world]) [fresh addObject:world];
+    tab.scripts.definitions = ScriptsShared(scripts); tab.scripts.relays = relays;
     if (!tab.domainsReady) { Reply(request); return true; }
+    if (noRenderer) {
+      std::vector<std::string> sessions(tab.scripts.sessions.begin(), tab.scripts.sessions.end());
+      if (sessions.empty()) sessions.push_back("");
+      for (const auto& session : sessions) ScriptSetup(tab, @(session.c_str()), [params[@"immediately"] boolValue], Ignore);
+      Reply(request); return true;
+    }
     tab.scripts.applying = true;
     auto sessions = std::make_shared<std::vector<std::string>>(tab.scripts.sessions.begin(), tab.scripts.sessions.end());
     if (sessions->empty()) sessions->push_back("");
     auto remaining = std::make_shared<size_t>(sessions->size());
     auto failure = std::make_shared<NSString*>(nil);
-    for (const auto& session : *sessions) ScriptSetup(tab, @(session.c_str()), false, [id = tab.id, request, remaining, failure](NSDictionary*, NSString* error) {
-      if (error) *failure = error;
+    // Adopted native pages may have committed before the client attached.
+    // Install their bridge and features into that original document too.
+    for (const auto& session : *sessions) ScriptSetup(tab, @(session.c_str()), [params[@"immediately"] boolValue], [id = tab.id, session, request, remaining, failure](NSDictionary*, NSString* error) {
+      auto owner = tabs.find(id);
+      if (owner == tabs.end()) *failure = @"Tab closed";
+      else if (ScriptSessionErrorMatters(@(session.c_str()), owner->second.scripts.sessions.count(session), error)) *failure = error;
       if (--*remaining) return;
       auto found = tabs.find(id); if (found != tabs.end()) found->second.scripts.applying = false;
       Reply(request, @{}, *failure);
-    });
+    }, fresh, RequestDue(request));
     return true;
   }
   if ([method isEqual:@"scripts.reply"] || [method isEqual:@"scripts.evaluate"]) {
@@ -380,6 +548,27 @@ static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSSt
       for (const auto& [key, candidate] : current->second.scripts.contexts)
         if ([candidate.session isEqual:context.session] && candidate.id == executionContext) { unique = candidate.token; break; }
       if (!unique) { Reply(request, nil, @"Execution context unavailable"); return; }
+      NSString* expression = S(params, @"expression");
+      if (expression.length) {
+        CDP(current->second, @"Runtime.evaluate", @{@"expression": expression, @"uniqueContextId": unique, @"awaitPromise": @YES,
+          @"returnByValue": @YES, @"replMode": @YES, @"userGesture": @([params[@"userGesture"] boolValue])}, [request](NSDictionary* result, NSString* error) {
+            Reply(request, error ? nil : WholeValue(result), error ?: (result[@"exceptionDetails"] ? JSON(result[@"exceptionDetails"]) : nil));
+          }, context.session);
+        return;
+      }
+      if (params[@"files"]) {
+        // An agent's upload in this frame: the function returns its file field (agent_files.inc).
+        NSArray* files = AgentFilePaths(params[@"files"]);
+        if (!files) { Reply(request, nil, @"files must be absolute file paths"); return; }
+        CDP(current->second, @"Runtime.callFunctionOn", @{@"functionDeclaration": function, @"uniqueContextId": unique,
+          @"arguments": @[@{@"value": params[@"arguments"] ?: NSNull.null}], @"awaitPromise": @YES, @"returnByValue": @NO},
+          [request, id, files, session = context.session](NSDictionary* result, NSString* error) {
+            auto owner = tabs.find(id);
+            if (owner == tabs.end()) { Reply(request, nil, @"Tab closed"); return; }
+            AgentSetFiles(owner->second, result, error, files, session, request);
+          }, context.session);
+        return;
+      }
       CDP(current->second, @"Runtime.callFunctionOn", @{@"functionDeclaration": function, @"uniqueContextId": unique,
         @"arguments": @[@{@"value": params[@"arguments"] ?: NSNull.null}], @"awaitPromise": @YES, @"returnByValue": @YES,
         @"userGesture": @([params[@"userGesture"] boolValue])}, [request](NSDictionary* result, NSString* error) {
@@ -407,7 +596,7 @@ static bool ScriptRequest(Tab& tab, NSString* method, NSDictionary* params, NSSt
         auto current = tabs.find(id);
         NSArray* names = current == tabs.end() ? nil : current->second.scripts.relays[world];
         if (!names.count) { run(created); return; }
-        NSString* once = [NSString stringWithFormat:@"if(!globalThis.__yabScriptReply){%@}", ScriptBridge(names)];
+        NSString* once = [NSString stringWithFormat:@"if(!globalThis.__yabScriptReply){%@}", ScriptBridge(names, world)];
         CDP(current->second, @"Runtime.evaluate", @{@"expression": once, @"contextId": @(created)},
           [run, created](NSDictionary*, NSString*) { run(created); }, context.session);
       }, context.session);

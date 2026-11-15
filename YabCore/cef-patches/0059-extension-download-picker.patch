@@ -1,0 +1,35 @@
+--- a/chrome/browser/download/download_file_picker.cc
++++ b/chrome/browser/download/download_file_picker.cc
+@@ -8,6 +8,10 @@
+ #include "base/functional/bind.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "build/build_config.h"
++#include "cef/libcef/features/features.h"
++#if BUILDFLAG(ENABLE_CEF)
++#include "cef/libcef/browser/browser_host_base.h"
++#endif
+ #include "chrome/browser/download/download_prefs.h"
+ #include "chrome/browser/platform_util.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+@@ -51,8 +55,20 @@
+     return;
+   }
+ 
++  // A browserless extension download belongs to its native profile and
++  // initiating extension, not whichever unrelated CEF tab happens to focus.
++  // CEF's generic dialog interceptor otherwise falls back to that tab. Keep
++  // Chrome's original save picker/listener and bypass only that interceptor.
++  bool run_from_cef = false;
++#if BUILDFLAG(ENABLE_CEF)
++  run_from_cef =
++      item->GetDownloadSource() == download::DownloadSource::EXTENSION_API &&
++      (!web_contents ||
++       !CefBrowserHostBase::GetBrowserForContents(web_contents));
++#endif
+   select_file_dialog_ = ui::SelectFileDialog::Create(
+-      this, std::make_unique<ChromeSelectFilePolicy>(web_contents));
++      this, std::make_unique<ChromeSelectFilePolicy>(web_contents),
++      run_from_cef);
+   // |select_file_dialog_| could be null in Linux. See CreateSelectFileDialog()
+   // in shell_dialog_linux.cc.
+   if (!select_file_dialog_.get()) {

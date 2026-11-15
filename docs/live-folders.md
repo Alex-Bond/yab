@@ -109,6 +109,8 @@ Pull Requests
   ([strip-folders.md](strip-folders.md)).
 - Its tabs are kept tabs asleep until you open one: a row, no page, no
   process. A folder of thirty costs thirty rows.
+- Opened and left, a tab the folder put there sleeps as today's tabs do
+  ("Rows, pages and sleep", below).
 - A pull request's row is its title with the repository's words taken out;
   the repository and number are in its card.
 - **Words at the row's end**, one at a time, the first that applies, and
@@ -211,6 +213,39 @@ The folder only ever takes away what it brought.
 - **Taken out by hand** (dragged out, Don't Keep): yours for good, and the
   folder leaves that pull request out the same way (`LiveFolders.takenOut`).
 - **Dragged in**, any tab stays: the folder didn't bring it.
+
+### Rows, pages and sleep
+
+Keeping a folder up to date and keeping a tab loaded are different things
+(the owner, 2026-11-05). Until you open a row by hand, the folder only
+updates what it says, and the row stays unloaded.
+
+1. **A row the folder brings is a link with its status**: title, words
+   (review asked, checks failing, ready to merge), refreshed from the
+   folder's source by `LiveReader`, never from a loaded page. No page is
+   built for it until you open it; a reading that adds rows, changes words
+   or takes rows away builds and wakes none (`LiveFolders.apply`,
+   `Browser.asleepTab`).
+2. **Opened, it is an ordinary tab.** It sleeps as today's tabs do: on
+   the timer when Sleep Tabs is on, when its page grows heavy, when memory
+   runs out (`Browser.awake(because:)`). Nothing the folder does makes it
+   kept: not bringing it, not moving today's tab of the same pull request
+   in, not the pull request you just made moving in (`LiveMark.moved`), not
+   a later reading. Its place among the kept is where the folder stands,
+   not the kept rules.
+3. **Sync is separate.** A folder's rows travel to your other Macs with
+   their status and who put them there (`LiveMark`), never a loaded page
+   and never the kept rules: a row that comes by sync is unloaded there
+   too, and follows the same rules once opened.
+4. **Only your hand keeps.** A tab you moved into the folder yourself, or
+   took out of it, keeps the kept rules as any kept tab does
+   (`Tab.placedByFolder` is false for it).
+
+Before this, every row was a kept tab in full: opened once, it stayed
+loaded for the rest of the session whatever it grew to, since a kept tab
+is never put down by the timer, for its size or when memory runs out
+(memory reports, 2026-11-05). Tests: `LiveFolderSleepTests`; in the built
+app, `evals/memory-growth/live_opened_ab.sh`.
 
 ### Where it reads from
 

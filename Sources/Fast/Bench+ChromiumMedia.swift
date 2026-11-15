@@ -8,6 +8,31 @@ extension Bench {
                             browser: Browser, answer: @escaping ([String: Any]) -> Void) -> Bool {
         guard Store.testing else { return false }
         switch request["op"] as? String {
+        case "frame-observe":
+            // Read a live child document through the engine's owned frame
+            // handle (including OOPIFs), without granting user activation.
+            guard let wanted = request["frame"] as? String, let body = request["body"] as? String else {
+                answer(["error": "frame and body required"]); return true
+            }
+            page.childFrames { frames in
+                guard let frame = frames.first(where: { (try? page.scripts.token($0, tab: page.remoteID)) == wanted }) else {
+                    answer(["error": "observed frame is no longer live in this page"]); return
+                }
+                page.call(body, in: .page, frame: frame, gesture: false) { result in
+                    switch result {
+                    case .success(let value): answer(["value": Bench.plain(value)])
+                    case .failure(let error): answer(["error": String(describing: error)])
+                    }
+                }
+            }
+            return true
+        case "fullscreen-observe":
+            // A transition observation must not age behind media.read and
+            // capture-state roundtrips in the broad media diagnostic below.
+            // Keep the native owner, compositor geometry and PiP on one turn.
+            answer(["fullscreenState": page.fullscreenState, "surface": page.surfaceState,
+                    "pip": page.videoPiP != nil, "now": CACurrentMediaTime()])
+            return true
         case "native-pip-state":
             guard let native = page.videoPiP else {
                 answer(["active": false, "known": page.nativeVideoPiPKnown]); return true
@@ -80,8 +105,54 @@ extension Bench {
                 out["tune"] = ["title": tune.title, "artist": tune.artist, "playing": tune.playing,
                                "duration": tune.duration, "position": tune.position(), "next": tune.next, "previous": tune.previous]
             }
+            out["nativeCaptureKnown"] = page.media.nativeCaptureKnown
+            if let capture = page.media.nativeCapture {
+                out["nativeCapture"] = ["camera": capture.camera, "microphone": capture.microphone, "screen": capture.screen,
+                                        "documentPiP": capture.documentPiP, "videoPiP": capture.videoPiP]
+            }
             Task { @MainActor in
                 if let native = try? await page.navigationRequest("media.read"),
+                   let value = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(native), options: .fragmentsAllowed) {
+                    out["core"] = value
+                }
+                if let capture = try? await page.navigationRequest("media.capture.state", ["profile": .string(page.profile)]),
+                   let value = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(capture), options: .fragmentsAllowed) {
+                    out["coreCapture"] = value
+                }
+                answer(out)
+            }
+            return true
+        case "document-pip":
+            // The page's own floating window: what is on screen, and a press
+            // inside it as `click` presses a tab.
+            let document = tab.documentPiP
+            if request["action"] as? String == "click", let child = document.chromiumPage {
+                _ = child.agentClick(x: request["x"] as? Double ?? 0, y: request["y"] as? Double ?? 0, flags: [])
+            }
+            if request["action"] as? String == "close" { document.panel?.performClose(nil) }
+            // Someone working in the browser: its window key, this one not.
+            if request["action"] as? String == "behind" { BrowserWindows.shared.window(for: browser)?.makeKeyAndOrderFront(nil) }
+            if request["action"] as? String == "picture", let path = request["path"] as? String, let child = document.chromiumPage {
+                child.snapshot(PageShot(rect: nil, width: nil)) { image, error in
+                    guard let image, let data = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
+                          let png = bitmap.representation(using: .png, properties: [:]) else {
+                        answer(["error": String(describing: error)]); return
+                    }
+                    do { try png.write(to: URL(fileURLWithPath: path)); answer(["ok": true, "width": image.size.width, "height": image.size.height]) }
+                    catch { answer(["error": String(describing: error)]) }
+                }
+                return true
+            }
+            var out: [String: Any] = [
+                "showing": document.showing, "window": document.panel?.windowNumber ?? 0,
+                "visible": document.panel?.isVisible ?? false, "key": document.panel?.isKeyWindow ?? false,
+                "frame": document.panel.map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] } ?? [],
+                "content": document.chromiumPage.map { [$0.bounds.width, $0.bounds.height] } ?? [],
+                "remote": document.chromiumPage?.remoteID ?? "", "context": document.chromiumPage?.contextID ?? 0,
+                "surface": Bench.plain(document.chromiumPage?.surfaceState ?? [:]),
+            ]
+            Task { @MainActor in
+                if let child = document.chromiumPage, let native = try? await child.navigationRequest("tab.state"),
                    let value = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(native), options: .fragmentsAllowed) {
                     out["core"] = value
                 }

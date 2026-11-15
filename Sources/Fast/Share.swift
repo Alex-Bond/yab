@@ -123,6 +123,12 @@ final class SharePicker: ObservableObject {
     var kinds: Set<Kind> = [.tabs, .windows, .screens]
     /// Only a page's own getDisplayMedia can go on to macOS's picker.
     var offersSystem = true
+    /// The door the page named (displaySurface), over the one remembered.
+    var preferred: Kind?
+    /// The page's own tab is offered (selfBrowserSurface), and first
+    /// (preferCurrentTab).
+    var offersCaller = false
+    var callerFirst = false
 
     /// The way to macOS's own picker on the windows, where Yab can't see
     /// other apps' windows.
@@ -140,6 +146,30 @@ final class SharePicker: ObservableObject {
     /// they can be shown, by Yab or by macOS's picker.
     var doors: [Kind] {
         Kind.allCases.filter { kinds.contains($0) && ($0 != .screens || sees || offersSystem) }
+    }
+
+    /// What a page's getDisplayMedia said of what it wants offered.
+    func take(_ body: [String: Any]) {
+        switch body["surface"] as? String {
+        case "browser": preferred = .tabs
+        case "window": preferred = .windows
+        case "monitor": preferred = .screens
+        default: break
+        }
+        callerFirst = body["current"] as? Bool ?? false
+        offersCaller = callerFirst || body["own"] as? String == "include"
+        if body["screens"] as? String == "exclude" { kinds.remove(.screens) }
+    }
+
+    /// Whether the sound comes with this: a tab's, as Chromium shares it
+    /// unless told not to. Never a window's, as Chromium on the Mac. A
+    /// screen's stays off: Chromium leaves its "Also share system audio" off
+    /// until it is pressed, and this box has no such switch. Asking for it
+    /// also puts macOS's System Audio Recording question up, and the page's
+    /// getDisplayMedia waits on that answer.
+    func hears(_ source: Share.Source) -> Bool {
+        if case .tab = source { return audio }
+        return false
     }
 
     /// A door's items, narrowed to what is typed.
@@ -166,16 +196,34 @@ final class SharePicker: ObservableObject {
         return all.first { $0.id == chosenID } ?? all.first
     }
 
-    /// An arrow: left and right along the order, up and down a row, to the
-    /// same column of the row above or below.
+    /// The keys are on the doors' row (Tab, Window, Entire Screen) rather
+    /// than the tiles under it.
+    @Published var onDoors = false
+
+    /// An arrow: on the doors, left and right open the one beside and down
+    /// goes to the tiles; on the tiles, left and right along the order, up
+    /// and down a row, to the same column of the row above or below, and up
+    /// from the first row to the doors.
     func move(_ step: Step) {
+        if onDoors {
+            switch step {
+            case .left: turn(false)
+            case .right: turn(true)
+            case .down: onDoors = false
+            case .up: break
+            }
+            return
+        }
         let all = items(door), columns = Self.columns(door)
-        guard let current = chosen, let index = all.firstIndex(where: { $0.id == current.id }) else { return }
+        guard let current = chosen, let index = all.firstIndex(where: { $0.id == current.id }) else {
+            if step == .up, doors.count > 1 { onDoors = true }
+            return
+        }
         switch step {
         case .left: chosenID = all[max(0, index - 1)].id
         case .right: chosenID = all[min(all.count - 1, index + 1)].id
         case .up:
-            guard index >= columns else { return }
+            guard index >= columns else { if doors.count > 1 { onDoors = true }; return }
             chosenID = all[index - columns].id
         case .down:
             guard index / columns < (all.count - 1) / columns else { return }
@@ -185,7 +233,13 @@ final class SharePicker: ObservableObject {
 
     enum Step { case left, right, up, down }
 
-    /// The next door along, or the one before: Tab and Shift-Tab.
+    /// Tab and Shift-Tab: from the doors' row to the tiles and back.
+    func switchRow() {
+        guard doors.count > 1 else { return }
+        onDoors.toggle()
+    }
+
+    /// The next door along, or the one before.
     func turn(_ forward: Bool) {
         let open = doors
         guard let index = open.firstIndex(of: door), !open.isEmpty else { return }
@@ -210,14 +264,16 @@ final class SharePicker: ObservableObject {
     func fill(_ browser: Browser, caller: Tab, offeringCaller: Bool = false) {
         let stills = TabGlance.of(browser).stills
         func offered(_ tabs: [Tab]) -> [Item] {
-            tabs.filter { (offeringCaller || $0.id != caller.id) && !$0.isBlank && !$0.shy }.map { tab in
+            tabs.filter { (offeringCaller || offersCaller || $0.id != caller.id) && !$0.isBlank && !$0.shy }.map { tab in
                 Item(id: tab.id.uuidString, source: .tab(tab.id), kind: .tabs, title: tab.rowLabel, icon: tab.icon, letter: tab.monogram, picture: stills[tab.id])
             }
         }
         let recent = browser.recentTabs().tabs
-        tabs = offered(recent)
-        otherTabs = offered(browser.tabs.filter { tab in !recent.contains { $0.id == tab.id } })
-        door = Self.remembered(host).flatMap { doors.contains($0) ? $0 : nil } ?? doors.first ?? .tabs
+        let first = callerFirst ? browser.tabs.filter { $0.id == caller.id } + recent.filter { $0.id != caller.id } : recent
+        tabs = offered(first)
+        otherTabs = offered(browser.tabs.filter { tab in !first.contains { $0.id == tab.id } })
+        door = (callerFirst ? Kind.tabs : preferred).flatMap { doors.contains($0) ? $0 : nil }
+            ?? Self.remembered(host).flatMap { doors.contains($0) ? $0 : nil } ?? doors.first ?? .tabs
         if !allowed, offersSystem { Task { await walls() } }
         Task { await others() }
     }
@@ -253,6 +309,9 @@ final class SharePicker: ObservableObject {
         return window.isVisible && !(window is NSPanel) && window.sharingType != .none
     }
 
+    /// macOS's own surfaces, windows to ScreenCaptureKit and nothing to show.
+    private static let systemParts: Set<String> = ["com.apple.controlcenter", "com.apple.notificationcenterui", "com.apple.dock", "com.apple.WindowManager"]
+
     private func others() async {
         // Yab's own windows come from the process's own content, which
         // needs no Screen Recording: without it they were never listed.
@@ -267,11 +326,12 @@ final class SharePicker: ObservableObject {
         let me = getpid()
         let found = content?.windows.filter { window in
             guard window.windowLayer == 0, window.frame.width >= 120, window.frame.height >= 80,
-                  let app = window.owningApplication, app.processID != me, !app.applicationName.isEmpty
+                  let app = window.owningApplication, app.processID != me, !app.applicationName.isEmpty,
+                  window.title?.isEmpty == false, !Self.systemParts.contains(app.bundleIdentifier)
             else { return false }
             return true
         } ?? []
-        let shown = Array((mine + found).prefix(12))
+        let shown = mine + found
         let own = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? ProcessInfo.processInfo.processName
         windows = shown.map { window in
             let app = window.owningApplication
@@ -282,11 +342,10 @@ final class SharePicker: ObservableObject {
             let icon = ours ? NSApp.applicationIconImage : app.flatMap { NSRunningApplication(processIdentifier: $0.processID)?.icon }
             return Item(id: "w\(window.windowID)", source: .window(window.windowID), kind: .windows, title: title, icon: icon, letter: String(name.prefix(1)))
         }
+        for window in shown { takes["w\(window.windowID)"] = (SCContentFilter(desktopIndependentWindow: window), window.frame.size) }
         guard let content else {
-            for window in shown {
-                let picture = await Self.picture(SCContentFilter(desktopIndependentWindow: window), window.frame.size)
-                if let index = windows.firstIndex(where: { $0.id == "w\(window.windowID)" }) { windows[index].picture = picture }
-            }
+            await picturesOfTheDoor(.windows)
+            keepPicturesLive()
             return
         }
         screens = content.displays.enumerated().map { index, display in
@@ -294,13 +353,33 @@ final class SharePicker: ObservableObject {
             return Item(id: "d\(display.displayID)", source: .display(display.displayID), kind: .screens, title: about?.name ?? "Screen \(index + 1)",
                         icon: nil, letter: "", detail: about?.size ?? "\(display.width) × \(display.height)")
         }
-        for window in shown {
-            let picture = await Self.picture(SCContentFilter(desktopIndependentWindow: window), window.frame.size)
-            if let index = windows.firstIndex(where: { $0.id == "w\(window.windowID)" }) { windows[index].picture = picture }
+        for display in content.displays { takes["d\(display.displayID)"] = (SCContentFilter(display: display, excludingWindows: []), display.frame.size) }
+        await picturesOfTheDoor(.windows)
+        await picturesOfTheDoor(.screens)
+        keepPicturesLive()
+    }
+
+    /// What each window and screen is taken with, by its tile's id.
+    private var takes: [String: (filter: SCContentFilter, size: CGSize)] = [:]
+
+    private func picturesOfTheDoor(_ kind: Kind) async {
+        for item in (kind == .windows ? windows : screens) {
+            guard let take = takes[item.id], let picture = await Self.picture(take.filter, take.size) else { continue }
+            if kind == .windows, let index = windows.firstIndex(where: { $0.id == item.id }) { windows[index].picture = picture }
+            if kind == .screens, let index = screens.firstIndex(where: { $0.id == item.id }) { screens[index].picture = picture }
         }
-        for display in content.displays {
-            let picture = await Self.picture(SCContentFilter(display: display, excludingWindows: []), display.frame.size)
-            if let index = screens.firstIndex(where: { $0.id == "d\(display.displayID)" }) { screens[index].picture = picture }
+    }
+
+    /// The open door's pictures stay live while the box is up, as Chromium's
+    /// picker keeps its own, a look a second. The box's end drops the picker
+    /// and this with it.
+    private func keepPicturesLive() {
+        Task { [weak self] in
+            while true {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                if self.door != .tabs { await self.picturesOfTheDoor(self.door) }
+            }
         }
     }
 
@@ -321,6 +400,55 @@ final class SharePicker: ObservableObject {
 /// where it goes; under them the open door's tiles. The field finds a tab
 /// or a window by its name, the arrows move through the tiles, Tab and
 /// ⌘1 to ⌘3 turn the doors, Return shows what is picked and Escape says no.
+/// The share box's keys, from the window whatever has them there: a
+/// Chromium page or the call's window can hold the first responder, and
+/// the box's field then heard no arrow. Arrows move the pick (and onto the
+/// doors' row), Tab and Shift-Tab change rows, Return shares, Escape
+/// cancels; letters go to the field, which finds as you type.
+@MainActor
+final class ShareKeys {
+    private var monitor: Any?
+
+    func start(_ picker: SharePicker, yes: @escaping () -> Void, no: @escaping () -> Void, focus: @escaping () -> Void) {
+        stop()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak picker] event in
+            guard let picker else { return event }
+            let flags = event.modifierFlags.intersection([.command, .control, .option])
+            guard flags.isEmpty else { return event }
+            let editing = (event.window?.firstResponder as? NSTextView)?.isFieldEditor == true
+            switch event.keyCode {
+            case 123:
+                if editing, !picker.typed.isEmpty { return event }
+                picker.move(.left)
+            case 124:
+                if editing, !picker.typed.isEmpty { return event }
+                picker.move(.right)
+            case 126: picker.move(.up)
+            case 125: picker.move(.down)
+            case 48: picker.switchRow()
+            case 36, 76: yes()
+            case 53: no()
+            case 51:
+                if editing { return event }
+                if !picker.typed.isEmpty { picker.typed.removeLast() }
+            default:
+                if editing { return event }
+                guard let text = event.characters, !text.isEmpty,
+                      text.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && $0.value < 0xF700 }) else { return event }
+                picker.typed += text
+                picker.onDoors = false
+                focus()
+            }
+            return nil
+        }
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+}
+
 struct ShareBox: View {
     let browser: Browser
     let tab: Tab
@@ -330,9 +458,10 @@ struct ShareBox: View {
     @Environment(\.accessibilityReduceTransparency) private var solid
 
     static let width: CGFloat = 600
-    /// The tiles' room, the same behind every door so the box stands
-    /// still as they turn: two rows of tabs and the top of a third.
-    static let pane: CGFloat = 316
+    /// As tall as ⌘T's box, its field and the body under it (owner,
+    /// 0.46.10); the tiles scroll in what the field, doors and foot leave.
+    static let height: CGFloat = Omnibox.fieldHeight + Omnibox.bodyHeight
+    @State private var keys = ShareKeys()
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: Omnibox.corner, style: .continuous) }
     private var yes: () -> Void { { SharePicker.remember(picker.door, for: picker.host); browser.answer(tab, .yes(nil)) } }
@@ -346,11 +475,15 @@ struct ShareBox: View {
             list
             foot
         }
-        .frame(width: Self.width)
+        .frame(width: Self.width, height: Self.height)
         .clipShape(shape)
         .background { ground }
         .overlay(shape.strokeBorder(scheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.08), lineWidth: 0.5)) // design: the field's box ring (Omnibox), not a card's hairline
-        .onAppear { DispatchQueue.main.async { typing = true } }
+        .onAppear {
+            DispatchQueue.main.async { typing = true }
+            keys.start(picker, yes: yes, no: no, focus: { typing = true })
+        }
+        .onDisappear { keys.stop() }
     }
 
     /// Who asks and what for, where ⌘T has its glass and its words: the
@@ -377,11 +510,8 @@ struct ShareBox: View {
                 .focused($typing)
                 .onSubmit(yes)
                 .onExitCommand(perform: no)
-                .onKeyPress(keys: [.upArrow], phases: .down) { press in guard press.modifiers.isEmpty else { return .ignored }; picker.move(.up); return .handled }
-                .onKeyPress(keys: [.downArrow], phases: .down) { press in guard press.modifiers.isEmpty else { return .ignored }; picker.move(.down); return .handled }
-                .onKeyPress(keys: [.leftArrow], phases: .down) { press in guard press.modifiers.isEmpty, picker.typed.isEmpty else { return .ignored }; picker.move(.left); return .handled }
-                .onKeyPress(keys: [.rightArrow], phases: .down) { press in guard press.modifiers.isEmpty, picker.typed.isEmpty else { return .ignored }; picker.move(.right); return .handled }
-                .onKeyPress(keys: [.tab], phases: .down) { press in picker.turn(!press.modifiers.contains(.shift)); return .handled }
+                // Arrows, Tab, Return and Escape: ShareKeys, wherever the
+                // window's keys are.
             if picker.typed.isEmpty, picker.door != .screens, !InputMethod.composing(focused: typing) {
                 Text("Type to find")
                     .font(.system(size: 12.5))
@@ -400,6 +530,13 @@ struct ShareBox: View {
             ForEach(Array(picker.doors.enumerated()), id: \.element) { index, kind in
                 Button { picker.door = kind } label: {
                     ShareDoor(kind: kind, on: picker.door == kind, items: picker.items(kind), allowed: picker.sees)
+                        // The keys on the doors' row: the open door ringed.
+                        .overlay {
+                            if picker.onDoors, picker.door == kind {
+                                RoundedRectangle(cornerRadius: Radius.floating, style: .continuous)
+                                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
@@ -445,7 +582,7 @@ struct ShareBox: View {
             .padding(.horizontal, Omnibox.gutter)
             .padding(.vertical, 12)
         }
-        .frame(height: Self.pane)
+        .frame(maxHeight: .infinity)
     }
 
     /// What Return sends, named: a tab, a window, a screen; the way to
@@ -532,7 +669,7 @@ private struct ShareDoor: View {
                 .frame(height: 62)
                 .frame(maxWidth: .infinity)
                 .background(Omnibox.tileFill)
-                .clipShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Radius.floating, style: .continuous))
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(name)
                     .font(.system(size: 13.5, weight: .semibold))
@@ -657,7 +794,7 @@ private struct ShareScreenTile: View {
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: Radius.floating, style: .continuous)
         let plate = RoundedRectangle(cornerRadius: Radius.floating, style: .continuous)
         VStack(alignment: .leading, spacing: 8) {
             // The screen's own shape across the tile, so the plate is the
@@ -698,7 +835,7 @@ private struct ShareElsewhere: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: Radius.floating, style: .continuous)
         VStack(alignment: .leading, spacing: 8) {
             Color.clear
                 .aspectRatio(16 / 10, contentMode: .fit)
@@ -758,7 +895,7 @@ private struct ShareThumb: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: Radius.floating, style: .continuous)
         VStack(alignment: .leading, spacing: 8) {
             Color.clear
                 .aspectRatio(16 / 10, contentMode: .fit)
@@ -850,6 +987,13 @@ final class Share: ObservableObject {
         /// The extension recording, when one asked (ExtensionCapture):
         /// the pill names it rather than its page.
         var recorder: String?
+        /// Chromium takes the picture itself (ShareNative): no feed, the
+        /// page's track is the engine's.
+        var native = false
+        /// The engine has said it is showing, so its saying otherwise ends this.
+        var nativeLive = false
+        /// The sound comes with it.
+        var hearing = false
 
         /// The page that takes the frames when it isn't a tab's: an
         /// extension's offscreen document (ExtensionCapture).
@@ -922,6 +1066,15 @@ final class Share: ObservableObject {
            !sessions.values.contains(where: { $0.source != nil && $0.caller?.builtPage === web }) {
             web.webKitDoneSharing(of: session.caller)
         }
+        if session.native {
+            mark()
+            guard tellPage, let page = session.caller?.builtPage as? ChromiumPage else { return }
+            // The engine ends every track of it, and the page hears them
+            // end as it would from Chrome's own Stop.
+            if page.stopsNativeCapture { page.stopNativeCapture(kind: "screen") }
+            else { page.call(ShareScript.call("api.feed(id, 'end')"), arguments: ["id": id], in: .page, frame: session.frame) { _ in } }
+            return
+        }
         if session.source != nil, let web = session.consumer {
             web.call(ShareScript.transport("api.end(id)"), arguments: ["id": id], in: .yab, frame: session.frame) { _ in }
         }
@@ -984,6 +1137,8 @@ final class Share: ObservableObject {
         guard !tab.isBlank, !tab.shy, !tab.sharing, !tab.seen else { return nil }
         return sessions.values.first { session in
             guard case .tab = session.source, let browser = session.browser, session.caller !== tab else { return false }
+            // Chromium's capture moves only to another Chromium tab.
+            if session.native, !(tab.builtPage is ChromiumPage) { return false }
             return browser.tabs.contains { $0 === tab }
         }
     }
@@ -992,6 +1147,9 @@ final class Share: ObservableObject {
     /// the last one was, so the picture taken is the same part of the
     /// window; the page's track and the call carry on as they were.
     func switchShown(_ session: Session, to tab: Tab) {
+        if session.native, let caller = session.caller?.builtPage as? ChromiumPage, let page = tab.builtPage as? ChromiumPage {
+            caller.switchDisplaySource(to: page, audio: session.hearing)
+        }
         session.shown = tab
         session.browser?.select(tab)
         mark()
@@ -1141,7 +1299,7 @@ final class Share: ObservableObject {
                     return self.end(session.id, tellPage: true)
                 }
                 guard let web = tab.builtPage, let window = web.window, window.isVisible, !window.isMiniaturized,
-                      window.windowNumber == session.window, browser.onScreen(tab.id)
+                      session.native || window.windowNumber == session.window, browser.onScreen(tab.id)
                 else {
                     session.feed?.open = false
                     session.steady = 0
@@ -1210,18 +1368,22 @@ extension Browser {
                 return shareOwn(tab, frame: frame, token: token, most: most, label: grant.label, source: grant.source,
                                 recorder: grant.extensionName)
             }
-            // The page's own frames only, just after your click or key in its tab (RelayGuard).
-            guard let hand = RelayGuard.share(frame, on: tab) else { return shareAnswer(tab, frame, token, ["choice": "cancel"]) }
+            // The page's own frames only, just after your click or key in its
+            // tab or in a window it draws (RelayGuard, shareHand).
+            guard let (hand, pressed) = shareHand(frame, on: tab) else { return shareAnswer(tab, frame, token, ["choice": "cancel"]) }
             let host = frame.origin.host.isEmpty ? (tab.address?.host() ?? "This page") : frame.origin.host
             let picker = SharePicker(token: token, frame: frame, host: host, audio: body["audio"] as? Bool ?? false)
             let wide = body["width"] as? Double ?? 0, tall = body["height"] as? Double ?? 0
             if wide > 0 || tall > 0 { picker.most = CGSize(width: wide, height: tall) }
+            picker.take(body)
             picker.fill(self, caller: tab)
             // Asked from where you aren't, the call's Share out in its
             // window: the card comes where you can see it, over its tab.
             // A tab behind that its page asked from keeps it (ShareWaiting).
-            if !onScreen(tab.id), hand == .yab || floatingCall === tab { select(tab) }
-            ask(PageAsk(kind: .share(picker), host: host), on: tab) { [weak self, weak tab] reply, _ in
+            // Pressed in a window the page draws, the box comes over that
+            // window, where you are; the share is still the page's.
+            if pressed == nil, !onScreen(tab.id), hand == .yab || floatingCall === tab { select(tab) }
+            ask(PageAsk(kind: .share(picker), host: host), on: pressed ?? tab) { [weak self, weak tab] reply, _ in
                 guard let self, let tab else { return }
                 guard case .yes(let said) = reply else { return self.shareAnswer(tab, frame, token, ["choice": "cancel"]) }
                 guard let item = picker.chosen else { return self.shareAnswer(tab, frame, token, ["choice": "cancel"]) }
@@ -1266,9 +1428,32 @@ extension Browser {
         case "started":
             guard let id = body["id"] as? String, RelayGuard.ownFrame(frame, of: tab) else { return }
             Share.shared.add(Share.Session(id: id, caller: tab, browser: self, frame: frame, source: nil))
+        case "native":
+            guard let id = body["id"] as? String, RelayGuard.ownFrame(frame, of: tab),
+                  let session = Share.shared.sessions[id], session.native, session.caller === tab else { return }
+            nativeStarted(session, stay: body["stay"] as? Bool ?? false)
         default:
             break
         }
+    }
+
+    /// Whose click stands behind a page's ask for the screen: one in its own
+    /// tab, or one in a window the page opened and draws (RelayGuard.drawn),
+    /// then that window's tab. Slack's huddle window is an about:blank
+    /// popup its opener fills: Share Screen is pressed there, and the
+    /// getDisplayMedia that follows is the opener's. Chrome asks no click
+    /// for getDisplayMedia; Yab asks one, and finds it where it was made.
+    /// A Document Picture-in-Picture window's click counts as its page's,
+    /// as Chromium hands its activation to the opener; the box stays on the tab.
+    func shareHand(_ frame: PageFrame, on tab: Tab) -> (RelayGuard.Hand, Tab?)? {
+        guard RelayGuard.ownFrame(frame, of: tab) else { return nil }
+        if let hand = RelayGuard.take(tab.builtPage) { return (hand, nil) }
+        for window in everyTab + outside where window !== tab && RelayGuard.drawn(window, by: tab) {
+            if let hand = RelayGuard.take(window.builtPage) { return (hand, window) }
+        }
+        let pip: [AnyObject?] = [tab.documentPiP.chromiumPage, tab.documentPiP.web]
+        for page in pip { if let hand = RelayGuard.take(page) { return (hand, nil) } }
+        return nil
     }
 
     /// An extension's chooseDesktopMedia (ExtensionCapture): the same box
@@ -1290,6 +1475,12 @@ extension Browser {
 
     private func shareAnswer(_ tab: Tab, _ frame: PageFrame, _ token: String, _ reply: [String: Any], ready: ((Bool) -> Void)? = nil) {
         shareAnswer(tab.builtPage, frame, token, reply, ready: ready)
+    }
+
+    func shareRefused(_ tab: Tab, _ frame: PageFrame, _ token: String) { shareAnswer(tab, frame, token, ["choice": "cancel"]) }
+
+    func shareAccepted(_ tab: Tab, _ frame: PageFrame, _ token: String, _ reply: [String: Any], ready: @escaping (Bool) -> Void) {
+        shareAnswer(tab, frame, token, reply, ready: ready)
     }
 
     private func shareAnswer(_ page: (any PageScriptTarget)?, _ frame: PageFrame, _ token: String, _ reply: [String: Any], ready: ((Bool) -> Void)? = nil) {
@@ -1361,6 +1552,7 @@ extension Browser {
     /// `prompt`: WebKit's own numbering, 1 the screens, 2 the windows.
     private func shareSystem(_ tab: Tab, frame: PageFrame, token: String, prompt: Int = 1) {
         guard let web = tab.builtPage else { return }
+        if web is ChromiumPage { return sharePicked(tab, frame: frame, token: token, most: nil, windows: prompt == 2) }
         // Sharing a tab brought its source forward. WebKit's own picker
         // needs the caller back in an active, focused document instead.
         if floating == tab.id { land(home: true) }
@@ -1411,7 +1603,10 @@ extension Browser {
 
     private func shareOwn(_ tab: Tab, _ picker: SharePicker, _ item: SharePicker.Item, _ source: Share.Source) {
         guard let frame = picker.frame else { return }
-        shareOwn(tab, frame: frame, token: picker.token, most: picker.most, label: item.title, source: source)
+        shareNative(tab, picker, source) { [weak self] taken in
+            guard !taken else { return }
+            self?.shareOwn(tab, frame: frame, token: picker.token, most: picker.most, label: item.title, source: source)
+        }
     }
 
     /// `recorder`: the extension recording, named on the shown tab's pill
@@ -1698,15 +1893,12 @@ struct ShareRing: View {
 
 // MARK: - on the tabs
 
-/// Presenting on the call's tab, as Meet and Zoom say it; Shown in Meet on
-/// the tab it shows, saying where it goes. "Sharing" and "Others see" left
-/// it to be worked out who showed what to whom. A right-click stops it.
-/// In the row's strongest ink, a touch heavier than the name: at the
-/// name's gray and a smaller size the words all but vanished on a site's
-/// color. Under the pointer, another of the window's tabs offers Share
-/// Instead while a tab is shown, as Arc does. With no band and no row's end
-/// to say it, the column's row has Stop too. Paused says its picture stands
-/// still.
+/// Shown in Meet on the tab a call shows, saying where it goes. The call's
+/// own row says nothing and other rows offer no Share Instead: the owner
+/// found both noise on the rows (0.46.10); the call's controls and the band
+/// stop or move a share. In the row's strongest ink, a touch heavier than
+/// the name. With no band and no row's end to say it, the column's row has
+/// Stop too. Paused says its picture stands still.
 struct ShareWord: View {
     @ObservedObject var tab: Tab
     let hovering: Bool
@@ -1717,9 +1909,6 @@ struct ShareWord: View {
     /// An extension's recording says so on both tabs: Recording on its
     /// page, Recorded by it on the tab it records.
     private var words: String {
-        if tab.sharing {
-            return share.sessions.values.contains { $0.caller === tab && $0.recorder != nil } ? "Recording" : "Presenting"
-        }
         let session = share.showing(tab)
         if session?.paused == true { return "Paused" }
         if let recorder = session?.recorder { return "Recorded by \(recorder)" }
@@ -1727,13 +1916,7 @@ struct ShareWord: View {
     }
 
     var body: some View {
-        if !tab.sharing, !tab.seen, let session = share.switchable(to: tab), hovering || share.offersInRow(session, tab) {
-            Button("Share Instead") { share.switchShown(session, to: tab) }
-                .buttonStyle(.yab(.secondary, .small))
-                .fixedSize()
-                .padding(.trailing, 16)
-                .transition(.opacity)
-        } else if tab.sharing || tab.seen {
+        if tab.seen, !tab.sharing {
             let stops = share.stopsInRow(tab, hovering: hovering)
             HStack(spacing: 6) {
                 // Beside Stop the first word is enough, the title keeps the row.

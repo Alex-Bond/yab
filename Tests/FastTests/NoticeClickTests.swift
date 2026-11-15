@@ -63,6 +63,24 @@ struct NoticeClickTests {
         w.browser.chatOpen = false
     }
 
+    // A private window holds none of your agents' questions and calls you
+    // to none of them; your normal window still does (#1520).
+    @Test func aPrivateWindowSaysNothingOfYourAgents() {
+        let w = World(); defer { w.dispose() }
+        w.session.permit = AgentPermit(kind: .mailRead, session: w.session.id, detail: "Looks for: boarding pass")
+        let shy = Browser(windowID: UUID(), purpose: .privateOnly)
+        defer {
+            shy.dozing?.invalidate()
+            shy.stuck.timer?.invalidate()
+            shy.pressure?.cancel()
+            for tab in shy.tabs { tab.close() }
+        }
+        #expect(Agents.speaks(in: w.browser))
+        #expect(Agents.shared.corneredAll(in: w.browser).contains(.chat(w.session.id)))
+        #expect(!Agents.speaks(in: shy))
+        #expect(Agents.shared.corneredAll(in: shy).isEmpty)
+    }
+
     @Test func anotherAppsAgentsQuestionIsReadInTheCornerNotTheColumn() {
         let external = World(); defer { external.dispose() }
         #expect(!Agents.shared.columnHolds(external.session.id))

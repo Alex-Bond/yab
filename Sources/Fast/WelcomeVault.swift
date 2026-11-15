@@ -97,7 +97,7 @@ enum WelcomeVault: WelcomeChapter {
         // Brought: its extension is on its way in.
         if let from = WelcomeYours.broughtFrom(stage), let id = from.manager { add(id, "Came from \(from.name)", .coming) }
         // In Yab already, not connected.
-        for item in Extensions.here.installed where PasswordManagers.isManager(item) {
+        for item in ManagerExtensions.shared.installed where PasswordManagers.isManager(item) {
             let id = PasswordManagers.canonical(item.id)
             if offerable.contains(id) { add(id, "Extension in Yab", .coming) }
         }
@@ -167,7 +167,7 @@ enum WelcomeVault: WelcomeChapter {
             connections.connect(offer.id, mode: .you)
             land(offer, stage)
         case .store:
-            Extensions.here.install(from: offer.id, confirm: false)
+            ManagerExtensions.shared.add(offer.id, confirm: false)
             connections.connect(offer.id, mode: .you)
             land(offer, stage)
         case .apple:

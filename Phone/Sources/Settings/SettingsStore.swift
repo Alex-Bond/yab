@@ -370,9 +370,11 @@ final class SettingsStore {
         defaults.set(value, forKey: key)
     }
 
-    /// The person's own defaults, or a test run's suite, emptied at launch.
+    /// The person's own defaults, or a test run's suite, emptied at launch
+    /// unless the run keeps one by name (LaunchOptions.settingsSuite).
     static func launchDefaults(_ options: LaunchOptions = .current) -> UserDefaults {
         guard options.isTestRun else { return .standard }
+        if let kept = options.settingsSuite, let suite = UserDefaults(suiteName: kept) { return suite }
         let name = "dev.serafim.fast.iphone.test-settings"
         let suite = UserDefaults(suiteName: name) ?? .standard
         suite.removePersistentDomain(forName: name)

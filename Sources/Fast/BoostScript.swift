@@ -3,8 +3,10 @@ import Foundation
 /// One isolated world per boost. The package stays portable; the wrapper owns
 /// its styles, observers, listeners and timers so a new trial can replace it.
 enum BoostScript {
+    /// "null" for a value JSON has no form for, which a page's message can
+    /// carry (a Date, NaN): JSONSerialization would raise, not throw (SafeJSON).
     static func json(_ value: Any) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]),
+        guard let data = try? SafeJSON.data(value, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else { return "null" }
         return text.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
@@ -14,7 +16,7 @@ enum BoostScript {
     static let report = "window.__yabBoost?.report() ?? {error: 'The boost did not run on this page.'}"
     static let sensitive = #"""
     (() => !['http:', 'https:'].includes(location.protocol) ||
-      /(?:^|\/)(?:login|signin|sign-in|auth|oauth|checkout|payment|wallet)(?:\/|$)/i.test(location.pathname) ||
+      /(?:^|\/)(?:login|signin|sign-in|oauth|checkout|payment|wallet)(?:\/|$)/i.test(location.pathname) ||
       !!document.querySelector('input[type="password"], input[autocomplete^="cc-"], input[autocomplete="one-time-code"]'))()
     """#
 

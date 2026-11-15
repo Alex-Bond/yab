@@ -133,10 +133,18 @@ public enum MailCodeWords {
               let range = Range(match.range(at: 1), in: text) else { return nil }
         return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    private static let spelled = try! NSRegularExpression(
+        pattern: #"\b(?:code|passcode|otp|код)\s*(?:is|:|—|-)?\s*((?=[A-Z0-9-]*[0-9])(?=[A-Z0-9-]*[A-Z])(?:[A-Z0-9]{3,5}-[A-Z0-9]{3,5}|[A-Z0-9]{4,10}))\b"#,
+        options: [.caseInsensitive])
+    /// An HTML tag: its slash, its name, its attributes.
+    private static let tags = try! NSRegularExpression(pattern: #"(?is)<(/?)([a-z][a-z0-9]*)\b([^>]*)>"#)
+    /// The markup round a code in one element, at the very most. A layout
+    /// table holds a whole mail, and its words were made text only to find
+    /// they aren't a code: once for every element round it.
+    private static let codeElement = 8_192
+
     private static func alphanumeric(_ text: String) -> String? {
-        let pattern = #"\b(?:code|passcode|otp|код)\s*(?:is|:|—|-)?\s*((?=[A-Z0-9-]*[0-9])(?=[A-Z0-9-]*[A-Z])(?:[A-Z0-9]{3,5}-[A-Z0-9]{3,5}|[A-Z0-9]{4,10}))\b"#
-        let regex = try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
-        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+        for match in spelled.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
             guard let range = Range(match.range(at: 1), in: text) else { continue }
             let value = String(text[range])
             if value.contains(where: \.isLetter), value.contains(where: \.isNumber), value == value.uppercased() { return value }
@@ -147,10 +155,9 @@ public enum MailCodeWords {
     /// Hidden preheaders do not supply a code, even when the subject says "code".
     private static func visibleHTML(_ html: String) -> String {
         var source = String(html.prefix(500_000)).replacingOccurrences(of: #"(?is)<(script|style|head)\b[^>]*>.*?</\1\s*>|<!--.*?-->"#, with: "", options: .regularExpression)
-        let tokens = try! NSRegularExpression(pattern: #"(?is)<(/?)([a-z][a-z0-9]*)\b([^>]*)>"#)
         var stack: [(tag: String, start: String.Index, hidden: Bool)] = []
         var spans: [Range<String.Index>] = []
-        for token in tokens.matches(in: source, range: NSRange(source.startIndex..., in: source)) {
+        for token in tags.matches(in: source, range: NSRange(source.startIndex..., in: source)) {
             func part(_ n: Int) -> String { Range(token.range(at: n), in: source).map { String(source[$0]) } ?? "" }
             guard let range = Range(token.range, in: source) else { continue }
             let tag = part(2).lowercased(), attrs = part(3).lowercased()
@@ -176,29 +183,28 @@ public enum MailCodeWords {
     /// Read an element's complete words. Attributes never contribute digits.
     private static func highlighted(_ html: String) -> String? {
         let source = String(html.prefix(500_000)).replacingOccurrences(of: #"(?is)<(script|style|head)\b[^>]*>.*?</\1\s*>|<!--.*?-->"#, with: "", options: .regularExpression)
-        let tokens = try! NSRegularExpression(pattern: #"(?is)<(/?)([a-z][a-z0-9]*)\b([^>]*)>"#)
-        var stack: [(tag: String, attrs: String, start: String.Index, hidden: Bool)] = []
+        var stack: [(tag: String, attrs: String, start: String.Index, at: Int, hidden: Bool)] = []
         var candidates: [(String, Int)] = []
-        for token in tokens.matches(in: source, range: NSRange(source.startIndex..., in: source)) {
+        for token in tags.matches(in: source, range: NSRange(source.startIndex..., in: source)) {
             func part(_ n: Int) -> String { Range(token.range(at: n), in: source).map { String(source[$0]) } ?? "" }
             guard let range = Range(token.range, in: source) else { continue }
             let tag = part(2).lowercased(), attrs = part(3).lowercased()
             if part(1) == "/" {
                 guard let i = stack.lastIndex(where: { $0.tag == tag }) else { continue }
                 let node = stack[i]; stack.removeSubrange(i...)
-                guard !node.hidden else { continue }
+                guard !node.hidden, token.range.location - node.at <= codeElement else { continue }
+                let emphatic = has(node.attrs, #"font-size\s*:\s*(?:2[0-9]|[3-9][0-9])(?:\.\d+)?px|letter-spacing|monospace|courier|menlo"#)
+                guard emphatic || tag == "td" else { continue }
                 let value = HTMLText.plain(String(source[node.start..<range.lowerBound])).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard has(value, #"^(?:G-)?(?:[0-9]{4,8}|[0-9]{3}[ -][0-9]{3}|[0-9]{4}[ -][0-9]{4}|[A-Z0-9]{3,5}-[A-Z0-9]{3,5}|[A-Z0-9]{4,10})$"#),
                       value.contains(where: \.isNumber), value.filter(\.isLetter).isEmpty || value == value.uppercased() else { continue }
-                let emphatic = has(node.attrs, #"font-size\s*:\s*(?:2[0-9]|[3-9][0-9])(?:\.\d+)?px|letter-spacing|monospace|courier|menlo"#)
-                guard emphatic || tag == "td" else { continue }
                 let raw = value.hasPrefix("G-") ? String(value.dropFirst(2)) : value
                 // A lone year in a footer is not an authentication step.
                 if let year = Int(raw), (1900...2099).contains(year) { continue }
                 candidates.append((raw, emphatic ? 0 : 1))
             } else if !["br", "img", "hr", "meta", "link", "input"].contains(tag), !attrs.hasSuffix("/") {
                 let hidden = stack.last?.hidden == true || has(attrs, #"display\s*:\s*none|visibility\s*:\s*hidden|(?:^|\s)hidden(?:\s|=|$)"#)
-                stack.append((tag, attrs, range.upperBound, hidden))
+                stack.append((tag, attrs, range.upperBound, token.range.location + token.range.length, hidden))
             }
         }
         return candidates.sorted { $0.1 < $1.1 }.first?.0

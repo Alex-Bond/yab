@@ -149,7 +149,7 @@ struct ChatRestorationTests {
             #expect(browser.focusRequest == focus + 1, "the existing field gets its keys back")
             #expect(browser.editing && browser.typed == "keep this query")
             #expect(browser.chatAttach.words == "keep this chat draft")
-            #expect(browser.chatAttach.items == [.quote("keep this attachment")])
+            #expect(browser.chatAttach.items(for: nil) == [.quote("keep this attachment")])
             #expect(browser.prefs.sideShut == hidden && browser.prefs.sideWidth == 253)
             #expect(browser.prefs.sideFlank == (hidden ? .right : .left))
             #expect(browser.sideShown == side && browser.chatWidth == 417)

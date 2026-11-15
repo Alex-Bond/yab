@@ -62,6 +62,18 @@ struct ChatProblemTests {
         }
     }
 
+    @Test(arguments: ["authentication failed or timed out",
+                      "Error: authentication required. Run 'agy' to log in, then retry.",
+                      "Antigravity CLI requires Google sign-in.", "You are not signed in."])
+    func geminiAuthenticationFailureIsNotAConnectionTimeout(raw: String) {
+        let problem = ChatProblem(raw, agent: "Gemini")
+        #expect(problem.kind == .signIn)
+        #expect(problem.recovery == .account)
+        #expect(problem.action == "Open AI Settings")
+        #expect(problem.title == "Sign in to Gemini again")
+        #expect(problem.diagnostics == raw)
+    }
+
     @Test func modelAccessErrorTakesPrecedenceOverGenericForbidden() {
         let problem = ChatProblem(#"{"status":403,"error":{"code":"model_not_found","message":"No access"}}"#, agent: "ChatGPT")
         #expect(problem.kind == .modelUnavailable)

@@ -8,7 +8,7 @@ enum Address {
     /// Schemes the window can show itself. Anything else typed with a scheme,
     /// mailto:, a custom app link, is somebody else's job and gets refused
     /// here rather than opening a blank tab.
-    private static let ours: Set<String> = ["http", "https", "file", "about", "data", DiaryPage.scheme, ArtifactPages.scheme]
+    private static let ours: Set<String> = ["http", "https", "file", "about", "data", "chrome", DiaryPage.scheme, ArtifactPages.scheme]
 
     /// Words a scheme is spelled with: tel:911 or javascript:1 is never a
     /// machine called tel.
@@ -105,9 +105,9 @@ enum Address {
     }
 
     /// This Mac, and the network it is on: localhost, the loopback and
-    /// private addresses, a .local name, a bare name.
+    /// private and shared addresses, a .local or Tailscale name, a bare name.
     static func isLocal(_ host: String) -> Bool {
-        if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") { return true }
+        if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") || host.hasSuffix(".ts.net") { return true }
         if host.hasPrefix("[") {
             // Loopback, link-local fe80::/10, unique local fc00::/7.
             let inside = host.dropFirst().dropLast()
@@ -120,7 +120,7 @@ enum Address {
         let numbers = parts.compactMap { UInt8($0) }
         guard parts.count == 4, numbers.count == 4 else { return parts.count == 1 }
         switch (numbers[0], numbers[1]) {
-        case (0, _), (10, _), (127, _), (192, 168), (169, 254), (172, 16...31): return true
+        case (0, _), (10, _), (100, 64...127), (127, _), (192, 168), (169, 254), (172, 16...31): return true
         default: return false
         }
     }

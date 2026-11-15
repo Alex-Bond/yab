@@ -6,15 +6,18 @@ set -euo pipefail
 APP="$1" CEF="$2" HELPER="$3" IDENTITY="$4"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENTITLEMENTS="${5:-$HERE/../../yab.entitlements}"
-[ -f "$APP/Contents/Info.plist" ] && [ -x "$HELPER" ] && [ -f "$ENTITLEMENTS" ] || { echo 'CEF: missing app, executable helper or entitlements' >&2; exit 1; }
+for need in "-f:$APP/Contents/Info.plist" "-x:$HELPER" "-f:$ENTITLEMENTS"; do
+  [ "${need%%:*}" "${need#*:}" ] || { echo "CEF: missing app, executable helper or entitlements: ${need#*:}" >&2; exit 1; }
+done
 [ -n "$IDENTITY" ] || { echo 'CEF: signing identity is required (use - for ad hoc)' >&2; exit 1; }
-# Optional typed preparation binding, validated by actual native signature,
-# CDHash/DER/entitlements/UUID/bytes. A path/bool alone never skips signing.
+# Old diagnostic receipts pin a flat executable, not a signed nested bundle.
+# Refuse before modifying the app rather than bypassing or invalidating the pin.
 PREPARED_HELPER_INPUT="${YABCORE_PREPARED_HELPER_INPUT:-}"
-HELPER_INPUT_TOOL="$HERE/../../YabCore/cef-patches/prepare_main_helper_image.py"
 if [ -n "$PREPARED_HELPER_INPUT" ]; then
-  python3 "$HELPER_INPUT_TOOL" verify --receipt "$PREPARED_HELPER_INPUT" \
-    --original-helper "$HELPER" --signing-identity "$IDENTITY"
+  # A flat-file receipt cannot authorize the new bundle's resource seal.
+  # Never silently resign an image pinned into the diagnostic Swift binary.
+  echo 'CEF: flat prepared-helper receipts must be regenerated for the YabCore bundle layout' >&2
+  exit 1
 fi
 SOURCE="$CEF/Release/Chromium Embedded Framework.framework"
 [ -d "$SOURCE" ] || { echo 'CEF: Release framework missing' >&2; exit 1; }
@@ -50,14 +53,16 @@ import plistlib, shutil, sys
 app, binary = map(Path, sys.argv[1:])
 parent = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
 if binary.name == 'YabCore':
-    import os, json
-    binding = os.environ.get('YABCORE_PREPARED_HELPER_INPUT')
-    source = Path(json.loads(Path(binding).read_text())['signed']['path']) if binding else binary
-    shutil.copy2(source, app / 'Contents/MacOS/YabCore')
+    target = app / 'Contents/MacOS/YabCore'
+    if target.is_symlink():
+        target.unlink()
+    shutil.copy2(binary, target)
 for suffix, identifier in [('', ''), (' (GPU)', '.gpu'), (' (Renderer)', '.renderer'), (' (Plugin)', '.plugin'), (' (Alerts)', '.alerts')]:
     name = 'YabCore Helper' + suffix
     bundle = app / 'Contents/Frameworks' / (name + '.app')
-    if bundle.exists():
+    if bundle.is_symlink():
+        bundle.unlink()
+    elif bundle.exists():
         shutil.rmtree(bundle)
     macos = bundle / 'Contents/MacOS'
     macos.mkdir(parents=True)
@@ -74,7 +79,7 @@ for suffix, identifier in [('', ''), (' (GPU)', '.gpu'), (' (Renderer)', '.rende
                 CFBundleVersion=parent['CFBundleVersion'],
                 CFBundleShortVersionString=parent['CFBundleShortVersionString'],
                 LSMinimumSystemVersion=parent.get('LSMinimumSystemVersion', '15.4'),
-                LSUIElement=True, LSFileQuarantineEnabled=True, LSEnvironment={'MallocNanoZone': '0'},
+                LSUIElement=True, LSBackgroundOnly=True, LSFileQuarantineEnabled=True, LSEnvironment={'MallocNanoZone': '0'},
                 NSHighResolutionCapable=True, NSSupportsAutomaticGraphicsSwitching=True)
     if suffix == ' (Alerts)':
         info['NSUserNotificationAlertStyle'] = 'alert'
@@ -113,13 +118,13 @@ if [ -d "$APP/Contents/PlugIns/YabDockTile.docktileplugin" ]; then
   codesign "${SIGN[@]}" "$APP/Contents/PlugIns/YabDockTile.docktileplugin"
 fi
 if [ -f "$APP/Contents/MacOS/YabCore" ]; then
-  if [ -n "$PREPARED_HELPER_INPUT" ]; then
-    python3 "$HELPER_INPUT_TOOL" verify --receipt "$PREPARED_HELPER_INPUT" \
-      --original-helper "$HELPER" --embedded "$APP/Contents/MacOS/YabCore" --signing-identity "$IDENTITY"
-    # Exact actual signed helper is already verified, not a skip-sign switch.
-  else
-    codesign "${SIGN[@]}" --entitlements "$HERE/helper-entitlements.plist" "$APP/Contents/MacOS/YabCore"
-  fi
+  # Preserve the old code identifier for existing keychain access requirements
+  # while changing its LaunchServices identity through the nested plist.
+  codesign "${SIGN[@]}" --entitlements "$HERE/helper-entitlements.plist" "$APP/Contents/MacOS/YabCore"
+  CORE_IDENTIFIER="$(codesign -dvv "$APP/Contents/MacOS/YabCore" 2>&1 | sed -n 's/^Identifier=//p')"
+  [ -n "$CORE_IDENTIFIER" ] || { echo 'CEF: missing helper code identifier' >&2; exit 1; }
+  python3 "$HERE/package_core.py" "$APP"
+  codesign "${SIGN[@]}" --identifier "$CORE_IDENTIFIER" --entitlements "$HERE/helper-entitlements.plist" "$FRAMEWORKS/YabCore.app"
 fi
 UPDATER="$APP/Contents/MacOS/YabUpdater"
 if [ -f "$UPDATER" ]; then
@@ -128,8 +133,4 @@ if [ -f "$UPDATER" ]; then
 fi
 codesign "${SIGN[@]}" --entitlements "$ENTITLEMENTS" "$APP"
 codesign --verify --deep --strict "$APP"
-if [ -n "$PREPARED_HELPER_INPUT" ]; then
-  python3 "$HELPER_INPUT_TOOL" verify --receipt "$PREPARED_HELPER_INPUT" \
-    --original-helper "$HELPER" --embedded "$APP/Contents/MacOS/YabCore" --signing-identity "$IDENTITY"
-fi
 echo "CEF: embedded and signed inside out ($IDENTITY)"

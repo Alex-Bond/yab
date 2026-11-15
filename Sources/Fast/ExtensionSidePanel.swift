@@ -4,7 +4,7 @@ import WebKit
 
 @available(macOS 15.4, *)
 @MainActor
-final class ExtensionSidePanelPage: NSObject, WKWebExtensionTab {
+final class ExtensionSidePanelPage: NSObject, WKWebExtensionTab, WKNavigationDelegate {
     let id: String
     let contextID = UUID().uuidString
     private(set) var targetTabID: Int?
@@ -25,7 +25,30 @@ final class ExtensionSidePanelPage: NSObject, WKWebExtensionTab {
         web = WKWebView(frame: NSRect(x: 0, y: 0, width: ChatLook.normal, height: 600),
                         configuration: configuration)
         super.init()
+        web.navigationDelegate = self
         owner.controller.didOpenTab(self)
+    }
+
+    // Panel documents live outside Browser.tabs. WebKit needs the same
+    // navigation-to-download handoff here as on an ordinary page; otherwise
+    // an extension's a.download never gets a destination or a lifetime owner.
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        decisionHandler(action.shouldPerformDownload ? .download : .allow)
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(PageResponsePolicy.decide(response.response,
+                        canShowMIMEType: response.canShowMIMEType).webKitResponse)
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        browser?.webView(webView, navigationAction: navigationAction, didBecome: download)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        browser?.webView(webView, navigationResponse: navigationResponse, didBecome: download)
     }
 
     func load(_ url: URL, tabID: Int?) {

@@ -6,8 +6,8 @@ import MailCoreFakes
 
 /// mail_send: what an agent may send is what is in the mail page already,
 /// built as the page's own Send builds it, refused where that Send refuses,
-/// and Ask/Auto approve one mail exactly while Bypass skips the card
-/// (MailAgent.outgoing, send; Agents.sendMail).
+/// and every permission mode approves one immutable outgoing operation
+/// (MailAgent.outgoing, send; Agents.queueMail).
 extension MailSyncAppTests {
     @MainActor private func engine(_ store: MailStore, _ gmail: MailGmail) -> MailCenter.Engine {
         MailCenter.Engine(account: "me@example.com", store: store, gmail: gmail, sync: MailSync(store: store, gmail: gmail))
@@ -118,10 +118,10 @@ extension MailSyncAppTests {
             let first = await agents.sendMail(out, in: tab, session: session, mode: mode)
             #expect(first["asking"] as? Bool == true)
             #expect(fake.sent.isEmpty && store.pendingOps == 0)
-            let card = try #require(tab.permit)
+            let card = try #require(agents.mailRequests.first?.permit)
             #expect(card.kind == .sendMail(to: out.to, mail: out.key))
             #expect(card.detail == out.detail && card.draft == out.draft.body)
-            agents.answer(tab, yes: true)
+            agents.answerMail(try #require(agents.mailRequests.first?.id), yes: true)
             let sent = await agents.sendMail(out, in: tab, session: session, mode: mode)
             #expect(sent["sent"] as? Bool == true)
             #expect(tab.permit == nil && tab.approved == nil)
@@ -150,7 +150,7 @@ extension MailSyncAppTests {
         let first = await agents.sendMails(outs, in: tab, session: session)
         #expect(first["asking"] as? Bool == true)
         #expect(fake.sent.isEmpty)
-        let card = try #require(tab.permit)
+        let card = try #require(agents.mailRequests.first?.permit)
         #expect(card.kind == .sendMails(count: 2, mail: MailAgent.batchKey(outs)))
         #expect(card.question == "Send these 2 mails?")
         #expect(card.answers.map(\.title) == ["Send All"])
@@ -159,7 +159,7 @@ extension MailSyncAppTests {
             #expect(card.draft.contains(out.detail))
             #expect(card.draft.contains(out.draft.body))
         }
-        agents.answer(tab, yes: true)
+        agents.answerMail(try #require(agents.mailRequests.first?.id), yes: true)
         let sent = await agents.sendMails(outs, in: tab, session: session)
         #expect(sent["error"] == nil)
         #expect(sent["count"] as? Int == 2)
@@ -179,10 +179,13 @@ extension MailSyncAppTests {
         let agents = Agents(), tab = Tab(bench: true), session = "mail-send-many"
         defer { tab.close() }
         _ = await agents.sendMails([one, two], in: tab, session: session)
-        agents.answer(tab, yes: true)
+        agents.answerMail(try #require(agents.mailRequests.first?.id), yes: true)
+        // The accepted immutable operation goes once even without a second
+        // CLI call. Its receipt is not consent for different words.
+        _ = await agents.sendMails([one, two], in: tab, session: session)
         let again = await agents.sendMails([one, changed], in: tab, session: session)
         #expect(again["asking"] as? Bool == true)
-        #expect(fake.sent.isEmpty)
+        #expect(fake.sent.count == 2)
     }
 
     @MainActor @Test func everyModeRejectsChangedExpiredAndOtherTasksApprovals() async throws {
@@ -200,10 +203,10 @@ extension MailSyncAppTests {
                 tab.approved = approval
                 let waiting = await agents.sendMail(out, in: tab, session: session, mode: mode)
                 #expect(waiting["asking"] as? Bool == true)
-                #expect(tab.permit?.key == "mail:" + out.key)
+                #expect(agents.mailRequests.first?.permit.key == "mail:" + out.key)
                 #expect(fake.sent.isEmpty)
             }
-            agents.answer(tab, yes: false)
+            agents.answerMail(try #require(agents.mailRequests.first?.id), yes: false)
             let refused = await agents.sendMail(out, in: tab, session: session, mode: mode)
             #expect((refused["error"] as? String)?.contains("not now") == true)
             #expect(refused["asking"] == nil && fake.sent.isEmpty)

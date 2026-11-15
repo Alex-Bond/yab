@@ -98,6 +98,28 @@ struct PageQuestionEventsTests {
             previousFailureCount: failures, failureResponse: nil, error: nil, sender: Sender())
     }
 
+    @Test func proxyCancelAnswersConcurrentWebKitChallengesAndDoesNotAskTheNextTab() throws {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let first = PageView(frame: .zero, configuration: configuration)
+        let second = PageView(frame: .zero, configuration: configuration)
+        let one = Listener(), two = Listener(), three = Listener()
+        let space = URLProtectionSpace(proxyHost: "proxy-cancel.test", port: 8080, type: NSURLProtectionSpaceHTTPProxy,
+                                       realm: "VPN", authenticationMethod: NSURLAuthenticationMethodHTTPBasic)
+        let challenge = URLAuthenticationChallenge(protectionSpace: space, proposedCredential: nil,
+            previousFailureCount: 0, failureResponse: nil, error: nil, sender: Sender())
+        var answers: [URLSession.AuthChallengeDisposition] = []
+        WebKitQuestions.authenticate(first, challenge, listener: one) { answers.append($0); #expect($1 == nil) }
+        WebKitQuestions.authenticate(second, challenge, listener: two) { answers.append($0); #expect($1 == nil) }
+        #expect(one.authentication != nil && two.authentication == nil && answers.isEmpty)
+        let reply = try #require(one.authReply)
+        reply(.cancel); reply(.credential(user: "late", password: "late"))
+        #expect(answers == [.cancelAuthenticationChallenge, .cancelAuthenticationChallenge])
+        WebKitQuestions.authenticate(second, challenge, listener: three) { answers.append($0); #expect($1 == nil) }
+        #expect(three.authentication == nil && answers.count == 3)
+        #expect(answers.allSatisfy { $0 == .cancelAuthenticationChallenge })
+    }
+
     @Test(arguments: [PageAuthenticationReply.performDefaultHandling, .cancel, .credential(user: "name", password: "secret")])
     func passwordAuthenticationCopiesMetadataAndHoldsExactlyOneReply(answer: PageAuthenticationReply) throws {
         let view = PageView(frame: .zero, configuration: WKWebViewConfiguration()), listener = Listener(), next = Listener()

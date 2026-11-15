@@ -8,6 +8,9 @@ final class ChromiumScripts {
     weak var tab: Tab?
     private var arming: PageScripts.Arming?
     private var installed: [PageScriptRegistration]?
+    private var installedVeils: [String: String] = [:]
+    /// Whether Dark pages' world is bound in this tab's documents.
+    private(set) var darkBound = false
     private struct YouTubePolicy: Equatable {
         let enabled: Bool
         let paused: [String]
@@ -23,12 +26,34 @@ final class ChromiumScripts {
             return "if (/^https?:$/.test(location.protocol) && (location.hostname === 'youtube.com' || location.hostname.endsWith('.youtube.com')) && !\(sites).includes(location.hostname.replace(/^www\\./, ''))) {\n" + YouTube.user.source + "\n}"
         }
     }
+    /// Calls' pages without Chrome's document Picture-in-Picture, as WebKit
+    /// never gives it them (DocumentPiP.excluded): Meet opened its own
+    /// titled window whenever a screen or tab was shared, over Yab's call
+    /// window. Without the API Meet keeps to its tab, and Yab's call window
+    /// comes along when the tab is left (Calls.liftCall). Decided in the
+    /// document, as a registration outlives the navigation that leaves a
+    /// call's site; refusing the window instead closed it under the page.
+    @MainActor static var callsWithoutDocumentPiP: String {
+        let bench = String(decoding: try! JSONEncoder().encode(CallLink.benchHosts.sorted()), as: UTF8.self)
+        return """
+        (function(){
+          var h = location.hostname.toLowerCase();
+          if (!(['meet.google.com','teams.microsoft.com','teams.cloud.microsoft','teams.live.com','app.slack.com','zoom.us'].indexOf(h) >= 0
+                || /\\.(zoom\\.us|webex\\.com)$/.test(h) || \(bench).indexOf(h) >= 0)) return;
+          for (var name of ['documentPictureInPicture','DocumentPictureInPicture','DocumentPictureInPictureEvent']) {
+            try { delete window[name]; } catch (e) {}
+            try { delete Window.prototype[name]; } catch (e) {}
+          }
+        })();
+        """
+    }
     private var installedYouTubePolicy: YouTubePolicy?
+    private var addons = ChromiumAddons()
     /// Dark pages' ground for the renderer, and what each helper tab was
     /// last told (ChromiumPage+Dark.swift).
     var ground: NSColor?
     var applied: [String: JSONValue] = [:]
-    static let featureRelays = [ScrollRelay.name, VeilRelay.name, ImageRelay.name, JSONRelay.name, MeasureRelay.name, ItemRelay.name, IconRelay.name, FormRelay.name, WalletRelay.name, StoreRelay.name, CallRelay.name, ShareRelay.name, DevRelay.name, RecordRelay.name, BadgeRelay.name, WatchRelay.name, FindRelay.name]
+    static let featureRelays = [TopDragRelay.name, ScrollRelay.name, VeilRelay.name, ImageRelay.name, JSONRelay.name, MeasureRelay.name, ItemRelay.name, IconRelay.name, FormRelay.name, WalletRelay.name, StoreRelay.name, CallRelay.name, ShareRelay.name, DevRelay.name, RecordRelay.name, BadgeRelay.name, WatchRelay.name, FindRelay.name, EyeDropperRelay.name, PasskeyRelay.name, PushRelay.name, WindowRelay.name, "yabPageTip"]
 
     private var probeRevision = 0
     private var probeHeld: [(tab: String, context: String, request: String)] = []
@@ -36,11 +61,12 @@ final class ChromiumScripts {
         Store.testing && ProcessInfo.processInfo.environment["YAB_CHROMIUM_SCRIPT_REPLAY_PROBE"] == "1"
     }
 
-    func arm(css: String, host: String?) {
+    func arm(css: String, host: String?, to url: URL? = nil) {
+        let changed = arming.map { $0.host != host || $0.css != css } ?? true
         arming = PageScripts.Arming(host: host, css: css)
         tab?.skipsAds = Shield.shared.skips(on: host)
-        if installed != nil, installedYouTubePolicy != YouTubePolicy() {
-            page?.refreshFeatureScripts()
+        if installed != nil, changed || installedVeils != Curtain.shared.styles || installedYouTubePolicy != YouTubePolicy() || addons.look != ChromiumAddons.look(for: tab) {
+            page?.refreshFeatureScripts(to: url)
         }
     }
 
@@ -53,6 +79,7 @@ final class ChromiumScripts {
         }
     }
 
+    static let boostWorldPrefix = "yab-world-yab-boost-"
     static func world(_ world: PageWorld) -> String {
         switch world {
         case .page: return ""
@@ -63,6 +90,7 @@ final class ChromiumScripts {
 
     func install(core: YabCoreClient, tab: String) async throws {
         installed = nil
+        installedVeils = [:]
         installedYouTubePolicy = nil
         applied = [:]
         // A tab with no URL has no DevTools agent until its first navigation:
@@ -71,11 +99,12 @@ final class ChromiumScripts {
         try await prepare(core: core, tab: tab, url: self.tab?.address)
     }
 
-    func prepare(core: YabCoreClient, tab: String, url: URL?) async throws {
+    func prepare(core: YabCoreClient, tab: String, url: URL?, currentDocument: Bool = false) async throws {
         guard let owner = self.tab else { return }
         let host = PageScripts.host(of: url)
         let plan = arming.flatMap { $0.host == host ? $0 : nil }
             ?? PageScripts.Arming(host: host, css: (owner.delegate as? Browser)?.curtain.css(on: host) ?? "")
+        arming = plan  // What the policy's answer arms next is compared with this.
         // Client navigations install document-start scripts before Chrome's
         // navigation callbacks. Decide Shield for the destination now, as
         // WebKit's policy delegate does before its document starts.
@@ -88,7 +117,11 @@ final class ChromiumScripts {
             owner.darkArm(url: url, host: host)
         }
         try await applyAppearance(core: core, tab: tab)
-        var registrations = LinkGap.cut("scripts") ? [] : PageScripts.chromium(for: owner, plan)
+        let hidden = Curtain.shared.styles
+        var registrations = LinkGap.cut("scripts") ? [] : PageScripts.chromium(for: owner, plan, hiddenCSS: hidden)
+        let addons = LinkGap.cut("scripts") ? ChromiumAddons() : ChromiumAddons(for: owner)
+        registrations += addons.scripts
+        self.addons = addons
         let youtube = YouTubePolicy()
         // CDP registrations survive renderer-initiated navigation, including
         // an ordinary page's link to YouTube. Install the guarded policy on
@@ -98,9 +131,12 @@ final class ChromiumScripts {
         if youtube.enabled, !LinkGap.cut("scripts") {
             registrations.append(PageScriptRegistration(source: youtube.source, world: .page, atEnd: false, mainOnly: true))
         }
+        if !LinkGap.cut("scripts"), !PageScripts.omits("call-pip") {
+            registrations.append(PageScriptRegistration(source: Self.callsWithoutDocumentPiP, world: .page, atEnd: false, mainOnly: false))
+        }
         if LinkGap.cut("docstart") { registrations.removeAll { !$0.atEnd } }
         if LinkGap.cut("docend") { registrations.removeAll { $0.atEnd } }
-        guard registrations != installed else { installedYouTubePolicy = youtube; return }
+        guard registrations != installed else { installedYouTubePolicy = youtube; installedVeils = hidden; return }
         let agent = Self.world(.agent)
         var definitions = registrations.map { registration in
             JSONValue.object(["world": .string(Self.world(registration.world)), "source": .string(registration.source),
@@ -131,17 +167,24 @@ final class ChromiumScripts {
                 if(window!==top)globalThis.__yabReplayAsk();
                 """), "end": .bool(false), "mainOnly": .bool(false)]))
         }
-        // The dark world is bound even while no engine is installed: a site
-        // turned dark again gets its scripts without a reload (darkRefresh).
+        // Dark pages' world only for a document they can darken: bound in
+        // every frame of every page it cost a world per frame with Dark pages
+        // off too (#1889). A page turned dark while up is prepared again
+        // first (DarkPagesTab.darkRefresh), and YabCore runs a newly bound
+        // world's bridge in the documents already there.
+        let dark = registrations.contains { $0.world == DarkPages.pageWorld }
         var relays: [String: JSONValue] = [
             agent: .array([.string(FrameRelay.name)]),
-            Self.world(.yab): .array(Self.featureRelays.map(JSONValue.string)),
-            Self.world(DarkPages.pageWorld): .array([.string(DarkRelay.name)])]
+            Self.world(.yab): .array(Self.featureRelays.map(JSONValue.string))]
+        if dark { relays[Self.world(DarkPages.pageWorld)] = .array([.string(DarkRelay.name)]) }
         if replayProbe { relays[probeWorld] = .array([.string("yabReplayProbe")]) }
+        for (world, names) in addons.relays { relays[world] = .array(names.map(JSONValue.string)) }
         _ = try await core.request("scripts.install", params: ["tab": .string(tab), "scripts": .array(definitions),
-            "relays": .object(LinkGap.cut("relays") ? [:] : relays)])
+            "relays": .object(LinkGap.cut("relays") ? [:] : relays), "immediately": .bool(currentDocument)])
         installed = registrations
+        installedVeils = hidden
         installedYouTubePolicy = youtube
+        darkBound = dark
     }
 
     func token(_ frame: PageFrame?, tab: String?) throws -> String? {
@@ -183,7 +226,8 @@ final class ChromiumScripts {
                      "link": self.tab?.pointedLink?.url.absoluteString ?? "",
                      "linkShown": LinkStatus.shared.pointed?.url.absoluteString ?? "", "linkTold": LinkStatus.shared.told,
                      "hover": ["moved": self.page?.hoverCounts.moved ?? 0, "status": self.page?.hoverCounts.status ?? 0,
-                               "last": self.page?.hoverCounts.last ?? "", "heard": self.page?.hoverCounts.heard ?? [], "admitted": self.page?.hoverAdmitted ?? false]]])
+                               "last": self.page?.hoverCounts.last ?? "", "heard": self.page?.hoverCounts.heard ?? [], "admitted": self.page?.hoverAdmitted ?? false,
+                               "echoes": self.page?.hoverCounts.echoes ?? 0, "windowMoves": self.page?.window?.acceptsMouseMovedEvents ?? false]]])
             } catch { done(["error": String(describing: error)]) }
         }
     }
@@ -256,6 +300,33 @@ final class ChromiumScripts {
             owner.darkState.relay.tab = owner
             guard let request = event.params["request"]?.string, let context = event.params["frame"]?["token"].string else { return }
             owner.darkState.relay.receive(PageScriptMessage(body: object, frame: frame, sourceView: page)) { [weak self] value, error in
+                self?.reply(tab: tab, context: context, request: request, value: value, error: error)
+            }
+            return
+        } else if world == Self.world(.yab), name == TopDragRelay.name {
+            guard frame.isMain, case .bool(let grab) = body["grab"] else { return }
+            page.topGrab = grab
+            page.topGrabPoint = TopDragRelay.point(grab: grab, x: body["x"].number, y: body["y"].number)
+        } else if world == Self.world(.yab), name == "yabPageTip" {
+            page.receiveTooltip(body["words"].string ?? "")
+        } else if let route = addons.routes[world], let owner = self.tab,
+                  let object = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(body), options: [.fragmentsAllowed]) {
+            guard let request = event.params["request"]?.string, let context = event.params["frame"]?["token"].string else { return }
+            route(PageScriptMessage(body: object, frame: frame, sourceView: page), owner) { [weak self] value, error in
+                self?.reply(tab: tab, context: context, request: request, value: value, error: error)
+            }
+            return
+        } else if world == Self.world(.yab), name == EyeDropperRelay.name,
+                  let request = event.params["request"]?.string, let context = event.params["frame"]?["token"].string,
+                  let object = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(body), options: [.fragmentsAllowed]) {
+            EyeDropperRelay.shared.heard(object, page: page) { [weak self] value, error in
+                self?.reply(tab: tab, context: context, request: request, value: value, error: error)
+            }
+            return
+        } else if world == Self.world(.yab), let replying = self.tab?.chromiumScriptReplying(name),
+                  let object = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(body), options: [.fragmentsAllowed]) {
+            guard let request = event.params["request"]?.string, let context = event.params["frame"]?["token"].string else { return }
+            replying.receive(PageScriptMessage(body: object, frame: frame, sourceView: page)) { [weak self] value, error in
                 self?.reply(tab: tab, context: context, request: request, value: value, error: error)
             }
             return

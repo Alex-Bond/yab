@@ -65,8 +65,57 @@ struct NewTabContent: Equatable {
         SiteCandidate(key: "github", name: "GitHub", host: "github.com"),
     ]
 
+    /// What New Tab's content was made from: cheap to read and compare, so
+    /// a draw that finds it unchanged takes the content made before. The
+    /// field's draw, its rows, its key and the sheet's height all ask for
+    /// the content; making it again for each (every tab scanned per row,
+    /// History weighed for the picks) kept the main thread busy at launch
+    /// until iOS ended Yab (crash reports of 0.1.33 to 0.1.37).
+    struct Inputs: Equatable {
+        var browser: Int
+        var profile: ObjectIdentifier?
+        var visits: Int
+        var clipboard: URL?
+        var macURL: String?
+        var macTitle: String?
+        var macTab: String?
+        var macSpace: String?
+        var macAwake: Bool
+        var closed: UUID?
+        var picks: Int
+        var engine: String
+        var engineURL: String?
+        var fixtures: Bool
+        var world: String
+    }
+
+    /// How many times the content was made, for tests.
+    @MainActor private(set) static var builds = 0
+
     @MainActor
     static func make(for app: AppModel) -> NewTabContent {
+        // Named states' picks are made from a history of their own, once.
+        if app.field.fixturePicks != nil { return build(app) }
+        let inputs = inputs(app)
+        if let memo = app.field.newTabMemo, memo.inputs == inputs { return memo.content }
+        let content = build(app)
+        app.field.newTabMemo = (inputs, content)
+        return content
+    }
+
+    @MainActor
+    static func inputs(_ app: AppModel) -> Inputs {
+        let front = (app.sync.awakeMac ?? app.sync.macs.first)?.front
+        let selection = app.field.searchSettings.searchSelection
+        return Inputs(browser: app.browser.revision, profile: app.profile.map(ObjectIdentifier.init), visits: app.profile?.visitsRevision ?? 0,
+                      clipboard: app.field.clipboardLink, macURL: front?.url, macTitle: front?.title, macTab: front?.tab, macSpace: front?.tab.flatMap { app.sync.spaceOfMacTab($0) }, macAwake: app.sync.awakeMac != nil,
+                      closed: recentlyClosed(app)?.id, picks: app.field.picksRevision, engine: selection.name,
+                      engineURL: selection.url(for: "yab")?.absoluteString, fixtures: app.fixturesEnabled, world: app.world.name)
+    }
+
+    @MainActor
+    private static func build(_ app: AppModel) -> NewTabContent {
+        builds += 1
         let paste = app.field.clipboardLink.map { _ in
             NewTabItem(id: "paste", icon: .clipboard, title: "Paste and Go", subtitle: "A link is on the clipboard", action: .paste)
         }
@@ -87,18 +136,37 @@ struct NewTabContent: Equatable {
         return NewTabContent(now: now, recent: Array(recent), frequent: sites)
     }
 
+    /// The tab just closed, while the sheet still offers it back.
+    @MainActor
+    private static func recentlyClosed(_ app: AppModel) -> ClosedTab? {
+        app.backStack.closed.flatMap { closed -> ClosedTab? in
+            let recent = Date().timeIntervalSince(closed.at) < closedShown
+            return recent && !closed.tab.isPrivate && app.browser.space(closed.space)?.isPrivate == false ? closed : nil
+        }
+    }
+
     /// Now's tab in front on a Mac. One this iPhone shows (a pin, a kept
     /// tab) is gone to; one of the Mac's own today, which this iPhone keeps
     /// out (docs/sync.md, "Today is each device's own"), opens as a copy
     /// here, from what the Mac's presence says of it.
+    /// Only for the space that tab is in on the Mac (row 2603): a space with
+    /// sign-ins of its own is another profile, and the page opened in the
+    /// wrong one is signed in as somebody else. Made once and handed to
+    /// every space's page, it offered the Mac's tab in each of them.
     @MainActor
-    static func macNow(_ app: AppModel) -> NewTabItem? {
+    static func macNow(_ app: AppModel, in requested: Space.ID? = nil) -> NewTabItem? {
+        let space = requested ?? app.browser.spaceID
+        guard app.browser.space(space)?.isPrivate == false else { return nil }
         let subtitle = "On your Mac now · open here"
-        if let mac = app.browser.onMac, !mac.isPrivate {
+        if let mac = app.browser.onMac, !mac.isPrivate, app.browser.space(holding: mac.id)?.id == space {
             return NewTabItem(id: "mac", icon: .favicon(key: mac.icon, host: mac.host), title: mac.short, subtitle: subtitle, action: .go(mac.id))
         }
-        guard let front = (app.sync.awakeMac ?? app.sync.macs.first)?.front, let url = front.url, !url.isEmpty else { return nil }
-        if let here = app.browser.allTabs.first(where: { !$0.isPrivate && $0.navigationURL?.absoluteString == url }) {
+        guard let front = (app.sync.awakeMac ?? app.sync.macs.first)?.front,
+              let url = front.url, !url.isEmpty else { return nil }
+        // Only a Mac tab known to be in another space stays out: an older Mac's
+        // presence names no tab, and a new iPhone may not have its record yet.
+        if let id = front.tab, let owner = app.sync.spaceOfMacTab(id), owner != space { return nil }
+        if let here = app.browser.space(space)?.allTabs.first(where: { !$0.isPrivate && $0.navigationURL?.absoluteString == url }) {
             return NewTabItem(id: "mac", icon: .favicon(key: here.icon, host: here.host), title: here.short, subtitle: subtitle, action: .go(here.id))
         }
         let copy = SyncMapping.tab(SyncTab(space: "", url: url, title: front.title ?? ""), id: PageFixtures.newID(), old: nil,
@@ -116,15 +184,46 @@ struct NewTabContent: Equatable {
         // Two addresses of one page (www, a query) read as the same row twice: the newest stands for both.
         var seen = Set<String>()
         let visits = (app.profile?.recent ?? []).filter { $0.url != current && seen.insert(($0.title + "|" + $0.site).lowercased()).inserted }
-        let recent = visits.prefix(Metrics.SearchSheet.rows).enumerated().compactMap { index, visit -> NewTabItem? in
+        let shown = visits.prefix(Metrics.SearchSheet.rows)
+        let open = openTabs(app, at: Set(shown.map(\.url)))
+        let recent = shown.enumerated().compactMap { index, visit -> NewTabItem? in
             guard let url = URL(string: visit.url) else { return nil }
-            let existing = app.browser.allTabs.first { !$0.isPrivate && $0.navigationURL?.absoluteString == visit.url }
+            let existing = app.browser.openTab(at: visit.url)
             let action: NewTabItem.Action = existing.map { .go($0.id) }
                 ?? .open(PageFixtures.liveTab(for: url, title: visit.title))
             return NewTabItem(id: "recent-\(index)", icon: .favicon(key: visit.icon, host: visit.host),
                               title: visit.title, subtitle: visit.site, action: action)
         }
-        let frequent = (app.profile?.frequent ?? []).compactMap { visit -> SiteCandidate? in
+        return NewTabContent(now: now, recent: recent, frequent: liveFrequent(app), picks: picks(app, now: now))
+    }
+
+    /// The first tab that isn't private open at each of `addresses`, in one
+    /// walk of every tab: an address is worked out from each tab's words
+    /// (Tab.navigationURL), and a walk for each recent row was what an iPad
+    /// with many tabs spent its launch on (#546, #548, #561).
+    @MainActor
+    private static func openTabs(_ app: AppModel, at addresses: Set<String>) -> [String: Tab.ID] {
+        var found: [String: Tab.ID] = [:]
+        guard !addresses.isEmpty else { return found }
+        for tab in app.browser.allTabs where !tab.isPrivate {
+            guard let address = tab.navigationURL?.absoluteString, addresses.contains(address),
+                  found[address] == nil else { continue }
+            found[address] = tab.id
+            if found.count == addresses.count { break }
+        }
+        return found
+    }
+
+    /// Frequent alone, for what needs only the sites (the field's rows):
+    /// without the recent rows, Now and the picks New Tab also makes.
+    @MainActor
+    static func frequent(for app: AppModel) -> [SiteCandidate] {
+        app.fixturesEnabled ? make(for: app).frequent : liveFrequent(app)
+    }
+
+    @MainActor
+    private static func liveFrequent(_ app: AppModel) -> [SiteCandidate] {
+        (app.profile?.frequent ?? []).compactMap { visit -> SiteCandidate? in
             guard var parts = URLComponents(string: visit.url) else { return nil }
             parts.path = ""
             parts.query = nil
@@ -134,17 +233,13 @@ struct NewTabContent: Equatable {
             guard let origin = parts.url else { return nil }
             return SiteCandidate(key: visit.icon, name: visit.site, host: origin.absoluteString)
         }
-        return NewTabContent(now: now, recent: recent, frequent: frequent, picks: picks(app, now: now))
     }
 
     /// The sheet's rows, made once as the field opens: they don't shift under
     /// a finger. What matters this moment first, then Suggestions.
     @MainActor
     private static func picks(_ app: AppModel, now: [NewTabItem]) -> [NewTabItem] {
-        let closed = app.backStack.closed.flatMap { closed -> ClosedTab? in
-            let recent = Date().timeIntervalSince(closed.at) < closedShown
-            return recent && !closed.tab.isPrivate && app.browser.space(closed.space)?.isPrivate == false ? closed : nil
-        }
+        let closed = recentlyClosed(app)
         let key = [app.field.clipboardLink?.absoluteString, closed?.id.uuidString, String(app.field.picksRevision)]
             .map { $0 ?? "" }.joined(separator: "|")
         if let held = app.field.heldPicks, held.key == key { return held.items }
@@ -163,8 +258,10 @@ struct NewTabContent: Equatable {
             current: app.browser.tab?.navigationURL?.absoluteString,
             engineHost: selection.url(for: "yab").map(Suggestions.bare), removed: removed, shown: SuggestionMemory.shown,
             now: Date(), hour: hour, limit: Metrics.SearchSheet.rows - (moment == nil ? 0 : 1)))
+        // Counted after this draw: a view's body writes nothing to disk.
         if app.field.heldPicks == nil {
-            SuggestionMemory.count(made.filter { $0.kind == .site }.map(\.host))
+            let hosts = made.filter { $0.kind == .site }.map(\.host)
+            Task { @MainActor in SuggestionMemory.count(hosts) }
         }
         let items = (moment.map { [$0] } ?? []) + made.map { item($0, app: app, engine: selection.name) }
         app.field.heldPicks = (key, items)
@@ -177,7 +274,7 @@ struct NewTabContent: Equatable {
             return NewTabItem(id: "pick-search", icon: .magnifier, title: words, subtitle: "Search \(engine)", action: .search(words))
         }
         let page = URL(string: pick.url).map { PageFixtures.liveTab(for: $0, title: pick.title) }
-        let open = app.browser.allTabs.first { !$0.isPrivate && $0.navigationURL?.absoluteString == pick.url }
+        let open = app.browser.openTab(at: pick.url)
         let action: NewTabItem.Action = open.map { .go($0.id) } ?? page.map { .open($0) } ?? .paste
         return NewTabItem(id: "pick-" + pick.host, icon: .favicon(key: page?.icon ?? pick.host, host: pick.host), title: pick.title,
                           subtitle: pick.host, action: action, removable: pick.host)

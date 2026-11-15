@@ -161,6 +161,19 @@ removal still removes its rows. `SyncSpaceDeliveryTests` covers both a
 fresh join and a reconnect, including the next save back to the other Mac;
 `evals/golden/sync_space_delivery.sh` runs the focused checks.
 
+Folders the same way: a folder opened, renamed or moved since its tabs
+were written comes pages after them, and a folder can come before or after
+the folder it is in. A row draws a folder only from its record, so until it
+comes the row shows those tabs loose, and the Mac's save of its rows
+meanwhile is no move out of it (`SyncCenter.reconcileRows`): a tab's or a
+folder's `folder` naming a folder the journal has never held stays as it
+was (`SyncShapes.keepingLinks`), a folder no record here names yet was
+never drawn here and isn't removed for missing, nor a pair whose other tab
+hasn't come. A folder known and removed still lets its tabs go, and a
+folder emptied here still goes. Through 0.46.24 a fresh Mac's first sync
+took every tab whose folder came late out of it, and those folders away,
+on every device (`SyncFolderDeliveryTests`, row 1895).
+
 Base URL: `YAB_SYNC_URL`, then `Info.plist` `YabSync`, then
 `https://yab-sync.21st.workers.dev` (the owner's Cloudflare account,
 Worker `yab-sync`, deployed with `npx wrangler
@@ -851,6 +864,34 @@ network (sync-ios.md, R8).
 record still dirty here stays dirty and goes back up. Mirrors then write
 the merged state into Yab's own files and live windows (`SyncCenter`), and
 the next save of those files finds nothing new to send.
+
+### Only what the files changed is an edit
+
+Tabs, folders and pairs are told to the journal three-way
+(`Journal.reconcile(…, shown: true)`): a local change carries only what the
+person did, never a difference from the merged state.
+The journal keeps each record as this Mac's files last said it (the
+`shown` table): a field goes up only when the files changed it since, and a
+record missing from them is removed only when they held it (or its space
+was removed). A row's order keys are the journal's when the row stands in
+the journal's order, otherwise the keys its files were last written with
+(`SyncCenter.previousOrders`), so an old row gives back its old keys
+rather than new ones over the other Mac's.
+
+Before, any difference between the files and the journal went up stamped
+now, and the files lag the journal whenever they haven't drawn what came
+yet: a catch-up page whose rows aren't drawn, and above all a relaunch
+between a page's merge and its rows (an idle Mac restarting for the update
+it just downloaded while it catches up on two weeks). The relaunch took
+every pin of the other Mac's that page brought for one closed here, and a
+tab's removal wins for good, so they went on every device; the old row's
+order and fields beat what the other Mac did meanwhile (register 2589,
+feedback #2032; `SyncStaleReturnTests`). After a delivery the rows as drawn
+are read back at once, so a tab that just came and is closed goes; at
+launch, records the journal has and the rows never drew
+(`Journal.unshown`) are drawn (`SyncCenter.drawUnshown`), since the line
+brings them again unchanged. A journal from before this has no `shown`
+yet: its first save measures from the journal, as before, and sets it.
 
 ## Testing
 

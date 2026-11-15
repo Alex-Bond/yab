@@ -31,6 +31,9 @@ final class Payments: ObservableObject {
             return
         }
         flows[tab.id]?.stop()
+        // A checkout's frames that drew their card's boxes after loading look
+        // now, while the sheet is up: no frame watches its page for them.
+        tab.walletLook()
         flows[tab.id] = PayFlow(tab: tab, permit: permit)
     }
 
@@ -449,7 +452,7 @@ final class PayFlow: ObservableObject, Identifiable {
             DispatchQueue.main.async { [weak tab] in
                 guard let tab, let number else { then(); return }
                 let data: [String: Any] = ["number": number, "name": card.name, "month": card.month, "year": card.year, "csc": code,
-                                           "postal": home?.postal ?? "", "country": home?.country ?? ""]
+                                           "postal": home?.postal ?? "", "country": home?.country ?? "", "billing": home?.filling ?? [:]]
                 tab.walletFill(data, what: .card, origin: origin) { filled in
                     if filled > 0 { DispatchQueue.global(qos: .utility).async { PayWallet.touch(card: card.id, on: site) } }
                     then()

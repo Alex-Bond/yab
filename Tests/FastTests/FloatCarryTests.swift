@@ -267,6 +267,7 @@ struct FloatCarryTests {
     private func wheel(x: Int32, phase: Int64) throws -> NSEvent {
         let event = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
                                         wheelCount: 2, wheel1: 0, wheel2: x, wheel3: 0))
+        event.flags = []
         event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
         event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
         return try #require(NSEvent(cgEvent: event))

@@ -13,6 +13,20 @@ extension Tab {
             u.queryItems = u.queryItems?.map { item in hidden.contains(where: { item.name.lowercased().contains($0) }) ? URLQueryItem(name: item.name, value: "[redacted]") : item }
             return u.string ?? ""
         }
+        // Chrome's own DevTools hold their records in their frontend; what
+        // Yab has of a Chromium tab is the page's log (DevRelay), heard from
+        // when the card came out.
+        if builtPage is ChromiumPage {
+            if !devListening { listenDev(true) }
+            switch kind {
+            case "devtools_console":
+                return ["messages": devLog.entries.suffix(limit).map { ["level": $0.level.rawValue, "text": safe($0.text), "url": url($0.source), "count": $0.count] as [String: Any] }]
+            case "devtools_network":
+                return ["requests": devLog.requests.suffix(limit).map { ["url": url($0.url), "status": $0.status, "method": $0.method, "type": $0.kind] as [String: Any] }]
+            default:
+                return ["error": "On a Chromium tab this is in Chrome's DevTools, in the card; only the console and network are read here."]
+            }
+        }
         let model = devModel(DevWorkbench.self)
         switch kind {
         case "devtools_comments":

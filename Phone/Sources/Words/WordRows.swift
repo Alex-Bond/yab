@@ -45,6 +45,12 @@ struct WordRow: Equatable, Identifiable, Sendable {
     var key: Key
     var group: Group
 
+    /// Preserve scheme and port for history results instead of guessing HTTPS.
+    var pageURL: URL? {
+        if case let .place(url) = action { return URL(string: url) }
+        return nil
+    }
+
     var id: String {
         switch action {
         case let .tab(id): "tab:" + id

@@ -54,6 +54,7 @@ final class BoostToolRuntime: NSObject, WKScriptMessageHandlerWithReply {
             }
             Task {
                 do {
+                    if tab.engineKind == .chromium { await (try? ChromiumDRMCookies.of(tab))?.current(for: target) }
                     let cookies: [HTTPCookie] = try await withCheckedThrowingContinuation { done in
                         var answered = false
                         tab.store.httpCookieStore.getAllCookies { cookies in
@@ -68,7 +69,8 @@ final class BoostToolRuntime: NSObject, WKScriptMessageHandlerWithReply {
                     for (field, value) in HTTPCookie.requestHeaderFields(with: cookies.filter { AgentRead.sent($0, to: target) }) { request.setValue(value, forHTTPHeaderField: field) }
                     request.setValue("application/json", forHTTPHeaderField: "Accept")
                     if method == "POST" {
-                        let body = try JSONSerialization.data(withJSONObject: value["body"] ?? [:], options: [.fragmentsAllowed])
+                        // The tool's own JS value: a Date or NaN in it would raise in this task (SafeJSON).
+                        let body = try SafeJSON.data(value["body"] ?? [:])
                         guard body.count <= 128_000 else { throw BoostPackage.Invalid("The tool request is too large.") }
                         request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     }

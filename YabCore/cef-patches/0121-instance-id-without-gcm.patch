@@ -1,0 +1,39 @@
+--- a/components/gcm_driver/instance_id/instance_id_impl.cc
++++ b/components/gcm_driver/instance_id/instance_id_impl.cc
+@@ -207,6 +207,14 @@ void InstanceIDImpl::OnDeleteIDCompleted(DeleteIDCallback callback,
+ void InstanceIDImpl::GetInstanceIDDataCompleted(
+     const std::string& instance_id,
+     const std::string& extra_data) {
++  // Yab: callers no longer wait for this (RunWhenReady). An ID already handed
++  // out stays this app's ID; its AddInstanceIDData was queued after this read,
++  // so the store ends with it too. A late empty or older answer must not
++  // replace it, or the next getID() would answer a different ID.
++  if (!id_.empty()) {
++    delayed_task_controller_.SetReady();
++    return;
++  }
+   id_ = instance_id;
+ 
+   if (extra_data.empty()) {
+@@ -263,11 +271,16 @@ gcm::InstanceIDHandler* InstanceIDImpl::Handler() {
+ }
+ 
+ void InstanceIDImpl::RunWhenReady(base::OnceClosure task) {
+-  if (!delayed_task_controller_.CanRunTaskWithoutDelay())
+-    delayed_task_controller_.AddTask(std::move(task));
+-  else
+-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+-        FROM_HERE, std::move(task));
++  // Yab (Helium's fix-instance-id-stuck.patch): run at once. The stored ID is
++  // read through GCMDriverDesktop, which answers only once the GCM client is
++  // READY, i.e. after its device check-in with Google. Until then (forever
++  // where check-in never completes) chrome.instanceID.getID() never answered,
++  // and extensions that wait for it at start-up never started: RoboForm's
++  // worker answered every page "Background not ready" (Yab register 2040).
++  // Until the stored ID is read (it may never be) one is generated and saved,
++  // as Chrome does for a new app. getToken() still waits for GCM.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, std::move(task));
+ }
+ 
+ }  // namespace instance_id

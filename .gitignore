@@ -43,3 +43,11 @@ Phone/Reference/prototype.html
 /report/final-short/matrix/films/row-own-site-dock-in-step+/*
 !/report/final-short/matrix/films/row-own-site-dock-in-step+/030.png
 !/report/final-short/matrix/films/row-own-site-dock-in-step+/160.png
+
+# Farm job outputs fetched into a tree (./farm fetch JOB DEST) and any app
+# bundle outside build/: evidence, never source.
+/proofs*/
+*.app/
+
+# Completion signal remains readable after runner metadata is archived.
+/codex-done

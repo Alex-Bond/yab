@@ -82,6 +82,19 @@ final class AgentEvalTests: XCTestCase {
         XCTAssertEqual(got as? Int, 8)
     }
 
+    /// An element's box comes back as plain numbers, nested too: WebKit of
+    /// macOS 15 crashed making the DOMRect itself in Yab's own JavaScript
+    /// context (crashes #822, #823, #1553).
+    func testABoxComesBackAsNumbers() async {
+        let box = await value("document.documentElement.getBoundingClientRect()") as? [String: Any]
+        XCTAssertEqual(box?["x"] as? Double, 0)
+        XCTAssertGreaterThan(box?["width"] as? Double ?? 0, 0)
+        let nested = await value("({ boxes: [new DOMRect(1, 2, 3, 4)], point: new DOMPoint(5, 6), title: document.title })") as? [String: Any]
+        XCTAssertEqual(((nested?["boxes"] as? [[String: Any]])?.first)?["height"] as? Double, 4)
+        XCTAssertEqual((nested?["point"] as? [String: Any])?["y"] as? Double, 6)
+        XCTAssertEqual(nested?["title"] as? String, "Search")
+    }
+
     func testNothingIsNull() async {
         let got = await value("(async () => {})()")
         XCTAssertTrue(got is NSNull, "\(String(describing: got))")

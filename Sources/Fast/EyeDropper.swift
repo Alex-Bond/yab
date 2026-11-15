@@ -126,7 +126,14 @@ final class EyeDropperRelay: NSObject, WKScriptMessageHandlerWithReply {
         replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void
     ) {
         MainActor.assumeIsolated {
-            guard let body = message.body as? [String: Any], let kind = body["kind"] as? String,
+            heard(message.body, page: message.webView, replyHandler)
+        }
+    }
+
+    /// A page's ask, from either engine.
+    @MainActor func heard(_ message: Any, page: NSView?, _ replyHandler: @escaping @MainActor (Any?, String?) -> Void) {
+        do {
+            guard let body = message as? [String: Any], let kind = body["kind"] as? String,
                   let id = body["id"] as? String, !id.isEmpty, id.count < 64
             else { return replyHandler(nil, "Not a request") }
             let request = id
@@ -137,12 +144,12 @@ final class EyeDropperRelay: NSObject, WKScriptMessageHandlerWithReply {
             case "open":
                 // Only a page that can be seen: a tab in front, in a window
                 // on screen. Another tab's gesture can't open it over this one.
-                guard let web = message.webView, let window = web.window, window.isVisible, !web.isHiddenOrHasHiddenAncestor else {
+                guard let web = page, let window = web.window, window.isVisible, !web.isHiddenOrHasHiddenAncestor else {
                     return replyHandler(["error": "NotAllowedError", "message": "The page isn't in front."], nil)
                 }
                 // A popup closes as the sampler takes the pointer, and the
                 // color would have nowhere to go: held open until it comes.
-                let popup = ExtensionPopup.hold(web)
+                let popup = (web as? WKWebView).flatMap { ExtensionPopup.hold($0) }
                 EyeDropperSampler.open(request) { answer in
                     popup?()
                     switch answer {

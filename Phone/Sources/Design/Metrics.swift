@@ -485,6 +485,13 @@ enum Metrics {
     }
 
     enum NewTab {
+        /// The approved phone space picker, between New Tab and Done.
+        static let spacePickerGap: CGFloat = 6
+        static let spacePickerLabelInset: CGFloat = 12
+        static let spacePickerControlGap: CGFloat = 12
+        static let spacesHeaderMark: CGFloat = 30
+        /// All Tabs into the spaces sidebar, in place: how blurred the one going is.
+        static let sidebarBlur: CGFloat = 18
         /// The Chats page's chats as cards, two a row (the A5 pick, 2026-10-13):
         /// a chat whose agent went to sites lies as a stack, a sheet behind it
         /// for one site, two for three and more.

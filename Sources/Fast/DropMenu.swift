@@ -13,6 +13,7 @@ struct DropOption<Value: Hashable> {
     var value: Value
     var picture: NSImage? = nil
     var note: String? = nil
+    var head: String? = nil
 }
 
 enum DropFace {
@@ -29,6 +30,8 @@ struct DropLink {
 
 struct DropMenu<Value: Hashable>: View {
     let title: String
+    var faceTitle: String? = nil
+    var showsCheck = false
     let options: [DropOption<Value>]
     @Binding var selection: Value
     /// From the plate's edge to the words: a table cell's, or a row's.
@@ -48,8 +51,10 @@ struct DropMenu<Value: Hashable>: View {
 
     init(_ title: String, options: [DropOption<Value>], selection: Binding<Value>,
          inset: CGFloat = DropFace.inset, small: NSSize? = nil, divideBefore: Value? = nil, trailing: Bool = false,
-         link: DropLink? = nil) {
+         link: DropLink? = nil, faceTitle: String? = nil, showsCheck: Bool = false) {
         self.title = title
+        self.faceTitle = faceTitle
+        self.showsCheck = showsCheck
         self.options = options
         self._selection = selection
         self.inset = inset
@@ -76,7 +81,7 @@ struct DropMenu<Value: Hashable>: View {
                     .renderingMode(picture.isTemplate ? .template : .original)
                     .frame(width: small.width, height: small.height)
             }
-            Text(chosen?.title ?? "")
+            Text(faceTitle ?? chosen?.title ?? "")
                 .lineLimit(1)
                 .truncationMode(.tail)
             Symbol("chevron.down", size: 8, weight: .semibold) // design: the size of MenuCell's ⌃⌄ before it
@@ -99,13 +104,14 @@ struct DropMenu<Value: Hashable>: View {
 
     private func open() {
         guard let view = place.view, view.window != nil else { return }
-        var lines = options.map { DropList.Line(title: $0.title, picture: $0.picture, note: $0.note) }
+        var lines = options.map { DropList.Line(title: $0.title, picture: $0.picture, note: $0.note, head: $0.head) }
         if let link { lines.append(DropList.Line(title: link.title, picture: nil, note: nil, opens: true)) }
         let list = DropList(
             options: lines,
             chosen: options.firstIndex { $0.value == selection } ?? 0,
             divideBefore: link != nil ? options.count : divideBefore.flatMap { cut in options.firstIndex { $0.value == cut } },
-            inset: inset
+            inset: inset,
+            showsCheck: showsCheck
         )
         let values = options.map(\.value)
         shown = true
@@ -199,6 +205,7 @@ final class DropList: ObservableObject {
 
     @Published private(set) var lines: [Line]
     let chosen: Int
+    let showsCheck: Bool
     let divideBefore: Int?
     let inset: CGFloat
     /// The search's words while it is empty.
@@ -233,9 +240,10 @@ final class DropList: ObservableObject {
 
     init(options: [Line], chosen: Int, divideBefore: Int?, inset: CGFloat,
          searchWords: String = "Search\u{2026}", alwaysSearch: Bool = false,
-         tallest: CGFloat = 360, showsKeys: Bool = false) {
+         tallest: CGFloat = 360, showsKeys: Bool = false, showsCheck: Bool = false) {
         self.lines = options
         self.chosen = chosen
+        self.showsCheck = showsCheck
         self.divideBefore = divideBefore
         self.inset = inset
         self.searchWords = searchWords
@@ -422,6 +430,11 @@ struct DropListView: View {
     private func row(_ index: Int) -> some View {
         let line = list.lines[index]
         return HStack(spacing: 8) {
+            if list.showsCheck {
+                Symbol("checkmark", size: 10, weight: .semibold)
+                    .frame(width: 12)
+                    .opacity(index == list.chosen ? 1 : 0)
+            }
             if let checked = line.checked {
                 DropBox(on: checked)
             }
@@ -461,7 +474,7 @@ struct DropListView: View {
         .contentShape(Rectangle())
         .onHover { if $0 { list.spot = index } }
         .onTapGesture { if list.ticked != nil { list.toggle(index) } else { list.pick(index) } }
-        .accessibilityAddTraits(line.checked == true ? .isSelected : [])
+        .accessibilityAddTraits(line.checked == true || (list.showsCheck && index == list.chosen) ? .isSelected : [])
     }
 }
 
@@ -620,6 +633,7 @@ enum DropPopup {
             // Room over the measure for the words' own drawing, which runs
             // a little wider than AppKit's measure of them.
             return words + (line.picture.map { $0.size.width + 8 } ?? 0) + (line.checked == nil ? 0 : 22)
+                + (list.showsCheck ? 20 : 0)
                 + (line.count.map { ("\($0)" as NSString).size(withAttributes: [.font: font]).width + 12 } ?? 0)
                 + (line.opens ? 16 : 0) + 2 * list.inset + 16
         }.max() ?? 0
@@ -628,7 +642,11 @@ enum DropPopup {
 
 final class DropPanel: NSPanel {
     var actionKey: ((NSEvent) -> Bool)?
+    /// A key held with ⌘ or ⌃, asked before the app's menus are: a line's
+    /// own key (ActionMenuList.press).
+    var actionKeyEquivalent: ((NSEvent) -> Bool)?
     var actionFlags: ((NSEvent.ModifierFlags) -> Void)?
+    var actionMouse: ((NSEvent) -> Bool)?
     var list: DropList?
     var closes: () -> Void = {}
     /// The clear room round the plate, for its shadow.
@@ -638,6 +656,7 @@ final class DropPanel: NSPanel {
     /// it puts the list away and goes on to the window under it, as one
     /// anywhere else does.
     override func sendEvent(_ event: NSEvent) {
+        if actionMouse?(event) == true { return }
         if event.type == .flagsChanged { actionFlags?(event.modifierFlags) }
         if event.type == .leftMouseDown || event.type == .rightMouseDown,
            let content = contentView,
@@ -684,6 +703,11 @@ final class DropPanel: NSPanel {
     override func resignKey() {
         super.resignKey()
         closes()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, actionKeyEquivalent?(event) == true { return true }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -774,6 +798,8 @@ extension DropPopup {
             let top = NSScreen.screens.first?.frame.maxY ?? 0
             answer["plate"] = [plate.minX, top - plate.maxY, plate.width, plate.height]
             answer["spot"] = panel.list?.spot ?? -1
+            answer["chosen"] = panel.list?.chosen ?? -1
+            answer["selectionChecks"] = panel.list?.showsCheck ?? false
             answer["key"] = panel.isKeyWindow
             answer["searches"] = panel.list?.searches ?? false
             answer["focus"] = panel.search.map { $0.isEditing(in: panel) } ?? false

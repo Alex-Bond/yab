@@ -1,0 +1,16 @@
+diff --git a/third_party/blink/renderer/core/page/focus_controller.cc b/third_party/blink/renderer/core/page/focus_controller.cc
+--- a/third_party/blink/renderer/core/page/focus_controller.cc
++++ b/third_party/blink/renderer/core/page/focus_controller.cc
+@@ -1966,7 +1966,11 @@ void FocusController::FocusHasChanged() {
+   // SetFocusedFrame above might reject to update focused_frame_, or
+   // focused_frame_ might be changed by blur/focus event handlers.
+   auto* focused_local_frame = DynamicTo<LocalFrame>(focused_frame_.Get());
+-  if (focused_local_frame && focused_local_frame->View()) {
++  // A frame being detached keeps its view but no longer its document's
++  // selection: DevTools disables focus emulation as the frame's agent is
++  // disposed in WillBeDetached(), and the page's focus then changes here.
++  if (focused_local_frame && focused_local_frame->IsAttached() &&
++      focused_local_frame->View()) {
+     focused_local_frame->Selection().SetFrameIsFocused(focused);
+     DispatchEventsOnWindowAndFocusedElement(focused_local_frame->GetDocument(),
+                                             focused);

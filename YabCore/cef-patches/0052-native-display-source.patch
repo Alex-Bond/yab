@@ -1,0 +1,367 @@
+diff --color -ru a/cef/include/cef_browser.h b/cef/include/cef_browser.h
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -58,6 +58,7 @@
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ #define CEF_YAB_NATIVE_MEDIA_SESSION_VERSION 1
+ #define CEF_YAB_NATIVE_CAPTURE_ACTIVITY_VERSION 1
++#define CEF_YAB_NATIVE_DISPLAY_SOURCE_VERSION 1
+ #define CEF_YAB_NATIVE_VIDEO_PIP_VERSION 1
+ #define CEF_YAB_NATIVE_CLOSE_PREFLIGHT_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_SOURCE_VERSION 1
+@@ -1284,6 +1285,27 @@
+   /*--cef(added=experimental)--*/
+   virtual bool StopNativeCapture(const CefString& token,
+                                 const CefString& kind) = 0;
++
++  ///
++  /// Names what this browser's next getDisplayMedia from |origin| shows, in
++  /// place of Chrome's picker: the embedder has its own. |source| is
++  /// "tab:<browser identifier>", "window:<CGWindowID>" or
++  /// "screen:<CGDirectDisplayID>". One use, for 30 seconds. Returns false for
++  /// a source that doesn't exist. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool GrantNativeDisplaySource(const CefString& source,
++                                        const CefString& origin,
++                                        bool audio) = 0;
++
++  ///
++  /// Moves this browser's running tab capture to the tab |source| names, as
++  /// Chrome's "Share this tab instead": the page's track carries on. UI
++  /// thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SwitchNativeDisplaySource(const CefString& source,
++                                         bool audio) = 0;
+ 
+   ///
+   /// Dispatches a supported action to that exact live native session token.
+diff --color -ru a/cef/libcef/browser/browser_contents_delegate.cc b/cef/libcef/browser/browser_contents_delegate.cc
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -219,6 +219,13 @@
+   if (auto owner = browser()) state->SetInt("browserId", owner->GetIdentifier());
+   return state;
+ }
++bool CefBrowserContentsDelegate::GrantNativeDisplaySource(const CefString& source,
++    const CefString& origin, bool audio) {
++  return external_capture_ && external_capture_->Grant(source.ToString(), origin.ToString(), audio);
++}
++bool CefBrowserContentsDelegate::SwitchNativeDisplaySource(const CefString& source, bool audio) {
++  return external_capture_ && external_capture_->Switch(source.ToString(), audio);
++}
+ bool CefBrowserContentsDelegate::StopNativeCapture(const CefString& token, const CefString& kind) {
+   return external_capture_ && external_capture_->Stop(token.ToString(), kind.ToString());
+ }
+diff --color -ru a/cef/libcef/browser/browser_contents_delegate.h b/cef/libcef/browser/browser_contents_delegate.h
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -94,6 +94,9 @@
+   bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
+       const CefSize& size, double value);
+   bool StopNativeCapture(const CefString& token, const CefString& kind);
++  bool GrantNativeDisplaySource(const CefString& source, const CefString& origin, bool audio);
++  bool SwitchNativeDisplaySource(const CefString& source, bool audio);
++  CefExternalCapture* external_capture() { return external_capture_.get(); }
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds);
+ 
+diff --color -ru a/cef/libcef/browser/browser_host_base.cc b/cef/libcef/browser/browser_host_base.cc
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1165,6 +1165,17 @@
+   return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
+       ? contents_delegate_.GetNativeCaptureState() : CefDictionaryValue::Create();
+ }
++bool CefBrowserHostBase::GrantNativeDisplaySource(const CefString& source,
++    const CefString& origin, bool audio) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) &&
++      contents_delegate_.GrantNativeDisplaySource(source, origin, audio);
++}
++bool CefBrowserHostBase::SwitchNativeDisplaySource(const CefString& source, bool audio) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) &&
++      contents_delegate_.SwitchNativeDisplaySource(source, audio);
++}
+ bool CefBrowserHostBase::StopNativeCapture(const CefString& token, const CefString& kind) {
+   CEF_REQUIRE_UIT_RETURN(false);
+   return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) &&
+diff --color -ru a/cef/libcef/browser/browser_host_base.h b/cef/libcef/browser/browser_host_base.h
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -303,6 +303,9 @@
+   bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
+       const CefSize& size, double value) override;
+   bool StopNativeCapture(const CefString& token, const CefString& kind) override;
++  bool GrantNativeDisplaySource(const CefString& source, const CefString& origin,
++      bool audio) override;
++  bool SwitchNativeDisplaySource(const CefString& source, bool audio) override;
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds) override;
+   bool SetExternalPageSize(const CefSize& size) override;
+diff --color -ru a/cef/libcef/browser/external_capture.cc b/cef/libcef/browser/external_capture.cc
+--- a/cef/libcef/browser/external_capture.cc
++++ b/cef/libcef/browser/external_capture.cc
+@@ -1,12 +1,49 @@
+ #include "external_capture.h"
+ #include "base/functional/bind.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "cef/libcef/browser/browser_host_base.h"
+ #include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+ #include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
++#include "content/public/browser/web_contents_media_capture_id.h"
+ #include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
+ 
++namespace {
++constexpr base::TimeDelta kGrantLifetime = base::Seconds(30);
++
++// "tab:<browser identifier>", "window:<CGWindowID>", "screen:<CGDirectDisplayID>".
++content::DesktopMediaID ParseDisplaySource(const std::string& source, bool audio) {
++  const auto parts = base::SplitString(source, ":", base::KEEP_WHITESPACE,
++                                       base::SPLIT_WANT_ALL);
++  int64_t id = 0;
++  if (parts.size() != 2 || !base::StringToInt64(parts[1], &id) || id < 0) return {};
++  content::DesktopMediaID media;
++  if (parts[0] == "tab") {
++    auto browser = CefBrowserHostBase::GetBrowserForBrowserId(static_cast<int>(id));
++    auto* contents = browser ? browser->GetWebContents() : nullptr;
++    auto* frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
++    if (!frame || !frame->IsRenderFrameLive()) return {};
++    media = content::DesktopMediaID(content::DesktopMediaID::TYPE_WEB_CONTENTS,
++        content::DesktopMediaID::kNullId,
++        content::WebContentsMediaCaptureId(frame->GetProcess()->GetDeprecatedID(),
++                                           frame->GetRoutingID()));
++  } else if (parts[0] == "window") {
++    media = content::DesktopMediaID(content::DesktopMediaID::TYPE_WINDOW, id);
++  } else if (parts[0] == "screen") {
++    media = content::DesktopMediaID(content::DesktopMediaID::TYPE_SCREEN, id);
++  } else {
++    return {};
++  }
++  media.audio_share = audio;
++  return media;
++}
++}  // namespace
++
+ CefExternalCapture::CefExternalCapture(content::WebContents* contents,
+     Changed changed) : content::WebContentsObserver(contents),
+     changed_(std::move(changed)),
+@@ -79,6 +116,46 @@
+   indicator_->StopMediaCapturing(web_contents(), type);
+   SchedulePublish();
+   return true;
++}
++bool CefExternalCapture::Grant(const std::string& source, const std::string& origin, bool audio) {
++  const auto media = ParseDisplaySource(source, audio);
++  const url::Origin site = url::Origin::Create(GURL(origin));
++  if (media.is_null() || site.opaque()) return false;
++  granted_ = media;
++  granted_origin_ = site;
++  granted_at_ = base::TimeTicks::Now();
++  return true;
++}
++bool CefExternalCapture::Switch(const std::string& source, bool audio) {
++  const auto media = ParseDisplaySource(source, audio);
++  if (media.is_null() || media.type != content::DesktopMediaID::TYPE_WEB_CONTENTS || !switcher_) return false;
++  switching_ = media;
++  switcher_.Run(media, /*captured_surface_control_active=*/false);
++  return true;
++}
++content::DesktopMediaID CefExternalCapture::TakeSource(const content::MediaStreamRequest& request) {
++  if (request.request_type == blink::MEDIA_DEVICE_UPDATE) {
++    content::DesktopMediaID media = switching_;
++    switching_ = {};
++    content::WebContentsMediaCaptureId asked;
++    if (media.is_null() || request.requested_video_device_ids.empty() ||
++        !content::WebContentsMediaCaptureId::Parse(request.requested_video_device_ids.front(), &asked) ||
++        asked.render_process_id != media.web_contents_id.render_process_id ||
++        asked.main_render_frame_id != media.web_contents_id.main_render_frame_id) {
++      return {};
++    }
++    return media;
++  }
++  if (granted_.is_null() ||
++      (request.video_type != blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE &&
++       request.video_type != blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_THIS_TAB)) {
++    return {};
++  }
++  content::DesktopMediaID media = granted_;
++  const bool fresh = base::TimeTicks::Now() - granted_at_ < kGrantLifetime &&
++      url::Origin::Create(request.security_origin) == granted_origin_;
++  granted_ = {};
++  return fresh ? media : content::DesktopMediaID();
+ }
+ void CefExternalCapture::SchedulePublish() {
+   if (!attached_ || publish_pending_) return;
+diff --color -ru a/cef/libcef/browser/external_capture.h b/cef/libcef/browser/external_capture.h
+--- a/cef/libcef/browser/external_capture.h
++++ b/cef/libcef/browser/external_capture.h
+@@ -3,12 +3,16 @@
+ #define CEF_LIBCEF_BROWSER_EXTERNAL_CAPTURE_H_
+ #include "base/functional/callback.h"
+ #include "base/memory/weak_ptr.h"
++#include "base/time/time.h"
++#include "content/public/browser/desktop_media_id.h"
++#include "content/public/browser/media_stream_request.h"
+ #include "base/unguessable_token.h"
+ #include "cef/include/cef_values.h"
+ #include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
+ #include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents_observer.h"
++#include "url/origin.h"
+ 
+ class CefExternalCapture final : public content::WebContentsObserver,
+     public MediaStreamCaptureIndicator::Observer,
+@@ -19,6 +23,14 @@
+   ~CefExternalCapture() override;
+   CefRefPtr<CefDictionaryValue> State();
+   bool Stop(const std::string& token, const std::string& kind);
++  // The embedder's own picker: what the next getDisplayMedia shows, and the
++  // running tab capture moved to another tab.
++  bool Grant(const std::string& source, const std::string& origin, bool audio);
++  bool Switch(const std::string& source, bool audio);
++  // The source this request was promised, consumed; null when none was.
++  content::DesktopMediaID TakeSource(const content::MediaStreamRequest& request);
++  void SetSwitcher(content::MediaStreamUI::SourceCallback switcher) { switcher_ = std::move(switcher); }
++  base::WeakPtr<CefExternalCapture> AsWeakPtr() { return weak_.GetWeakPtr(); }
+   void OnIsCapturingVideoChanged(content::WebContents*, bool) override;
+   void OnIsCapturingAudioChanged(content::WebContents*, bool) override;
+   void OnIsBeingMirroredChanged(content::WebContents*, bool) override;
+@@ -40,6 +52,11 @@
+   base::UnguessableToken token_;
+   bool attached_ = true;
+   bool publish_pending_ = false;
++  content::DesktopMediaID granted_;
++  url::Origin granted_origin_;
++  base::TimeTicks granted_at_;
++  content::DesktopMediaID switching_;
++  content::MediaStreamUI::SourceCallback switcher_;
+   base::WeakPtrFactory<CefExternalCapture> weak_{this};
+ };
+ #endif
+diff --color -ru a/cef/libcef/browser/external_media_stream_ui.h b/cef/libcef/browser/external_media_stream_ui.h
+--- a/cef/libcef/browser/external_media_stream_ui.h
++++ b/cef/libcef/browser/external_media_stream_ui.h
+@@ -2,6 +2,8 @@
+ #define CEF_LIBCEF_BROWSER_EXTERNAL_MEDIA_STREAM_UI_H_
+ #include <memory>
+ #include <utility>
++#include "base/memory/weak_ptr.h"
++#include "cef/libcef/browser/external_capture.h"
+ #include "content/public/browser/media_stream_request.h"
+ // Preserve CEF's original stream notification UI and Chrome's authoritative
+ // device/stop registration on the same original native stream lifetime.
+@@ -41,5 +43,37 @@
+  private:
+   bool started_=false;
+   std::unique_ptr<content::MediaStreamUI> indicator_,legacy_;
++};
++// Chrome's own stream UI for a display capture the embedder chose, keeping the
++// way to move it to another tab where the embedder's UI can reach it.
++class CefDisplaySourceUI final : public content::MediaStreamUI {
++ public:
++  CefDisplaySourceUI(std::unique_ptr<content::MediaStreamUI> inner,
++      base::WeakPtr<CefExternalCapture> owner)
++      :inner_(std::move(inner)),owner_(std::move(owner)) {}
++  gfx::NativeViewId OnStarted(base::RepeatingClosure stop,SourceCallback source,
++      const std::string& label,std::vector<content::DesktopMediaID> ids,
++      StateChangeCallback change) override {
++    if(owner_)owner_->SetSwitcher(source);
++    return inner_?inner_->OnStarted(std::move(stop),std::move(source),label,std::move(ids),std::move(change)):0;
++  }
++  void OnDeviceStoppedForSourceChange(const std::string& label,
++      const content::DesktopMediaID& old_id,const content::DesktopMediaID& new_id,
++      bool captured_surface_control_active) override {
++    if(inner_)inner_->OnDeviceStoppedForSourceChange(label,old_id,new_id,captured_surface_control_active);
++  }
++  void OnDeviceStopped(const std::string& label,const content::DesktopMediaID& id) override {
++    if(inner_)inner_->OnDeviceStopped(label,id);
++  }
++  void OnRegionCaptureRectChanged(const std::optional<gfx::Rect>& rect) override {
++    if(inner_)inner_->OnRegionCaptureRectChanged(rect);
++  }
++  void SetFocus(const content::DesktopMediaID& id,bool focus,
++      bool from_microtask,bool from_timer) override {
++    if(inner_)inner_->SetFocus(id,focus,from_microtask,from_timer);
++  }
++ private:
++  std::unique_ptr<content::MediaStreamUI> inner_;
++  base::WeakPtr<CefExternalCapture> owner_;
+ };
+ #endif
+diff --color -ru a/cef/libcef/browser/media_access_query.cc b/cef/libcef/browser/media_access_query.cc
+--- a/cef/libcef/browser/media_access_query.cc
++++ b/cef/libcef/browser/media_access_query.cc
+@@ -13,6 +13,7 @@
+ #include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
+ #include "cef/libcef/browser/thread_util.h"
+ #include "cef/libcef/common/cef_switches.h"
++#include "chrome/browser/media/webrtc/desktop_capture_devices_util.h"
+ #include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
+ #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
+ 
+@@ -115,6 +116,40 @@
+     return std::move(callback_);
+   }
+ 
++  // What the embedder's own picker chose, taken by Chrome's own capture: the
++  // devices, the page's displaySurface and the stream's stop are Chrome's.
++  void ExecuteDisplaySource(const content::DesktopMediaID& source) {
++    CEF_REQUIRE_UIT();
++    auto* contents = browser_->GetWebContents();
++    if (!contents) {
++      std::move(callback_).Run(*blink::mojom::StreamDevicesSet::New(),
++          blink::mojom::MediaStreamRequestResult::INVALID_STATE, nullptr);
++      return;
++    }
++    const bool audio = source.audio_share &&
++        request_.audio_type != blink::mojom::MediaStreamType::NO_SERVICE;
++    const bool tab = source.type == content::DesktopMediaID::TYPE_WEB_CONTENTS;
++    auto* capture = browser_->contents_delegate()->external_capture();
++    GetDevicesForDesktopCapture(contents, source, request_.video_type,
++        request_.audio_type, request_.security_origin, audio,
++        /*disable_local_echo=*/tab && request_.suppress_local_audio_playback,
++        request_.suppress_local_audio_playback, request_.restrict_own_audio,
++        /*display_notification=*/false, std::u16string(),
++        request_.captured_surface_control_active,
++        base::BindOnce(
++            [](CallbackType callback, base::WeakPtr<CefExternalCapture> owner,
++               blink::mojom::StreamDevices devices,
++               std::unique_ptr<content::MediaStreamUI> ui) {
++              auto set = blink::mojom::StreamDevicesSet::New();
++              set->stream_devices.emplace_back(blink::mojom::StreamDevices::New());
++              *set->stream_devices[0] = std::move(devices);
++              std::move(callback).Run(*set, blink::mojom::MediaStreamRequestResult::OK,
++                  std::make_unique<CefDisplaySourceUI>(std::move(ui), std::move(owner)));
++            },
++            std::move(callback_),
++            capture ? capture->AsWeakPtr() : base::WeakPtr<CefExternalCapture>()));
++  }
++
+   void ExecuteCallback(uint32_t allowed_permissions) {
+     CEF_REQUIRE_UIT();
+ 
+@@ -373,6 +408,14 @@
+   CEF_REQUIRE_UIT();
+ 
+   CefMediaAccessQuery query(browser, request, std::move(callback));
++
++  if (auto* capture = browser->contents_delegate()->external_capture()) {
++    const content::DesktopMediaID source = capture->TakeSource(request);
++    if (!source.is_null()) {
++      query.ExecuteDisplaySource(source);
++      return base::NullCallback();
++    }
++  }
+ 
+   if (CheckCommandLinePermission()) {
+     // Allow all requested permissions.

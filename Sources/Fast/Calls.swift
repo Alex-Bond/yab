@@ -8,9 +8,10 @@ import SwiftUI
 //
 // A call is the one page that costs something to lose: ⌘W on it asks
 // twice, as ⌘Q does, quitting says so, and it never sleeps, is never
-// tidied, and no update is written in over it. Going to another tab, the
-// call comes along in the floating window (Floater, as a call: its people,
-// the microphone, the camera, Leave), and a call over closes its tab once
+// tidied, and no update is written in over it. Going to another tab, or
+// another space, the call comes along in the floating window (Floater, as
+// a call: its people, the microphone, the camera, Leave), its tab staying
+// live in its own space (feedback #1878); a call over closes its tab once
 // you have looked away from it. See PLAN-calls.md.
 
 extension Tab {
@@ -123,9 +124,8 @@ extension Browser {
     /// shows its tab again), unless it is pinned or not a meeting's page.
     private func callEnded(_ tab: Tab) {
         if floating == tab.id { land() }
-        // Sent to a space during the call, the next call goes along again;
-        // one over that came along goes home once you look away.
-        if !Browser.hosts(tab) { tab.stays = false }
+        // One that came along with an agent goes home once you look away;
+        // a call's own tab is home already.
         sendHome(tab)
         guard tab.pin == nil, CallLink.isCall(tab.address) || CallLink.isCall(tab.callStarted) else { return }
         calls.over[tab.id] = Date()
@@ -153,7 +153,8 @@ extension Browser {
             }
             guard now.timeIntervalSince(seen) >= Calls.linger else { continue }
             calls.over[id] = nil
-            if tabs.contains(where: { $0.id == id }) { close(tab) }
+            // Parked in the space it was left talking in, it closes there.
+            if tabs.contains(where: { $0.id == id }) { close(tab) } else { closeElsewhere(tab) }
         }
         if calls.over.isEmpty {
             calls.sweeping?.invalidate()
@@ -213,10 +214,13 @@ extension Browser {
     // MARK: - the call in the floating window
 
     /// Away from a call's tab: the call comes along, in the floating
-    /// window, laid out by CallStage. A video already out goes home to its
+    /// window, laid out by CallStage, its tab where it is, in this row or
+    /// parked in the space you left. A video already out goes home to its
     /// tab first; another call already out stays, one call at a time.
     func liftCall(_ tab: Tab) {
-        guard tab.onCall, !tab.isBlank, !tab.asleep, let web = tab.builtPage else { return }
+        // The call's own window is out (Meet's, on Chromium): it comes along
+        // as it is.
+        guard tab.onCall, !tab.isBlank, !tab.asleep, !tab.documentPiP.showing, let web = tab.builtPage else { return }
         if floater.showing, !floater.homing {
             if floater.kind == .call { return }
             land()
@@ -225,14 +229,14 @@ extension Browser {
             guard let self else { return }
             // Gone back to it meanwhile, closed, or the call over: nothing
             // to lift, and the stage comes off again.
-            guard self.tabs.contains(where: { $0 === tab }), tab.onCall, self.activeID != tab.id,
+            guard self.everyTab.contains(where: { $0 === tab }), tab.onCall, self.activeID != tab.id,
                   !self.floater.showing || self.floater.homing
             else {
                 if self.floating != tab.id { CallStage.run("off", on: web) }
                 return
             }
             if self.floater.homing { self.floater.drop() }
-            web.webKitPutOut(tab, in: self)
+            self.putOut(tab, web: web)
             // Under the stage now, the page's menus can be opened unseen.
             tab.readCallDevices { [weak self] in self?.floater.refreshCall() }
         }

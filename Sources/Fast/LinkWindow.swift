@@ -260,8 +260,6 @@ final class LinkWindow: NSObject, NSWindowDelegate {
             let panel = FullScreenFrame(contentRect: NSRect(origin: .zero, size: size),
                                         styleMask: style.union(.nonactivatingPanel), backing: .buffered, defer: false)
             panel.hidesOnDeactivate = false
-            panel.isFloatingPanel = true
-            panel.level = .floating
             window = panel
         } else {
             window = Frame(contentRect: NSRect(origin: .zero, size: size),
@@ -307,7 +305,19 @@ final class LinkWindow: NSObject, NSWindowDelegate {
         window.contentView = content
         // Ours, where the bar puts them, in its middle.
         Lights.hideOwn(of: window)
+        updateLevel()
     }
+
+    /// Desktop Small Windows participate in normal click-to-front ordering.
+    /// Only the nonactivating fullscreen panel needs to float while it owns
+    /// the keyboard, including over a foreign Space with NSApp inactive.
+    /// Once another window takes the keyboard, that panel must yield too.
+    private func updateLevel() {
+        window.level = window is FullScreenFrame && window.isKeyWindow ? .floating : .normal
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) { updateLevel() }
+    func windowDidResignKey(_ notification: Notification) { updateLevel() }
 
     // MARK: - where it stands
 
@@ -819,7 +829,7 @@ final class PageHolder: NSView {
     /// Where the page lies in the holder: all of it, less the band's room.
     var pageFrame: NSRect {
         let tall = band?.frame.height ?? 0
-        return NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - tall))
+        return NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: max(0, bounds.height - tall))
     }
 
     init(tab: Tab, size: NSSize = NSSize(width: 900, height: 600)) {
@@ -911,10 +921,22 @@ final class PageHolder: NSView {
         claimPull()
     }
 
+    /// Element fullscreen borrows the view; unlike StageView, this holder's
+    /// layout only sizes an attached page. Return only the same live tab's
+    /// detached view, never a page already handed to the browser or a peek.
+    func returnFromFullscreen(_ page: ChromiumPage) {
+        guard window != nil, !tab.gone, tab.builtPage === page,
+              page.superview == nil else { return }
+        page.autoresizingMask = []
+        page.frame = bounds
+        addSubview(page, positioned: .below, relativeTo: pull)
+        claimPull()
+    }
+
     private func fit() {
         let page = pageFrame
         if let band {
-            let room = NSRect(x: 0, y: page.maxY, width: bounds.width, height: band.frame.height)
+            let room = NSRect(x: bounds.minX, y: page.maxY, width: bounds.width, height: band.frame.height)
             if band.frame != room { band.frame = room }
         }
         if pull.frame != page { pull.frame = page }
@@ -1014,6 +1036,7 @@ private struct LinkRoom: View {
                         .frame(height: Self.bar)
                         .toned(tone)
                     Holding(holder: holder)
+                        .overlay(alignment: .bottomLeading) { LinkStatusPill(tab: tab.id) }
                         .overlay(alignment: .topLeading) { PageSuggestions(browser: browser, tab: tab) }
                         // ⌘F, the tab's own bar in the page's top corner.
                         .overlay(alignment: .topTrailing) {

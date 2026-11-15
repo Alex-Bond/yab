@@ -106,7 +106,8 @@ struct Column: View {
     /// The card's ground as paint: on a color, the window's own, worked out
     /// as SpaceWash works it out, so a switch hands the card the same paint
     /// it hands the window; on a site's color, that color.
-    static func paint(_ ground: Tone, prefs: Preferences) -> SpaceWash.Paint {
+    static func paint(_ ground: Tone, prefs: Preferences, privateWindow: Bool = false) -> SpaceWash.Paint {
+        if privateWindow { return SpaceWash.Paint(color: ContentView.privateBackdrop, grain: prefs.grain) }
         if let worn = SpaceWash.card(prefs) { return worn }
         return SpaceWash.Paint(color: ground.page, grain: prefs.grain, transparency: prefs.wornTransparency(dark: ground.scheme == .dark),
                                glass: prefs.wearsGlass)
@@ -149,7 +150,7 @@ struct Column: View {
         // column wears its space's look on a ground of its own, out and on
         // the way between alike, as Arc's sidebar always wears its theme.
         let ground = tone == nil ? card : Self.ground(floating: floating, tone: tone)
-        let paint = ground.map { Self.paint($0, prefs: prefs) }
+        let paint = ground.map { Self.paint($0, prefs: prefs, privateWindow: browser.windowPurpose == .privateOnly) }
         // What the card's own hairline and the island at its foot are
         // drawn on: the window's backdrop, or edge to edge the column's.
         let worn = tone ?? card
@@ -227,6 +228,9 @@ struct Column: View {
                 .overlay(alignment: left ? .bottomLeading : .bottomTrailing) {
                     BandSlot(player: browser.player, prefs: prefs, room: browser.player.room, column: width, trailing: !left, edge: browser.bandEdge, foot: !ColumnKit.cut.contains("foot"))
                         .toned(ink ?? worn)
+                        // The island stands outside the rows' clip, so it
+                        // also needs their fade under the downloads stack.
+                        .modifier(HoardHush(hoard: browser.hoard))
                 }
                 .compositingGroup()
                 .shadow(color: .black.opacity(floating && out ? 0.14 : 0), radius: 24, x: 0, y: 8)
@@ -292,6 +296,7 @@ struct ColumnHost: NSViewRepresentable {
 }
 
 final class ColumnView: NSView {
+    private typealias Host = ColumnHoverHost<ColumnRoot>
     private let host: Host
     private weak var browser: Browser?
     private var out: Bool?
@@ -349,25 +354,6 @@ final class ColumnView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
-
-    /// The column in a host of its own hears the pointer wherever it is
-    /// over the column, a pin's card or a folder's preview hanging over
-    /// its rows too: there the rows under the card would light and take
-    /// the card's place (TabGlance.covers). Off the card, the next move
-    /// sets them right.
-    private final class Host: NSHostingView<ColumnRoot> {
-        weak var browser: Browser?
-
-        override func mouseMoved(with event: NSEvent) {
-            if browser?.glance.covers(event) == true { return }
-            super.mouseMoved(with: event)
-        }
-
-        override func mouseEntered(with event: NSEvent) {
-            if browser?.glance.covers(event) == true { return }
-            super.mouseEntered(with: event)
-        }
-    }
 
     override func layout() {
         super.layout()
@@ -769,7 +755,17 @@ final class ColumnView: NSView {
         defer {
             let changed = out != now
             out = now
-            if changed { Lights.rows(in: self).forEach { $0.columnVisibilityChanged(now) } }
+            if changed {
+                Lights.rows(in: self).forEach { $0.columnVisibilityChanged(now) }
+                if !now {
+                    func stop(in view: NSView) {
+                        if let page = view as? ColumnPage { page.stopPointing(); return }
+                        view.subviews.forEach { stop(in: $0) }
+                    }
+                    stop(in: self)
+                    browser?.glance.drop()
+                }
+            }
         }
         if !now {
             ScrollLatch.release(in: self)
@@ -895,6 +891,7 @@ struct ColumnRoot: View {
     @ObservedObject var browser: Browser
     @ObservedObject var prefs: Preferences
     @Environment(\.colorScheme) private var scheme
+    private var privateWindow: Bool { browser.windowPurpose == .privateOnly }
 
     var body: some View {
         // The window's own dresser (Browser.dresser): with two halves on
@@ -904,7 +901,7 @@ struct ColumnRoot: View {
         // branches made the column anew each time the tab in front came or
         // went (a new space, a split staged, a switch's passing moment), and
         // with it every page of ColumnPages and every cell in them.
-        SteadyWorn(site: browser.worn, mode: prefs.backdrop, swatch: swatch, glassActive: glassActive) { tone in
+        SteadyWorn(site: browser.worn, mode: privateWindow ? .color : prefs.backdrop, swatch: swatch, glassActive: glassActive) { tone in
             // Docked it paints nothing of its own, the window's color shows
             // through it: on the site's color it is handed its words alone,
             // the same from one site to the next of the same light. Out over
@@ -919,7 +916,7 @@ struct ColumnRoot: View {
     /// site's light or dark, not its hue, so a switch to another site of the
     /// same light leaves every row, word and button as it is.
     private var ink: Tone? {
-        guard !glassActive, let color = browser.worn.color else { return nil }
+        guard !privateWindow, !glassActive, let color = browser.worn.color else { return nil }
         let site = Tone(color, lifted: true)
         guard Worn<EmptyView>.worn(site, mode: prefs.backdrop, dark: scheme == .dark) else { return nil }
         return Tone.columnInk(site)
@@ -931,7 +928,10 @@ struct ColumnRoot: View {
     // after the column came back flat.
     /// Edge to edge and docked too: the column stands on the window's
     /// backdrop then, as on a color (Preferences.edgeBackdrop).
-    private var swatch: Tone? {
+    var swatch: Tone? {
+        // This is an independent NSHostingView: ContentView's preferred
+        // dark scheme and private paint do not supply its environment.
+        if privateWindow { return Tone(ContentView.privateBackdrop, lifted: true) }
         guard prefs.backdrop != .none || prefs.edgeBackdrop else { return nil }
         return Tone(prefs.swatch.color(dark: scheme == .dark, custom: prefs.backdropColor), lifted: true, glass: glassActive)
     }
@@ -941,12 +941,12 @@ struct ColumnRoot: View {
     /// color, so the same inks (Tone.card), and the same paint
     /// (SpaceWash.card).
     private var card: Tone? {
-        guard prefs.backdrop == .none, !prefs.edgeBackdrop else { return nil }
+        guard !privateWindow, prefs.backdrop == .none, !prefs.edgeBackdrop else { return nil }
         return Tone(prefs.swatch.color(dark: scheme == .dark, custom: prefs.backdropColor), lifted: true,
                     glass: prefs.lookGlass && WindowGlassPolicy.supported)
     }
 
-    private var glassActive: Bool { prefs.wearsGlass }
+    private var glassActive: Bool { !privateWindow && prefs.wearsGlass }
 }
 
 /// Worn with one shape whether or not a tab is in front: Worn's two

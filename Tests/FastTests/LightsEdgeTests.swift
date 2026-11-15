@@ -28,7 +28,7 @@ struct LightsEdgeTests {
 
         mutating func look() -> Bool {
             let edge = EdgeReach.at(point, past: false, height: LightsEdgeTests.height)
-            let rest = EdgeReach.rest(edge: edge, corner: false, hand: false, quiet: false)
+            let rest = EdgeReach.rest(edge: edge)
             return dwell.remaining(rest: rest, now: now) == 0
         }
 
@@ -152,8 +152,8 @@ struct LightsEdgeTests {
         }
         #expect(at(0, 300, past: false))
         #expect(at(Metrics.edgeWall, 300, past: false))
-        #expect(at(8, 300, past: false))
-        #expect(at(12, 300, past: false))
+        #expect(!at(8, 300, past: false))
+        #expect(!at(12, 300, past: false))
         #expect(!at(13, 300, past: false))
         #expect(!at(13, 300, past: true))
         #expect(!at(8, -1, past: false))
@@ -209,25 +209,17 @@ struct LightsEdgeTests {
         #expect(!EdgeReach.away(CGPoint(x: -600, y: 400), window: flush, screen: nil))
     }
 
-    // Bug #58: X's image viewer has its close button in the lights' corner,
-    // and resting on it brought the column out over it.
-    @Test func theCornerKeepsQuietOverWhatTakesAClick() {
-        func rest(edge: Bool = false, corner: Bool = true, hand: Bool = false, quiet: Bool = false) -> CFTimeInterval? {
-            EdgeReach.rest(edge: edge, corner: corner, hand: hand, quiet: quiet)
+    @Test func pageControlsInTheCornerNeverRevealTheColumn() {
+        for x in [CGFloat(4), 8, 12, 20, 38, 60] {
+            for y in [CGFloat(8), 24, 40, 300] {
+                let edge = EdgeReach.at(CGPoint(x: x, y: y), past: false, height: Self.height)
+                #expect(!edge)
+                #expect(EdgeReach.rest(edge: edge) == nil)
+            }
         }
-        #expect(rest() == EdgeReach.cornerRest)
-        #expect(EdgeReach.cornerRest > EdgeReach.edgeRest)
-        // Over a link or a button, and just after a press there.
-        #expect(rest(hand: true) == nil)
-        #expect(rest(quiet: true) == nil)
-        // The edge doesn't ask the page.
-        #expect(rest(edge: true, hand: true, quiet: true) == EdgeReach.edgeRest)
-        #expect(rest(edge: true, corner: false) == EdgeReach.edgeRest)
-        #expect(rest(corner: false) == nil)
+        #expect(EdgeReach.rest(edge: true) == EdgeReach.edgeRest)
     }
 
-    // The column waits for the chosen rest; the strip and card motion keep
-    // their existing timing.
     @Test func theColumnWaitsWithoutChangingTheStripOrMotion() {
         #expect(EdgeReach.edgeRest == 0.3)
         #expect(TopReach.edgeRest == 0.15)

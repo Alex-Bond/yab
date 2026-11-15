@@ -16,6 +16,9 @@ import Foundation
 /// their trace), keep (LastingSignIns), notices
 /// (SiteNotices: the pool's notification provider and the store's delegate),
 /// swipe (a trackpad gesture's begin not told to the page's swipe script).
+/// For scripts/cef/ab.py: chromium.cookies (no cookie pass before a navigation),
+/// chromium.warm (a spare's page not warmed), chromium.show (a pick doesn't
+/// tell the helper ahead of the redraw), chromium.defer (the redraw doesn't wait).
 /// For evals/scroll-ram: hover (WebKit's word on the link under the pointer
 /// dropped, no link pill) and pillglass (the link pill on a plain ground).
 enum LinkGap {

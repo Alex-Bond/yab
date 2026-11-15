@@ -110,6 +110,27 @@ struct TidyTabsTests {
         #expect(browser.tidyTabsLoose.map(\.id) == opened.prefix(2).map(\.id))
     }
 
+    @Test func tidyRechecksVisitingTabsWhenTheAnswerArrives() throws {
+        let id = UUID(), browser = Browser(windowID: id)
+        defer {
+            for tab in browser.tabs { browser.close(tab) }
+            try? FileManager.default.removeItem(at: Store.file("session-window-\(id.uuidString).json"))
+        }
+        let tabs = (0..<3).map { browser.open(URL(string: "https://example.test/late-tidy/\($0)")!, foreground: false) }
+        browser.lay(tabs)
+        let asked = browser.tidyTabsLoose
+        try #require(asked.count == 3)
+        // The model was asked before the tab became a visitor. Its answer
+        // must not file a tab whose folder belongs to another space.
+        tabs[1].homeSpace = UUID()
+        browser.applyTidy([TidyTabs.Group(name: "Topic", tabs: [0, 1, 2])], of: asked)
+        #expect(tabs[1].nest == nil)
+        #expect(tabs[0].nest != nil)
+        #expect(tabs[0].nest === tabs[2].nest)
+        browser.folderBook.refresh()
+        #expect(tabs[0].nest === tabs[2].nest)
+    }
+
     @Test func tidyMakesFoldersOfTodaysAndUndoPutsTheRowBack() throws {
         let id = UUID()
         let browser = Browser(windowID: id)

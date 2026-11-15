@@ -590,7 +590,7 @@ enum FieldActions {
 
     private static func linear(_ words: String) -> [FieldRequest] {
         let title = RequestReader.saidAfter(words) ?? words
-        let workspace = History.shared.visits(since: .distantPast)
+        let workspace = History.current.visits(since: .distantPast)
             .compactMap { URL(string: $0.url) }.first { $0.host() == "linear.app" }?.pathComponents.dropFirst().first
         var url = URLComponents(string: "https://linear.app/" + (workspace.map { $0 + "/" } ?? "") + "new")!
         url.queryItems = [URLQueryItem(name: "title", value: title)]
@@ -624,7 +624,7 @@ enum FieldActions {
     private static func agentTask(_ kind: String, _ reading: Reading, _ words: String) -> [FieldRequest] {
         let site = reading.host.map(Address.siteName)
         var fields = [Field(label: "Asked", value: words, source: "your words")]
-        if let site, let host = reading.host { fields.append(Field(label: "Where", value: site, source: "you went there \(History.shared.count(host: host)) times")) }
+        if let site, let host = reading.host { fields.append(Field(label: "Where", value: site, source: "you went there \(History.current.count(host: host)) times")) }
         let (title, button, plan): (String, String, [String])
         switch kind {
         case "pay":

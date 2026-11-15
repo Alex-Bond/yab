@@ -31,6 +31,20 @@ struct AddressTests {
         #expect(Self.url("8.8.8.8") == "https://8.8.8.8")
     }
 
+    @Test func tailscaleServersUseHttpUnlessASchemeWasSpecified() {
+        #expect(Self.url("box:8080") == "http://box:8080")
+        #expect(Self.url("box.tail1234.ts.net") == "http://box.tail1234.ts.net")
+        #expect(Self.url("BOX.TAIL1234.TS.NET:8080/path") == "http://BOX.TAIL1234.TS.NET:8080/path")
+        #expect(Self.url("100.64.0.0:8080") == "http://100.64.0.0:8080")
+        #expect(Self.url("100.127.255.255") == "http://100.127.255.255")
+        #expect(Self.url("100.63.255.255") == "https://100.63.255.255")
+        #expect(Self.url("100.128.0.0") == "https://100.128.0.0")
+        #expect(Self.url("ts.net") == "https://ts.net")
+        #expect(Self.url("fake-ts.net") == "https://fake-ts.net")
+        #expect(Self.url("https://box.tail1234.ts.net") == "https://box.tail1234.ts.net")
+        #expect(Self.url("http://box.tail1234.ts.net") == "http://box.tail1234.ts.net")
+    }
+
     @Test func ipv6InBrackets() {
         #expect(Self.url("[::1]:3000") == "http://[::1]:3000")
         #expect(Self.url("[::1]") == "http://[::1]")

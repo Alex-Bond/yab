@@ -33,6 +33,13 @@ struct SuggestRow: Identifiable, Equatable {
         /// One of your own addresses, for an email box on a site with no
         /// login: the address alone goes in.
         case email(String)
+        /// One of the site's passkeys, for a page's pending conditional get
+        /// on a Chromium tab: picked, the Mac's sheet signs in with it
+        /// (ChromiumWebAuthn+Conditional.swift).
+        case passkey(ConditionalPasskey)
+        /// Chrome's footer for that request, "Use Passkey from another
+        /// device": the modal sheet (a phone nearby, a security key).
+        case otherPasskey(String)
     }
 
     let kind: Kind
@@ -67,6 +74,17 @@ struct SuggestRow: Identifiable, Equatable {
         case .generate(let id, _): return "generate/" + (id ?? "yab")
         case .all: return "all"
         case .email(let address): return "email/" + address
+        case .passkey(let key): return "pk/" + key.request + "/" + key.id
+        case .otherPasskey(let request): return "pkother/" + request
+        }
+    }
+
+    /// A row under the others, out of their scroll: All Passwords, and the
+    /// way to another device's passkey.
+    var footer: Bool {
+        switch kind {
+        case .all, .otherPasskey: return true
+        default: return false
         }
     }
 
@@ -107,6 +125,14 @@ enum SuggestRows {
         /// what is typed in it so far, to narrow them.
         var emails: [String] = []
         var typed = ""
+        /// The site's passkeys for a pending conditional get: first, as
+        /// Chrome lists them above passwords.
+        var passkeys: [ConditionalPasskey] = []
+        /// Only those: password filling is off, passkeys are not.
+        var passkeysOnly = false
+        /// The pending conditional get, for Chrome's "Use Passkey from
+        /// another device" footer; nil with none.
+        var otherPasskey: String? = nil
     }
 
     /// The other Space a login was saved in, as its emoji and name, or nil
@@ -145,7 +171,28 @@ enum SuggestRows {
         return names.dropLast().joined(separator: ", ") + " and " + names.last!
     }
 
+    /// Chrome's footer text for another device's passkey (Chrome 157 on the
+    /// Mac says it so, seen on the fixture page).
+    static let otherPasskeyTitle = "Use Passkey from another device"
+
     static func build(_ input: Input) -> [SuggestRow] {
+        var rows = listed(input)
+        // Under a pending conditional get, the passkey footer: after the rows,
+        // before All Passwords. It stands alone where nothing else would
+        // say anything but where Yab looked.
+        guard let request = input.otherPasskey else { return rows }
+        if rows.first?.kind == .nothing { rows = [] }
+        let footer = SuggestRow(kind: .otherPasskey(request), group: (rows.last?.group ?? 0) + 1,
+                                title: otherPasskeyTitle, glyph: "iphone")
+        if let all = rows.firstIndex(where: { $0.kind == .all }) {
+            rows.insert(footer, at: all)
+        } else {
+            rows.append(footer)
+        }
+        return rows
+    }
+
+    private static func listed(_ input: Input) -> [SuggestRow] {
         let host = input.host
         // A box for a new password: one made here, shown as it will go in;
         // kept after by the manager's own offer, else Yab's card.
@@ -161,6 +208,17 @@ enum SuggestRows {
                                detail: " · saved in Yab passwords", quick: true, shown: password)]
         }
         let connected = !input.managers.isEmpty
+        // The site's passkeys first, one row each, a passkey and a password
+        // of the same name both.
+        let keys = input.passkeys.map {
+            SuggestRow(kind: .passkey($0), group: -1, title: $0.user.isEmpty ? "No name" : $0.user, detail: $0.detail, host: host)
+        }
+        if input.passkeysOnly {
+            guard keys.count == 1 else { return keys }
+            var only = keys[0]
+            only.quick = true
+            return [only]
+        }
         // One row an account: Yab's first, then each manager's in order,
         // the same name kept in two places said once, both named.
         var users: [String: Int] = [:]
@@ -267,6 +325,14 @@ enum SuggestRows {
             return [only]
         }
 
+        // Passkeys and no login: the passkeys alone, the one of them ↩.
+        if !keys.isEmpty, accounts.isEmpty, !waiting, !hybrid {
+            guard keys.count == 1 else { return keys }
+            var only = keys[0]
+            only.quick = true
+            return [only]
+        }
+
         // No login here and the box wants an email: your addresses, and
         // nothing else (no rows saying what isn't there).
         if accounts.isEmpty, !waiting, !hybrid, !input.secret {
@@ -295,11 +361,11 @@ enum SuggestRows {
                 out[0].quick = true
                 out.append(SuggestRow(kind: .open(id), group: out[0].group, title: "Open \(name(id))", glyph: "arrow.up.right"))
             }
-            return out
+            return keys + out
         }
 
         // One account and nothing else to wait for: the one row, ↩.
-        if accounts.count == 1, rows.count == 1 {
+        if keys.isEmpty, accounts.count == 1, rows.count == 1 {
             var only = rows[0]
             only.quick = true
             only.used = nil
@@ -312,7 +378,7 @@ enum SuggestRows {
         if !connected, input.yabOn || accounts.contains(where: { if case .yab = $0.kind { return true }; return false }) {
             rows.append(SuggestRow(kind: .all, group: (rows.last?.group ?? 0), title: "All Passwords"))
         }
-        return rows
+        return keys + rows
     }
 
     /// A strong password: four groups of four, letters
@@ -341,8 +407,19 @@ enum SuggestRows {
 final class ManagerLists {
     static let shared = ManagerLists()
 
-    struct Site { var at: Date; var logins: [String: [ManagerVault.Login]]; var states: [String: ManagerVault.State] }
+    struct Site {
+        var at: Date
+        var logins: [String: [ManagerVault.Login]]
+        var states: [String: ManagerVault.State]
+        /// Every manager gave a real answer: its state, and its logins
+        /// where it is open. A list that timed out or a tool that failed
+        /// leaves it false, and the next ask reads again (ManagerVaults.answered).
+        var complete = false
+    }
     private(set) var sites: [String: Site] = [:]
+    /// Rows being redrawn for an answer that just came: the box asks for
+    /// the site again then, and is shown what came, not read again.
+    private var answering = false
     /// Unlocking now, and since when: a row shows after 300 ms.
     private(set) var unlocking: [String: Date] = [:]
     private var looking: Set<String> = []
@@ -398,17 +475,22 @@ final class ManagerLists {
         return now.timeIntervalSince(since) >= 0.3
     }
 
-    /// Reads every readable manager for this host, unless read in the last
-    /// 30 seconds; `changed` after each step that changes the rows.
+    /// Reads every readable manager for this host, unless every one of
+    /// them answered it in the last 30 seconds and none has changed state
+    /// since; `changed` after each step that changes the rows. Only real
+    /// answers are kept: a list that timed out or failed is shown as
+    /// nothing found, and the next focus or keystroke asks again.
     func look(_ host: String, changed: @escaping @MainActor () -> Void) {
         let site = Vault.registrable(host)
-        if let kept = sites[site], Date().timeIntervalSince(kept.at) < 30 { return }
-        guard !looking.contains(site) else { return }
+        if answering, sites[site] != nil { return }
         let readable = ManagerVaults.readable
+        if let kept = sites[site], ManagerVaults.stillTrue(kept.complete, at: kept.at, states: kept.states, readable: readable) { return }
+        guard !looking.contains(site) else { return }
         guard !readable.isEmpty else { return }
         looking.insert(site)
         Task { @MainActor in
             var found = Site(at: Date(), logins: [:], states: [:])
+            var complete = true
             for id in readable {
                 guard let adapter = ManagerVault.adapter(id) else { continue }
                 var state = await adapter.state()
@@ -416,20 +498,33 @@ final class ManagerLists {
                     unlocking[id] = Date()
                     // The spinner row only for an unlock that takes a while.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
-                        if self?.unlocking[id] != nil { changed() }
+                        if self?.unlocking[id] != nil { self?.answer(changed) }
                     }
                     if await ManagerVaults.unlockIfKept(id, adapter) { state = .open }
                     unlocking[id] = nil
                 }
                 found.states[id] = state
                 ManagerVaults.lastState[id] = state
-                if state == .open { found.logins[id] = (try? await adapter.logins(for: host)) ?? [] }
+                if state == .open {
+                    let read = try? await adapter.logins(for: host)
+                    found.logins[id] = read ?? []
+                    if read == nil { complete = false }
+                }
+                if !ManagerVaults.answered(state) { complete = false }
                 found.at = Date()
                 sites[site] = found
-                changed()
+                answer(changed)
             }
+            found.complete = complete
+            sites[site] = found
             looking.remove(site)
         }
+    }
+
+    private func answer(_ changed: @MainActor () -> Void) {
+        answering = true
+        defer { answering = false }
+        changed()
     }
 
     /// A login saved or changed: read again next time.
@@ -444,13 +539,16 @@ extension Browser {
     /// The rows for the box, from Yab's logins (already narrowed and
     /// ordered by the caller) and what the managers have: set as the list.
     /// Nil list when there is nothing to show and nobody to ask.
-    func showRows(_ tab: Tab, spot: CGRect, site: String, host: String, yab: [Login]) {
+    func showRows(_ tab: Tab, spot: CGRect, site: String, host: String, yab: [Login], passkeysOnly: Bool = false) {
         let lists = ManagerLists.shared
-        // A box in another site's frame: Yab's own accounts for that site,
-        // which fill that frame alone. Managers fill the page.
+        // A box in another site's frame: `host` is that frame's site, and
+        // what Yab reads from a manager for it fills that frame alone, as
+        // Yab's own accounts do (ManagerVaults.fill). Only the rows that
+        // fill through Yab come there; the page's own scripts (emails, a
+        // new password, an extension's menu) stay the page's.
         let framed = tab.fieldFrame != nil
-        let connections = framed ? [] : PasswordManagers.Connections.shared.list
-        if !framed { lists.look(host) { [weak self, id = tab.id] in self?.refreshField(id) } }
+        let connections = passkeysOnly ? [] : PasswordManagers.Connections.shared.list
+        if !passkeysOnly { lists.look(host) { [weak self, id = tab.id] in self?.refreshField(id) } }
         let found = lists.logins(Vault.registrable(host))
         let typed = tab.fieldQuery.trimmingCharacters(in: .whitespaces).lowercased()
         var managers: [SuggestRows.Manager] = []
@@ -475,11 +573,12 @@ extension Browser {
             // on one box (1Password without its CLI, its banner read as
             // logins). Agents still sign in through its menu (menuSignIn).
         }
-        if !framed, Store.testing, let staged = lists.staged { managers = staged }
+        if !framed, !passkeysOnly, Store.testing, let staged = lists.staged { managers = staged }
         // A new password made here goes in through the page's script.
-        let fresh = !framed && tab.fieldSecret && tab.fieldFresh
+        let fresh = !framed && !passkeysOnly && tab.fieldSecret && tab.fieldFresh
         let box = (tab.fieldDocument ?? "") + "/" + (tab.fieldIdentity ?? "")
         if fresh, lists.generated[box] == nil { lists.generated[box] = SuggestRows.strongPassword() }
+        let offer = ChromiumWebAuthn.offer(for: tab)
         let input = SuggestRows.Input(
             yab: yab, yabOn: prefs.usesYabPasswords, managers: managers, host: host,
             secret: tab.fieldSecret, fresh: fresh, named: tab.fieldSecret ? (tab.fieldAccount ?? tab.account(on: host)) : nil,
@@ -488,8 +587,11 @@ extension Browser {
             here: loginSpace(tab), spaces: loginSpaceNames,
             // Only once the managers have said they have nothing here, so
             // an address doesn't flash before their login comes in.
-            emails: !framed && tab.fieldEmail && !lists.isLooking(Vault.registrable(host)) ? lists.emails() : [],
-            typed: tab.fieldQuery)
+            emails: !framed && !passkeysOnly && tab.fieldEmail && !lists.isLooking(Vault.registrable(host)) ? lists.emails() : [],
+            typed: tab.fieldQuery,
+            // A pending conditional get's passkeys, on a box marked webauthn,
+            // and Chrome's footer for another device's.
+            passkeys: offer?.passkeys ?? [], passkeysOnly: passkeysOnly, otherPasskey: offer?.request)
         let rows = SuggestRows.build(input)
         guard !rows.isEmpty else {
             suggesting = nil
@@ -519,10 +621,11 @@ extension Browser {
             case .hybrid(let id, _), .unlocking(let id), .open(let id), .locked(let id): return id
             case .generate(let id, _): return id
             case .yab: return "yab"
+            case .passkey, .otherPasskey: return "passkey"
             default: return nil
             }
         })
-        let badge = sourcesShown.count == 1 ? sourcesShown.first.flatMap { $0 == "yab" ? nil : $0 } : nil
+        let badge = sourcesShown.count == 1 ? sourcesShown.first.flatMap { $0 == "yab" || $0 == "passkey" ? nil : $0 } : nil
         fieldPlate = FieldPlate(tab: tab.id, spot: spot, badge: badge, dark: tab.fieldDark)
     }
 
@@ -545,9 +648,29 @@ extension Browser {
         guard let list = suggesting, let tab = autofillTab(list.tab) else { return }
         let clear = tab.fieldAddress?.scheme?.lowercased() == "http"
         guard let host = curtain.host(of: tab.fieldAddress), (clear ? "http://" : "") + host == list.site else { return }
-        // In another site's frame only Yab's own accounts are listed.
-        if tab.fieldFrame != nil { guard case .yab = row.kind else { return } }
+        // In another site's frame only what fills that frame through Yab:
+        // its own accounts, the logins it read from a manager, and that
+        // frame's own passkeys.
+        if tab.fieldFrame != nil {
+            switch row.kind {
+            case .yab, .managed, .passkey, .otherPasskey: break
+            default: return
+            }
+        }
         switch row.kind {
+        case .passkey(let key):
+            // The Mac's sheet for that passkey; the page signs in when it
+            // answers (ChromiumWebAuthn+Conditional.swift).
+            dropChoice()
+            noteFilled(tab)
+            pickedInto = tab.id
+            ChromiumWebAuthn.choose(key)
+        case .otherPasskey(let request):
+            // The footer opens the modal sheet for the same request.
+            dropChoice()
+            noteFilled(tab)
+            pickedInto = tab.id
+            ChromiumWebAuthn.chooseOtherDevice(request)
         case .yab(let login):
             choose(login)
         case .managed(let login):
@@ -555,7 +678,7 @@ extension Browser {
             noteFilled(tab)
             pickedInto = tab.id
             tab.namedAccount(login.user)
-            ManagerVaults.fill(login, into: tab) { [weak self] filled in
+            ManagerVaults.fill(login, into: tab, caret: true) { [weak self] filled in
                 switch filled {
                 case .filled: self?.markFilled(tab, from: PasswordManagers.name(login.provider))
                 case .gone: self?.toaster.pop("\(PasswordManagers.name(login.provider)) didn’t fill it", mark: "exclamationmark.triangle")
@@ -581,7 +704,7 @@ extension Browser {
             }
         case .locked(let id):
             dropChoice()
-            if let item = PasswordManagers.installed(id) { Extensions.here.press(item.id) }
+            if let item = PasswordManagers.installed(id) { ManagerExtensions.shared.press(item.id, on: tab) }
         case .hybrid(let id, _):
             let lists = ManagerLists.shared
             lists.busy = (id, tab.id)
@@ -595,7 +718,6 @@ extension Browser {
                 fieldPlate = nil
             }
         case .generate(let saver, let password):
-            guard let web = tab.webKitOnly("Authenticated password generation fill") else { return }
             dropChoice()
             noteFilled(tab)
             pickedInto = tab.id
@@ -606,11 +728,10 @@ extension Browser {
         case .all:
             openAll(.passwords)
         case .email(let address):
-            guard let web = tab.webKitOnly("Email fill") else { return }
             dropChoice()
             noteFilled(tab)
             pickedInto = tab.id
-            web.runInYab(Tab.emailScript(address)) { _ in }
+            tab.page.runInYab(Tab.emailScript(address)) { _ in }
         case .unlocking, .nothing:
             break
         }

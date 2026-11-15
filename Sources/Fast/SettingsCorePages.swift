@@ -98,21 +98,13 @@ struct GeneralPage: View {
         }
     }
 
-    @ViewBuilder
     private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.directoryURL = prefs.downloads
-        panel.prompt = SettingsWords.text("Use This Folder")
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        prefs.downloads = url
+        DownloadFolder.chooseFolder(starting: prefs.downloads) { [prefs] url in prefs.downloads = url }
     }
 
     /// Nightly builds turned off on a build newer than Stable: nothing would
     /// change until Stable catches up, so going back is offered here, by the
-    /// disk image, since an update never goes to an older build.
+    /// same checked download and swap as an update, after confirmation.
     private func offerStable() async {
         guard let stable = await updater.stableBehind(), !nightly, let window = SettingsWindow.shared.window else { return }
         let alert = NSAlert()
@@ -121,7 +113,7 @@ struct GeneralPage: View {
         alert.addButton(withTitle: SettingsWords.format("Download Stable %@", [stable.version]))
         alert.addButton(withTitle: SettingsWords.format("Stay on %@", [Updater.version]))
         alert.beginSheetModal(for: window) { answer in
-            if answer == .alertFirstButtonReturn { Links.openFromSettings(stable.dmg, in: browser) }
+            if answer == .alertFirstButtonReturn { updater.installStable(stable) }
         }
     }
 
@@ -129,7 +121,11 @@ struct GeneralPage: View {
     /// place; with none, it is simply this one.
     private var versionTitle: String {
         switch updater.stage {
-        case .none: return SettingsWords.text("Yab is up to date")
+        // Found, but its last try to go in place failed: Check Now tries
+        // again (Updater.landing).
+        case .none:
+            if let missed = updater.missed { return SettingsWords.format("Yab %@ is available", [missed.version]) }
+            return SettingsWords.text("Yab is up to date")
         case .fetching(let next): return SettingsWords.format("Downloading Yab %@…", [next.version])
         case .ready(let next): return SettingsWords.format("Yab %@ is downloaded", [next.version])
         case .offered(let next): return SettingsWords.format("Yab %@ is available", [next.version])
@@ -303,6 +299,13 @@ struct AppearancePage: View {
             MenuRow("Address bar", options: [("Hidden", AddressShow.hidden), ("Site", .site), ("Full URL", .full)],
                     selection: addressShow)
                 .settingsAnchor("address-bar")
+            SettingsRow("Show address bar in Peek") {
+                Toggle(SettingsWords.text("Show address bar in Peek"), isOn: $prefs.peekAddress)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            .settingsAnchor("peek-address")
             SettingsRow("Bookmarks bar", detail: "Show bookmarks above the page.") {
                 // Through the browser, so the row comes and goes the way
                 // ⇧⌘B carries it, not in one jump.
@@ -412,6 +415,7 @@ struct ReachableRow: View {
 /// has one, for its address along the top (PeekBand). The field's
 /// suggestions are Search's.
 struct TabsPage: View {
+    @AppStorage(EnergySaver.key, store: Store.settings) private var energySaver = EnergySaver.off.rawValue
     @ObservedObject var prefs: Preferences
     @ObservedObject private var meetings = Meetings.shared
     @ObservedObject private var reopenKey = Keymap.shared.slot(.reopen)
@@ -438,13 +442,6 @@ struct TabsPage: View {
                     .fixedSize()
             }
             .settingsAnchor("peek-click")
-            SettingsRow("Show address bar in Peek") {
-                Toggle(SettingsWords.text("Show address bar in Peek"), isOn: $prefs.peekAddress)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-            }
-            .settingsAnchor("peek-address")
             SettingsRow("Close agent tabs", detail: "Close inactive tabs after a task ends. Unread results and kept tabs stay open.") {
                 DropMenu("Close agent tabs", options: AgentTabsAfter.allCases.map { (title: $0.title, value: $0) },
                          selection: $prefs.agentTabsAfter)
@@ -467,6 +464,16 @@ struct TabsPage: View {
                 }
                 .settingsAnchor("switcher-reach")
             }
+        }
+        Section {
+            SettingsRow("Energy Saver", detail: "Saves battery by limiting background activity and visual effects, such as smooth scrolling and video frame rates.") {
+                DropMenu("Energy Saver", options: EnergySaver.allCases.map { (title: SettingsWords.text($0.title), value: $0.rawValue) },
+                         selection: Binding(get: { energySaver }, set: {
+                             EnergySaver.current = EnergySaver(rawValue: $0) ?? .off
+                         }))
+                    .fixedSize()
+            }
+            .settingsAnchor("energy-saver")
         }
         AwakeSiteSettings()
         Section {
@@ -651,6 +658,7 @@ struct PasswordsPage: View {
     @ObservedObject var model: SettingsModel
     /// A connected manager's extension turning on or off changes who saves.
     @ObservedObject private var extensions = Extensions.shared
+    @ObservedObject private var managers = ManagerExtensions.shared
     @ObservedObject private var connections = PasswordManagers.Connections.shared
 
     var body: some View {
@@ -676,8 +684,11 @@ struct PasswordsPage: View {
                 PasswordBringer(browser: browser, anchor: "bring-passwords", icon: true)
             }
             Section {
-                SettingsSwitch("Offer to save passwords", isOn: prefs.passwordSource.saver == nil ? $prefs.savesPasswords : .constant(false))
-                    .disabled(prefs.passwordSource.saver != nil).settingsAnchor("save-passwords")
+                // The person's while Yab asks, Apple Passwords connected too;
+                // held only by a manager's extension that asks itself.
+                let offer = prefs.passwordSource.offerSwitch(saves: prefs.savesPasswords)
+                SettingsSwitch("Offer to save passwords", isOn: offer.enabled ? $prefs.savesPasswords : .constant(false))
+                    .disabled(!offer.enabled).settingsAnchor("save-passwords")
                 SettingsSwitch("Fill in passwords", isOn: $prefs.fillsPasswords).settingsAnchor("fill")
                 SettingsSwitch("Ask for \(Vault.proof) before filling", isOn: $prefs.provesToFill).settingsAnchor("prove")
                 // Off and still until Apple grants the browser passkeys entitlement:

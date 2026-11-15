@@ -326,7 +326,7 @@ final class AppIconUITests: XCTestCase {
             + (initial ? ["-YabURL", site.url("/article").absoluteString] : [])
             + (large ? ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] : [])
         app.terminate(); app.launch()
-        XCTAssertTrue(wait { app.staticTexts["Page controls article"].exists || app.buttons["welcome.start"].exists
+        XCTAssertTrue(wait { app.staticTexts["Page controls article"].exists || app.buttons["welcome.skip"].exists
             || app.textFields["field.input"].exists || app.buttons["join.close"].exists })
         let identity = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("website-data-store.json"))) as? [String:Any])
         _ = try XCTUnwrap((identity["dataStoreID"] as? String).flatMap(UUID.init(uuidString:)))

@@ -1,10 +1,12 @@
 (function () {
   // Yab's pushManager (WebPush.swift): WebKit's needs Apple's push daemon,
-  // which only Safari may use, so without this a page had none. In the
-  // page's own world, before anything of the site's runs; requests go to
-  // yab's side as events on the window, and come back the same way.
+  // which only Safari may use, and Chromium's Google's push service, so
+  // without this a page had none, or one Yab couldn't carry from engine to
+  // engine. In the page's own world, before anything of the site's runs;
+  // requests go to yab's side as events on the window, and come back the
+  // same way.
   if (!window.isSecureContext || !window.ServiceWorkerRegistration || !navigator.serviceWorker) return;
-  if ('PushManager' in window) return;
+  if ('PushManager' in window && !__YAB_OVERRIDE__) return;
   var mark = Symbol.for('yab.push');
   if (window[mark]) return;
   try { Object.defineProperty(window, mark, { value: true }); } catch (e) { return; }

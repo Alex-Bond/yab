@@ -139,14 +139,34 @@ final class SyncBridge {
 
     /// Shared pins stay owned by Personal in the journal. Project them into
     /// each shared-sign-in page without duplicating tabs in the browser store.
+    /// The space's own pins follow them, as the Mac's row joins them
+    /// (docs/shared-pins.md, "Switching"): one pinned here, or a Mac's that
+    /// sync brought into this space, unless a shared pin is at its address.
+    /// Shown in their place, they hid every pin of the space's own (row 2602).
     func pins(in space: Space) -> [Tab] {
         _ = pinsStamp
         guard sharesPins, !space.isPrivate, !space.ownSignIns else { return space.visiblePins }
         let source = ids.local(SyncCollection.firstSpace)
-        if let owner = app?.browser.space(source) { return owner.visiblePins }
-        return mirror.row(SyncCollection.firstSpace).pins.map {
+        if source == space.id { return space.visiblePins }
+        let shared = app?.browser.space(source)?.visiblePins ?? mirror.row(SyncCollection.firstSpace).pins.map {
             SyncMapping.tab($0, id: ids.local($0.id), old: nil, fixturesEnabled: app?.isFixture ?? false)
         }.filter { !$0.isMail }
+        let addresses = Set(shared.compactMap { $0.navigationURL?.absoluteString })
+        return shared + space.visiblePins.filter { pin in
+            pin.navigationURL.map { !addresses.contains($0.absoluteString) } ?? true
+        }
+    }
+
+    /// Whether the Mac's tab in front belongs on `space`'s page: it is in
+    /// that space on the Mac, or it is a shared pin the page shows. The
+    /// presence names only the tab; its record says where it is. Nil while
+    /// that record hasn't come (row 2603).
+    func macFrontShows(in space: Space) -> Bool? {
+        _ = macTodayStamp
+        guard let id = (awakeMac ?? macs.first)?.front?.tab,
+              let tab = mirror.tabs[id] ?? mirror.elsewhere[id] else { return nil }
+        if tab.list == .pinned, pins(in: space).contains(where: { $0.id == ids.local(id) }) { return true }
+        return ids.local(tab.space) == space.id
     }
 
     /// Opening an inherited pin stays in the chosen space. Its today's copy
@@ -1430,7 +1450,12 @@ final class SyncBridge {
                     // a link another app opened at launch, before the journal
                     // was read, was dropped and the page under it shown (row 1176).
                     space = carry ? Self.carried(had, into: space, carries: carries)
-                        : Self.carried(had, into: space) { tab, _ in self.ids.known(tab.id) == nil }
+                        : Self.carried(had, into: space) { tab, _ in
+                            // Presence can allocate an id before this tab is
+                            // written. Only a journal record makes it synced.
+                            guard let sid = self.ids.known(tab.id) else { return true }
+                            return self.engine?.journal.record(.init(collection: SyncCollection.tab, id: sid)) == nil
+                        }
                 }
                 out.append(space)
             }
@@ -1843,8 +1868,9 @@ final class SyncBridge {
         }
         for space in spaces {
             let id = ids.sync(space.id)
-            if mirror.spaces[id]?.ownSignIns != space.ownSignIns {
-                attempt("space sign-ins") { try [.space(engine.setSpaceSignIns(id, own: space.ownSignIns))] }
+            let profile = space.signInWith.map { ids.sync($0) }
+            if mirror.spaces[id]?.ownSignIns != space.ownSignIns || mirror.spaces[id]?.signInWith != profile {
+                attempt("space sign-ins") { try [.space(engine.setSpaceSignIns(id, own: space.ownSignIns, signInWith: profile))] }
             }
         }
         // Dissolve removed folders before writing their promoted children.
@@ -1878,11 +1904,12 @@ final class SyncBridge {
         var order: [String: [SyncTab.List: [String]]] = [:]
         for space in spaces {
             let sid = ids.sync(space.id)
+            let holders = KeptTree.holders(space.kept)
             func put(_ tab: Tab, _ list: SyncTab.List) {
                 guard !tab.isPrivate else { return }
                 let id = ids.sync(tab.id)
                 wants[id] = Want(space: sid, list: list, url: SyncMapping.wireURL(tab, fixturesEnabled: app.isFixture),
-                                 title: tab.pageTitle ?? (tab.name == nil ? tab.title : mirror.tabs[id]?.title ?? tab.title), name: tab.name, folder: space.folder(holding: tab.id).map { ids.sync($0.id) })
+                                 title: tab.pageTitle ?? (tab.name == nil ? tab.title : mirror.tabs[id]?.title ?? tab.title), name: tab.name, folder: holders[tab.id].map { ids.sync($0) })
                 wanted.append(id)
                 order[sid, default: [:]][list, default: []].append(id)
             }
@@ -1975,6 +2002,7 @@ final class SyncBridge {
             if icon != synced.icon { synced.iconChoice = icon; synced.iconChoiceID = UUID().uuidString }
             synced.icon = icon
             synced.ownSignIns = space.ownSignIns
+            synced.signInWith = space.signInWith.map { ids.sync($0) }
             if let look = space.look { synced.paint = SyncPaint(look.raw) }
             synced.order = places[sid]
             out.spaces[sid] = synced
@@ -2620,6 +2648,15 @@ final class SyncBridge {
 
     /// The Mac up now, if one is.
     var awakeMac: SyncMac? { macs.first { $0.online } }
+
+    /// Resolve a Mac presence through the shared tab record. Presence from older
+    /// Macs has no space, and a URL can exist in several spaces.
+    func spaceOfMacTab(_ id: String) -> Space.ID? {
+        _ = macTodayStamp
+        _ = pinsStamp
+        if let record = mirror.elsewhere[id] ?? mirror.tabs[id] { return ids.local(record.space) }
+        return app?.browser.space(holding: ids.local(id))?.id
+    }
 
     /// A space's tabs of today open on the Macs, in order: not in this
     /// iPhone's rows (docs/sync.md, "Today is each device's own").

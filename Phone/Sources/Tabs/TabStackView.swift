@@ -42,8 +42,11 @@ final class TabStackView: UIView {
     /// chrome's frequent updates never draw them again.
     func show(front: Tab?, back: Tab?, pictures: Int, artwork: SyncFolderArtwork? = nil, picture: (Tab) -> UIImage?) {
         func mark(_ tab: Tab?) -> ObjectIdentifier? {
-            guard let tab, let mark = tab.customMark else { return nil }
-            return artwork?.image(mark, isPrivate: tab.isPrivate).map(ObjectIdentifier.init)
+            guard let tab else { return nil }
+            let image = tab.customMark.flatMap { artwork?.image($0, isPrivate: tab.isPrivate) }
+                ?? artwork?.siteImage(for: tab.navigationURL, isPrivate: tab.isPrivate)
+                ?? FaviconImages.image(tab.icon, host: tab.host, url: tab.navigationURL, isPrivate: tab.isPrivate)
+            return image.map(ObjectIdentifier.init)
         }
         let next = Shown(front: front, back: back, pictures: pictures, frontMark: mark(front), backMark: mark(back))
         guard next != shown else { return }
@@ -177,6 +180,7 @@ enum TabIcons {
         // What Favicon draws from: the site's picture (by identity, as it
         // arrives later from SiteIcons) or, without one, the tile its key names.
         let source = tab.customMark.flatMap { artwork?.image($0, isPrivate: tab.isPrivate) }
+            ?? artwork?.siteImage(for: tab.navigationURL, isPrivate: tab.isPrivate)
             ?? (tab.icon == "mail" || tab.icon == "face" ? nil
                 : FaviconImages.image(tab.icon, host: tab.host, url: tab.navigationURL, isPrivate: tab.isPrivate))
         let key = "\(tab.icon)|\(tab.host ?? "")|\(tab.customMark ?? "")|\(tab.isPrivate)|\(size)|\(scale)"

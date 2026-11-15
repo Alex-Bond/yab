@@ -31,12 +31,14 @@ final class LiveProfileTests: XCTestCase {
         try? FileManager.default.removeItem(at: folder)
     }
 
-    private func launch(url: URL? = nil, animationsEnabled: Bool = false, filmFolder: URL? = nil, privateAuthentication: String? = nil) -> XCUIApplication {
+    private func launch(url: URL? = nil, animationsEnabled: Bool = false, filmFolder: URL? = nil, privateAuthentication: String? = nil, extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-YabProfileDirectory", folder.path, "-YabNoAnim", animationsEnabled ? "NO" : "YES"]
+        app.launchArguments += extraArguments
         if let url { app.launchArguments += ["-YabURL", url.absoluteString] }
         if let privateAuthentication { app.launchArguments += ["-YabPrivateLockTestAuthentication", privateAuthentication] }
-        app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
+        app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1",
+                                 "YAB_LINK_JOURNAL": Atlas.out.appendingPathComponent("live-" + UUID().uuidString + ".log").path]
         if let filmFolder {
             app.launchEnvironment["YAB_FRAMEMETER"] = "1"
             app.launchEnvironment["YAB_FILM_MARK"] = filmFolder.appendingPathComponent("recording").path
@@ -48,7 +50,7 @@ final class LiveProfileTests: XCTestCase {
         // then close the New Tab field it opens before touching the page:
         // by its ✕, since New Tab's spaces fill the screen around the field
         // and a tap beside it lands on a row.
-        let notNow = app.buttons["welcome.start"]
+        let notNow = app.buttons["welcome.skip"]
         XCTAssertTrue(notNow.waitForExistence(timeout: 10))
         app.passWelcome()
         XCTAssertTrue(wait { !app.alerts["welcome"].exists })
@@ -588,6 +590,33 @@ final class LiveProfileTests: XCTestCase {
         XCTAssertTrue(wait { plate.exists && plate.isHittable }, "the page's plate is covered (\(name))", file: file, line: line)
     }
 
+    func testExternalLinkAfterStoppedPagesAndLongAbsence() throws {
+        try externalLinkAfterAway(suspended: false)
+    }
+
+    func testExternalLinkAfterStoppedPagesAndForcedSuspension() throws {
+        try externalLinkAfterAway(suspended: true)
+    }
+
+    private func externalLinkAfterAway(suspended: Bool) throws {
+        let app = launch(url: server.url.appendingPathComponent("first"), animationsEnabled: true,
+                         extraArguments: ["-YabTestEndPagesAway", "YES", "-YabLaunchKeyboard", "YES", "-YabTestAwaySeconds", "172800"])
+        XCTAssertTrue(app.webViews.staticTexts["First real page"].waitForExistence(timeout: 20))
+        let target = openFromAnotherApp("retained")
+        checkLinkInFront(app, "retained", target)
+        checkLinkInFront(app, "previous", openFromAnotherApp("previous"))
+        let pid = try ExternalLinkSuspension.pid(of: app)
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10) || app.state == .runningBackgroundSuspended)
+        if suspended { try ExternalLinkSuspension.stop(pid: pid) }
+        // The first tap returns to an existing HTTP tab whose process was ended.
+        checkLinkInFront(app, "retained", openFromAnotherApp("retained"))
+        if suspended { XCTAssertEqual(try ExternalLinkSuspension.pid(of: app), pid) }
+        // A new URL must win too, while all the old tabs are stopped.
+        XCUIDevice.shared.press(.home)
+        checkLinkInFront(app, "fresh", openFromAnotherApp("fresh"))
+    }
+
     func testLinkFromAnotherAppWhileYabIsInFront() throws {
         let app = launch(url: server.url.appendingPathComponent("first"))
         XCTAssertTrue(app.webViews.staticTexts["First real page"].waitForExistence(timeout: 15))
@@ -631,19 +660,28 @@ final class LiveProfileTests: XCTestCase {
     /// Yab not running: the link launches it (connectionOptions.urlContexts),
     /// with the same profile, as a person's Yab that iOS ended while away.
     func testLinkFromAnotherAppLaunchesYab() throws {
-        let app = launch(url: server.url.appendingPathComponent("first"))
-        XCTAssertTrue(app.webViews.staticTexts["First real page"].waitForExistence(timeout: 15))
-        XCTAssertTrue(wait { self.savedURL() == self.server.url.appendingPathComponent("first").absoluteString })
+        let app = XCUIApplication()
         app.terminate()
+        // A system URL launch does not inherit the isolated profile arguments.
+        // Prepare that simulator profile's welcome before measuring cold delivery.
+        _ = openFromAnotherApp("prepared")
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+        let welcome = app.buttons["welcome.skip"].waitForExistence(timeout: 3)
+        if welcome {
+            app.passWelcome()
+            XCTAssertTrue(app.textFields["field.input"].waitForExistence(timeout: 10))
+        }
+        _ = openFromAnotherApp("prepared")
+        XCTAssertTrue(app.webViews.staticTexts["Outside prepared"].waitForExistence(timeout: 30))
+        XCTAssertFalse(app.textFields["field.input"].exists)
+        app.terminate()
+
         let page = openFromAnotherApp("cold")
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20), "the link didn't launch Yab")
-        // A system launch carries none of the test's arguments: the
-        // simulator's own profile, whose first run may still ask.
-        app.passWelcome(timeout: 3)
-        app.closeField(timeout: 2)
-        let shown = app.webViews.firstMatch.staticTexts["Outside cold"].waitForExistence(timeout: 30)
+        let shown = app.webViews.staticTexts["Outside cold"].waitForExistence(timeout: 30)
         record(app.screenshot(), name: "link from another app: cold launch")
-        XCTAssertTrue(shown, "a link that launched Yab didn't open its page")
+        XCTAssertTrue(shown, "the first cold URL must load its page: \(page)")
+        XCTAssertFalse(app.textFields["field.input"].exists, "cold URL delivery must not open the launch field")
     }
 }
 

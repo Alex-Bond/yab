@@ -264,8 +264,14 @@ extension Bench {
             var saved = true
             for id in request["connect"] as? [String] ?? [] {
                 let password = request["password"] as? String
-                saved = connections.connect(id, mode: password == nil ? .you : .yab, password: password) && saved
+                let mode: PasswordManagers.Mode = password == nil ? .you : .yab
+                // As Connect on its page does: a manager new to Yab opens its own page.
+                saved = (request["sign_in"] as? Bool == true
+                    ? connections.connectAndSignIn(id, mode: mode, password: password)
+                    : connections.connect(id, mode: mode, password: password)) && saved
             }
+            if request["refresh"] as? Bool == true { ManagerExtensions.shared.refresh() }
+            if let id = request["open"] as? String { PasswordManagers.open(id, in: browser) }
             for id in request["disconnect"] as? [String] ?? [] { connections.disconnect(id) }
             if let id = request["failed"] as? String { connections.unlocked(id, ok: false) }
             // The finger, played: Touch ID's answer for Yab's unlock for the
@@ -295,8 +301,24 @@ extension Bench {
                 case .disconnect(let id): return "disconnect:" + id
                 }
             }()
-            answer(["yab": source.yab, "saver": source.saver ?? "", "saved": saved, "kept": ManagerKeep.last, "session": ManagerKeep.approved, "keep_trace": ManagerKeep.trace,
+            // Settings' Offer to save passwords as drawn now, and as it is
+            // drawn for another saver ("offer_switch_for", Apple Passwords
+            // read as connected natively, which a Dev build is not entitled to).
+            let offer = source.offerSwitch(saves: browser.prefs.savesPasswords)
+            var asked: [String: Any] = [:]
+            if let other = request["offer_switch_for"] as? String {
+                let id = PasswordManagers.canonical(other)
+                let drawn = PasswordManagers.Source(yab: source.yab, saver: id, asksForApple: id == PasswordManagers.apple)
+                    .offerSwitch(saves: browser.prefs.savesPasswords)
+                asked = ["on": drawn.on, "enabled": drawn.enabled]
+            }
+            answer(["yab": source.yab, "saver": source.saver ?? "", "saved": saved,
+                    "offer_switch": ["on": offer.on, "enabled": offer.enabled], "offer_switch_for": asked, "kept": ManagerKeep.last, "session": ManagerKeep.approved, "keep_trace": ManagerKeep.trace,
                     "card": card, "card_ms": connections.shownMs ?? -1, "here": connections.here,
+                    "key_is_settings": NSApp.keyWindow === SettingsWindow.shared.window, "settings_open": SettingsWindow.shared.window?.isVisible ?? false,
+                    "listed": ManagerExtensions.shared.installed.map { ["id": $0.id, "enabled": $0.enabled] as [String: Any] },
+                    "found": Dictionary(uniqueKeysWithValues: PasswordManagers.providers.compactMap { provider in
+                        PasswordManagers.found(provider.id).map { (provider.id, $0) } }),
                     "connected": connections.list.map { ["provider": $0.provider, "mode": $0.mode.rawValue, "row": connections.row($0.provider).words] }])
             return
         case "frames-eval":
@@ -339,6 +361,14 @@ extension Bench {
             ManagerLists.shared.stagedInsecure = request["insecure"] as? Bool
             ManagerLists.shared.forget()
             if let tab = browser.active { browser.reopenList(tab.id) }
+        case "passkey-stage":
+            // A test world's passkeys for conditional gets on Chromium tabs,
+            // read in place of the Mac's own (never a real passkey):
+            // [{id, user, provider}], or none to read the Mac's.
+            guard Store.testing else { answer(["error": "passkey-stage needs a test run"]); return }
+            ChromiumWebAuthn.staged = (request["passkeys"] as? [[String: Any]])?.map {
+                (id: $0["id"] as? String ?? "", user: $0["user"] as? String ?? "", provider: $0["provider"] as? String ?? "")
+            }
         case "press-plate":
             // Yab's plate in the box, as clicked.
             guard let plate = browser.fieldPlate else { answer(["error": "no plate in the box"]); return }
@@ -455,7 +485,7 @@ extension Bench {
             // What the reader made of the words (Actions in the Field).
             "reading": RequestModel.shared.said(browser.typed.trimmingCharacters(in: .whitespacesAndNewlines)),
             "offers": query.offers.map { ["key": $0.key, "title": $0.title, "kind": "\($0.kind)", "url": $0.url?.absoluteString ?? "",
-                                          "favorite": $0.favorite, "bookmarked": $0.bookmarked, "section": browser.quietSection($0) ?? ""] as [String: Any] },
+                                          "favorite": $0.favorite, "bookmarked": $0.bookmarked, "engine": $0.engine, "section": browser.quietSection($0) ?? ""] as [String: Any] },
             "active": browser.active.map { $0.id.uuidString.prefix(8) } ?? "",
             "activeBlank": browser.active?.isBlank ?? true,
             "activeURL": browser.active?.address?.absoluteString ?? "",
@@ -484,7 +514,9 @@ extension Bench {
             "rowFrames": FieldRowMenu.frames,
             "shown": browser.shownActions.map(\.title),
             "actionWords": query.actionWords,
-            "items": browser.placeItems.prefix(16).map { ["title": $0.title, "section": $0.section, "source": $0.source, "faded": $0.faded] },
+            // With the icon its tile draws, averaged, "" for a letter or a mark.
+            "items": browser.placeItems.prefix(16).map { ["title": $0.title, "section": $0.section, "source": $0.source, "faded": $0.faded,
+                                                          "icon": Scope.average(of: PlaceTileView.picture($0.tile))?.hex ?? ""] },
             "placeFilter": query.placeFilter,
             "target": browser.placeTarget.map { ($0.refused ? "refused:" : "into:") + $0.what + ($0.host.isEmpty ? "" : " · " + $0.host) } ?? "",
             "empty": browser.placeEmpty.map { ["title": $0.title, "detail": $0.detail, "actions": $0.actions.map(\.title), "sources": $0.sources.count] } ?? [:],

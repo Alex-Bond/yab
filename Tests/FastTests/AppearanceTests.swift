@@ -95,15 +95,20 @@ struct AppearanceTests {
         #expect(styled[1]["size"] == "11px")
         #expect(styled[1]["font"]?.contains("Helvetica") == true)
         #expect(styled[2]["font"]?.contains("Menlo") == true)
+        // The page's own "serif" is the engine's to draw (PageFamilies), and
+        // the script leaves the element as the page wrote it.
         let serif = try await web.evaluateJavaScript("getComputedStyle(document.getElementById('serif')).fontFamily") as? String
-        #expect(PageFontTests.fixtureFamilies(serif) == ["Palatino", PageFonts.emojiFamily, "serif"])
+        #expect(serif == "serif")
+        #expect(try await web.evaluateJavaScript("document.getElementById('serif').getAttribute('style')") as? String == "font-family:serif")
         try await web.evaluateJavaScript(PageAppearance.script(PageFonts()))
         #expect(try await web.evaluateJavaScript("getComputedStyle(document.getElementById('plain')).fontSize") as? String == "16px")
         let sentinel = WKUserScript(source: "window.kept = true", injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         web.configuration.userContentController.addUserScript(sentinel)
         PageAppearance.install(fonts, in: web.configuration.userContentController)
-        PageAppearance.install(PageFonts(), in: web.configuration.userContentController)
         #expect(web.configuration.userContentController.userScripts.count == 2)
+        // No fonts of one's own: no script at all, the page's own kept.
+        PageAppearance.install(PageFonts(), in: web.configuration.userContentController)
+        #expect(web.configuration.userContentController.userScripts.count == 1)
     }
 
     // The other app icons go light or dark with the Mac, as the Dock does,

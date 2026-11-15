@@ -206,8 +206,11 @@ struct NestRow: View {
     /// In a cell of the AppKit column: where it stands is the page's to say.
     @Environment(\.columnHosted) private var hosted
     @State private var hoverState = RowLocalState(false)
+    /// The column's word in the AppKit column (SideRow's `columnPointed`),
+    /// which also tells the preview (ColumnPage.point).
+    @Environment(\.columnPointed) private var columnPointed
     private var hovering: Bool {
-        get { hoverState[nest.id] }
+        get { columnPointed ?? hoverState[nest.id] }
         nonmutating set { hoverState[nest.id] = newValue }
     }
 
@@ -221,6 +224,8 @@ struct NestRow: View {
     var body: some View {
         let _ = SpacePager.touched()
         let peeks = folders.peeks(nest)
+        // A peeking one's end is its minus (FolderUnpeek).
+        let closing = nest.today && hovering && !lifted && !naming && !peeks
         HStack(spacing: SideBar.markGap) {
             Group {
                 if let linked = LinkFolders.mark(nest, in: browser) {
@@ -270,8 +275,19 @@ struct NestRow: View {
                     FolderUnpeek { folders.unpeek(nest) }
                 }
             }
+            // A folder of today's tabs (Tidy's among them): under the
+            // pointer, a task's folder's own cross (FolderRow) takes the
+            // end and closes its tabs as its menu's Close N Tabs (⌘W)
+            // does, ⌘⇧T bringing them back. A kept folder's tabs aren't
+            // closed but put to sleep, so it has none.
+            if closing {
+                Spacer(minLength: 0)
+                FolderCross { browser.glance.drop(); browser.close(browser.tabs(in: nest)) }
+                    .transition(.opacity)
+            }
         }
         .animation(Motion.quick, value: over)
+        .animation(Motion.quick, value: closing)
         .padding(.leading, 10)
         .padding(.trailing, naming ? SideBar.inner : SideBar.endInset)
         .frame(height: SideBar.row)
@@ -315,7 +331,7 @@ struct NestRow: View {
         }
         .modifier(NestClick(nest: nest, naming: naming, folders: folders))
         // Rested on, shut, its preview comes out beside the column.
-        .onHover { on in hovering = on; browser.glance.hoverFolder(nest.key, on && !naming && !lifted) }
+        .modifier(RowHover(on: columnPointed == nil) { on in hovering = on; browser.glance.hoverFolder(nest.key, on && !naming && !lifted) })
         .onChange(of: naming) { _, value in if value { browser.glance.drop() } }
         .steadyMenu(actions: true) { NestMenu(browser: browser, nest: nest) }
         .accessibilityElement(children: .combine)
@@ -450,14 +466,16 @@ struct NestPill: View {
         .padding(.vertical, 6)
         .frame(width: width, alignment: compact && !naming ? .center : .leading)
         .background {
-            if let tint {
-                RoundedRectangle(cornerRadius: SideBar.radius, style: .continuous)
-                    .fill(tint.wash(dark: colorScheme == .dark))
+            // Inside its folder's wash, concentric with it: the wash's rim on
+            // the leading side too, as over and under the pill.
+            let shape = RoundedRectangle(cornerRadius: SideBar.radius - NestedWash.rim, style: .continuous)
+            Group {
+                if let tint { shape.fill(tint.wash(dark: colorScheme == .dark)) }
+                if hovering || aimed || naming {
+                    shape.fill(aimed || naming ? Palette.wash(on: tone) : Palette.hover(on: tone))
+                }
             }
-            if hovering || aimed || naming {
-                RoundedRectangle(cornerRadius: SideBar.radius, style: .continuous)
-                    .fill(aimed || naming ? Palette.wash(on: tone) : Palette.hover(on: tone))
-            }
+            .padding(.leading, NestedWash.rim)
         }
         .contentShape(RoundedRectangle(cornerRadius: SideBar.radius, style: .continuous))
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
@@ -665,8 +683,10 @@ struct NestNameField: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
+        let field = NameBox()
         field.delegate = context.coordinator
+        field.coordinator = context.coordinator
+        context.coordinator.field = field
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
@@ -690,31 +710,63 @@ struct NestNameField: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.nest = nest
         field.appearance = context.environment.tone?.appearance
-        guard !coordinator.claimed else { return }
-        coordinator.claimed = true
-        DispatchQueue.main.async {
-            guard field.window != nil else { return }
-            field.window?.makeFirstResponder(field)
-            coordinator.watch(field)
-            guard let editor = field.currentEditor() as? NSTextView else { return }
-            editor.selectedTextAttributes = [
-                .backgroundColor: NSColor(Palette.ink.opacity(0.11)),
-                .foregroundColor: Palette.NS.ink,
-            ]
-            editor.selectAll(nil)
+        coordinator.claim()
+    }
+
+    /// The field, which takes the keys when it comes into a window. Tried
+    /// once, a turn after the row was drawn, and given up if the row was
+    /// not in its window yet (a long session's column is slower than
+    /// that), the name was left open in a field with no keys and no watch
+    /// for a click away, and the folder could not be named again (feedback
+    /// #1910; a tab's name, TabAddressField, #1899 and #1902).
+    final class NameBox: NSTextField {
+        weak var coordinator: Coordinator?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            coordinator?.claim()
         }
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var nest: Nest
         let folders: Folders
-        var claimed = false
+        weak var field: NSTextField?
+        /// The keys taken, once: a click away answered by its own end.
+        private(set) var claimed = false
+        private var claiming = false
         private var done = false
         private var clicks: Any?
 
         init(nest: Nest, folders: Folders) {
             self.nest = nest
             self.folders = folders
+        }
+
+        /// The keys for the field, once it is in a window; refused there,
+        /// the name is put down rather than left open where nobody types.
+        func claim(tries: Int = 5) {
+            guard let field, field.window != nil, !field.isHiddenOrHasHiddenAncestor,
+                  !claimed, !claiming, !done, folders.naming == nest.id else { return }
+            claiming = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + (tries == 5 ? 0 : 0.05)) { [weak self] in
+                guard let self else { return }
+                self.claiming = false
+                guard let field = self.field, let window = field.window, !self.claimed, !self.done,
+                      self.folders.naming == self.nest.id else { return }
+                guard window.makeFirstResponder(field), let editor = field.currentEditor() as? NSTextView else {
+                    if tries > 1 { return self.claim(tries: tries - 1) }
+                    return self.finish(nil, clearFocus: false)
+                }
+                self.claimed = true
+                self.watch(field)
+                editor.selectedTextAttributes = [
+                    .backgroundColor: NSColor(Palette.ink.opacity(0.11)),
+                    .foregroundColor: Palette.NS.ink,
+                ]
+                editor.selectAll(nil)
+            }
         }
 
         func watch(_ field: NSTextField) {

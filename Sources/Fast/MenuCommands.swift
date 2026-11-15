@@ -22,7 +22,7 @@ enum MenuCommands {
     /// rest (keys they already have, folder and project chores, developer
     /// odds and ends) waits behind More Commands in the Field.
     static let everyone: Set<Command> = [
-        .back, .forward, .nextTab, .previousTab, .renameTab, .pickAllTabs, .keepTab, .releaseTab,
+        .sharePage, .back, .forward, .nextTab, .previousTab, .renameTab, .pickAllTabs, .keepTab, .releaseTab,
         .sleepTabs, .muteTab, .unmuteTab, .editPinnedURL, .clearToday, .tidyTabs,
         .moveTabToWindow, .smallWindow, .reopenWindow, .fullScreen, .exitFullScreen, .undoBrowserAction,
         .newSpace, .switchSpace, .moveToSpace, .renameSpace, .deleteSpace,
@@ -31,7 +31,7 @@ enum MenuCommands {
         .copyPageMarkdown, .savePageMarkdown, .captureFullPage, .keepPeek, .splitPeek,
         .showChat, .hideChat, .takeOverAgent, .stopAgent, .muteCall, .unmuteCall, .joinMeeting,
         .inspectElement, .measurePage, .hideRulers,
-        .lightTheme, .darkTheme, .systemTheme, .shortcuts,
+        .lightTheme, .darkTheme, .systemTheme, .shortcuts, .addExtension, .importExtensions,
         .newChatProject, .openChatProject, .moveChatToProject,
     ]
 
@@ -44,6 +44,28 @@ enum MenuCommands {
             out[command] = MenuCommand(title: title, aliases: aliases, symbol: symbol,
                                       shortcut: key, opens: opens, available: when, run: run)
         }
+        add(.addExtension, "Add Extension", ["Add", "add an extension", "install extension", "custom extension", "unpacked extension", "load unpacked", "A Folder on This Mac"],
+            symbol: "puzzlepiece.extension", opens: true,
+            when: { _ in if #available(macOS 15.4, *) { return true }; return false }) { browser in
+                if #available(macOS 15.4, *) {
+                    browser.openSettings(.extensions)
+                    SettingsWindow.shared.showExtension(ExtensionAdd.Step.arrival.rawValue, for: browser)
+                }
+            }
+        add(.importExtensions, "Import Extensions", ["Import", "Import Yab Extensions", "import WebKit extensions"],
+            symbol: "puzzlepiece.extension", opens: true, when: { browser in
+                guard PageEngineFactory.chromiumEnabled else { return false }
+                if #available(macOS 15.4, *) {
+                    let native = ChromiumExtensions.of(browser)
+                    return !native.busy && native.canImportWebKitList(browser)
+                }
+                return false
+            }) { browser in
+                if #available(macOS 15.4, *) {
+                    browser.openSettings(.extensions)
+                    ChromiumExtensions.of(browser).importWebKitList(browser)
+                }
+            }
         let page: @MainActor (Browser) -> Bool = { $0.active.map { !$0.isBlank } ?? false }
         let web: @MainActor (Browser) -> Bool = { ["http", "https"].contains($0.active?.address?.scheme ?? "") }
         let folder: @MainActor (Browser) -> Bool = { $0.folderHere != nil }
@@ -56,6 +78,9 @@ enum MenuCommands {
         add(.stopLoading, "Stop Loading", symbol: "xmark", key: .stopLoading, when: { $0.active?.loading == true }) { if let tab = $0.active { $0.stop(tab) } }
         add(.closeWindow, "Close Window", symbol: "xmark.rectangle", key: .closeWindow,
             when: { window($0) != nil }) { window($0)?.performClose(nil) }
+        add(.sharePage, "Share Page…", ["share page", "share this page", "share link"],
+            symbol: "square.and.arrow.up", key: .sharePage, opens: true,
+            when: { $0.active?.address.map { Bookmark.keepable($0) } == true }) { _ = $0.sharePage() }
         add(.pasteAndGo, "Paste and Go", symbol: "yab.clipboard.right", key: .pasteAndGo) { $0.pasteAndGo() }
         add(.findNext, "Find Next", symbol: "arrow.down", key: .findNext,
             when: { $0.finding }) { $0.look(forward: true) }
@@ -270,7 +295,7 @@ enum MenuCommands {
             opens: true, when: { $0.splitShown }) { browser in
             if let active = browser.active, let other = browser.partner(of: active) {
                 browser.focus(other)
-                if let web = other.built { window(browser)?.makeFirstResponder(web) }
+                if let web = other.builtPage { window(browser)?.makeFirstResponder(web) }
             }
         }
         add(.swapHalves, "Swap Halves", ["swap split panes"], symbol: "arrow.left.arrow.right",

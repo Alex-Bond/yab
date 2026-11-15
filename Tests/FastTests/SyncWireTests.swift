@@ -175,22 +175,31 @@ struct SyncWireTests {
     // MARK: Out, as before
 
     @Test func spacesAreWrittenAsBefore() {
-        expectFixture("space", SyncShapes.spaces(Self.spaces, orders: Self.spaceOrders))
+        expectFixture("space", SyncShapes.spaces(Self.spaces, orders: Self.spaceOrders), adding: ["signInWith": .null])
+    }
+
+    @Test func sharedProfileOwnerSurvivesTheWire() throws {
+        var space = Self.spaces[1]
+        space.signInWith = Self.lisbon
+        let fields = try #require(SyncShapes.spaces([space], orders: [:])[space.id.uuidString])
+        #expect(fields["signInWith"] == .string(Self.lisbon.uuidString))
+        let record = Record(collection: "space", id: space.id.uuidString, fields: fields)
+        let read = try #require(SyncSpace(record))
+        #expect(read.signInWith == Self.lisbon.uuidString)
+        #expect(read.fields == fields)
     }
 
     @Test func rowsAreWrittenAsBefore() {
         let rows = SyncShapes.rows(Self.shapes, orders: Self.tabOrders)
         expectFixture("tab", rows.tabs)
-        expectFixture("folder", rows.folders, adding: Self.folderAdditions)
+        // Folder colors and ordinary Today ownership were added after these fixtures.
+        expectFixture("folder", rows.folders, adding: ["color": .null, "ordinaryToday": .null])
         expectFixture("pair", rows.pairs)
     }
 
-    /// Folder fields added after the frozen fixtures were taken: colors, and
-    /// an ordinary folder moved among today's (Nest.ordinaryToday, 1948e3e37).
-    static let folderAdditions: SyncFields = ["color": .null, "ordinaryToday": .null]
-
     @Test func bookmarksAreWrittenAsBefore() {
-        expectFixture("bookmark", SyncShapes.bookmarks(Self.tree, orders: Self.markOrders))
+        expectFixture("bookmark", SyncShapes.bookmarks(Self.tree, orders: Self.markOrders),
+                      adding: ["space": .null, "importKey": .null])
     }
 
     @Test func historyIsWrittenAsBefore() {
@@ -227,11 +236,11 @@ struct SyncWireTests {
     }
 
     @Test func everyRecordReadsBackTheSameThroughSyncKit() throws {
-        try readsBack("space") { SyncSpace($0)?.fields }
+        try readsBack("space", adding: ["signInWith": .null]) { SyncSpace($0)?.fields }
         try readsBack("tab") { SyncTab($0)?.fields }
-        try readsBack("folder", adding: Self.folderAdditions) { SyncFolder($0)?.fields }
+        try readsBack("folder", adding: ["color": .null, "ordinaryToday": .null]) { SyncFolder($0)?.fields }
         try readsBack("pair") { SyncPair($0)?.fields }
-        try readsBack("bookmark") { SyncBookmark($0)?.fields }
+        try readsBack("bookmark", adding: ["space": .null, "importKey": .null]) { SyncBookmark($0)?.fields }
         try readsBack("visit") { SyncVisit($0)?.fields }
         try readsBack("chat") { SyncChat($0)?.fields }
         try readsBack("chatitem") { SyncChatItem($0)?.fields }
@@ -262,6 +271,28 @@ struct SyncWireTests {
             #expect(tab.folder == Self.folderKept)
             #expect(tab.folderColor == color)
             #expect(tab.folderPath == shape.tabs[0].folderPath)
+        }
+    }
+
+    @Test func ordinaryTodaySurvivesWritingReadingAndClearing() throws {
+        let journal = try Journal(path: nil, device: "mac-a")
+        for ordinary in [true, false, nil] as [Bool?] {
+            let shape = Session.Shape(tabs: [
+                Session.Entry(url: "https://example.com/", title: "Today", folder: Self.folderSearch,
+                              folderName: "Today", folderOpen: true, folderToday: true,
+                              folderOrdinaryToday: ordinary, id: "today-tab"),
+            ], active: 0)
+            let out = SyncShapes.rows([Self.work: shape], orders: [:])
+            #expect(out.folders.count == 1)
+            #expect(out.folders[Self.folderSearch]?["ordinaryToday"] == Value(ordinary))
+            try journal.reconcile(SyncShapes.folder, out.folders)
+            let folders = journal.living(SyncShapes.folder)
+            let record = try #require(folders.first)
+            let folder = try #require(SyncFolder(record))
+            #expect(folder.ordinaryToday == ordinary)
+            #expect(folder.fields == out.folders[Self.folderSearch])
+            let back = SyncShapes.row(Self.work, tabs: records(SyncShapes.tab, out.tabs), folders: folders, pairs: [], here: shape)
+            #expect(try #require(back.tabs.first).folderOrdinaryToday == ordinary)
         }
     }
 

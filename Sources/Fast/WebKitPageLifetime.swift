@@ -2,13 +2,14 @@ import WebKit
 
 extension PageView {
     func retire(call: Bool, pictureInPicture wasPictureInPicture: Bool) {
+        ClientCertificates.cancel(in: self)
         let web = self
         stateEvents = nil
         // An animation or a retained view may outlive its tab. Stop playback
         // now, before dropping delegates and removing it from the window.
         // The system's Picture-in-Picture window goes with it.
-        web.setAllMediaPlaybackSuspended(true, completionHandler: nil)
-        if wasPictureInPicture { web.closeAllMediaPresentations(completionHandler: nil) }
+        web.setAllMediaPlaybackSuspended(true, completionHandler: {})
+        if wasPictureInPicture { web.closeAllMediaPresentations(completionHandler: {}) }
         OpenTrace.mark("build.relays")
         let controller = web.configuration.userContentController
         Web.release(controller)
@@ -32,6 +33,7 @@ extension PageView {
         web.onPictureWords = nil
         web.onPictureCopied = nil
         web.onMailLink = nil
+        web.onSplitLink = nil
         web.onHideAt = nil
         web.onCapture = nil
         web.onSelectionCommand = nil

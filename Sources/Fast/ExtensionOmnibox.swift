@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import YabCoreClient
 
 // chrome.omnibox: an extension's keyword in the field.
 //
@@ -7,9 +8,10 @@ import WebKit
 // Raindrop "rd", LastPass "lp", DuckDuckGo "ddg", Toby "to/", AIPRM, Vimium C)
 // is searched from the field the way a site is (Scopes.swift): type the
 // keyword, Tab, and the field becomes the extension's, the way back at its
-// head and its icon and name at its foot. Chrome enters on a space as
-// well; in Yab a keyword followed by a space stays words, as every other name
-// does, since "v 8" or "11 tabs" are as likely searches. The words typed after
+// head and its icon and name at its foot. A space after the keyword enters
+// it too, as in Chrome, while Settings › Field › Sites › Keyboard shortcut
+// is Space or Tab (Scopes.spaced); at Tab, "v 8" or "11 tabs" stay words,
+// as Yab had it from 2026-10-13 until register 2668. The words typed after
 // it go to `onInputStarted` once and `onInputChanged` on every change, whose
 // `suggest` rows fill the list under the extension's `setDefaultSuggestion`;
 // Return sends `onInputEntered` with the row's content (`currentTab`, or
@@ -59,7 +61,7 @@ final class ExtensionOmnibox {
             scope.extensionID = id
             return scope
         }
-        return nil
+        return chromiumScope(for: text)
     }
 
     // MARK: - what the field does
@@ -70,6 +72,7 @@ final class ExtensionOmnibox {
         active = id
         asked[id] = nil
         rows[id] = nil
+        if Self.chromiumID(id) != nil { tellChromium(id, "started"); return }
         send(id, ["e": "onInputStarted", "a": [Any]()])
     }
 
@@ -81,6 +84,7 @@ final class ExtensionOmnibox {
         guard active == id, asked[id] != text, asked[id] != nil || !text.isEmpty else { return }
         asked[id] = text
         request += 1
+        if Self.chromiumID(id) != nil { tellChromium(id, "changed", text: text); return }
         send(id, ["e": "onInputChanged", "a": [text], "r": request])
     }
 
@@ -110,6 +114,7 @@ final class ExtensionOmnibox {
         case .ahead, .last, .split: disposition = "newForegroundTab"
         }
         active = nil
+        if Self.chromiumID(id) != nil { tellChromium(id, "entered", text: content, disposition: disposition); return }
         send(id, ["e": "onInputEntered", "a": [content, disposition]])
     }
 
@@ -118,6 +123,7 @@ final class ExtensionOmnibox {
         guard active == id else { return }
         active = nil
         asked[id] = nil
+        if Self.chromiumID(id) != nil { tellChromium(id, "cancelled"); return }
         send(id, ["e": "onInputCancelled", "a": [Any]()])
     }
 
@@ -218,5 +224,102 @@ final class ExtensionOmnibox {
     private func flush(_ id: String) {
         guard let port = ports[id], let list = waiting.removeValue(forKey: id) else { return }
         for message in list { port.sendMessage(message) { _ in } }
+    }
+
+    // MARK: - Chromium tabs (CEF patch 0124)
+
+    // In a Chromium tab the extension runs in Chrome, and so does its
+    // omnibox API: Yab's field hands the words to Chrome's own
+    // ExtensionOmniboxEventRouter (onInputStarted, onInputChanged with a
+    // request id, onInputEntered with the disposition, onInputCancelled), as
+    // Chrome's KeywordProvider does from its omnibox, and omnibox.suggest's
+    // rows come back for that request (`extension.omniboxSuggestions`).
+    // The keyword is the manifest's, read from the folder Chrome loaded the
+    // extension from. A helper without 0124 offers no keyword.
+
+    /// The field's id of a Chromium extension's keyword, and back.
+    nonisolated static let chromiumPrefix = "chromium:"
+    nonisolated static func chromiumID(_ id: String) -> String? {
+        guard id.hasPrefix(chromiumPrefix) else { return nil }
+        let extensionID = String(id.dropFirst(chromiumPrefix.count))
+        return ChromiumSidePanel.validExtensionID(extensionID) ? extensionID : nil
+    }
+
+    private var keywords: [String: (version: String, keyword: String?)] = [:]
+
+    private func chromiumScope(for text: String) -> Scope? {
+        guard ChromiumProcess.shared.extensionSurfaces.omnibox,
+              let tab = BrowserWindows.shared.activeBrowser?.active, tab.engineKind == .chromium,
+              let native = ChromiumColumn.shared.native(for: tab) else { return nil }
+        for item in ChromiumColumn.shared.items(native, for: tab) where item.enabled {
+            guard let keyword = keyword(of: item), keyword == text else { continue }
+            var scope = Scope(id: "omnibox:" + Self.chromiumPrefix + item.id, name: item.name, template: "")
+            scope.aliases = [keyword]
+            scope.extensionID = Self.chromiumPrefix + item.id
+            return scope
+        }
+        return nil
+    }
+
+    /// The manifest's omnibox keyword, lowercased, its __MSG_ name resolved
+    /// in the default locale as Chrome resolves it (OmniboxInfo).
+    private func keyword(of item: ChromiumExtensions.Item) -> String? {
+        if let known = keywords[item.id], known.version == item.version { return known.keyword }
+        var found: String?
+        if let path = item.path {
+            let folder = URL(fileURLWithPath: path)
+            found = Self.keyword(manifest: try? Data(contentsOf: folder.appendingPathComponent("manifest.json"))) { locale, name in
+                let file = folder.appendingPathComponent("_locales").appendingPathComponent(locale).appendingPathComponent("messages.json")
+                guard let data = try? Data(contentsOf: file),
+                      let messages = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                let entry = messages.first { $0.key.lowercased() == name.lowercased() }?.value as? [String: Any]
+                return entry?["message"] as? String
+            }
+        }
+        keywords[item.id] = (item.version, found)
+        return found
+    }
+
+    nonisolated static func keyword(manifest data: Data?, message: (String, String) -> String?) -> String? {
+        guard let data, let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let omnibox = manifest["omnibox"] as? [String: Any], var keyword = omnibox["keyword"] as? String else { return nil }
+        if keyword.hasPrefix("__MSG_"), keyword.hasSuffix("__"), let locale = manifest["default_locale"] as? String {
+            keyword = message(locale, String(keyword.dropFirst(6).dropLast(2))) ?? ""
+        }
+        let text = keyword.trimmingCharacters(in: .whitespaces).lowercased()
+        return text.isEmpty ? nil : text
+    }
+
+    /// The input, to Chrome for the field's Chromium tab in front.
+    private func tellChromium(_ id: String, _ event: String, text: String = "", disposition: String = "currentTab") {
+        guard let extensionID = Self.chromiumID(id),
+              let page = (field ?? BrowserWindows.shared.activeBrowser)?.active?.builtPage as? ChromiumPage else { return }
+        let request = self.request
+        Task { @MainActor [weak self] in
+            let reply = await page.extensionSurface("extension.omnibox", [
+                "extension": .string(extensionID), "event": .string(event), "text": .string(text),
+                "requestId": .number(Double(request)), "disposition": .string(disposition)])
+            guard let self else { return }
+            if let description = reply?["default"].string { self.defaults[id] = description; self.refresh() }
+        }
+    }
+
+    /// `extension.omniboxSuggestions`: only the answer to the words still in
+    /// the field counts, as for a WebKit extension's.
+    func chromiumSuggested(_ extensionID: String, request answered: Int, rows list: [(content: String, description: String)]) {
+        let id = Self.chromiumPrefix + extensionID
+        guard answered == request, let text = asked[id] else { return }
+        rows[id] = (text, list)
+        refresh()
+    }
+
+    nonisolated static func chromiumSuggestions(_ params: [String: JSONValue]) -> (extensionID: String, request: Int, list: [(content: String, description: String)])? {
+        guard let id = params["extensionId"]?.string, ChromiumSidePanel.validExtensionID(id),
+              let request = params["requestId"]?.number, case .array(let rows)? = params["suggestions"] else { return nil }
+        let list = rows.prefix(64).compactMap { row -> (content: String, description: String)? in
+            guard let content = row["content"].string else { return nil }
+            return (content, row["description"].string ?? content)
+        }
+        return (id, Int(request), list)
     }
 }

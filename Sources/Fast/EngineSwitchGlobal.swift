@@ -12,11 +12,15 @@ enum EngineSwitchGlobal {
         guard observation == nil else { return }
         lastRequested = PageEngineFactory.requestedEngine ?? .webKit
         observation = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification,
-                                                             object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated {
-                let selected = PageEngineFactory.requestedEngine ?? .webKit
-                guard selected != lastRequested else { return }
-                settle(selected)
+                                                             object: nil, queue: nil) { _ in
+            // queue: .main would hold whichever thread wrote the default until
+            // the main thread ran this, and the launch hung on a lock between them.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let selected = PageEngineFactory.requestedEngine ?? .webKit
+                    guard selected != lastRequested else { return }
+                    settle(selected)
+                }
             }
         }
     }

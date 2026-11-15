@@ -44,6 +44,7 @@ FARM_RUNTIME="$HOME/.local/state/yab-farm/runtime/farm.py"
 if [ -f "$FARM_RUNTIME" ]; then /usr/bin/python3 "$FARM_RUNTIME" _may_run_here || exit 1; fi
 CONFIG="${1:-release}"
 STEP="${2:-app}"
+case "$STEP" in prod|dmg|ship) . scripts/release/xcode-env.sh ;; esac
 # A disposable launch preview has its own bundle metadata and never enters
 # the ordinary dev-app cache, whose key is shared with normal builds.
 if [ "$STEP" = app ] && [ "${YAB_LAUNCH_PREVIEW:-}" = 1 ]; then
@@ -655,6 +656,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        keeps this Mac's address from the page; the words say what it is. -->
   <key>NSLocalNetworkUsageDescription</key>
   <string>Some websites, like X and video calls, open live connections that can reach devices on your network.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Websites you visit can ask to connect to a Bluetooth device. Yab asks you first, for each site.</string>
   <key>NSLocationUsageDescription</key>
   <string>Websites you visit can ask where you are. Yab asks you first, for each site.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
@@ -698,18 +701,12 @@ SWIFT
 printf '%s\n' '["AppIntent","AppEntity"]' > "$INTENTS/protocols.json"
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 TRIPLE="$(uname -m)-apple-macosx$MINIMUM"
-# One spelling of the source for the compiler's constant values and the
-# processor's list, which matches them by path: in a tree reached through a
-# symlink (the farm's rev trees, /Users/Shared/yab-lanes) $PWD and the
-# compiler's own working directory differ, and every action was refused
-# ("Unable to find matching source file").
-INTENT_SOURCE="$(pwd -P)/Sources/Fast/SystemIntents.swift"
 xcrun swiftc -parse-as-library -whole-module-optimization -c \
   -module-name Fast -target "$TRIPLE" -sdk "$SDK" \
   -Xfrontend -const-gather-protocols-file -Xfrontend "$INTENTS/protocols.json" \
   -emit-const-values-path "$INTENTS/Fast.swiftconstvalues" \
-  "$INTENT_SOURCE" "$INTENTS/bridge.swift" -o "$INTENTS/Fast.o"
-printf '%s\n' "$INTENT_SOURCE" > "$INTENTS/sources.list"
+  Sources/Fast/SystemIntents.swift "$INTENTS/bridge.swift" -o "$INTENTS/Fast.o"
+printf '%s\n' "$PWD/Sources/Fast/SystemIntents.swift" > "$INTENTS/sources.list"
 printf '%s\n' "$PWD/$INTENTS/Fast.swiftconstvalues" > "$INTENTS/const.list"
 xcrun appintentsmetadataprocessor --output "$PWD/$APP/Contents/Resources" \
   --toolchain-dir "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain" \
@@ -852,6 +849,8 @@ else
 fi
 codesign --verify --deep --strict "$APP"
 
+case "$STEP" in prod|dmg|ship) python3 scripts/release/sdk_guard.py "$APP" ;; esac
+
 echo "built: $APP ($VERSION, build $BUILD)"
 case "$STEP" in app|prod) exit 0 ;; esac
 
@@ -877,6 +876,9 @@ staple() {
 if [ "$STEP" = "ship" ]; then
   unlock_release_keychain
   xcrun notarytool submit "$ZIP" --keychain-profile "${YAB_NOTARY_PROFILE:-yab}" ${NOTARY_KEYCHAIN_ARGS[@]+"${NOTARY_KEYCHAIN_ARGS[@]}"} --wait
+  # Each embedded helper carries its own offline ticket. The
+  # accepted parent submission covers these signatures; this submits no code.
+  python3 scripts/security/staple_nested.py "$APP"
   staple "$APP"
   rm -f "$ZIP"
   ditto -c -k --keepParent "$APP" "$ZIP"

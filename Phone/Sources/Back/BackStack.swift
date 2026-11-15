@@ -299,6 +299,10 @@ final class BackStack {
     /// "Closed site · Undo"; the column or stack shows the close itself.
     func offer(_ closed: ClosedTab) {
         self.closed = closed
+        app?.registerActionUndo("Close Tab") { app in
+            guard !app.privateContentBlocked else { return }
+            app.backStack.undo(closed.id)
+        }
     }
 
     /// Undo: the tab back where it stood with its pages and its place in

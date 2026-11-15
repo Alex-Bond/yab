@@ -12,13 +12,13 @@ struct DiaTabsFallbackTests {
             try fixture.write("User Data/\(profile)/Sessions/Session_1", ChromiumSessionTests.session)
         }
         try fixture.json("User Data/Local State", ["profile": ["info_cache": ["Default": ["name": "Personal"], "Profile 1": ["name": "Work"]]]])
-        return (fixture, source)
+        return (fixture, source.authorizingImport())
     }
 
     @Test func missingContainersUsesChromiumSessionsAndKeepsProfilesApart() throws {
         let (fixture, source) = try fixture()
         defer { fixture.remove() }
-        let places = try TabImport.places(in: source)
+        let places = try TabImport.places(in: source.authorizingImport())
         #expect(places.map(\.profile) == ["Default", "Profile 1"])
         #expect(places.map(\.shared) == [true, false])
         #expect(places.map(\.name) == ["Personal", "Work"])
@@ -30,7 +30,7 @@ struct DiaTabsFallbackTests {
         let (fixture, source) = try fixture()
         defer { fixture.remove() }
         try fixture.write("StorableProfileContainers.json", data)
-        #expect(try TabImport.places(in: source).count == 2)
+        #expect(try TabImport.places(in: source.authorizingImport()).count == 2)
         #expect(try Data(contentsOf: fixture.root.appendingPathComponent("StorableProfileContainers.json")) == data)
     }
 
@@ -39,7 +39,7 @@ struct DiaTabsFallbackTests {
         defer { fixture.remove() }
         try fixture.json("StorableProfileContainers.json", ["version": 1, "containers": []])
         // Work is still offered, as a profile of its own, with no tabs.
-        let places = try TabImport.places(in: source)
+        let places = try TabImport.places(in: source.authorizingImport())
         #expect(places.map(\.profile) == ["Profile 1"])
         #expect(places.allSatisfy { $0.isEmpty && $0.apart })
     }
@@ -49,7 +49,7 @@ struct DiaTabsFallbackTests {
         defer { fixture.remove() }
         var source = Chromium.known[0]
         source.dataRoot = fixture.root.appendingPathComponent("User Data")
-        #expect(throws: TabImport.Trouble.missing) { try TabImport.places(in: source) }
+        #expect(throws: TabImport.Trouble.missing) { try TabImport.places(in: source.authorizingImport()) }
         #expect(TabImport.explain(TabImport.Trouble.missing, from: source) == "Couldn't read Dia's tabs: there is no tab file or session to read")
     }
 
@@ -66,7 +66,7 @@ struct DiaTabsFallbackTests {
         var source = Chromium.known[0]
         source.dataRoot = fixture.root.appendingPathComponent("User Data")
         try fixture.write("StorableProfileContainers.json", data)
-        #expect(throws: trouble) { try TabImport.places(in: source) }
+        #expect(throws: trouble) { try TabImport.places(in: source.authorizingImport()) }
         #expect(try Data(contentsOf: fixture.root.appendingPathComponent("StorableProfileContainers.json")) == data)
     }
 
@@ -80,7 +80,7 @@ struct DiaTabsFallbackTests {
         // A folder where the file should be: reading it fails.
         try FileManager.default.createDirectory(at: fixture.root.appendingPathComponent("StorableProfileContainers.json"),
                                                 withIntermediateDirectories: true)
-        #expect(throws: TabImport.Trouble.unreadable) { try TabImport.places(in: source) }
+        #expect(throws: TabImport.Trouble.unreadable) { try TabImport.places(in: source.authorizingImport()) }
         let (sessions, withSessions) = try self.fixture()
         defer { sessions.remove() }
         try FileManager.default.createDirectory(at: sessions.root.appendingPathComponent("StorableProfileContainers.json"),
@@ -119,7 +119,7 @@ struct DiaTabsFallbackTests {
             "profiles_order": ["Default", "Profile 3", "Profile 1"],
         ]])
         #expect(TabImport.profileOrder(in: source) == ["Default", "Profile 3", "Profile 1"])
-        let places = try TabImport.places(in: source)
+        let places = try TabImport.places(in: source.authorizingImport())
         #expect(places.map(\.profile) == ["Default", "Profile 1", "Profile 3"])
         #expect(places.map(\.name) == ["Personal", "Work", "Side"])
         #expect(places.last.map { $0.isEmpty && $0.apart && $0.id == "Dia:Profile 3" } == true)

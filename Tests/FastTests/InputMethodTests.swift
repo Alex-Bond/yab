@@ -8,6 +8,40 @@ import Testing
 // marked text.
 @MainActor
 struct InputMethodTests {
+    /// #524/#636/#644: the app's update notification rechecks a composition
+    /// before returning to AppKit, including when it was silently unmarked.
+    @Test func updateNotificationClearsSilentlyUnmarkedTextSynchronously() throws {
+        let center = NotificationCenter()
+        let marking = InputMethod.Marking(center: center)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 60),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
+        window.contentView?.addSubview(editor)
+        #expect(window.makeFirstResponder(editor))
+        editor.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0),
+                             replacementRange: NSRange(location: NSNotFound, length: 0))
+        center.post(name: NSText.didChangeNotification, object: editor)
+        #expect(marking.composing)
+        editor.unmarkText()
+        center.post(name: NSApplication.didUpdateNotification, object: NSApp)
+        #expect(!marking.composing)
+    }
+
+    @Test func backgroundEditingNotificationIsDeliveredOnMain() async {
+        let center = NotificationCenter()
+        let marking = InputMethod.Marking(center: center)
+        // Empty/non-text objects are valid notifications too. Neither may
+        // cause the observer to touch AppKit from the posting thread.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                center.post(name: NSText.didEndEditingNotification, object: nil)
+                center.post(name: NSApplication.didUpdateNotification, object: nil)
+                done.resume()
+            }
+        }
+        #expect(!marking.composing)
+    }
+
     @Test func markedTextIsComposing() {
         let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 20))
         #expect(!InputMethod.composing(editor))

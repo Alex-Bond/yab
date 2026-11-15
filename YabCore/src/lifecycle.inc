@@ -1,3 +1,38 @@
+static void ForceCloseUnresponsive(Tab& tab) {
+  // Never signal a process still serving a tab outside this close batch.
+  // Interrupt its script instead, leaving those documents and their process
+  // alive. Most tabs have a private renderer, which can be ended directly.
+  bool shared = std::any_of(tabs.begin(), tabs.end(), [&](const auto& row) {
+    return row.first != tab.id && !row.second.closing && tab.rendererPID > 0 &&
+           row.second.rendererPID == tab.rendererPID;
+  });
+  Mark(shared ? "close.interrupt-shared-renderer" : "close.end-renderer", tab.id);
+  if (shared) {
+    // The ordinary CDP wrapper deliberately rejects closing tabs. This
+    // lifecycle-only interrupt is dispatched after batch authorization, so
+    // use the host directly; no renderer callback is needed to keep closing.
+    tab.browser->GetHost()->ExecuteDevToolsMethod(++sequence,
+        "Runtime.terminateExecution", CefDictionaryValue::Create());
+    tab.browser->GetHost()->CloseBrowser(true);
+    return;
+  }
+  // Authenticate the child and its birth time before sending any signal.
+  struct proc_bsdinfo info = {};
+  if (tab.rendererPID > 0 && proc_pidinfo(tab.rendererPID, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) == sizeof(info) &&
+      info.pbi_ppid == getpid() && info.pbi_start_tvsec * 1000000ULL + info.pbi_start_tvusec == tab.rendererBorn)
+    kill(tab.rendererPID, SIGKILL);
+  tab.browser->GetHost()->CloseBrowser(true);
+}
+
+// A committed endpoint must disappear even if its renderer never unloads.
+static void WatchCommittedClose(std::string id) {
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 750 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    auto found = tabs.find(id);
+    if (found != tabs.end() && found->second.closing && found->second.browser)
+      ForceCloseUnresponsive(found->second);
+  });
+}
+
 // Native non-destructive approvals and final original-document outcomes.
 #if YABCORE_CLOSE_PREFLIGHT
 struct NativeCloseScope { NativeCloseScope() { ++nativeCloseDepth; } ~NativeCloseScope() { --nativeCloseDepth; } };
@@ -50,6 +85,15 @@ static void NativeClosePreflight(Tab* tab, CefRefPtr<CefDictionaryValue> native)
   NSDictionary* state = NativeDictionary(native);
   if (![state[@"version"] isEqual:@1] || [state[@"browserId"] intValue] != tab->browser->GetIdentifier() ||
       !S(state, @"request").length || !S(state, @"document").length) return;
+  // Once force-close is dispatched, native renderer-gone/retained events
+  // describe the abandoned preflight, not the force-close receipt. Only
+  // OnBeforeClose may confirm destruction of that endpoint.
+  if (tab->closeUnresponsive && (tab->closing || [S(state, @"reason") isEqual:@"renderer-timeout"])) return;
+  // A late pending/approved notification cannot replace the recovery token
+  // already returned to the client. Real Stay and document retirement still
+  // revoke it while another page's question holds the batch open.
+  if (tab->closeUnresponsive && ![state[@"withdrawn"] boolValue] &&
+      !([state[@"decision"] boolValue] && ![state[@"allow"] boolValue])) return;
   NSString* expected = S(tab->closePreflight, @"request");
   if (expected.length && ![expected isEqual:S(state, @"request")]) return;
   if (S(tab->closePreflight, @"document").length && ![S(tab->closePreflight, @"document") isEqual:S(state, @"document")]) return;
@@ -57,6 +101,7 @@ static void NativeClosePreflight(Tab* tab, CefRefPtr<CefDictionaryValue> native)
       (!S(tab->closePreflight, @"token").length || ![S(tab->closePreflight, @"token") isEqual:S(state, @"token")] ||
        ![@[@"closed", @"retained"] containsObject:S(state, @"phase")] ||
        [state[@"closed"] boolValue] != [S(state, @"phase") isEqual:@"closed"])) return;
+  tab->closeUnresponsive = false;
   tab->closePreflight = state;
   NSMutableDictionary* event = [state mutableCopy]; event[@"owner"] = tab->closeOwner;
   Event(@"tab.closePreflight", tab, event);
@@ -75,9 +120,39 @@ static void CancelClosePreflight(Tab& tab) {
   if (request.length && tab.browser && !tab.closing && ![tab.closePreflight[@"final"] boolValue])
     tab.browser->GetHost()->CancelClosePreflight(Key(request));
   NSString* wire = tab.closeWireRequest; tab.closeWireRequest = nil;
-  if (!tab.closing) { tab.closeOwner = nil; tab.closePreflight = nil; }
+  if (!tab.closing) { tab.closeOwner = nil; tab.closePreflight = nil; tab.closeUnresponsive = false; }
   if (owner.length) CancelCloseDialogs(tab.id, owner);
   if (wire.length) Reply(wire, nil, @"Native close preflight cancelled");
+}
+// A renderer that never returns from beforeunload cannot veto a user's
+// close forever. Reserve a force-close approval, but do not destroy anything
+// until the whole batch agrees. A real dialog has no deadline.
+static void WatchClosePreflight(std::string id, NSString* owner, NSString* wire) {
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 750 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    auto found = tabs.find(id);
+    if (found == tabs.end()) return;
+    auto& tab = found->second;
+    if (![tab.closeOwner isEqual:owner] || ![tab.closeWireRequest isEqual:wire] || tab.closing) return;
+    for (const auto& [key, question] : pageQuestions) {
+      if (question.tab == id && question.isDialog) {
+        WatchClosePreflight(id, owner, wire); return;
+      }
+    }
+    if (tab.documentGeneration != tab.closeDocumentGeneration || !tab.browser) {
+      CancelClosePreflight(tab); return;
+    }
+    NSMutableDictionary* state = [tab.closePreflight mutableCopy];
+    if (!S(state, @"request").length || !S(state, @"document").length) {
+      CancelClosePreflight(tab); return;
+    }
+    state[@"version"] = @1; state[@"browserId"] = @(tab.browser->GetIdentifier());
+    state[@"phase"] = @"approved"; state[@"decision"] = @YES; state[@"allow"] = @YES;
+    state[@"token"] = NSUUID.UUID.UUIDString; state[@"owner"] = owner;
+    state[@"unresponsive"] = @YES;
+    Mark("close.preflight-timeout", tab.id);
+    tab.closeUnresponsive = true; tab.closePreflight = state; tab.closeWireRequest = nil;
+    Reply(wire, state);
+  });
 }
 static void LifecycleBeforeClose(Tab& tab) {
   // The native observer emits final before delegate Close. An external
@@ -106,8 +181,10 @@ static bool LifecycleBatchRequest(NSString* method, NSDictionary* p, NSString* r
   if (![method isEqual:@"tabs.close.commit"]) return false;
 #if YABCORE_CLOSE_PREFLIGHT
   NSArray* approvals = [p[@"approvals"] isKindOfClass:NSArray.class] ? p[@"approvals"] : nil;
-  if (!approvals.count || approvals.count > 256 || closeBatches.size() >= 64) { Reply(request, nil, @"Expected bounded native close approvals"); return true; }
-  struct Commit { std::string tab, token; CefRefPtr<CefBrowserHost> host; };
+  // A tab is in one batch at most (closing below), so batches are bounded
+  // by the tabs there are; a fixed 64 failed closes past it.
+  if (!approvals.count || approvals.count > tabs.size()) { Reply(request, nil, @"Expected bounded native close approvals"); return true; }
+  struct Commit { std::string tab, token; CefRefPtr<CefBrowserHost> host; bool unresponsive; };
   std::vector<Commit> commits;
   CloseBatch batch; batch.wire = request;
   std::set<std::string> seen;
@@ -123,17 +200,22 @@ static bool LifecycleBatchRequest(NSString* method, NSDictionary* p, NSString* r
     if (!token.length || ![S(item, @"owner") isEqual:t.closeOwner] ||
         ![S(item, @"document") isEqual:S(t.closePreflight, @"document")] || ![token isEqual:S(t.closePreflight, @"token")] ||
         ![t.closePreflight[@"allow"] boolValue] || [t.closePreflight[@"withdrawn"] boolValue] ||
-        !t.browser->GetHost()->ValidateClosePreflight(Key(token))) {
+        (t.closeUnresponsive ? t.documentGeneration != t.closeDocumentGeneration : !t.browser->GetHost()->ValidateClosePreflight(Key(token))) ||
+        std::any_of(pageQuestions.begin(), pageQuestions.end(), [&](const auto& row) {
+          return row.second.tab == t.id && row.second.isDialog;
+        })) {
       Reply(request, nil, @"A native close approval expired; no page was closed"); return true;
     }
     batch.members.push_back({found->first, t.closeOwner, S(t.closePreflight, @"request"), S(t.closePreflight, @"document"), token});
-    commits.push_back({found->first, Key(token), t.browser->GetHost()});
+    commits.push_back({found->first, Key(token), t.browser->GetHost(), t.closeUnresponsive});
   }
   const std::string id = Key(request);
   closeBatches.emplace(id, std::move(batch)); requests[id] = Now() + 240;
   for (const auto& commit : commits) tabs.at(commit.tab).closing = true;
   for (const auto& commit : commits) {
-    if (!commit.host->CommitClosePreflight(commit.token)) {
+    if (commit.unresponsive) {
+      ForceCloseUnresponsive(tabs.at(commit.tab));
+    } else if (!commit.host->CommitClosePreflight(commit.token)) {
       // Refusal is a retained outcome, never a force-close retry.
       auto found = tabs.find(commit.tab);
       if (found != tabs.end()) {
@@ -142,6 +224,18 @@ static bool LifecycleBatchRequest(NSString* method, NSDictionary* p, NSString* r
         RecordCloseFinal(found->second, final);
       }
     }
+  }
+  for (const auto& commit : commits) {
+    std::string tabID = commit.tab;
+    NSString* owner = tabs.count(tabID) ? tabs.at(tabID).closeOwner : nil;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 750 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      auto found = tabs.find(tabID);
+      if (found != tabs.end() && found->second.closing && found->second.browser &&
+          [found->second.closeOwner isEqual:owner]) {
+        found->second.closeUnresponsive = true;
+        ForceCloseUnresponsive(found->second);
+      }
+    });
   }
   auto current = closeBatches.find(id);
   if (current != closeBatches.end()) current->second.dispatching = false;
@@ -161,6 +255,7 @@ static bool LifecycleRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
       Reply(request, nil, @"Invalid or competing native close preflight"); return true;
     }
     tab.closeOwner = owner; tab.closeWireRequest = request; tab.closePreflight = nil;
+    tab.closeUnresponsive = false; tab.quitUnresponsive = false; tab.closeDocumentGeneration = tab.documentGeneration;
     requests[Key(request)] = Now() + 240;
     NSDictionary* begin = NativeDictionary(tab.browser->GetHost()->BeginClosePreflight());
     if (![begin[@"accepted"] boolValue] || !S(begin, @"request").length || !S(begin, @"document").length) {
@@ -169,6 +264,8 @@ static bool LifecycleRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
     }
     // A no-listener native decision is permitted to arrive synchronously.
     if (!tab.closePreflight) tab.closePreflight = begin;
+    // Engine switches are non-destructive and must never force an approval.
+    if ([p[@"allowUnresponsive"] boolValue]) WatchClosePreflight(tab.id, owner, request);
 #else
     (void)p;
     Reply(request, nil, @"Non-destructive native close is unavailable in this SDK/API mode");
@@ -178,6 +275,10 @@ static bool LifecycleRequest(Tab& tab, NSString* method, NSDictionary* p, NSStri
   if ([method isEqual:@"tab.close.cancel"]) {
 #if YABCORE_CLOSE_PREFLIGHT
     if (![S(p, @"owner") isEqual:tab.closeOwner]) { Reply(request, nil, @"Close preflight owner changed"); return true; }
+    // Reserve cleanup only for an approved quit. The app can still cancel
+    // its own quit warning; no renderer is touched until helper shutdown.
+    tab.quitUnresponsive = [p[@"quitting"] boolValue] && tab.closeUnresponsive &&
+                          tab.documentGeneration == tab.closeDocumentGeneration;
     CancelClosePreflight(tab); Reply(request);
 #else
     Reply(request, nil, @"Non-destructive native close is unavailable in this SDK/API mode");

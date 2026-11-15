@@ -169,6 +169,25 @@ struct GeminiAccountsTests {
         #expect(signer.finished && signer.authorizationURL == nil)
     }
 
+    @Test func printedSignInLinkIsTheOAuthPageWhenNoLauncherRuns() throws {
+        let screen = try String(contentsOf: Self.evidence.appendingPathComponent("agy-1.4.4-tui.ansi"), encoding: .utf8)
+        let url = try #require(GeminiLogin.printedURL(screen))
+        #expect(url.host == "accounts.google.com" && url.path == "/o/oauth2/auth")
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(items.first { $0.name == "redirect_uri" }?.value == "https://antigravity.google/oauth-callback")
+        #expect(items.contains { $0.name == "state" } && items.contains { $0.name == "code_challenge" })
+        let link = { (address: String) in "\u{1B}]8;;\(address)\u{1B}\\Click\u{1B}]8;;\u{1B}\\" }
+        #expect(GeminiLogin.printedURL(link("https://evil.example/o/oauth2/auth?redirect_uri=x&state=y")) == nil)
+        #expect(GeminiLogin.printedURL(link("https://accounts.google.com/o/oauth2/auth?state=y")) == nil)
+        #expect(GeminiLogin.printedURL(link("https://accounts.google.com/o/oauth2/auth?redirect_uri=x&state=y")) != nil)
+        #expect(GeminiLogin.printedURL("Select login method:") == nil)
+    }
+
+    @Test func loginMethodAcceptsUnnumberedSelectedGoogleRow() {
+        #expect(GeminiLogin.googleSelected("Select login method:\r\n \u{276F} Google OAuth\r\n   Other sign-in options\r\n"))
+        #expect(!GeminiLogin.googleSelected("Select login method:\r\n   Google OAuth\r\n \u{276F} Other sign-in options\r\n"))
+    }
+
     @Test func loginMethodRequiresTheSelectedGoogleOAuthRow() {
         let menu = "Select login method:\r\n > 1. Google OAuth\r\n   2. Use a Google Cloud project\r\n"
         #expect(GeminiLogin.googleSelected(menu))
@@ -209,6 +228,113 @@ struct GeminiAccountsTests {
         #expect(signer.authorizationURL?.query == "state=fixture-method",
                 "The hidden CLI must confirm its Google method before a sign-in tab can open")
         #expect(!signer.finished && signer.identity == nil)
+    }
+
+    @Test func signInOwnsItsRowAndFindsATabWaitingForItsFirstFrame() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("gemini-row-" + UUID().uuidString)
+        let home = root.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Library/Keychains"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binary = root.appendingPathComponent("agy-fixture")
+        try #"""
+        #!/bin/sh
+        "$BROWSER" 'https://accounts.google.com/o/oauth2/auth?state=fixture-row'
+        IFS= read -r unused
+        """#.write(to: binary, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+        let fixture = IsolatedProviderConsent("gemini")
+        defer { fixture.close() }
+        let signer = GeminiLogin()
+        defer { signer.stop() }
+        try signer.start(binary: binary.path, profile: root.appendingPathComponent("profile"),
+                         base: ["HOME": home.path, "PATH": "/usr/bin:/bin"], switching: false, signingIn: true,
+                         permit: try #require(fixture.consent.permit("gemini")))
+        let deadline = Date().addingTimeInterval(8)
+        while signer.authorizationURL == nil, Date() < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        _ = try #require(signer.authorizationURL)
+        let screen = try #require(TestScreen.screen)
+        let sharing = Spaces.sharing
+        let foldersBrowser = Folders.shared.browser
+        defer { Spaces.sharing = sharing; Folders.shared.browser = foldersBrowser }
+        let browser = Browser(windowID: UUID())
+        let window = NSWindow(contentRect: NSRect(origin: screen.visibleFrame.origin, size: NSSize(width: 800, height: 600)),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        BrowserWindows.shared.register(window, for: browser)
+        defer { signer.stop(); window.close() }
+        signer.openPage(in: browser, choice: .another)
+        let tab = try #require(browser.tabs.first { $0.address?.host == "accounts.google.com" || $0.pending?.host == "accounts.google.com" })
+        #expect(signer.opened && !signer.closed)
+        // Model the first-frame staging interval independently of timing.
+        browser.outside.append(tab)
+        browser.lay(browser.tabs.filter { $0 !== tab })
+        #expect(!signer.closed, "A tab waiting outside the row is still owned by this browser")
+        browser.outside.removeAll { $0 === tab }
+        browser.lay(browser.tabs + [tab])
+        signer.show()
+        #expect(browser.activeID == tab.id)
+        #expect(window.isVisible)
+        browser.close(tab)
+        #expect(signer.closed, "A real close must still cancel the challenge")
+    }
+
+    @Test func anUnverifiedSharedHeaderIsReplacedBeforeOAuthStarts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("gemini-stale-header-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binary = root.appendingPathComponent("agy-fixture")
+        try #"""
+        #!/bin/sh
+        printf 'Antigravity CLI 1.4.7\r\n old@example.com\r\n? for shortcuts\r\n'
+        IFS= read -r command
+        [ "$command" = /logout ] || exit 7
+        touch "${0%/*}/replaced"
+        # Stop before OAuth opens: no window, real CLI or usage query runs.
+        IFS= read -r unused
+        """#.write(to: binary, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+        let fixture = IsolatedProviderConsent("gemini")
+        defer { fixture.close() }
+        let account = GeminiAccount(binary: binary.path)
+        defer { account.cancel() }
+        account.choice = .another
+        #expect(account.signedIn != true)
+        account.signIn(permit: try #require(fixture.consent.permit("gemini")),
+                       profile: root.appendingPathComponent("profile"))
+        let replaced = root.appendingPathComponent("replaced").path
+        let deadline = Date().addingTimeInterval(8)
+        while !FileManager.default.fileExists(atPath: replaced), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(FileManager.default.fileExists(atPath: replaced),
+                "Unknown readiness must not leave the existing CLI waiting forever without OAuth")
+        #expect(account.waiting == .signingIn && !account.ready)
+    }
+
+    @Test func aFreshOAuthHeaderIsNotLoggedOutWhenReadinessWasUnknown() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("gemini-fresh-" + UUID().uuidString)
+        let home = root.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Library/Keychains"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binary = root.appendingPathComponent("agy-fixture")
+        try #"""
+        #!/bin/sh
+        "$BROWSER" 'https://accounts.google.com/o/oauth2/auth?state=fixture-fresh'
+        printf 'Antigravity CLI 1.4.7\r\n actual@example.com\r\n? for shortcuts\r\n'
+        IFS= read -r unused
+        """#.write(to: binary, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+        let fixture = IsolatedProviderConsent("gemini")
+        defer { fixture.close() }
+        let signer = GeminiLogin()
+        defer { signer.stop() }
+        try signer.start(binary: binary.path, profile: root.appendingPathComponent("profile"),
+                         base: ["HOME": home.path, "PATH": "/usr/bin:/bin"], switching: true, signingIn: true,
+                         permit: try #require(fixture.consent.permit("gemini")))
+        let deadline = Date().addingTimeInterval(8)
+        while signer.identity == nil, Date() < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(signer.identity?.email == "actual@example.com")
+        #expect(!signer.loggedOut)
     }
 
     @Test func identityInspectionDoesNotChooseALoginMethod() async throws {
@@ -296,7 +422,9 @@ struct GeminiAccountsTests {
                          permit: try #require(fixture.consent.permit("gemini")))
         let deadline = Date().addingTimeInterval(8)
         while !signer.awaitingCode, Date() < deadline { try await Task.sleep(for: .milliseconds(25)) }
-        #expect(signer.awaitingCode && signer.authorizationURL == nil)
+        // The launcher was never called; the page is the link agy 1.4.4
+        // prints on its own screen (#1829, #1884).
+        #expect(signer.awaitingCode && signer.authorizationURL?.host == "accounts.google.com")
         for invalid in ["", "https://example.com", "4/fixture_Code-12345\n/logout", "4/fixture_Code-12345\u{1b}[A"] {
             #expect(!signer.submitCode(invalid))
         }

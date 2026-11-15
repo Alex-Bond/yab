@@ -117,10 +117,15 @@ does not undo browser side effects already accepted by the helper.
 | `dialog.reply` | `accept`, optional `text`, native `request` token | Resolve the matching native JS dialog; tokenless tab-scoped wire-v1 callers remain supported |
 | `extension.load` | Existing absolute unpacked `path`; `chrome://extensions/` tab | Install in the management tab's profile or explicit error |
 | `extension.list` | Use a `chrome://extensions/` tab | ID, name, state list in that profile |
+| `extension.access` | Use a `chrome://extensions/` tab, with `extension`, `hostAccess`, `add`, `remove` | Sets its runtime host permissions as Yab's one list says |
 | `extension.review` | Manifest JSON string, at most 1 MB; management tab | Candidate review; target API is unavailable in the tested WebUI context |
 | `extension.setEnabled` | `extension` ID, `enabled`; management tab | Enable/disable in that profile |
+| `extension.incognito` | `extension` ID, `enabled`; management tab | Chrome's "Allow in Incognito" for it |
+| `extension.userScripts` | `extension` ID, `enabled`; management tab | Chrome's "Allow User Scripts" for it; `extension.list` reports `userScripts` and `userScriptsChangeable` |
 | `extension.remove` | `extension` ID, `userApproved: true`; management tab | Start reviewed removal; caller must verify absence |
 | `extension.removalState` | Same management tab and extension ID | Callback state/error for that removal only |
+| `extension.installCrx` | Absolute store-signed CRX `path`, expected `extension` ID; management tab | Chrome's own CRX3 installer with publisher proof and native consent (CEF 0021/0022): a store install Chrome updates; status installed, cancelled or error, with the installed version |
+| `extension.checkUpdates` | Management tab | Chrome's ExtensionUpdater checks every store install now and installs newer versions |
 | `shutdown` | none | Acknowledge, close all tabs, exit, remove socket |
 
 A persistent profile uses `DATA_ROOT/space-PROFILE` as its request context's
@@ -199,18 +204,20 @@ let title = try await core.evaluate(tab: tab, world: "agent",
 ### Input
 
 `input.send` coordinates are page points from the top-left. Mouse kinds:
-`mouseDown`, `mouseUp`, `mouseMove`, `mouseDrag`, `rightDown`, `rightUp`;
+`mouseDown`, `mouseUp`, `mouseMove`, `mouseDrag`, `rightDown`, `rightUp`, `rightDrag`;
 fields `x`, `y`, optional `clickCount`, `modifiers` (NSEvent flag bits).
 Keys: `keyDown`/`keyUp`, macOS `keyCode`, `characters`, `unmodified`, optional
 `repeat` and modifiers. `text` inserts committed Unicode through the page
-view's `NSTextInputClient`; `compose` marks text (`selectionStart`,
-`selectionLength`) and `unmark` finishes it. `text` and `compose` take an
-optional UTF-16 `replacementStart`/`replacementLength` in the focused field,
-passed to the view as AppKit's replacement range (a held letter's accent
-replaces the letter typed). Yab's own input context reads a page field's
-keys first: only a plain character or an editing command comes here as
-`keyDown`, everything else as these edits. `wheel` takes `deltaX`, `deltaY`, AppKit/CG scroll
-phase and momentumPhase, location and modifiers. The helper converts pointer
+view's `NSTextInputClient`. `wheel` takes `deltaX`, `deltaY`, AppKit/CG scroll
+phase and momentumPhase, location and modifiers. `magnify` takes `x`, `y`,
+NSEvent `phase`, `magnification`, `timestamp` and modifiers; `smartMagnify` the
+same without phase and magnification. They reach the page view's
+`magnifyWithEvent:` and `smartMagnifyWithEvent:` through a stand-in event, as
+Chromium's `SyntheticPinchEvent` does, so a pinch is Chrome's own: the page may
+take it as a ctrl wheel, else the compositor scales the visual viewport about
+the point, with no layout. CDP input (`Input.dispatchMouseEvent`,
+`Input.dispatchDragEvent`) multiplies its points by that scale; a person's mouse
+goes to the view and is not affected. The helper converts pointer
 coordinates to viewport CSS pixels using the native browser zoom and sends
 trusted `Input.dispatchMouseEvent` commands. NSEvent modifiers become CDP
 modifier bits; drag buttons and click counts retain their native values.
@@ -310,6 +317,11 @@ whole-browser audio output mute, including subframes and WebAudio; it does
 not modify media-element volume or microphone capture. The result contains
 `muted`, and `page.state` reports `audioMuted`. `tab.state` includes both
 `audioMuted` and `rendererPID`. Audible state is in the media section below.
+The mute is the tab's until `media.mute` lets it back in: Chrome's
+SoundContentSettingObserver unmutes a tab on every new main document unless
+Chrome's tab code muted it with a reason, which `SetAudioMuted` never gives,
+so YabCore mutes again at each main-frame commit and whenever the page turns
+audible (`KeepMuted`, feedback #2018).
 
 The role-specific renderer Helper installs `MediaRenderer`, which reports
 its OS PID when CEF creates the main-frame V8 context. YabCore accepts that
@@ -369,6 +381,8 @@ records acceptance; this contract alone is not a passing result.
 | --- | --- | --- |
 | `media.state` | event | `audible`, `audibleSource` (`native` or `page`), `playing`, `session` (`title`, `artist`, `album`, `artwork` URLs) or null, `sessionState`, `media` (`t`, `d`, `paused`, `muted`, `loop`, `video`) or null, `frames`, `mainFrame` |
 | `media.capture` | event | `camera`, `microphone`, from `CefDisplayHandler::OnMediaAccessChange` |
+| `media.capture.changed` | event | Chrome's own capture state of the browser: `camera`, `microphone`, `screen`, `tabCapture`, `window`, `display`, `allScreens`, `mirrored`, `videoPiP`, `documentPiP`, `actions`. `tab` is the page, as on every event |
+| `documentPiP.size` | event | `width`, `height`: the page's size in Chrome's window of a page's own floating window, before anything resizes it. It is the size the page asked for, which no popup feature carries |
 | `page.fullscreen` | event | `fullscreen`, from `OnFullscreenModeChange` |
 | `media.action` | method | `action` = `play`, `pause` or `seekto` (with `value` seconds); answers the number of frames reached |
 | `page.exitFullscreen` | method | `CefBrowserHost::ExitFullscreen(true)` |
@@ -462,3 +476,32 @@ profiles are refused.
 `profile`, `reason` `action` or `worker`, optional `nativeTab`) tell the app
 to read again: after the extension changed its action, or when its worker
 started again and lost the hook.
+
+## Safe Storage ownership
+
+The signed outer Yab app owns the existing `Yab Safe Storage` / `Yab` generic
+password. Before CEF profile services initialize, CEF patch 0129 requests its
+exact bytes from the owning app over `--yab-safe-storage-socket`. The switch
+contains only the address of a one-use socket next to `core.sock` in the
+owner-only launch directory. Both peers check kernel process identity; the
+app additionally validates its bundle seal and the live nested helper image
+before any Keychain lookup. The ordinary wire and original-caller stdin are
+unchanged. Broker failure cannot fall back to Keychain or a basic/mock key.
+The provider keeps Chromium's existing `v10` PBKDF2/AES format, so no cookie
+or password database re-encryption is needed. Denied access never creates a
+replacement key. A legacy item's ACL may ask its owner to authorize the
+outer app; the app does not silently change that ACL.
+
+The native helper requires a broker-capable SDK for real-Keychain runs.
+Standalone fixture tests continue to explicitly use `--use-mock-keychain`.
+Certificate/trust Keychain notifications and certificate queries remain in
+Chromium; the Safe Storage broker does not change TLS trust handling.
+`evals/golden/cortex_safe_storage.py` checks ownership and encrypted data
+across relaunch. `scripts/cef/cortex-keychain-proof.sh` additionally builds
+0.47.8 and checks migration of its synthetic real-Keychain profile.
+
+The launch audit identifies every captured PID, including the outer app. An
+application display name cannot identify the caller in pre-0.47.8 builds. This
+ownership change retains an app-owned Safe Storage read during initialization,
+as well as production session/sync reads and Chromium trust operations; it is
+not a claim of zero startup Keychain access or verified Cortex acceptance.

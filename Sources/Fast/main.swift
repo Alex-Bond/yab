@@ -13,6 +13,12 @@ import SyncKit
 // The browser is what almost every launch is, so it is the default and the
 // others cost it one comparison.
 
+// CEF's native messaging launcher must remain a stdio-only browser process.
+// Enter before LaunchCopy, settings, dates, CLI dispatch or AppKit startup.
+if CommandLine.arguments.dropFirst().first == ChromiumNativeHostLauncher.flag {
+    exit(ChromiumNativeHostLauncher.run(Array(CommandLine.arguments.dropFirst(2))))
+}
+
 // The app this was started from still there, and its bundle read while it
 // is, before anything else asks for it (LaunchCopy).
 LaunchCopy.ensure()
@@ -68,9 +74,12 @@ default:
     // One browser on one set of files, before it touches any of them,
     // moved first from the name they had before (Store.folder).
     Store.movesOldFolder = true
+    LaunchJournal.record("browser.entry")
     LaunchWarm.start()
     OneYab.take()
     MainActor.assumeIsolated {
+        OneYab.listen()
+        CrashSessions.start()
         CursorUpdateGuard.install()
         ScrollWheelGuard.install()
         _ = AppleWritingTools.shared

@@ -174,6 +174,8 @@ struct SettingsContent {
     /// The Recovery Key's Show with Face ID, and its Copy.
     var revealRecovery: @MainActor () -> Void = {}
     var copyRecovery: @MainActor () -> Void = {}
+    /// General's Show Welcome Again: the first run from its first page.
+    var showWelcome: @MainActor () -> Void = {}
     var tabletLayout: TabletLayoutPreferences? = nil
 
     // MARK: - values
@@ -311,7 +313,9 @@ struct SettingsContent {
             ], footer: "Swipe right anywhere on a page to go back, left to go forward. Off, only from the screen’s edges."), SettingsSectionModel(id: "general.launch", title: nil, rows: [
                 SettingsRowModel(id: "general.openKeyboardAtLaunch", icon: .glyph(.magnifyingGlass), title: "Open Keyboard at Launch", value: nil,
                                  kind: .toggle(Binding(get: { store.openKeyboardAtLaunch }, set: { store.openKeyboardAtLaunch = $0 }))),
-            ], footer: "Yab opens ready to type. A page you were just reading stays in front.")]
+            ], footer: "Yab opens ready to type. A page you were just reading stays in front."), SettingsSectionModel(id: "general.welcome", title: nil, rows: [
+                SettingsRowModel(id: "general.showWelcome", icon: nil, title: "Show Welcome Again", value: nil, kind: .action(showWelcome)),
+            ], footer: "Yab\u{2019}s first pages once more, from the name to the field. Your tabs, spaces and sync stay as they are.")]
         case .search:
             let selection = store.searchSelection
             return [SettingsSectionModel(id: "search", title: "Search Engine", rows: store.searchEngines.map { engine in
@@ -435,9 +439,9 @@ struct SettingsContent {
                                                        set: { host.setEnabled(item.id, $0) })))
             }
             // No way to the store here (register 617): adding an extension
-            // is on the Mac.
+            // is on the Mac, named as its menus name it (row 2604).
             let get = SettingsSectionModel(id: "extensions.get", title: nil, rows: [],
-                                           footer: "Add extensions in Yab on your Mac. They run on every page except Private tabs.")
+                                           footer: "Add extensions on your Mac, in Yab › Settings › Extensions › Add Extension. They run on every page except Private tabs.")
             return (rows.isEmpty ? [] : [SettingsSectionModel(id: "extensions", title: nil, rows: rows, footer: nil)]) + [get]
         case .feedback:
             return [SettingsSectionModel(id: "feedback", title: nil, rows: [

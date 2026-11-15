@@ -171,8 +171,7 @@ extension Bench {
                         "routines": Routines.shared.all.filter { $0.id.hasPrefix("boost:probe:") }.count])
             case "report":
                 do {
-                    guard let web = tab.webKitOnly("Boost report") else { answer(["error": "Boost reports are not available on this engine yet"]); return }
-                    let result = try await BoostJavaScript.evaluate(BoostScript.report, on: web, world: Boosts.world(request["name"] as? String ?? "probe"))
+                    let result = try await BoostJavaScript.evaluate(BoostScript.report, on: tab.page, world: Boosts.pageWorld(request["name"] as? String ?? "probe"))
                     answer(result as? [String: Any] ?? [:])
                 } catch { answer(["error": error.localizedDescription]) }
             default:

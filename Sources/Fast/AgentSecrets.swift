@@ -1,13 +1,22 @@
 import Foundation
 
 /// An agent's permission to work in a tab never includes extension vaults or
-/// recovery material. Chromium keeps this boundary in isolated worlds and
+/// a wallet's recovery-phrase entry. Chromium keeps this boundary in isolated worlds and
 /// authenticates frame origins through the helper, not page-supplied labels.
 @MainActor
 enum AgentSecrets {
-    static let refusal = "This page contains protected recovery material or an extension context. The person must handle it; continue after they leave this page."
     struct Refused: LocalizedError {
-        var errorDescription: String? { AgentSecrets.refusal }
+        let message: String
+        @MainActor init(_ page: (any PageHandle)? = nil) { message = page.map { AgentSecrets.refusal(for: $0) } ?? AgentSecrets.refusal }
+        var errorDescription: String? { message }
+    }
+
+    // This fixed Chromium component is a document renderer, not an installed
+    // extension vault. Match the authenticated origin, never a page label or
+    // an occurrence of its id in an ordinary address.
+    nonisolated static func builtInPDFViewer(_ url: URL?) -> Bool {
+        url?.scheme?.lowercased() == "chrome-extension" &&
+            url?.host?.lowercased() == "mhjfbmdgcfjbbpaeojofohoefgiehjai"
     }
 
     nonisolated static func protected(_ url: URL?) -> Bool {
@@ -28,42 +37,79 @@ enum AgentSecrets {
         return false
     }
 
-    /// This returns only a boolean. Secret words and field values stay in
-    /// the renderer. It deliberately refuses an unreadably large document.
-    static let probe = #"""
+    /// What the guard is for: an agent never reads or acts on an extension's
+    /// own pages (password vaults, wallets) or a wallet's recovery-phrase
+    /// entry. It is not a scan for scary words. Body text, hashes, wallet
+    /// addresses and the size of a page say nothing: Apple's Certificates,
+    /// Identifiers & Profiles mention "private key", Gmail and Figma are huge,
+    /// every page with an ad has a cross-origin frame. Only fields count: a
+    /// field whose own hints (name, id, placeholder, aria-label, autocomplete,
+    /// its labels, its group's legend) name a seed or recovery phrase, or a
+    /// field holding a PEM private key. Only a fixed reason leaves the
+    /// renderer, never a word of the page.
+    static let reasonProbe = #"""
     (() => {
-      const recovery = /\b(?:seed|recovery|backup|secret)\s+(?:phrase|words)|\b(?:mnemonic|private)\s+key/iu;
-      // The snapshot visits open shadow roots, so the guard must visit them
-      // too. body.innerText and document.querySelectorAll omit their contents.
-      const roots = [{ root: document, depth: 0 }];
-      let rootCount = 0, elementCount = 0, wordCount = 0;
+      const phrase = /\b(?:seed|recovery|backup|mnemonic)\s+(?:phrase|words?)\b|\bmnemonic\b/iu;
+      const pem = /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/u;
+      const skip = /^(?:hidden|button|submit|reset|image|checkbox|radio|file|range|color)$/iu;
+      const words = node => node ? (node.textContent || '') : '';
+      const hintsOf = field => {
+        const own = ['name', 'id', 'placeholder', 'aria-label', 'autocomplete'].map(key => field.getAttribute(key) || '');
+        const labels = Array.from(field.labels || [], words);
+        const root = field.getRootNode();
+        const by = (field.getAttribute('aria-labelledby') || '').split(/\s+/u).filter(Boolean)
+          .map(id => words(root.getElementById ? root.getElementById(id) : null));
+        const group = field.closest('fieldset,[role=group]');
+        const legend = group ? [group.getAttribute('aria-label') || '', words(group.querySelector(':scope > legend'))] : [];
+        return [...own, ...labels, ...by, ...legend].join(' ').replace(/([a-z])([A-Z])/gu, '$1 $2').replace(/[_-]+/gu, ' ');
+      };
+      const roots = [document];
       while (roots.length) {
-        const { root, depth } = roots.pop();
-        if (++rootCount > 256 || depth >= 32) return true;
-        const words = root === document ? (document.body?.innerText || '')
-          : Array.from(root.childNodes, node => node.nodeType === 3 ? node.textContent
-              : /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(node.nodeName) ? '' : node.innerText || '').join('\n');
-        wordCount += words.length;
-        if (wordCount > 500000 || recovery.test(document.title + '\n' + words)) return true;
-        const elements = root.querySelectorAll('*');
-        elementCount += elements.length;
-        if (elementCount > 50000) return true;
-        for (const field of elements) {
-          if (field.shadowRoot) roots.push({ root: field.shadowRoot, depth: depth + 1 });
-          if (!field.matches('input,textarea,[contenteditable]')) continue;
-          const hints = ['name', 'id', 'placeholder', 'aria-label', 'autocomplete'].map(key => field.getAttribute(key) || '').join(' ')
-            + ' ' + Array.from(field.labels || [], label => label.textContent).join(' ');
-          if (recovery.test(hints.replace(/[_-]+/g, ' '))) return true;
-          const value = field.value || (field.isContentEditable ? field.textContent : '') || '';
-          if (/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\b(?:0x)?[a-f0-9]{64}\b/iu.test(value)) return true;
+        const root = roots.pop();
+        for (const node of root.querySelectorAll('*')) {
+          if (node.shadowRoot) roots.push(node.shadowRoot);
+          const name = node.localName;
+          const editable = node.hasAttribute('contenteditable') && node.getAttribute('contenteditable') !== 'false';
+          if (name !== 'input' && name !== 'textarea' && !editable) continue;
+          if (name === 'input' && skip.test(node.type || '')) continue;
+          if (phrase.test(hintsOf(node))) return 'recovery phrase field';
+          const value = name === 'input' || name === 'textarea' ? node.value : node.textContent;
+          if (value && value.length < 100000 && pem.test(value)) return 'private key field';
         }
       }
       return false;
     })()
     """#
 
+    static var probe: String { "Boolean(\(reasonProbe))" }
+
+    static let reasons: [String: String] = [
+        "extension page": "it is an extension's own page (a password manager, wallet or other extension)",
+        "extension frame": "an extension's frame is open on it (a password manager's or wallet's own window)",
+        "recovery phrase field": "it has a recovery-phrase field (a wallet's seed words)",
+        "private key field": "it has a field holding a private key",
+    ]
+
+    static func message(_ reason: String) -> String {
+        "Yab keeps agents off this page because \(reasons[reason] ?? reason). The person must handle it; continue after they leave this page."
+    }
+
+    private static var found: [ObjectIdentifier: String] = [:]
+    static var refusal: String { message("extension page") }
+    static func refusal(for page: any PageHandle) -> String {
+        message(found[ObjectIdentifier(page)] ?? "extension page")
+    }
+
+    // Keep the caller's JavaScript line numbers: this prefix adds no lines.
+    // Remove whole-line comments before joining; otherwise // would consume
+    // the following statements when the probe is put on one line.
+    private static let inlineProbe = reasonProbe.split(separator: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        .joined(separator: " ")
+
     static var guardBody: String {
-        "if (\(probe)) throw new Error(\(String(reflecting: refusal)));\n"
+        let field = String(reflecting: message("recovery phrase field")), key = String(reflecting: message("private key field"))
+        return "{ const reason = \(inlineProbe); if (reason) throw new Error(reason === 'private key field' ? \(key) : \(field)); } "
     }
 
     /// Why the last check refused, for the helper's log; never page words.
@@ -82,31 +128,77 @@ enum AgentSecrets {
                 "needs_user": true, "code": "NATIVE_PAGE_QUESTION"]
     }
 
+    /// Refuses only for an extension's page or frame and for the fields
+    /// above. Whatever cannot be checked (a frame with no script context, a
+    /// frame that came or went during the check, a probe that failed) is
+    /// left out and logged; it never refuses the whole page.
     static func check(_ page: any PageHandle) async -> Bool {
-        // WebKit's existing behavior is unchanged by this opt-in migration.
-        guard let page = page as? ChromiumPage else { return true }
-        guard !protected(page.url) else { return refuse("protected address scheme") }
-        var step = "frames"
-        let started = Date()
-        do {
-            let frames = try await page.agentFrames()
-            var tokens = Set<String>()
-            for frame in frames {
-                guard !protected(frame.url),
-                      !protected(URL(string: frame.origin.scheme + "://" + frame.origin.host)) else { return refuse("protected frame address") }
-                guard let token = try page.scripts.token(frame, tab: page.remoteID) else { return refuse("frame without a script context") }
-                tokens.insert(token)
-                step = "probe"
-                let result = try await page.call("return " + probe, in: .agent, frame: frame, gesture: false)
-                guard result as? Bool == false else { return refuse("probe in frame gave \(String(describing: result))") }
+        let id = ObjectIdentifier(page)
+        found[id] = nil
+        func refuse(_ reason: String, _ why: String) -> Bool {
+            found[id] = reason
+            return AgentSecrets.refuse(why)
+        }
+        // An extension's own PDF is still an extension document. Only the
+        // browser's fixed component may be treated as a document renderer.
+        guard !protected(page.url) || (page is ChromiumPage && builtInPDFViewer(page.url)) else {
+            return refuse("extension page", "extension address")
+        }
+        // A PDF has no fields to type a phrase into.
+        if page.webKit?.webKitShowsPDF == true { return true }
+        func probe(_ frame: PageFrame?) async -> String? {
+            do {
+                let result = try await page.call("return " + reasonProbe, in: .agent, frame: frame, gesture: false)
+                if let reason = result as? String, reasons[reason] != nil { return reason }
+                if result as? Bool != false { skipped("probe gave \(String(describing: result))") }
+            } catch { skipped("probe failed: \(error)") }
+            return nil
+        }
+        guard let chromium = page as? ChromiumPage else {
+            let frames = await withCheckedContinuation { continuation in
+                page.childFrames { continuation.resume(returning: $0) }
             }
-            // A navigation or renderer/frame replacement during the probe is
-            // not the same authorization. Never cache a successful check.
-            step = "recheck"
-            let current = try await page.agentFrames()
-            let currentTokens = try Set(current.compactMap { try page.scripts.token($0, tab: page.remoteID) })
-            guard currentTokens == tokens && current.count == tokens.count && !protected(page.url) else { return refuse("frames changed during the check") }
+            if frames.contains(where: { protected($0.url) }) { return refuse("extension frame", "extension frame") }
+            for frame in [nil] + frames.map({ Optional($0) }) {
+                if let reason = await probe(frame) { return refuse(reason, reason) }
+            }
             return true
-        } catch { return refuse("\(step) failed after \(Int(Date().timeIntervalSince(started) * 1000)) ms: \(error)") }
+        }
+        // Chromium: every attached renderer, with authenticated origins. A
+        // frame that appears while checking is checked on the next pass.
+        var checked = Set<String>()
+        for pass in 0..<3 {
+            let frames: [PageFrame]
+            do { frames = try await chromium.agentFrames() } catch {
+                skipped("frame inventory: \(error)")
+                if pass == 0, let reason = await probe(nil) { return refuse(reason, reason) }
+                return true
+            }
+            var fresh = false
+            for frame in frames {
+                let origin = URL(string: frame.origin.scheme + "://" + frame.origin.host)
+                let pdfViewer = builtInPDFViewer(frame.url) && builtInPDFViewer(origin)
+                guard pdfViewer || (!protected(frame.url) && !protected(origin)) else {
+                    return refuse(frame.isMain ? "extension page" : "extension frame", "extension frame")
+                }
+                guard let token = try? chromium.scripts.token(frame, tab: chromium.remoteID) else {
+                    skipped("a frame without a script context"); continue
+                }
+                guard checked.insert(token).inserted else { continue }
+                fresh = true
+                if pdfViewer { continue }
+                if let reason = await probe(frame) { return refuse(reason, reason) }
+            }
+            if !fresh || pass == 2 {
+                if fresh { skipped("frames still changing after three passes") }
+                return true
+            }
+        }
+        return true
+    }
+
+    /// Something the guard could not look at, for the helper's log.
+    private static func skipped(_ why: String) {
+        FileHandle.standardError.write(Data("yab: agent guard left out: \(why)\n".utf8))
     }
 }

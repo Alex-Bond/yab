@@ -91,6 +91,92 @@ struct SearchSuggestionsTests {
         #expect(SearchSuggestions.parse(response, engine: .google, typed: "jürg") == [name, "one", "two", "three", "four"])
     }
 
+    /// Google's answer for "twitter" as the branch fix/suggestion-remove
+    /// saw it (2026-11-08): http://twitter.com, a NAVIGATION result, third
+    /// by relevance.
+    static let twitter = #")]}'\#n["twitter",["twitter downloader","twitter viewer","http://twitter.com","twitter x","twitter login"],["","","","",""],[],{"google:suggestrelevance":[602,601,600,561,560],"google:suggesttype":["QUERY","QUERY","NAVIGATION","QUERY","QUERY"],"google:verbatimrelevance":1300}]"#
+    /// Google's answer for "github", live 2026-11-08 (client=chrome-omni).
+    static let github = #")]}'\#n["github",["github login","https://github.com/","github copilot","github desktop","github down"],["","How people build software · GitHub","","",""],[],{"google:suggestrelevance":[800,799,601,600,553],"google:suggesttype":["QUERY","NAVIGATION","QUERY","QUERY","QUERY"],"google:verbatimrelevance":1300}]"#
+
+    /// Google's answer for "faceb", live 2026-11-08: facebook.com scored
+    /// above the words themselves (1150 against 851), which Chrome 157 still
+    /// lists last and never finishes inline.
+    static let faceb = #")]}'\#n["faceb",["facebook","https://www.facebook.com/","facebook login","facebook marketplace"],["","Facebook - Log In or Sign Up","",""],[],{"google:suggestrelevance":[1250,1150,601,600],"google:suggesttype":["QUERY","NAVIGATION","QUERY","QUERY"],"google:verbatimrelevance":851}]"#
+
+    @Test func navigationIsASiteRankedByRelevance() throws {
+        let items = SearchSuggestions.read(Data(Self.twitter.utf8), engine: .google, typed: "twitter")
+        #expect(items == [.words("twitter downloader"), .words("twitter viewer"),
+                          .site(URL(string: "https://twitter.com")!, title: ""), .words("twitter x"), .words("twitter login")])
+        // The words alone never search for an address.
+        #expect(SearchSuggestions.parse(Data(Self.twitter.utf8), engine: .google, typed: "twitter")
+                == ["twitter downloader", "twitter viewer", "twitter x", "twitter login"])
+        let github = SearchSuggestions.read(Data(Self.github.utf8), engine: .google, typed: "github")
+        #expect(github.prefix(2) == [.words("github login"), .site(URL(string: "https://github.com/")!, title: "How people build software · GitHub")])
+        // Out of order, the relevance decides, as in Chromium's SearchProvider.
+        let shuffled: [Any] = ["yout", ["youtube tv", "https://www.youtube.com/", "youtube"], ["", "YouTube", ""], [],
+                               ["google:suggesttype": ["QUERY", "NAVIGATION", "QUERY"], "google:suggestrelevance": [700, 1150, 1250],
+                                "google:verbatimrelevance": 851]]
+        #expect(SearchSuggestions.read(try data(shuffled), engine: .google, typed: "yout")
+                == [.words("youtube"), .site(URL(string: "https://www.youtube.com/")!, title: "YouTube"), .words("youtube tv")])
+    }
+
+    @Test func onlyPlainWebAddressesBecomeSites() throws {
+        let bad = ["javascript:alert(1)", "file:///etc/passwd", "ftp://example.com", "https://user:pw@example.com/",
+                   "https://example.com:8443/", "https://localhost/", "example.com", "https://.com/", "data:text/html,hi"]
+        for text in bad { #expect(SearchSuggestions.site(text) == nil, "\(text)") }
+        #expect(SearchSuggestions.site("http://twitter.com")?.absoluteString == "https://twitter.com")
+        #expect(SearchSuggestions.site("https://www.Amazon.com/")?.absoluteString == "https://www.amazon.com/")
+        let root: [Any] = ["x", bad + ["https://x.com/", "http://x.com"], [], [],
+                           ["google:suggesttype": Array(repeating: "NAVIGATION", count: bad.count + 2)]]
+        #expect(SearchSuggestions.read(try data(root), engine: .google, typed: "x") == [.site(URL(string: "https://x.com/")!, title: "")])
+    }
+
+    @MainActor @Test func aSiteRowSitsAmongTheWordsUnderReturnsRow() {
+        let items = SearchSuggestions.read(Data(Self.twitter.utf8), engine: .google, typed: "twitter")
+        let rows = SearchSuggestions.rows(items) { URL(string: "https://www.google.com/search?q=" + $0.replacingOccurrences(of: " ", with: "+")) }
+        let list = [row("twitter", .search), row("Ask", .ask), row("x.com", .visited)]
+        let merged = SearchSuggestions.merge(rows, into: list, lead: 0)
+        // Under the engine's words, as Chromium 157 lists it.
+        #expect(merged.list.map(\.key) == ["twitter", "Ask", "x.com", "twitter downloader", "twitter viewer", "twitter x", "twitter login", "twitter.com"])
+        let site = merged.list[7]
+        #expect(site.kind == .known && site.engine && site.url?.absoluteString == "https://twitter.com" && site.isPlace)
+        #expect(merged.lead == 0)
+    }
+
+    @MainActor @Test func aSiteAlreadyListedByItsAddressIsListedOnce() {
+        let github = SearchSuggestions.rows(SearchSuggestions.read(Data(Self.github.utf8), engine: .google, typed: "github")) {
+            URL(string: "https://www.google.com/search?q=" + $0)
+        }
+        // The same destination, however written: listed once, as Chromium's
+        // AutocompleteResult dedupes by stripped URL.
+        for place in [row("github.com", .known), row("www.github.com", .open), row("github.com", .visited),
+                      Suggestion(key: "GitHub", title: "", url: URL(string: "http://www.github.com/#top"), kind: .quickAction("gh"))] {
+            let merged = SearchSuggestions.merge(github, into: [row("github", .search), place], lead: 0)
+            #expect(!merged.list.contains { $0.engine }, "\(place.key)")
+            #expect(merged.list.filter { $0.kind == .suggested }.count == SearchSuggestions.shown)
+        }
+        // Another page of the same site is another destination: both stay.
+        for place in [row("github.com/example/project", .visited), row("gitlab.com", .visited)] {
+            let merged = SearchSuggestions.merge(github, into: [row("github", .search), place], lead: 0)
+            #expect(merged.list.map(\.key) == ["github", place.key, "github login", "github copilot", "github desktop", "github down", "github.com"])
+        }
+    }
+
+    @Test func strippedAddressesAreChromes() {
+        let same = ["https://www.facebook.com/", "http://facebook.com", "https://facebook.com/#x", "HTTPS://WWW.FACEBOOK.COM"]
+        #expect(Set(same.map { SearchSuggestions.stripped(URL(string: $0)!) }) == ["facebook.com/"])
+        #expect(SearchSuggestions.stripped(URL(string: "https://facebook.com/login?next=1")!) == "facebook.com/login?next=1")
+        #expect(SearchSuggestions.stripped(URL(string: "https://m.facebook.com/")!) == "m.facebook.com/")
+    }
+
+    @MainActor @Test func aSiteStaysWhileItsAddressIsStillBeingTyped() {
+        let site = SearchSuggestions.Item.site(URL(string: "https://www.facebook.com/")!, title: "Facebook")
+        #expect(site.completes("faceb"))
+        #expect(site.completes("facebook.c"))
+        #expect(!site.completes("facebook.com"))
+        #expect(!site.completes("facex"))
+    }
+
     @Test func tenSuggestionsAreKeptAndLongResponsesAreBounded() throws {
         let words = (1...24).map { "query \($0)" }
         let ten: [Any] = ["query", Array(words.prefix(10))]

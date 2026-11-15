@@ -12,15 +12,41 @@ final class ProviderConsent {
     private(set) var revision = 0
     private var connections: [String: ProviderLaunchPermit] = [:]
 
-    init(settings: UserDefaults = Store.settings, history: [Chat]? = nil) {
+    /// `connected`: the plans Connect put in place, from its files
+    /// (`connectedByConnect`); given in unit tests, which never read them.
+    init(settings: UserDefaults = Store.settings, history: [Chat]? = nil, connected: Set<String>? = nil) {
         self.settings = settings
+        let denied = Set(settings.stringArray(forKey: revokedKey) ?? [])
         if !settings.bool(forKey: "agents.consent-migrated.v1") {
             let old = history ?? (Store.unitTests ? [] : Chats.read(Chats.folder))
-            let denied = Set(settings.stringArray(forKey: revokedKey) ?? [])
             let providers = Set(old.filter(Self.manualUse).map(\.cli)).union(Self.standIns()).subtracting(denied)
             settings.set(Array(Set(settings.stringArray(forKey: key) ?? []).union(providers)).sorted(), forKey: key)
             settings.set(true, forKey: "agents.consent-migrated.v1")
         }
+        // Until 0.36.3 a plan was connected when Connect had put Yab in
+        // place for it, and nothing else recorded the press. The migration
+        // above counted only chats, so a plan connected in the welcome and
+        // never chatted with read "No plan connected" after the update
+        // (R1831). Once, for every profile: what Connect left, unless
+        // disconnected since.
+        if !settings.bool(forKey: Self.connectMigrated) {
+            let providers = (connected ?? (Store.unitTests ? [] : Self.connectedByConnect())).subtracting(denied)
+            if !providers.isEmpty {
+                settings.set(Array(Set(settings.stringArray(forKey: key) ?? []).union(providers)).sorted(), forKey: key)
+            }
+            settings.set(true, forKey: Self.connectMigrated)
+        }
+    }
+
+    static let connectMigrated = "agents.consent-migrated.v2"
+
+    /// The plans whose Connect left this copy of Yab in place: its skill
+    /// and tools in Claude Code or Codex naming this binary, Cursor's
+    /// connection. Files Yab writes only on a person's Connect (or `yab
+    /// setup`); a CLI signed in on its own is not among them. Gemini's
+    /// was its Google sign-in alone, never a record of a press.
+    static func connectedByConnect(_ status: AgentSetup.Status = AgentSetup.status()) -> Set<String> {
+        Set(AgentPlan.connectable.filter { $0.cli != "gemini" && status[keyPath: $0.connected] }.map(\.cli))
     }
 
     /// A probe world that is handed a stand-in agent (`YAB_AGENT_CLAUDE` and

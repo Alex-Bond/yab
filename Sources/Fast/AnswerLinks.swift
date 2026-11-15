@@ -85,7 +85,7 @@ final class AnswerLinks: ObservableObject {
     /// whole when the page hasn't been here.
     static func tip(_ url: URL) -> String {
         guard let host = url.host() else { return url.absoluteString }
-        if let title = History.shared.title(of: url) {
+        if let title = History.current.title(of: url) {
             let site = IDN.shownAddress(host.hasPrefix("www.") ? String(host.dropFirst(4)) : host)
             return title + "\n" + site
         }

@@ -105,6 +105,43 @@ struct ApprovalChoiceTests {
         #expect(!AssistantApprovalRecords.answers(cap(2), device: "other"))
     }
 
+    /// A manager that asked the person for the password itself (Apple
+    /// Passwords' Touch ID) is the one question: Yab puts none, and the
+    /// grace starts from it, so Yab's own fill a moment later isn't asked
+    /// either. Forgotten (the Mac locked), the yes is gone again.
+    @MainActor @Test func aManagersOwnTouchIDIsTheOnlyQuestion() {
+        let was = Store.settings.object(forKey: Vault.proveKey)
+        defer { Store.settings.set(was, forKey: Vault.proveKey); Vault.forgetProof(cancelling: false) }
+        Store.settings.set(true, forKey: Vault.proveKey)
+        Vault.forgetProof(cancelling: false)
+        #expect(!Vault.yesStands)
+        let before = Vault.questions
+        var picked: Vault.Proven?
+        Vault.proveToFill(on: "login.example.com", already: true) { picked = $0 }
+        #expect(picked == .yes)
+        #expect(Vault.asking == nil && Vault.questions == before)
+        #expect(Vault.yesStands)
+        var own: Vault.Proven?
+        Vault.proveToFill(on: "other.example.org") { own = $0 }
+        #expect(own == .yes)
+        #expect(Vault.questions == before)
+        Vault.forgetProof(cancelling: false)
+        #expect(!Vault.yesStands)
+    }
+
+    /// Who is asked: a manager's yes counts only for a pick the person made;
+    /// an agent's fill, Yab's own vault and a manager that asked nobody
+    /// (Bitwarden opened with the saved password) still ask.
+    @Test func whoIsStillAsked() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        #expect(!Vault.asks(agent: false, already: true, provenAt: nil, now: now))
+        #expect(Vault.asks(agent: true, already: true, provenAt: nil, now: now))
+        #expect(Vault.asks(agent: false, already: false, provenAt: nil, now: now))
+        #expect(!Vault.asks(agent: false, already: false, provenAt: now - 299, now: now))
+        #expect(Vault.asks(agent: false, already: false, provenAt: now - 301, now: now))
+        #expect(Vault.asks(agent: true, already: false, provenAt: now - 10, now: now))
+    }
+
     @MainActor @Test func aYesProvenElsewhereFillsOnceWithoutAsking() {
         let was = Store.settings.object(forKey: Vault.proveKey)
         defer { Store.settings.set(was, forKey: Vault.proveKey); Vault.provenElsewhere = nil }

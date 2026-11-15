@@ -1,6 +1,31 @@
 import SwiftUI
 import AppKit
 
+/// Only actual controls refuse the native band handle. Anchors follow layout,
+/// including split sizes, extension doors and controls appearing on hover.
+private struct BandControls: PreferenceKey {
+    static let defaultValue: [Anchor<CGRect>] = []
+    static func reduce(value: inout [Anchor<CGRect>], nextValue: () -> [Anchor<CGRect>]) {
+        value += nextValue()
+    }
+}
+
+private extension View {
+    func bandControl() -> some View {
+        anchorPreference(key: BandControls.self, value: .bounds) { [$0] }
+    }
+
+    func bandHandles(enabled: Bool) -> some View {
+        overlayPreferenceValue(BandControls.self) { anchors in
+            if enabled {
+                GeometryReader { geometry in
+                    DragStrip(exclusions: anchors.map { geometry[$0] })
+                }
+            }
+        }
+    }
+}
+
 /// The address, for whoever wants it in view: a band along the top of the
 /// page, inside its card, with the site written in the middle of it.
 ///
@@ -89,9 +114,11 @@ struct AddressBar: View {
                         if hiddenColumn {
                             ColumnDoor(browser: browser, prefs: browser.prefs)
                                 .environment(\.doorSize, .header)
+                                .bandControl()
                         }
                         if helmed {
                             Helm(browser: browser, tab: half ? tab : nil, reads: false, quiet: quiet, still: true)
+                                .bandControl()
                         }
                     }
                 } else {
@@ -103,11 +130,13 @@ struct AddressBar: View {
                 // any, Measure and the developer tools (DevMode.swift).
                 if tab.isDev && !half {
                     DevBandDoors(browser: browser, tab: tab, log: tab.devLog.counts)
+                        .bandControl()
                 }
                 // A dev page's link is a door among its tools, beside the
                 // camera, as Arc keeps it, not the site's own end.
                 if tab.isDev {
                     Door(icon: "link", help: "Copy URL", shortcut: "Copy URL") { browser.focus(tab); browser.copyAddress(door: true) }
+                        .bandControl()
                         .opacity(quiet ? 0 : 1)
                         .allowsHitTesting(!quiet)
                 }
@@ -115,6 +144,7 @@ struct AddressBar: View {
                 // beside it when something is off (JSONView.swift).
                 if tab.json != nil && !quiet {
                     JSONBandDoor(browser: browser, tab: tab)
+                        .bandControl()
                 }
                 // Reading mode's book on an article, at the band's end beside
                 // the camera, and Aa beside
@@ -125,6 +155,7 @@ struct AddressBar: View {
                 // whatever the doors (BandLayout).
                 if takes, ReadingDoor.offered(tab) {
                     ReadingDoor(browser: browser, tab: tab, own: half)
+                        .bandControl()
                         .opacity(quiet ? 0 : 1)
                         .allowsHitTesting(!quiet)
                 }
@@ -132,14 +163,16 @@ struct AddressBar: View {
                 // that half brought to the front first.
                 if !tab.isBlank {
                     Door(icon: "camera", help: "Capture", shortcut: "Capture…") { browser.focus(tab); browser.capture.start() }
+                        .bandControl()
                         .opacity(quiet ? 0 : 1)
                         .allowsHitTesting(!quiet)
                 }
                 if takes, strip {
-                    if doors { UpdateButton(browser: browser, place: .strip) }
+                    if doors { UpdateButton(browser: browser, place: .strip).bandControl() }
                     // Under the pointer in the half behind, as the camera
                     // beside it, unless a download is going on.
                     HoardSlot(hoard: browser.hoard, place: .strip, quiet: quiet)
+                        .bandControl()
                 }
                 // Site Controls for this band's page, each half its own:
                 // the extensions are in it, where the puzzle used to be.
@@ -150,9 +183,12 @@ struct AddressBar: View {
                     // one row, the right half's, as it has one update door.
                     if doors {
                         BandPins(quiet: quiet, tab: tab)
+                            .bandControl()
                     }
                     WindowChip(browser: browser, tab: tab)
+                        .bandControl()
                     SiteControlsDoor(browser: browser, tab: tab, side: Door.Size.band.side, glyph: Door.Size.band.glyph)
+                        .bandControl()
                         .opacity(quiet ? 0 : 1)
                         .allowsHitTesting(!quiet)
                 }
@@ -160,9 +196,11 @@ struct AddressBar: View {
                 // in a half that place is the half's way out below.
                 if leave == nil, !half, !browser.inMail, !tab.isBlank, browser.canHost(tab) {
                     Door(icon: "split.view", help: "Split View", shortcut: "Split View") { browser.focus(tab); browser.splitView() }
+                        .bandControl()
                 }
                 if let leave {
                     Door(icon: "xmark", help: "Leave Split View", act: leave)
+                        .bandControl()
                         // Under the pointer: the half dims and its chip is
                         // outlined, the one that goes back to the list, and
                         // its picture is taken for the way there.
@@ -173,11 +211,13 @@ struct AddressBar: View {
                 }
             }
             if !tab.isBlank {
-                Site(browser: browser, tab: tab, copies: browser.copies, doubleClicks: !half)
+                Site(browser: browser, tab: tab, copies: browser.copies, handles: !half)
+                    .bandControl()
             }
             // A share going on: its mark before the doors at the band's end,
             // its words out over the band when asked for.
             ShareChip(browser: browser, tab: tab)
+                .bandControl()
                 .layoutValue(key: BandChip.self, value: true)
         }
         // The header's doors, larger than a row's, with Arc's air between.
@@ -213,24 +253,15 @@ struct AddressBar: View {
                         ))
                 }
             }
-            // The whole page's band is the window's top, as a toolbar is in
-            // Arc and Safari: its empty room drags the window, and a
-            // double-click there does what System Settings says (#454). On
-            // the ground under the doors, not the band: there a double-click
-            // the band waited for kept the doors from sinking when pressed.
-            // A real view for this (DragStrip) would take every press in the
-            // band, the doors' too.
-            .gesture(WindowDragGesture(), including: half ? .subviews : .all)
-            // A single press on the site opens its field without waiting
-            // for this double-click to fail.
-            .simultaneousGesture(TapGesture(count: 2).onEnded {
-                if let window = NSApp.currentEvent?.window { StripPress.twice(window) }
-            }, including: half ? .subviews : .all)
         }
+        // Native hit testing fills all the air while refusing the measured
+        // controls. Split bands retain their existing deck-carry gesture.
+        .bandHandles(enabled: !half)
         // Where the band ends and the page starts, as faint as the line
         // down the column's edge.
         .overlay(alignment: .bottom) {
             Rectangle().fill(Palette.ink.opacity(0.06)).frame(height: 1)
+                .allowsHitTesting(false)
         }
         // The whole band, including the empty room beside the site, owns
         // its menu. SteadyMenu lets ordinary clicks and window drags through.
@@ -303,7 +334,7 @@ struct PeekBand: View {
             ZStack {
                 Rectangle().fill(worn?.color ?? Palette.ground)
                 if !tab.isBlank {
-                    Site(browser: browser, tab: tab, copies: browser.copies, doubleClicks: false)
+                    Site(browser: browser, tab: tab, copies: browser.copies, handles: false)
                         .padding(.horizontal, AddressBar.rim(Self.height))
                 }
             }
@@ -329,7 +360,10 @@ private struct Site: View {
     /// is the same object before and after one, and this view would
     /// otherwise have nothing to notice.
     let copies: Int
-    let doubleClicks: Bool
+    /// The band is the window's handle here (not one of two halves): its
+    /// empty room drags the window and takes the title bar's double-click,
+    /// and the site drags it too.
+    let handles: Bool
 
     @Environment(\.tone) private var tone
     @State private var hovering = false
@@ -339,7 +373,6 @@ private struct Site: View {
     /// The tick, for a moment after a copy.
     @State private var ticked = false
     @State private var untick: DispatchWorkItem?
-    @State private var clicks = AddressBarClick()
 
     /// The plate under the pointer: the doors' height and corner, so the
     /// site is lit as the doors beside it are, not hugged by a lower one.
@@ -360,11 +393,11 @@ private struct Site: View {
     @State private var lockFrame: CGRect = .zero
     @State private var lockHovering = false
 
-    init(browser: Browser, tab: Tab, copies: Int, doubleClicks: Bool) {
+    init(browser: Browser, tab: Tab, copies: Int, handles: Bool) {
         self.browser = browser
         self.tab = tab
         self.copies = copies
-        self.doubleClicks = doubleClicks
+        self.handles = handles
         self.prefs = browser.prefs
     }
 
@@ -390,13 +423,13 @@ private struct Site: View {
             // the band's start, its lock before it, its link with its tools,
             // and no star.
             if dev {
-                lock
+                lock.bandControl()
             } else if copyable {
-                copy
+                copy.bandControl()
             }
-            name
+            name.bandControl()
             if starred {
-                star
+                star.bandControl()
             } else if copyable && !dev {
                 Color.clear.frame(width: Self.slot, height: Self.slot)
             }
@@ -408,26 +441,16 @@ private struct Site: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
         .onHover { hovering = $0 }
+        .bandHandles(enabled: handles)
         // Only the half whose address it was: two side by side both
         // ticked for one copy.
         .onChange(of: copies) { if tab.id == browser.activeID { tick() } }
-        .onChange(of: tab.id) { settle(); clicks.cancel() }
-        .onDisappear { clicks.cancel() }
+        .onChange(of: tab.id) { settle() }
     }
 
     /// The site, still through a copy, as Arc's is: the corner says it.
     private var name: some View {
-        Button {
-            // The site of the half behind: that half comes to the front,
-            // and the field is its.
-            let event = NSApp.currentEvent
-            let opening = !browser.fieldShowing
-            browser.focus(tab)
-            browser.edit()
-            // The next press may land in the field instead of this band.
-            if opening && doubleClicks { clicks.watch(event, in: browser) }
-            else { clicks.cancel() }
-        } label: {
+        Button(action: open) {
             words
                 // A long name gives up its front: the end of a host
                 // is the part that says whose it is. A dev address
@@ -437,13 +460,32 @@ private struct Site: View {
         }
         .buttonStyle(.plain)
         .focusable(false)
+        .overlay {
+            LinkFieldHandle(enabled: handles, click: open)
+        }
         .pointerTip(tab.address?.absoluteString ?? "")
-        // It raises the field: a click on it while the field is up asks
-        // again, not away and back (Browser.fieldAway).
+        // It raises the field and puts it away itself (`open`), so the
+        // window's click away leaves it be (Browser.fieldAway).
         .background(ClickZone(away: browser.fieldAway))
         // Medium, as Arc sets its site: regular read thin on a colored band.
         .sidebarFont(size: dev ? 12 : 13, weight: dev ? .regular : .medium, design: dev ? .monospaced : .default)
         .lineLimit(1)
+    }
+
+    /// Each press toggles the field, as each press on Arc's address does
+    /// its command bar: up over this page, a press puts it away; down, or
+    /// up over the other half, a press raises it here at once. A second
+    /// press is never anything else, however soon it comes, so fast
+    /// presses are each answered and none is taken for a double-click.
+    private func open() {
+        if browser.fieldShowing, browser.fieldGuest == nil, browser.activeID == tab.id {
+            browser.dismiss()
+            return
+        }
+        // The site of the half behind: that half comes to the front,
+        // and the field is its.
+        browser.focus(tab)
+        browser.edit()
     }
 
     /// Shut for https and open for http, under the pointer only: on the
@@ -817,6 +859,8 @@ private struct BandPins: View {
     /// A Chromium tab's own extensions (ChromiumColumn).
     @ObservedObject private var column = ChromiumColumn.shared
     @ObservedObject private var nativePopup = ChromiumPopupHost.shared
+    /// Pins a window of the extension's own stands under (ExtensionWindowFrame).
+    @ObservedObject private var hung = ExtensionWindowFrame.Hung.shared
 
     /// As many as a narrow band keeps beside its site; the rest are in the
     /// sliders' list.
@@ -827,8 +871,10 @@ private struct BandPins: View {
         let native = tab.engineKind == .chromium ? tab : nil
         let pinned = Array((native.map { column.buttons(for: $0) } ?? extensions.buttons.filter(\.pinned)).prefix(Self.most))
         let nativePopupID = native.flatMap { nativePopup.shownExtension(for: $0) }
-        let popped = native != nil ? nativePopupID != nil : popup.isShown && !popup.fromDoor && pinned.contains { $0.id == popup.extensionID }
-        let hidden = quiet && !popped
+        let nativeDoor = native.map { nativePopup.shownFromDoor(for: $0) } ?? false
+        let popped = native != nil ? nativePopupID != nil && !nativeDoor : popup.isShown && !popup.fromDoor && pinned.contains { $0.id == popup.extensionID }
+        // An extension's own window under one keeps them in, as its popup.
+        let hidden = quiet && !popped && !pinned.contains { hung.ids.contains($0.id) }
         ForEach(pinned) { button in
             PlatePin(button: button, lit: popped && (nativePopupID ?? popup.extensionID) == button.id,
                      side: Door.Size.band.side, corner: Door.Size.band.corner, native: native) {

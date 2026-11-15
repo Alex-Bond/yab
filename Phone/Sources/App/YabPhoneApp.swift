@@ -155,16 +155,19 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     /// A page picked up from the Mac by Handoff while Yab runs.
     func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        Links.trace("continue type=\(userActivity.activityType) url=\(String(describing: userActivity.webpageURL))")
         app?.pickUp(userActivity)
     }
 
     /// A link while Yab runs: a task's from the Live Activity, else a new tab (Entrances/Links).
     func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) {
+        Links.trace("openURLContexts state=\(scene.activationState.rawValue) selected=\(app?.browser.tab?.id ?? "nil") field=\(app?.field.shown == true) away=\(String(describing: LaunchKeyboard.away()))")
         guard let app else { return }
         for context in contexts where !app.taskDesk.open(context.url) && !app.sync.openJoinLink(context.url) { app.openLink(context.url) }
     }
 
     func sceneWillResignActive(_ scene: UIScene) {
+        Links.trace("willResignActive state=\(scene.activationState.rawValue) selected=\(app?.browser.tab?.id ?? "nil") field=\(app?.field.shown == true) away=\(String(describing: LaunchKeyboard.away()))")
         // Dialogs go; a download goes on and says where it is on return.
         app?.pages.appWillResignActive()
         if app?.hasPrivateForeground == true || app?.privateLock.presentsPrompt == true {
@@ -181,6 +184,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
+        Links.trace("willEnterForeground state=\(scene.activationState.rawValue) selected=\(app?.browser.tab?.id ?? "nil") field=\(app?.field.shown == true) away=\(String(describing: LaunchKeyboard.away()))")
         // The launch already said what it is for; this is a return. Decided
         // before the snapshot gives way, so the first live frame has the field.
         if launching { launching = false; return }
@@ -189,6 +193,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
+        Links.trace("didBecomeActive state=\(scene.activationState.rawValue) selected=\(app?.browser.tab?.id ?? "nil") field=\(app?.field.shown == true) away=\(String(describing: LaunchKeyboard.away()))")
         app?.privateLock.didBecomeActive()
         app?.tabClear.becameActive()
         (window?.rootViewController as? RootController)?.setInactivePrivacyCover(false)
@@ -228,12 +233,24 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
+        Links.trace("didEnterBackground state=\(scene.activationState.rawValue) selected=\(app?.browser.tab?.id ?? "nil") field=\(app?.field.shown == true) away=\(String(describing: LaunchKeyboard.away()))")
         guard let app else { return }
         app.tabClear.resigned()
         app.privateLock.didEnterBackground()
         let options = LaunchOptions.current
         if !options.isTestRun || options.launchKeyboard { LaunchKeyboard.left() }
         #if DEBUG
+        if options.isTestRun {
+            let offset = UserDefaults.standard.double(forKey: "YabTestAwaySeconds")
+            if offset > 0 {
+                LaunchKeyboard.left(at: Date().addingTimeInterval(-offset))
+                app.tabClear.clock = {
+                    let now = TabClearPolicy.Clock.now
+                    return .init(date: now.date.addingTimeInterval(offset), uptime: now.uptime + offset)
+                }
+                Links.trace("fakeAway seconds=\(offset)")
+            }
+        }
         // #350's world: iOS ends the pages' processes while Yab is away.
         if UserDefaults.standard.bool(forKey: "YabTestEndPagesAway") { app.pages.endPageProcessesForTests() }
         #endif
@@ -266,6 +283,19 @@ final class RootController: UIViewController {
         content = UIHostingController(rootView: AnyView(RootView().environment(app)
             .environment(\.syncedArtwork, app.sync.folderArtwork)))
         super.init(nibName: nil, bundle: nil)
+    }
+
+    override var undoManager: UndoManager? { app.actionUndo }
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // Never take focus from an editor: its native text undo has priority.
+        if !Self.hasFirstResponder(view) { becomeFirstResponder() }
+    }
+
+    private static func hasFirstResponder(_ view: UIView) -> Bool {
+        view.isFirstResponder || view.subviews.contains(where: hasFirstResponder)
     }
 
     override func viewDidLoad() {

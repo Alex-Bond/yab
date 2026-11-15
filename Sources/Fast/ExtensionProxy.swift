@@ -57,6 +57,7 @@ enum ExtensionProxy {
     private static var pacRead: [String: String] = [:]
     private static var pacReading: Set<String> = []
     private static var lastSaid = ""
+    private(set) static var authenticationRevision = 0
     /// Pages' WebRTC kept to relays (PageScripts.webrtcRelay).
     private(set) static var relayOnly = Store.settings.bool(forKey: "extensions.webrtc.relayOnly")
 
@@ -64,6 +65,7 @@ enum ExtensionProxy {
 
     /// A proxy setting set or cleared by `id`.
     static func set(by id: String, cleared: Bool) {
+        authenticationRevision += 1
         if !cleared { controller = id } else if controller == id { controller = nil }
         // Set again: a script named by address is read again, as Chrome does.
         if !cleared { pacRead = [:] }
@@ -114,6 +116,7 @@ enum ExtensionProxy {
         let said = words + passwords.keys.sorted().map { "\($0)=\(passwords[$0]!.0):\(passwords[$0]!.1.hashValue)" }.joined(separator: ",")
         if said != lastSaid {
             lastSaid = said
+            authenticationRevision += 1
             apply(configurations(for: chosen ?? [:]))
         }
     }

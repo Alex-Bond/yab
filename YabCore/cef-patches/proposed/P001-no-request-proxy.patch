@@ -1,0 +1,64 @@
+--- a/cef/include/cef_request_handler.h
++++ b/cef/include/cef_request_handler.h
+@@ -51,6 +51,9 @@
+ #include "include/cef_unresponsive_process_callback.h"
+ #include "include/cef_x509_certificate.h"
+ 
++// Experimental Yab source-build capability, absent from official CEF SDKs.
++#define CEF_YAB_NO_REQUEST_PROXY_VERSION 1
++
+ ///
+ /// Callback interface used to select a client certificate for authentication.
+ ///
+@@ -122,7 +125,21 @@
+     return false;
+   }
+ 
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
+   ///
++  /// Called on the UI thread when a frame, or a navigation in it, gets its URL
++  /// loader factory. Return false to keep Chrome's own loader path for it: no
++  /// CEF proxy on the IO thread and no header client, so no
++  /// GetResourceRequestHandler for the requests this factory carries.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool WantsResourceRequests(CefRefPtr<CefBrowser> browser,
++                                     CefRefPtr<CefFrame> frame) {
++    return true;
++  }
++#endif
++
++  ///
+   /// Called on the browser process IO thread before a resource request is
+   /// initiated. The |browser| and |frame| values represent the source of the
+   /// request. |request| represents the request contents and cannot be modified
+--- a/cef/libcef/browser/chrome/chrome_content_browser_client_cef.cc
++++ b/cef/libcef/browser/chrome/chrome_content_browser_client_cef.cc
+@@ -511,6 +511,27 @@
+     return;
+   }
+ 
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  // A page whose client has nothing to say about its requests stays on Chrome's
++  // path: every request through the proxy costs its hops on the IO thread and
++  // the network service's calls back for headers.
++  if (frame) {
++    auto browser = CefBrowserHostBase::GetBrowserForHost(frame);
++    auto client = browser ? browser->client() : nullptr;
++    auto handler = client ? client->GetRequestHandler() : nullptr;
++    if (handler && !handler->WantsResourceRequests(
++                       browser.get(), browser->GetFrameForHost(frame))) {
++      ChromeContentBrowserClient::WillCreateURLLoaderFactory(
++          browser_context, frame, render_process_id, type, request_initiator,
++          isolation_info, navigation_id, ukm_source_id, factory_builder,
++          header_client, bypass_redirect_checks, disable_secure_dns,
++          factory_override, navigation_response_task_runner,
++          is_for_network_service);
++      return;
++    }
++  }
++#endif
++
+   // Based on content/browser/devtools/devtools_instrumentation.cc
+   // WillCreateURLLoaderFactoryParams::Run.
+   network::mojom::URLLoaderFactoryOverridePtr cef_override(

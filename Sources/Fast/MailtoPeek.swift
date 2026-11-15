@@ -54,7 +54,7 @@ extension Browser {
         // As tall as it is written at the card's width, before it is shown.
         let width = min(MailtoPeek.width, max(280, view.bounds.width - 64))
         let tall = host.sizeThatFits(in: CGSize(width: width, height: 4000)).height
-        view.present(mail: host.view, owner: host, tall: tall, from: source.webKitOnly("WebKit mail peek transition", build: false))
+        view.present(mail: host.view, owner: host, tall: tall, from: source.builtPage)
         return true
     }
 
@@ -80,8 +80,8 @@ extension Browser {
         guard let id = mailtoFrom else { return }
         mailtoFrom = nil
         let source = tabs.first { $0.id == id }
-        peekView?.dismiss(to: source?.webKitOnly("WebKit mail peek transition", build: false)) {}
-        if let web = source?.webKitOnly("WebKit mail peek transition", build: false), id == activeID { web.window?.makeFirstResponder(web) }
+        peekView?.dismiss(to: source?.builtPage) {}
+        if let web = source?.builtPage, id == activeID { web.window?.makeFirstResponder(web) }
     }
 
     /// A send from over a page taken back (Undo): the mail up over the page

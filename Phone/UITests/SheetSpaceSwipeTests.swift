@@ -51,6 +51,136 @@ final class SheetSpaceSwipeTests: XCTestCase {
         attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
     }
 
+    func testGallerySwitchesSpacesWithoutClearingTabs() throws {
+        app = XCUIApplication()
+        app.launchArguments = ["-YabWorld", "mira", "-YabSearchSheet", "-YabState", "stack.gallery", "-YabNoAnim", "YES"]
+        app.launchEnvironment["YAB_HAPTICS_SILENT"] = "1"
+        app.launch()
+        XCTAssertTrue(node("tabs.gallery").waitForExistence(timeout: 30))
+        func cards() -> [String] {
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'tabs.card.'"))
+                .allElementsBoundByIndex.map(\.identifier).sorted()
+        }
+        let original = cards()
+        XCTAssertFalse(original.isEmpty)
+        try save("gallery-spaces-before")
+        // The spaces' own capsule: its names are buttons by their labels.
+        let lisbon = node("tabs.spaces").buttons["Lisbon"]
+        XCTAssertTrue(lisbon.waitForExistence(timeout: 5), "spaces must be reachable while tabs are still open")
+        lisbon.tap()
+        XCTAssertTrue(wait { current == "Lisbon" })
+        XCTAssertTrue(cards().allSatisfy { $0.hasPrefix("tabs.card.lisbon-") })
+        XCTAssertFalse(cards().isEmpty)
+        try save("gallery-spaces-lisbon")
+        node("tabs.spaces").buttons["Work"].tap()
+        XCTAssertTrue(wait { current == "Work" })
+        XCTAssertEqual(cards(), original, "switching away and back must keep every card")
+        try save("gallery-spaces-returned")
+        let picker = node("tabs.spaces")
+        XCTAssertLessThan(app.buttons["tabs.new"].frame.midX, picker.frame.midX)
+        XCTAssertGreaterThan(app.buttons["tabs.done"].frame.midX, picker.frame.midX)
+        XCTAssertLessThan(app.buttons["tabs.settings"].frame.midY, app.frame.height * 0.3)
+        // The computer: the sidebar in place, its Settings, +, capsule and Done where All Tabs' were.
+        let settings = app.buttons["tabs.settings"].frame, plus = app.buttons["tabs.new"].frame
+        let done = app.buttons["tabs.done"].frame, computer = app.buttons["tabs.sidebar"].frame
+        app.buttons["tabs.sidebar"].tap()
+        XCTAssertTrue(app.buttons["spaces.done"].waitForExistence(timeout: 5))
+        XCTAssertTrue(wait { !node("tabs.gallery").exists })
+        try save("gallery-to-sidebar")
+        XCTAssertEqual(app.buttons["newtab.settings"].frame.midX, settings.midX, accuracy: 1)
+        XCTAssertEqual(app.buttons["newtab.settings"].frame.midY, settings.midY, accuracy: 1)
+        XCTAssertEqual(app.buttons["spaces.new"].frame.midX, plus.midX, accuracy: 1)
+        XCTAssertEqual(app.buttons["spaces.done"].frame.midX, done.midX, accuracy: 1)
+        XCTAssertEqual(app.buttons["spaces.done"].frame.midY, done.midY, accuracy: 1)
+        XCTAssertEqual(node("newtab.more").frame.midY, computer.midY, accuracy: 1)
+    }
+
+    func testSwitchingSpacesPreservesTheirRows() throws {
+        try launch()
+        let original = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'newtab.tab.work-'"))
+            .allElementsBoundByIndex.map(\.identifier).sorted()
+        XCTAssertFalse(original.isEmpty)
+        for _ in 0..<2 {
+            drag(x: app.frame.width - 14, y: row.frame.midY, dx: -260)
+            XCTAssertTrue(wait { current == "Lisbon" })
+            try save("tabs-lisbon")
+            drag(x: 14, y: app.frame.height * 0.5, dx: 260)
+            XCTAssertTrue(wait { current == "Work" })
+        }
+        try save("tabs-work-returned")
+        let returned = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'newtab.tab.work-'"))
+            .allElementsBoundByIndex.map(\.identifier).sorted()
+        XCTAssertEqual(returned, original)
+    }
+
+    func testMacShortcutDoesNotAppearInAnotherSpace() throws {
+        try launch()
+        drag(x: app.frame.width - 14, y: row.frame.midY, dx: -260)
+        XCTAssertTrue(wait { current == "Lisbon" })
+        try save("mac-shortcut-lisbon")
+        let leaked = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'On your Mac now'"))
+        XCTAssertEqual(leaked.count, 0, "the Mac shortcut belongs only in its source space")
+    }
+
+    func testApprovedBottomLayout() throws {
+        try launch()
+        try save("layout")
+        checkBottomLayout()
+    }
+
+    func testApprovedBottomLayoutInLandscape() throws {
+        try launch()
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(wait { app.frame.width > app.frame.height })
+        try save("layout-landscape")
+        checkBottomLayout()
+    }
+
+    private func checkBottomLayout() {
+        let picker = node("newtab.capsule")
+        let plus = app.buttons["spaces.new"]
+        let gear = app.buttons["newtab.settings"]
+        let done = app.buttons["spaces.done"]
+        XCTAssertGreaterThan(picker.frame.midY, app.frame.height * 0.7)
+        XCTAssertLessThan(plus.frame.midX, picker.frame.midX)
+        XCTAssertGreaterThan(done.frame.midX, picker.frame.midX)
+        XCTAssertLessThan(gear.frame.midY, app.frame.height * 0.3)
+    }
+
+    func testSearchOpensInTheViewedSpaceAndKeepsIt() throws {
+        try launch()
+        drag(x: app.frame.width - 14, y: row.frame.midY, dx: -260)
+        XCTAssertTrue(wait { current == "Lisbon" })
+        try save("search-lisbon-before")
+        let input = app.textFields["field.input"]
+        app.buttons["spaces.new"].tap()
+        XCTAssertTrue(wait { app.keyboards.firstMatch.exists })
+        input.typeText("g\n")
+        XCTAssertTrue(wait { !app.keyboards.firstMatch.exists })
+        try save("search-opened")
+        app.openNewTabFromChrome()
+        // Expand the search sheet back to the spaces.
+        let start = node("search.sheet").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -350)),
+                    withVelocity: .slow, thenHoldForDuration: 0.1)
+        XCTAssertTrue(wait { current == "Lisbon" }, "search must open in the viewed space and reopen there")
+        try save("search-space-after")
+    }
+
+    func testViewedSpaceIsKeptWhenSpacesAreClosedWithoutOpeningATab() throws {
+        try launch()
+        drag(x: app.frame.width - 14, y: row.frame.midY, dx: -260)
+        XCTAssertTrue(wait { current == "Lisbon" })
+        try save("selection-before-close")
+        app.buttons["spaces.done"].tap()
+        app.openNewTabFromChrome()
+        let lift = node("search.sheet").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        lift.press(forDuration: 0.05, thenDragTo: lift.withOffset(CGVector(dx: 0, dy: -350)),
+                   withVelocity: .slow, thenHoldForDuration: 0.1)
+        try save("selection-after-reopen")
+        XCTAssertTrue(wait { current == "Lisbon" })
+    }
+
     func testEmptyAreaBelowTheListPagesFromTheCenter() throws {
         try launch()
         drag(x: app.frame.width - 14, y: row.frame.midY, dx: -260)

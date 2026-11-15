@@ -10,10 +10,8 @@ struct BottomToolbarGeometry: Equatable {
     let plus: CGRect
     let sideOpacity: CGFloat
 
-    init(size: CGSize, folded: Bool, hasNow: Bool, words: CGFloat? = nil, emptyPlus: Bool = false,
-         verticalControls: Bool? = nil, leadingRail: Bool = false) {
-        let source = ChromeGeometry(size: size, folded: folded, hasNow: hasNow, words: words, emptyPlus: emptyPlus,
-                                    verticalControls: verticalControls, leadingRail: leadingRail)
+    init(size: CGSize, folded: Bool, hasNow: Bool, words: CGFloat? = nil, verticalControls: Bool? = nil, leadingRail: Bool = false) {
+        let source = ChromeGeometry(size: size, folded: folded, hasNow: hasNow, words: words, verticalControls: verticalControls, leadingRail: leadingRail)
         back = source.back
         plus = source.space
         plate = source.plate
@@ -34,12 +32,9 @@ struct SharedBottomToolbar: View {
 
     var body: some View {
         let folded = sourceFolded
-        let empty = app.browser.tab == nil
-        let geometry = BottomToolbarGeometry(size: size, folded: folded, hasNow: app.nowItem != nil, words: app.plateWordsWidth,
-                                             emptyPlus: empty, verticalControls: app.workspace.verticalControls, leadingRail: app.workspace.leadingRail)
+        let geometry = BottomToolbarGeometry(size: size, folded: folded, hasNow: app.nowItem != nil, words: app.plateWordsWidth, verticalControls: app.workspace.verticalControls, leadingRail: app.workspace.leadingRail)
         // One frame folded or not: each piece moves inside it by its own frame.
-        let open = BottomToolbarGeometry(size: size, folded: false, hasNow: app.nowItem != nil, emptyPlus: empty,
-                                         verticalControls: app.workspace.verticalControls, leadingRail: app.workspace.leadingRail)
+        let open = BottomToolbarGeometry(size: size, folded: false, hasNow: app.nowItem != nil, verticalControls: app.workspace.verticalControls, leadingRail: app.workspace.leadingRail)
         let group = open.back.union(open.plate).union(open.plus).union(geometry.plate).insetBy(dx: -16, dy: -16)
         // Safari's fold (Motion.chromeFold): ‹ and the stack slide in toward
         // the capsule, smaller, as their glass melts (natively, below).
@@ -68,23 +63,16 @@ struct SharedBottomToolbar: View {
         ZStack(alignment: .topLeading) {
             // Folded, its glass dematerializes natively (ToolbarLeftButton):
             // a SwiftUI opacity leaves a pale disc of glass behind.
-            // The empty page has nothing to go back from, so the slot is
-            // Settings there: the foot keeps its three controls, and the way
-            // into Settings is where it is on a page's menu.
+            // The empty page has nothing to go back from.
             let hasPage = app.browser.tab != nil
-            // Not while the first run hands the screen over: the empty
-            // browser keeps all its furniture off that move (EmptyHomeLayer).
-            let settingsSlot = !hasPage && !FirstRun.shared.handsOver
-            let leftShown = hasPage || settingsSlot
-            ToolbarLeftControl(isAccessible: enabled && !sideFolded && leftShown, folded: sideFolded,
-                               showsSettings: settingsSlot)
+            ToolbarLeftControl(isAccessible: enabled && !sideFolded && hasPage, folded: sideFolded)
                 .frame(width: geometry.back.width, height: geometry.back.height)
                 .scaleEffect(shrink)
                 .position(x: geometry.back.midX + slide - group.minX, y: geometry.back.midY - group.minY)
                 .animation(reduced ? nil : Motion.chromeFold.current, value: folded)
-                .opacity(leftShown ? 1 - toNewTab : 0)
+                .opacity(hasPage ? 1 - toNewTab : 0)
                 .scaleEffect(CGFloat(1 - 0.4 * toNewTab))
-                .allowsHitTesting(enabled && !sideFolded && leftShown)
+                .allowsHitTesting(enabled && !sideFolded && hasPage)
                 .modifier(PageMenuSide(progress: sides, direction: -1))
 
             PlateGlass(size: geometry.plate.size, isPrivate: isPrivate, glassNamespace: glassNamespace,
@@ -338,16 +326,12 @@ struct ToolbarLeftControl: UIViewRepresentable {
     @Environment(AppModel.self) private var app
     let isAccessible: Bool
     var folded = false
-    /// The empty browser: the slot is Settings, not ‹ (nothing to go back
-    /// from there, and the foot would stand one control short).
-    var showsSettings = false
 
     func makeUIView(context: Context) -> ToolbarLeftButton { ToolbarLeftButton(type: .custom) }
 
     func updateUIView(_ button: ToolbarLeftButton, context: Context) {
         let owner = ChromePlusOwner(app: app)
         let isPrivate = owner.isPrivate
-        guard !showsSettings else { return settings(button, isPrivate: isPrivate, owner: owner, context: context) }
         // Where ‹ leads (Back/BackStack): the page's Back, the tab that
         // opened this one, or nowhere, its chevron dimmed.
         let route = app.backStack.route(for: app.browser.tab)
@@ -386,34 +370,6 @@ struct ToolbarLeftControl: UIViewRepresentable {
         }
     }
 
-    /// Settings in ‹'s place on the empty browser: the same glass and the
-    /// same frame, the gear instead of the chevron, and none of ‹'s menus.
-    private func settings(_ button: ToolbarLeftButton, isPrivate: Bool, owner: ChromePlusOwner, context: Context) {
-        button.overrideUserInterfaceStyle = isPrivate || context.environment.colorScheme == .dark ? .dark : .light
-        button.setAppearance(isPrivate: isPrivate, glyph: SettingsFieldRow.glyph)
-        button.setFolded(folded, animated: context.transaction.animation != nil && !context.transaction.disablesAnimations)
-        button.isAccessibilityElement = isAccessible
-        button.accessibilityElementsHidden = !isAccessible
-        button.accessibilityIdentifier = isAccessible ? "chrome.settings" : nil
-        button.accessibilityLabel = "Settings"
-        button.accessibilityHint = nil
-        button.accessibilityValue = ""
-        button.accessibilityCustomActions = nil
-        button.isEnabled = isAccessible
-        button.isUserInteractionEnabled = button.isEnabled
-        button.bindHistory(nil) { _ in [] }
-        button.setOpenerAction(nil) { false }
-        button.onTap = { [weak app, weak button] in
-            guard let app, let button, owner == ChromePlusOwner(app: app),
-                  button.isEnabled, button.window?.windowScene?.activationState == .foregroundActive,
-                  UIApplication.shared.applicationState == .active, !app.privateContentBlocked,
-                  !app.surfaces.coversChrome, !app.surfaces.settings, !app.surfaces.join,
-                  app.surfaces.chat == nil, app.surfaces.menu == nil,
-                  app.surfaces.chromeOpacity > 0.5 else { return }
-            Motion.sheetGrow.run { app.surfaces.openSettings() }
-        }
-    }
-
     static func dismantleUIView(_ button: ToolbarLeftButton, coordinator: ()) {
         button.onTap = nil
         button.isEnabled = false
@@ -425,7 +381,7 @@ struct ToolbarLeftControl: UIViewRepresentable {
 final class ToolbarLeftButton: UIButton {
     let glass = UIVisualEffectView()
     let foreground = UIImageView()
-    private var glyphShown: GlyphName?
+    private var imageMade = false
     private var privateAppearance: Bool?
     private var effect: UIGlassEffect?
     private var dimmed = false
@@ -470,7 +426,7 @@ final class ToolbarLeftButton: UIButton {
         }
     }
 
-    func setAppearance(isPrivate: Bool, dimmed: Bool = false, glyph: GlyphName = .chevronLeft) {
+    func setAppearance(isPrivate: Bool, dimmed: Bool = false) {
         if privateAppearance != isPrivate {
             privateAppearance = isPrivate
             let effect = UIGlassEffect(style: .regular)
@@ -480,11 +436,9 @@ final class ToolbarLeftButton: UIButton {
             if !folded { glass.effect = effect }
         }
         tintColor = isPrivate ? .white : .label
-        // The same slot, one glass: ‹ on a page, the gear on the empty
-        // browser, where there is nothing to go back from.
-        if glyphShown != glyph {
-            glyphShown = glyph
-            foreground.image = ChromePlusControl.image(glyph, size: Metrics.Chrome.backIcon)
+        if !imageMade {
+            imageMade = true
+            foreground.image = ChromePlusControl.image(.chevronLeft, size: Metrics.Chrome.backIcon)
         }
         self.dimmed = dimmed
         foreground.alpha = folded ? 0 : dimmed ? Metrics.Back.dimmed : 1
@@ -545,13 +499,15 @@ struct ToolbarPlateControl: UIViewRepresentable {
         button.overrideUserInterfaceStyle = privateInk || context.environment.colorScheme == .dark ? .dark : .light
         button.words.font = font
         button.words.textColor = ink
-        let words = NSMutableAttributedString(string: tab.map(PlateLabel.address) ?? "",
+        let words = NSMutableAttributedString(string: tab.map(PlateLabel.address) ?? "New Tab",
             attributes: [.font: font, .foregroundColor: ink, .kern: -0.02 * font.pointSize])
-        // Nothing in front: the plate is New Tab's +, the bare mark in a short
-        // capsule, as the screen with no tabs at all wears it. The word would
-        // say what the + already says, and make one empty foot wider than the
-        // other (ChromeGeometry.emptyPlus sizes the capsule).
-        button.setPlus(tab == nil, color: ink)
+        // The empty page: "+ New Tab", the plate is the way out of it.
+        if tab == nil, let plus = ChromePlusControl.image(.plusMedium, size: Metrics.Chrome.emptyPlus)?.withTintColor(ink, renderingMode: .alwaysOriginal) {
+            let mark = NSTextAttachment(image: plus)
+            mark.bounds = CGRect(x: 0, y: (font.capHeight - plus.size.height) / 2, width: plus.size.width, height: plus.size.height)
+            words.insert(NSAttributedString(string: " "), at: 0)
+            words.insert(NSAttributedString(attachment: mark), at: 0)
+        }
         button.words.attributedText = words
         button.words.isHidden = pagingActive
         // Translate's word ("Translating…", "Translated") stands where
@@ -626,11 +582,6 @@ final class ToolbarPlateButton: UIButton {
     private let wordsBox = HeadFadeLabel()
     var words: UILabel { wordsBox.label }
     let reader = UILabel()
-    /// Nothing in front: New Tab's + drawn as its own mark, centered in the
-    /// short capsule. A lone attachment inside the fading label measures to
-    /// nothing, so the + came out a sliver.
-    private let plus = UIImageView()
-    private var plusShown = false
     private let hold = UILongPressGestureRecognizer()
     private var onHold: (() -> Void)?
     private var heldAt: Date?
@@ -667,9 +618,7 @@ final class ToolbarPlateButton: UIButton {
         super.init(frame: frame)
         reader.numberOfLines = 1; reader.lineBreakMode = .byTruncatingTail; reader.textAlignment = .center
         reader.adjustsFontForContentSizeCategory = true
-        plus.contentMode = .center
-        plus.isHidden = true
-        for view in [wordsBox, reader, plus] {
+        for view in [wordsBox, reader] {
             view.isAccessibilityElement = false; view.accessibilityElementsHidden = true
             view.isUserInteractionEnabled = false; addSubview(view)
         }
@@ -692,27 +641,8 @@ final class ToolbarPlateButton: UIButton {
         let textWidth = min(width, ceil(words.intrinsicContentSize.width))
         wordsBox.frame = CGRect(x: center.x - textWidth / 2, y: center.y - groupHeight / 2, width: textWidth, height: wordsHeight)
         reader.frame = CGRect(x: center.x - width / 2, y: wordsBox.frame.maxY, width: width, height: hintHeight)
-        plus.frame = bounds
         wordsBox.setNeedsLayout()
-        bringSubviewToFront(wordsBox); bringSubviewToFront(reader); bringSubviewToFront(plus)
-    }
-
-    /// The plate is New Tab's + alone (no tab in front), or it is words.
-    func setPlus(_ on: Bool, color: UIColor) {
-        guard on else {
-            plusShown = false
-            plus.isHidden = true
-            wordsBox.isHidden = false
-            return
-        }
-        if !plusShown {
-            plusShown = true
-            plus.image = ChromePlusControl.image(.plusMedium, size: Metrics.Chrome.spaceEmoji)
-        }
-        plus.tintColor = color
-        plus.isHidden = false
-        wordsBox.isHidden = true
-        setNeedsLayout()
+        bringSubviewToFront(wordsBox); bringSubviewToFront(reader)
     }
 
     /// The button's own frame on the screen, which the hosting SwiftUI

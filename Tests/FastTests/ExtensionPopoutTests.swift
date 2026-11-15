@@ -77,7 +77,9 @@ struct ExtensionPopoutTests {
         #expect(made["type"] as? String == "popup")
         let popout = try #require(ExtensionPopout.open.first { $0.extensionID == context.uniqueIdentifier })
         #expect(ExtensionPopout.open.filter { $0.extensionID == context.uniqueIdentifier }.count == 1)
-        #expect(popout.window.frame.size == NSSize(width: 380, height: 450))
+        // The page as wide as asked, the frame as tall (ExtensionWindowFrame).
+        #expect(popout.shown.extensionFrame.size == NSSize(width: 380, height: 450))
+        #expect(popout.web.frame.width == 380)
         // Found again by the address it was opened at, in its own window.
         let found = try #require(made["found"] as? [[String: Any]])
         #expect(found.count == 1)

@@ -130,16 +130,12 @@ struct AgentAnswer: View {
 
     /// What `rich` made of the last few texts: a card is drawn again at
     /// every key typed in its field, and Markdown isn't parsed again for it.
-    private static var shaped: [String: AttributedString] = [:]
+    private static var shaped = RichTextCache(costLimit: 1024 * 1024, countLimit: 128)
 
     /// Markdown's inline marks (bold, code, links), the lines kept; a
     /// heading is a bold line, a list's dash a bullet.
     static func rich(_ text: String) -> AttributedString {
-        if let known = shaped[text] { return known }
-        let made = shape(text)
-        if shaped.count > 24 { shaped.removeAll() }
-        shaped[text] = made
-        return made
+        shaped.value(text) { shape(text) }
     }
 
     private static func shape(_ text: String) -> AttributedString {

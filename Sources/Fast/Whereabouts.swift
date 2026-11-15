@@ -24,48 +24,111 @@ final class Whereabouts: NSObject, CLLocationManagerDelegate {
     /// The pool's WKGeolocationManagerRef, once the provider is set.
     private var geolocation: UnsafeRawPointer?
     private var installed = false
-    private var updating = false
+    /// Who is watching: WebKit's pool (its provider's start and stop) and
+    /// Chromium's browser process (ChromiumGeolocation, CEF patch 0120).
+    /// CoreLocation updates while either is.
+    private var webKitWatching = false
+    private var chromiumWatching = false
+    private var updating: Bool { webKitWatching || chromiumWatching }
 
     private override init() {
         super.init()
+        Whereabouts.made = true
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     }
 
-    var status: CLAuthorizationStatus { manager.authorizationStatus }
+    /// Whether anything has needed where you are yet. A card's words read
+    /// macOS's answer only from a Whereabouts already made by a site's
+    /// question; drawing a card must not start CoreLocation (release 0.46.33's
+    /// QA: SharedPinsTests' call no longer floated after PageAskLifetimeTests
+    /// drew location cards, once making it also read Location Services).
+    private(set) static var made = false
+
+    var status: CLAuthorizationStatus { Store.macSaysYes ? .authorizedAlways : manager.authorizationStatus }
 
     /// What a manager says before locationd has answered it is "not
     /// determined", whatever macOS decided: on renderer-2, Location Services
     /// off, a fresh manager said so and the card asked as if macOS would.
-    /// Known once the manager's first word comes, a moment after it starts.
+    /// Known once the manager's first word comes, a second at most.
     private var known = false
     private var untilKnown: [() -> Void] = []
 
-    /// `then` once what macOS said about Yab is known (a second at most).
+    /// `then` once what macOS said about Yab is known (a second at most). A
+    /// site asked: the switch for the whole Mac is read now too, and nothing
+    /// waits for it.
     func whenKnown(_ then: @escaping () -> Void) {
+        readServices()
         guard !known else { return then() }
         untilKnown.append(then)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.nowKnown() }
     }
 
     private func nowKnown() {
+        guard !known else { return }
         known = true
         let all = untilKnown
         untilKnown = []
         for then in all { then() }
     }
 
-    /// macOS said no to Yab, or Location Services is off for the whole Mac
-    /// (CoreLocation says denied for that too).
-    var refused: Bool { status == .denied || status == .restricted }
+    /// Location Services off for the whole Mac. A copy macOS was never asked
+    /// about reads "not determined" then, not denied, and its manager may say
+    /// nothing at all (m2pro, macOS 26.6, a fresh bundle id): the card asked,
+    /// Allow asked macOS, macOS shows no window while the switch is off, and
+    /// the card said to choose Allow in a window that never came (feedback
+    /// #1971). Read off the main thread, as CoreLocation asks, once a site
+    /// asks and whenever macOS's answer moves after (the switch fires the
+    /// delegate). Nothing waits for it: a question decided before it lands
+    /// asks as usual, and the read answers one waiting on macOS's window.
+    private var servicesOff = false
+    private var reading = false, readOnce = false
+
+    private func readServices() {
+        guard !reading else { return }
+        reading = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let on = CLLocationManager.locationServicesEnabled()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.reading = false
+                if !self.readOnce || self.servicesOff == on { NSLog("Yab: Location Services %@", on ? "on" : "off") }
+                let moved = self.servicesOff == on
+                self.readOnce = true
+                self.servicesOff = !on
+                if moved { ChromiumGeolocation.answerChanged() }
+                self.answerWaiting()
+            }
+        }
+    }
+
+    /// macOS said no to Yab, or Location Services is off for the whole Mac.
+    var refused: Bool {
+        guard !Store.macSaysYes else { return false }
+        return servicesOff || status == .denied || status == .restricted
+    }
+
+    /// The questions waiting on macOS's window, answered once there is an
+    /// answer: an Allow or a no in it, or the switch off for the whole Mac.
+    private func answerWaiting() {
+        guard status != .notDetermined || refused else { return }
+        let all = waiting
+        waiting = []
+        for done in all { done(!refused) }
+        if refused, updating { fail("Location Services is off for Yab") }
+    }
 
     /// macOS's answer about Yab: asked for, with its own window, if it was
     /// never given.
     func authorize(_ done: @escaping (Bool) -> Void) {
+        if refused { return done(false) }
         switch status {
         case .notDetermined:
             waiting.append(done)
-            if waiting.count == 1 { manager.requestWhenInUseAuthorization() }
+            guard waiting.count == 1 else { return }
+            manager.requestWhenInUseAuthorization()
+            // With the switch off macOS shows no window: the read answers.
+            readServices()
         case .denied, .restricted:
             done(false)
         default:
@@ -76,11 +139,9 @@ final class Whereabouts: NSObject, CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         MainActor.assumeIsolated {
             if !known { nowKnown() }
-            guard status != .notDetermined else { return }
-            let all = waiting
-            waiting = []
-            for done in all { done(!refused) }
-            if refused, updating { fail("Location Services is off for Yab") }
+            ChromiumGeolocation.answerChanged()
+            answerWaiting()
+            if readOnce { readServices() }
         }
     }
 
@@ -128,8 +189,8 @@ final class Whereabouts: NSObject, CLLocationManagerDelegate {
         let provider = UnsafeMutablePointer<Provider>.allocate(capacity: 1)
         provider.initialize(to: Provider(
             base: Base(version: 1, info: nil),
-            start: { _, _ in MainActor.assumeIsolated { Whereabouts.shared.start() } },
-            stop: { _, _ in MainActor.assumeIsolated { Whereabouts.shared.stop() } },
+            start: { _, _ in MainActor.assumeIsolated { Whereabouts.shared.watch(webKit: true) } },
+            stop: { _, _ in MainActor.assumeIsolated { Whereabouts.shared.watch(webKit: false) } },
             accuracy: { _, high, _ in
                 MainActor.assumeIsolated {
                     Whereabouts.shared.manager.desiredAccuracy = high ? kCLLocationAccuracyBest : kCLLocationAccuracyHundredMeters
@@ -138,23 +199,41 @@ final class Whereabouts: NSObject, CLLocationManagerDelegate {
         set(geolocation, UnsafeRawPointer(provider))
     }
 
-    /// A page started watching (WebKit calls it for the first one only).
-    private func start() {
-        guard !updating else { return }
-        updating = true
-        // What CoreLocation knew a moment ago answers at once; a fresh fix follows.
-        if let known = manager.location, -known.timestamp.timeIntervalSinceNow < 120 { tell(known) }
-        manager.startUpdatingLocation()
+    /// WebKit's pool started or stopped watching (it calls for the first
+    /// page and after the last).
+    private func watch(webKit on: Bool) {
+        let was = updating
+        webKitWatching = on
+        updatesChanged(was)
+        if on, let known = recent { tell(known) }
     }
 
-    private func stop() {
-        guard updating else { return }
-        updating = false
-        manager.stopUpdatingLocation()
+    /// Chromium's browser process started or stopped watching
+    /// (ChromiumGeolocation).
+    func watch(chromium on: Bool, high: Bool) {
+        let was = updating
+        chromiumWatching = on
+        if on, high { manager.desiredAccuracy = kCLLocationAccuracyBest }
+        updatesChanged(was)
+        if on, let known = recent { tell(known) }
+    }
+
+    /// What CoreLocation knew a moment ago answers at once; a fresh fix follows.
+    private var recent: CLLocation? {
+        manager.location.flatMap { -$0.timestamp.timeIntervalSinceNow < 120 ? $0 : nil }
+    }
+
+    private func updatesChanged(_ was: Bool) {
+        if updating, !was { manager.startUpdatingLocation() }
+        if !updating, was {
+            manager.stopUpdatingLocation()
+            manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        }
     }
 
     private func tell(_ location: CLLocation) {
-        guard updating, let geolocation,
+        if chromiumWatching { ChromiumGeolocation.tell(location) }
+        guard webKitWatching, let geolocation,
               let changed = Self.fn("WKGeolocationManagerProviderDidChangePosition", (@convention(c) (Ref, Ref) -> Void).self)
         else { return }
         let time = location.timestamp.timeIntervalSince1970
@@ -177,7 +256,8 @@ final class Whereabouts: NSObject, CLLocationManagerDelegate {
     }
 
     private func fail(_ message: String) {
-        guard updating, let geolocation else { return }
+        if chromiumWatching { ChromiumGeolocation.fail(message, denied: refused) }
+        guard webKitWatching, let geolocation else { return }
         if let failed = Self.fn("WKGeolocationManagerProviderDidFailToDeterminePositionWithErrorMessage", (@convention(c) (Ref, Ref) -> Void).self),
            let make = Self.fn("WKStringCreateWithUTF8CString", (@convention(c) (UnsafePointer<CChar>) -> Ref?).self),
            let text = message.withCString({ make($0) }) {

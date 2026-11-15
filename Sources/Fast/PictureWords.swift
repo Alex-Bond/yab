@@ -143,6 +143,9 @@ final class PictureReader {
     private var reading: [String: Task<PictureWords?, Never>] = [:]
     private var marking: [String: Task<PictureWords?, Never>] = [:]
     private static let keep = 300
+    /// ⌘F's readings: the fast ones, then the accurate ones, one at a time each.
+    private let quick = ReadingLane()
+    private let careful = ReadingLane()
     /// Past this many pixels a picture is read smaller: words big enough
     /// to read stay big enough.
     private static let side = 2400
@@ -199,11 +202,18 @@ final class PictureReader {
         if let words = texts[src], words.whole, words.isEmpty { return words }
         if let task = marking[src] { return await task.value }
         let task = Task<PictureWords?, Never> {
-            guard let image = await Self.image(url, from: tab) else { return nil }
-            let fast = await PictureWords.read(image, whole: true, fine: false)
+            // One picture at a time, each reading in its own lane (#1991):
+            // ⌘F asks for thirty, and thirty of Vision's readings at once,
+            // each with its accurate one after, starved the rest of the Mac:
+            // Chromium's pages stopped scrolling and answering for 40 s.
+            guard let read = await self.quick.run({ () async -> (CGImage, PictureWords)? in
+                guard let image = await Self.image(url, from: tab) else { return nil }
+                return (image, await PictureWords.read(image, whole: true, fine: false))
+            }) else { return nil }
+            let (image, fast) = read
             self.keep(src, mark: fast)
             Task {
-                let fine = await PictureWords.read(image, whole: true)
+                let fine = await self.careful.run { await PictureWords.read(image, whole: true) }
                 self.keep(src, mark: fine)
                 self.keep(src, text: fine)
                 if fine.text != fast.text { finer(fine) }
@@ -251,7 +261,7 @@ final class PictureReader {
     }
 
     private static func image(_ url: URL, from tab: Tab) async -> CGImage? {
-        guard let data = await Browser.imageData(url, from: tab) else { return nil }
+        guard let data = await Browser.imageData(url, from: tab, largest: side) else { return nil }
         return await aside { decode(data) }
     }
 
@@ -273,5 +283,18 @@ final class PictureReader {
             kCGImageSourceThumbnailMaxPixelSize: side,
         ]
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+}
+
+/// One at a time, in the order asked: a reading waits for the one before.
+@MainActor
+final class ReadingLane {
+    private var busy = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func run<T>(_ work: () async -> T) async -> T {
+        if busy { await withCheckedContinuation { waiting.append($0) } } else { busy = true }
+        defer { if waiting.isEmpty { busy = false } else { waiting.removeFirst().resume() } }
+        return await work()
     }
 }

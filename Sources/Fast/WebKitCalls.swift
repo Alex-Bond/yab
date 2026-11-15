@@ -1,13 +1,5 @@
 import WebKit
 
-extension PageHandle {
-    /// Floater still owns a WebKit view; migrate its native view lifecycle
-    /// separately from ordinary call controls and scripts.
-    func webKitPutOut(_ tab: Tab, in browser: Browser) {
-        if let webKit { browser.putOut(tab, web: webKit) }
-    }
-}
-
 extension Tab {
     static let screenKey = "_displayCaptureState"
     /// The screen or a window shown by the page, as WebKit has it now.

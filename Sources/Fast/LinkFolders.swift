@@ -184,12 +184,13 @@ enum LinkFolders {
             said = await namer.ask("Tabs:\n" + list, within: 30) ?? ""
         } else if cli == "codex" {
             guard let permit = ProviderConsent.shared.permit("codex") else { return nil }
-            let found = await Shell.find()
-            guard permit.valid, let codex = found.codex else { return nil }
+            let found = await AgentLaunch.environment()
+            guard permit.valid, let launch = AgentLaunch.resolve(cli, in: found) else { return nil }
+            let codex = launch.binary
             let prompt = instructions + "\n\nTabs:\n" + list + (emoji ? "\n\nReply with the emoji and the name and nothing else." : "\n\nReply with the name and nothing else.")
             let room = Store.file("agent/folder-names")
             try? FileManager.default.createDirectory(at: room, withIntermediateDirectories: true)
-            let env = PlanAccounts.shared.env(PlanAccounts.shared.pick(cli), base: found.env)
+            let env = launch.env
             let out = room.appendingPathComponent("name-\(UUID().uuidString).txt")
             defer { try? FileManager.default.removeItem(at: out) }
             // No tools: a page's title can say anything (PlanText).

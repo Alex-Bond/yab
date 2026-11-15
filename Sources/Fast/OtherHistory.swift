@@ -24,8 +24,15 @@ enum OtherHistory {
     static let broughtFromKey = "bring.from"
 
     /// The browsers whose history is read now, among those on this Mac.
-    static func sources(among installed: [Chromium.Source] = Chromium.installed()) -> [Chromium.Source] {
-        allowed(installed, choices: choices, ownOnly: ownOnly)
+    static func sources(among installed: @autoclosure () -> [Chromium.Source] = Chromium.installed()) -> [Chromium.Source] {
+        sources(choices: choices, ownOnly: ownOnly, discover: installed)
+    }
+
+    static func sources(choices: [String: Bool], ownOnly: Bool, discover: () -> [Chromium.Source]) -> [Chromium.Source] {
+        // An eager default argument used to discover every browser even
+        // when none of their histories could be read.
+        guard !ownOnly, choices.values.contains(true) else { return [] }
+        return allowed(discover(), choices: choices, ownOnly: false)
     }
 
     /// Whether this browser's history is read.

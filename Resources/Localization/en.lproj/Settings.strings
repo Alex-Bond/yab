@@ -21,6 +21,7 @@
 "Address" = "Address";
 "Address bar" = "Address bar";
 "Ads and promos" = "Ads and promos";
+"After a site's alias in the field" = "After a site's alias in the field";
 "Agents" = "Agents";
 "Agents ask first" = "Agents ask first";
 "Agents in One Row (Experimental)" = "Agents in One Row (Experimental)";
@@ -80,6 +81,7 @@
 "Clear cache" = "Clear cache";
 "Clear history" = "Clear history";
 "Close" = "Close";
+"Keyboard shortcut" = "Keyboard shortcut";
 "Overwrite" = "Overwrite";
 "Close agent tabs" = "Close agent tabs";
 "Close tabs you haven't opened in" = "Close tabs you haven't opened in";
@@ -393,3 +395,7 @@
 
 "Rules override the default. Recent space uses the space open when a link arrives. Click a rule to edit or remove it." = "Rules override the default. Recent space uses the space open when a link arrives. Click a rule to edit or remove it.";
 "Engines for Sites" = "Engines for Sites";
+"Energy Saver" = "Energy Saver";
+"When battery is at 20% or lower" = "When battery is at 20% or lower";
+"When unplugged" = "When unplugged";
+"Saves battery by limiting background activity and visual effects, such as smooth scrolling and video frame rates." = "Saves battery by limiting background activity and visual effects, such as smooth scrolling and video frame rates.";

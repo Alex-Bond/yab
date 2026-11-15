@@ -33,14 +33,12 @@ enum AgentPage {
     static func run(_ tab: Tab, _ body: String, _ arguments: [String: Any] = [:], frame: PageFrame? = nil, _ done: @escaping @MainActor (Result<Any?, Error>) -> Void) {
         let page = tab.page
         let execute = {
-            page.call(tab.engineKind == .chromium ? AgentSecrets.guardBody + body : body, arguments: arguments, in: .agent, frame: frame) { result in
+            page.call(AgentSecrets.guardBody + body, arguments: arguments, in: .agent, frame: frame) { result in
                 MainActor.assumeIsolated {
-                    if page.engine == .chromium {
-                        Task { @MainActor in
-                            guard await AgentSecrets.check(page) else { done(.failure(AgentSecrets.Refused())); return }
-                            finish(result)
-                        }
-                    } else { finish(result) }
+                    _ = Task<Void, Never> { @MainActor in
+                        guard await AgentSecrets.check(page) else { done(.failure(AgentSecrets.Refused(page))); return }
+                        finish(result)
+                    }
                 }
             }
         }
@@ -50,9 +48,8 @@ enum AgentPage {
             case .failure(let error): done(.failure(Said(error)))
             }
         }
-        guard page.engine == .chromium else { execute(); return }
         Task { @MainActor in
-            guard await AgentSecrets.check(page) else { done(.failure(AgentSecrets.Refused())); return }
+            guard await AgentSecrets.check(page) else { done(.failure(AgentSecrets.Refused(page))); return }
             execute()
         }
     }
@@ -250,6 +247,17 @@ enum AgentPage {
     /// what changed from the last look.
     static func read(_ tab: Tab, interactive: Bool, ref: String?, since: Bool,
                      takeMemoryNotice: @escaping @MainActor () -> String?, _ done: @escaping @MainActor ([String: Any]) -> Void) {
+        Task { @MainActor in
+            do {
+                if try await AgentPDF.isDocument(tab.page) { AgentPDF.read(tab, snapshot: true, done: done) }
+                else { readHTML(tab, interactive: interactive, ref: ref, since: since, takeMemoryNotice: takeMemoryNotice, done) }
+            } catch { done(["error": error.localizedDescription]) }
+        }
+    }
+
+    private static func readHTML(_ tab: Tab, interactive: Bool, ref: String?, since: Bool,
+                                 takeMemoryNotice: @escaping @MainActor () -> String?,
+                                 _ done: @escaping @MainActor ([String: Any]) -> Void) {
         let key = ObjectIdentifier(tab)
         if let question = asked[key] { done(["dialog": question.said, "url": tab.address?.absoluteString ?? "", "title": tab.title]); return }
         // A ref inside a frame reads that frame.
@@ -568,6 +576,9 @@ enum AgentPage {
     function cardNumber(el) {
       const said = called(el);
       if (/cc-number|card.?num|cc.?num|cardnumber/.test(said) && !/name|holder|exp/.test(said)) return true;
+      // A Luhn-valid number in a box named for something else (a Cloud
+      // project number, an account or order id) is not a card.
+      if (/account|project|order|phone|tracking|invoice|customer|\\bid\\b|routing|iban/.test(said)) return false;
       const d = (el.value || '').replace(/[\\s-]/g, '');
       return /^\\d+$/.test(d) && luhn(d);
     }
@@ -702,11 +713,14 @@ enum AgentPage {
       for (const f of docs[i].querySelectorAll('iframe')) { let d = null; try { d = f.contentDocument; } catch (e) {} if (d) docs.push(d); }
     }
     const q = s => docs.some(d => [...d.querySelectorAll(s)].some(shown));
-    if (q('iframe[src*="recaptcha"],iframe[src*="hcaptcha"],iframe[src*="challenges.cloudflare"],iframe[src*="arkoselabs"],iframe[title*="captcha" i],#cf-challenge-running'))
+    // reCAPTCHA v3's invisible badge sits on ordinary forms and asks nothing.
+    if (q('iframe[src*="recaptcha"]:not([src*="size=invisible"]),iframe[src*="hcaptcha"],iframe[src*="challenges.cloudflare"],iframe[src*="arkoselabs"],iframe[title*="captcha" i],#cf-challenge-running'))
       needs = 'captcha';
     else if (q('input[autocomplete="one-time-code"],input[name*="otp" i],input[id*="totp" i],input[name*="code" i][inputmode="numeric"]'))
       needs = 'a one-time code';
-    else if (q('input[type="password"]:not([autocomplete="new-password"])'))
+    // One password box is a sign-in (or a confirm-access step). A page with
+    // several is changing a password in settings: the agent's to fill.
+    else if (docs.reduce((n, d) => n + [...d.querySelectorAll('input[type="password"]:not([autocomplete="new-password"])')].filter(shown).length, 0) === 1)
       needs = 'a password';
     // The other ways in it offers: Continue with Google, GitHub and the like.
     // A bare provider's name counts only beside a sign-in form, not in a footer.

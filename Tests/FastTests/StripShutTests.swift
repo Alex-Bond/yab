@@ -176,6 +176,30 @@ struct StripShutTests {
         }
     }
 
+    /// Register 2551: in full screen with the column put away a page alone
+    /// has the screen edge to edge, but the two halves of a pair stay cards
+    /// on the space's color, round and between them, as in a window.
+    @MainActor @Test func aPairStaysCardsInFullScreen() async throws {
+        try await keeping {
+            try await withBrowser { browser in
+                browser.prefs.sidebar = true
+                browser.prefs.sideShut = true
+                browser.fullScreen = true
+                #expect(browser.tabsAway)
+                #expect(browser.pageSquare)
+                let other = Tab()
+                other.restore(url: URL(string: "https://strip-shut.test/other")!, title: "Other")
+                browser.prepare(other)
+                browser.lay(browser.tabs + [other])
+                browser.stagePair = Pair(first: browser.activeID!, second: other.id)
+                #expect(browser.pageShared)
+                #expect(!browser.pageSquare)
+                browser.stagePair = nil
+                browser.fullScreen = false
+            }
+        }
+    }
+
     /// Two quick presses are two changes, the second undoing the first,
     /// pressed before the first has moved anything or while it moves.
     @MainActor @Test func twoQuickPressesUndoEachOther() async throws {

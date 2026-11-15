@@ -110,23 +110,18 @@ s.was { color: var(--muted); text-decoration: line-through; text-decoration-colo
 
 /* cards: people, what forms get */
 .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .card { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px;
   background: var(--sheet); box-shadow: inset 0 0 0 1px var(--hairline); min-width: 0; scroll-margin-top: 80px; }
-/* your people: a row each, the whole note under the name */
-.cards.people { grid-template-columns: minmax(0, 1fr); gap: 2px; }
-.card.person { grid-template-columns: 34px minmax(0, 1fr) auto; align-items: start; padding: 8px; margin: 0 -8px; border-radius: 10px; background: none; box-shadow: none; }
-.card.person:hover { background: var(--hover); }
+.card.person { grid-template-columns: 34px minmax(0, 1fr); gap: 10px; }
 .card .k { display: block; font-size: 12px; color: var(--muted); }
 .card .v { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card.person .v { font-weight: 600; font-size: 14px; white-space: normal; width: fit-content; max-width: 100%; }
-.card .n { display: block; font-size: 13px; line-height: 1.45; color: var(--muted); text-wrap: pretty; max-width: 68ch; }
+.card.person .v { font-weight: 600; font-size: 14px; }
+.card .n { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .from { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); }
 .card .from .logo { width: 12px; height: 12px; border-radius: 3px; }
 .card .acts { position: absolute; right: 8px; top: 8px; display: none; gap: 4px; align-items: center; padding: 2px; border-radius: 9px; background: var(--sheet); }
 .card:hover .acts { display: flex; }
-/* a person's Fix and Cross Out keep their place, so pointing at a row never rewraps its note */
-.card.person .acts { position: static; display: flex; visibility: hidden; padding: 0; margin-top: 4px; background: none; }
-.card.person:hover .acts { visibility: visible; }
 .card.gone .v, .card.gone .k, .card.gone .ava { opacity: .42; }
 .card.lit { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--pen) 40%, transparent); }
 .ava { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: #fff; font: 600 13px var(--sans); overflow: hidden; }
@@ -217,7 +212,7 @@ s.was { color: var(--muted); text-decoration: line-through; text-decoration-colo
   .sheet { padding: 36px 20px 100px; }
   .ttl { font-size: 36px; }
   .story p { font-size: 16.5px; }
-  .cards { grid-template-columns: minmax(0, 1fr); }
+  .cards, .cards.three { grid-template-columns: minmax(0, 1fr); }
   .ph p { display: none; }
   .doo { display: none; }
   .kind { grid-template-columns: 34px minmax(0, 1fr); }
@@ -446,7 +441,7 @@ function render(s, anim) {
   const also = withGone(s.also || [], 'also');
   if (also.length) h += `<div class="sub">Also in your notes</div>${also.map(row).join('')}`;
   const ps = withGone(people, 'people');
-  if (ps.length) h += `<div class="sub">Your people${s.morePeople ? ` · ${ps.length} of ${ps.length + s.morePeople}` : ''}</div><div class="cards people">${ps.map(person).join('')}</div>` +
+  if (ps.length) h += `<div class="sub">Your people${s.morePeople ? ` · ${ps.length} of ${ps.length + s.morePeople}` : ''}</div><div class="cards three">${ps.map(person).join('')}</div>` +
     (s.morePeople ? `<p class="more">And ${s.morePeople} more <button type="button" class="inline" data-act="memory">in Memory</button></p>` : '');
   h += '</section>';
 

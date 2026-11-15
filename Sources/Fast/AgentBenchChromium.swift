@@ -19,7 +19,7 @@ extension Bench {
                         checks += 1
                         let allowed = await AgentSecrets.check(page)
                         if checks == 1 {
-                            _ = try? await page.call("document.body.innerHTML='<h1>Recovery phrase</h1><p>SYNTHETIC_WORDS_ONLY</p>'; return true;", in: .agent)
+                            _ = try? await page.call("document.body.innerHTML='<h1>Import wallet</h1><input name=seed_phrase value=SYNTHETIC_WORDS_ONLY>'; return true;", in: .agent)
                         }
                         return allowed
                     }

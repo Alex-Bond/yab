@@ -1,5 +1,5 @@
 import XCTest
-import YabUpdate
+@testable import YabUpdate
 @testable import Fast
 
 /// The appcast as the site writes it, the rollout's turn on a fixed number
@@ -47,6 +47,52 @@ final class UpdaterTests: XCTestCase {
         // Without milliseconds too, as a hand-written file has it.
         XCTAssertEqual(Updater.parse(appcast(["published": "2026-10-05T10:00:00Z"]), allowingHTTP: false)?.published,
                        at("2026-10-05T10:00:00Z"))
+    }
+
+    /// Captured from the public Nightly appcast on 2026-11-03. The site
+    /// exposes camelCase rolloutHours; rollout_hours is a database column.
+    func testPublished0467FeedCanReplace0466() throws {
+        let data = Data(#"""
+        {"version":"0.46.7","build":202611030445,
+         "url":"https://8hauzhgbhxiipn9a.public.blob.vercel-storage.com/releases/yab-0.46.7-202611030445.zip",
+         "dmg":"https://8hauzhgbhxiipn9a.public.blob.vercel-storage.com/releases/yab-0.46.7-202611030445.dmg",
+         "sha256":"7d4bab38a44bb4a79ebff34c210a7602df73376a951d8d8ac8467f5fa0cc75ec",
+         "arch":"universal","minimumSystemVersion":"15.4","critical":false,
+         "published":"2026-11-03T15:15:41.470Z"}
+        """#.utf8)
+        let release = try XCTUnwrap(Updater.parse(data, allowingHTTP: false, architecture: "arm64"))
+        XCTAssertTrue(release.isUpdate(from: "0.46.6", build: 202611030107, asked: true))
+        XCTAssertEqual(release.rolloutHours, 0)
+        XCTAssertNotNil(release.published)
+        XCTAssertEqual(release.sha256, "7d4bab38a44bb4a79ebff34c210a7602df73376a951d8d8ac8467f5fa0cc75ec")
+        XCTAssertNil(Updater.Settle.wait(release, dice: 0.99, since: at("2026-11-03T15:00:00Z"),
+                                        now: at("2026-11-03T16:00:00Z"), asked: false, nightly: true))
+    }
+
+    func testOlderEligibleFeedCannotDowngradeANightlyCopy() throws {
+        // Held releases do not appear in the server response. Stable, or
+        // Nightly when its newest build is held, can name an older release.
+        let release = try XCTUnwrap(Updater.parse(appcast([
+            "version": "0.45.2", "build": 202611011012, "rolloutHours": 4,
+            "published": "2026-11-03T00:12:31.192Z",
+        ]), allowingHTTP: false))
+        XCTAssertEqual(release.rolloutHours, 4)
+        XCTAssertFalse(release.isUpdate(from: "0.46.6", build: 202611030107, asked: true))
+        XCTAssertFalse(release.isUpdate(from: "0.46.6", build: 202611030107, asked: false))
+    }
+
+    func testExplicitChannelSelectionAcceptsOnlyTheSelectedOlderBuild() throws {
+        let stable = 202611011012, nightly = 202611040850
+        XCTAssertThrowsError(try Swap.checkBuild(stable, current: nightly, selected: stable))
+        XCTAssertNoThrow(try Swap.checkBuild(stable, current: nightly, selected: stable, allowDowngrade: true))
+        XCTAssertThrowsError(try Swap.checkBuild(nightly, current: nightly, selected: stable, allowDowngrade: true))
+        XCTAssertThrowsError(try Swap.checkBuild(0, current: nightly, selected: 0, allowDowngrade: true))
+        XCTAssertThrowsError(try Swap.checkBuild(nightly, current: nightly, selected: nightly, allowDowngrade: true))
+        // A downloaded Nightly waiting for restart must also yield to Stable.
+        XCTAssertNoThrow(try Swap.checkBuild(stable, current: nightly, staged: nightly + 1,
+                                           selected: stable, allowDowngrade: true))
+        XCTAssertThrowsError(try Swap.checkBuild(stable, current: nightly, staged: nightly + 1, selected: stable))
+        XCTAssertNoThrow(try Swap.checkBuild(nightly + 2, current: nightly, staged: nightly + 1, selected: nightly + 2))
     }
 
     func testAPlainFileIsAPlainRelease() throws {
@@ -448,6 +494,25 @@ final class UpdaterTests: XCTestCase {
         XCTAssertEqual(Updater.Failure.reason(NSError(domain: "x", code: 1)), "other")
     }
 
+    /// Alpha chat, 0.46.25: a download cut off once sent Update to the
+    /// 280 MB disk image in the browser until Yab was quit. Only a Mac where
+    /// no update can go in is offered the disk image; any other failure goes
+    /// back to none, so Check Now and the next check try again in place.
+    func testOnlyAMacThatCanNeverSwapIsSentToTheDiskImage() {
+        let next = release(202611052256, version: "0.46.25")
+        XCTAssertEqual(Updater.landing(next, failure: nil), .ready(next))
+        XCTAssertEqual(Updater.landing(next, failure: "readOnly"), .offered(next))
+        XCTAssertEqual(Updater.landing(next, failure: "unsignedHere"), .offered(next))
+        let passing = Swap.Refused.allCases.map(\.rawValue).filter { !Updater.Failure.lasting.contains($0) }
+            + [Updater.Failure.reason(URLError(.networkConnectionLost)),
+               Updater.Failure.reason(CocoaError(.fileWriteOutOfSpace)),
+               Updater.Failure.reason(NSError(domain: "x", code: 1))]
+        XCTAssertTrue(passing.contains("network") && passing.contains("download") && passing.contains("move"))
+        for reason in passing {
+            XCTAssertEqual(Updater.landing(next, failure: reason), .none, reason)
+        }
+    }
+
     func testAFailureIsSaidOnceThenForgotten() {
         let feed = URL(string: "https://yetanotherbrowser.com/appcast.json")!
         XCTAssertNil(Updater.Failure.pending(in: defaults))
@@ -513,7 +578,11 @@ final class UpdaterTests: XCTestCase {
         try bundle(running, build: 202610241200)
         try bundle(place, build: 202610252100)
         try bundle(fresh, build: 202610260758)
-        try Swap.replace(202610252100, with: fresh, scratch: scratch, at: place, identifier: "dev.test.yab")
+        var registrations: [(URL, Bool)] = []
+        try Swap.replace(202610252100, with: fresh, scratch: scratch, at: place, identifier: "dev.test.yab",
+                         registrationChanged: { registrations.append(($0, $1)) })
+        XCTAssertEqual(registrations.map { $0.0.path }, [fresh.path, scratch.appendingPathComponent("replaced.app").path, place.path])
+        XCTAssertEqual(registrations.map(\.1), [true, true, false])
         XCTAssertEqual(buildOf(place), "202610260758")
         XCTAssertEqual(buildOf(running), "202610241200")
         XCTAssertEqual(buildOf(scratch.appendingPathComponent("replaced.app")), "202610252100")
@@ -530,6 +599,23 @@ final class UpdaterTests: XCTestCase {
         XCTAssertThrowsError(try Swap.replace(202610252100, with: fresh, scratch: scratch, at: place, identifier: "dev.test.yab"))
         XCTAssertEqual(buildOf(place), "202610252100")
         XCTAssertEqual(buildOf(fresh), "202610260758")
+    }
+
+    func testFailedReplacementDoesNotUnregisterTheInstalledApp() throws {
+        let root = try folder()
+        let place = root.appendingPathComponent("Yab.app")
+        let scratch = root.appendingPathComponent("scratch")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        try bundle(place, build: 202610252100)
+        let missing = scratch.appendingPathComponent("missing.app")
+        var registrations: [(URL, Bool)] = []
+        XCTAssertThrowsError(try Swap.replace(202610252100, with: missing, scratch: scratch, at: place,
+                                             identifier: "dev.test.yab",
+                                             registrationChanged: { registrations.append(($0, $1)) }))
+        XCTAssertEqual(buildOf(place), "202610252100")
+        XCTAssertEqual(registrations.map { $0.0.path }, [missing.path])
+        XCTAssertEqual(registrations.map(\.1), [true])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratch.appendingPathComponent("replaced.app").path))
     }
 
     func testTheSetAsideBundleGoesOnlyWithTheAppInPlace() throws {

@@ -223,6 +223,16 @@ final class AgentFiles {
     return { done: 'drop', count: files.length };
     """
 
+    /// The file field ref means (itself, a label's, inside or beside it), or
+    /// with no ref the page's last: the element itself, for Chromium's
+    /// DOM.setFileInputFiles to fill by path. Null when there is none.
+    static let field = deep + """
+    const S = globalThis.__yab;
+    const el = ref && S ? S.refs.get(ref) : null;
+    if (ref && (!el || !el.isConnected)) throw new Error('stale ref ' + ref + ', take a new snapshot');
+    return fieldFor(el) || (el ? null : deepFiles(document.documentElement).pop() || null);
+    """
+
     /// The ref's own file field (or one beside it), clicked in script,
     /// which opens the picker yab answers; or where to click with the
     /// mouse, for a button that opens one itself.

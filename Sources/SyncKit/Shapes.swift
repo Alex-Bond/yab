@@ -40,6 +40,7 @@ public struct SyncSpace: Equatable, Sendable, Identifiable {
     /// Its emoji or a Mac's symbol name.
     public var icon: String
     public var ownSignIns: Bool
+    public var signInWith: String?
     public var paint: SyncPaint?
     /// The other browser's place it was brought in from, "Arc:<id>".
     public var origin: String?
@@ -59,12 +60,13 @@ public struct SyncSpace: Equatable, Sendable, Identifiable {
     public var isFirst: Bool { id.uppercased() == SyncCollection.firstSpace }
 
     public init(id: String, name: String, icon: String, ownSignIns: Bool = false, paint: SyncPaint? = nil, origin: String? = nil, order: String? = nil,
-                search: String? = nil, searchCustom: String? = nil, iconChoice: String? = nil, iconChoiceID: String? = nil) {
+                search: String? = nil, searchCustom: String? = nil, iconChoice: String? = nil, iconChoiceID: String? = nil, signInWith: String? = nil) {
         self.id = id; self.name = name; self.icon = icon; self.ownSignIns = ownSignIns
         self.paint = paint; self.origin = origin; self.order = order
         self.search = search; self.searchCustom = searchCustom
         self.iconChoice = iconChoice
         self.iconChoiceID = iconChoiceID
+        self.signInWith = signInWith
     }
 
     /// As SyncShapes.spaces(from:) reads one: a UUID and a name, or nothing.
@@ -75,7 +77,7 @@ public struct SyncSpace: Equatable, Sendable, Identifiable {
                   paint: record["paint"].flatMap(SyncPaint.init), origin: record["origin"]?.string,
                   order: record["order"]?.string,
                   search: record["search"]?.string, searchCustom: record["searchCustom"]?.string,
-                  iconChoice: record["iconChoice"]?.string, iconChoiceID: record["iconChoiceID"]?.string)
+                  iconChoice: record["iconChoice"]?.string, iconChoiceID: record["iconChoiceID"]?.string, signInWith: record["signInWith"]?.string)
     }
 
     /// As SyncShapes.spaces(_:orders:) writes one.
@@ -84,6 +86,7 @@ public struct SyncSpace: Equatable, Sendable, Identifiable {
             "name": .string(name),
             "icon": .string(icon),
             "ownSignIns": .bool(ownSignIns),
+            "signInWith": Value(signInWith),
             "paint": paint?.raw ?? .null,
             "origin": Value(origin),
             "order": Value(order),
@@ -211,12 +214,29 @@ public struct SyncTab: Equatable, Sendable, Identifiable {
 public struct SyncIcon: Equatable, Sendable, Identifiable {
     public let id: String
     public let data: Data
+    /// Present only for a public site icon; custom artwork has no origin.
+    public let origin: URL?
 
     public init?(_ record: Record) {
         guard record.collection == SyncCollection.icon, record.alive(), Self.validName(record.id),
               let encoded = record["data"]?.string, encoded.utf8.count <= 64_000,
               let data = Data(base64Encoded: encoded), !data.isEmpty, data.count < 48_000 else { return nil }
+        if let address = record["origin"]?.string {
+            guard let url = URL(string: address), let normalized = Self.siteOrigin(url), normalized.absoluteString == address else { return nil }
+            origin = normalized
+        } else { origin = nil }
         id = record.id; self.data = data
+    }
+
+    public static func siteOrigin(_ url: URL) -> URL? {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: true),
+              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = parts.host?.lowercased(), !host.isEmpty,
+              parts.user == nil, parts.password == nil else { return nil }
+        var result = URLComponents()
+        result.scheme = scheme; result.host = host
+        if let port = parts.port, !(scheme == "http" && port == 80), !(scheme == "https" && port == 443) { result.port = port }
+        return result.url
     }
 
     public static func validName(_ name: String) -> Bool {
@@ -369,6 +389,8 @@ public struct SyncBookmark: Equatable, Sendable, Identifiable {
     /// Nil for a folder.
     public var url: String?
     public var added: Double?
+    public var space: String?
+    public var importKey: String?
     /// A folder's bookmarks, in order, when read as a tree.
     public var children: [SyncBookmark]?
 
@@ -379,12 +401,12 @@ public struct SyncBookmark: Equatable, Sendable, Identifiable {
         guard record.alive(), UUID(uuidString: record.id) != nil else { return nil }
         let folder = record["folder"]?.bool == true || record["url"] == nil
         self.init(id: record.id, parent: record["parent"]?.string ?? SyncCollection.root, order: record["order"]?.string,
-                  title: record["title"]?.string ?? "", url: folder ? nil : record["url"]?.string, added: record["added"]?.number)
+                  title: record["title"]?.string ?? "", url: folder ? nil : record["url"]?.string, added: record["added"]?.number, space: record["space"]?.string, importKey: record["importKey"]?.string)
     }
 
     public init(id: String = UUID().uuidString, parent: String = SyncCollection.root, order: String? = nil, title: String, url: String?,
-                added: Double? = nil, children: [SyncBookmark]? = nil) {
-        self.id = id; self.parent = parent; self.order = order; self.title = title; self.url = url; self.added = added; self.children = children
+                added: Double? = nil, children: [SyncBookmark]? = nil, space: String? = nil, importKey: String? = nil) {
+        self.id = id; self.parent = parent; self.order = order; self.title = title; self.url = url; self.added = added; self.children = children; self.space = space; self.importKey = importKey
     }
 
     /// As SyncShapes.bookmarks writes one.
@@ -396,6 +418,8 @@ public struct SyncBookmark: Equatable, Sendable, Identifiable {
             "url": Value(url),
             "folder": isFolder ? .bool(true) : .null,
             "added": Value(added),
+            "space": Value(space),
+            "importKey": Value(importKey),
         ]
     }
 }
@@ -564,7 +588,7 @@ public enum RecordShapes {
                 let folder = record["folder"]?.bool == true || record["url"] == nil
                 return SyncBookmark(id: node.id, parent: node.parent ?? root, order: node.order, title: record["title"]?.string ?? "",
                                     url: folder ? nil : record["url"]?.string, added: record["added"]?.number,
-                                    children: folder ? level(node.id) : nil)
+                                    children: folder ? level(node.id) : nil, space: record["space"]?.string, importKey: record["importKey"]?.string)
             }
         }
         return level(root)

@@ -27,6 +27,7 @@ struct Veil: Codable, Identifiable, Equatable {
 
 @MainActor
 final class Curtain: ObservableObject {
+    static let shared = Curtain()
     @Published private(set) var byHost: [String: [Veil]] = [:]
     private var saving = false
 
@@ -83,12 +84,16 @@ final class Curtain: ObservableObject {
             .joined(separator: "\n")
     }
 
+    var styles: [String: String] {
+        byHost.keys.reduce(into: [:]) { $0[$1] = css(on: $1) }
+    }
+
     // MARK: - the file
 
     private static var file: URL { Store.file("hidden.json") }
 
     /// The file again, as sync wrote it from another Mac (SyncCenter).
-    func reload() { load() }
+    func reload() { load(); refreshChromium() }
 
     private func load() {
         guard let data = try? Data(contentsOf: Curtain.file),
@@ -98,6 +103,7 @@ final class Curtain: ObservableObject {
     }
 
     private func save() {
+        refreshChromium()
         guard !saving else { return }
         saving = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -111,6 +117,19 @@ final class Curtain: ObservableObject {
                     at: file.deletingLastPathComponent(), withIntermediateDirectories: true
                 )
                 try? data.write(to: file, options: .atomic)
+            }
+        }
+    }
+
+    /// New rules belong to every tab's next document, not just the page
+    /// where the picker was used. Queue them before another input can load
+    /// a document. Live application stays with the picker and its dust.
+    private func refreshChromium() {
+        guard self === Self.shared else { return }
+        for browser in BrowserWindows.shared.browsers {
+            let open = browser.everyTab + browser.outside + [browser.peeking].compactMap { $0 }
+            for tab in open {
+                (tab.builtPage as? ChromiumPage)?.refreshFeatureScripts()
             }
         }
     }
@@ -153,22 +172,45 @@ enum Veiling {
     /// A stylesheet put in before the document has a body, so nothing is ever
     /// seen arriving and then leaving.
     static func style(_ css: String) -> String {
-        let escaped = css
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "`", with: "\\`")
-            .replacingOccurrences(of: "$", with: "\\$")
+        style(value: BoostScript.json(css))
+    }
+
+    /// A Chromium registration outlives the site that installed it. Pick
+    /// the rules in the new document itself, before navigation callbacks
+    /// can replace a registration meant for the document we just left.
+    static func styles(_ sites: [String: String]) -> String {
+        let entries = sites.sorted { $0.key < $1.key }.map { [PageScripts.scriptHost($0.key), $0.value] }
+        return style(value: "new Map(\(BoostScript.json(entries))).get(\(PageScripts.documentHost).replace(/^www\\./, '')) || ''")
+    }
+
+    private static func style(value: String) -> String {
         return """
         (function () {
-          // Found again through this world's own variable, not an id on
-          // the page: nothing in the page says it is yab's (see Web.world).
-          var all = window.__yabSheets || (window.__yabSheets = {});
-          var sheet = all['yab-veil'];
-          if (!sheet || !sheet.isConnected) {
-            sheet = document.createElement('style');
-            (document.head || document.documentElement).appendChild(sheet);
-            all['yab-veil'] = sheet;
+          var css = \(value);
+          function put() {
+            // Found again through this world's own variable, not an id on
+            // the page: nothing in the page says it is yab's (see Web.world).
+            var all = window.__yabSheets || (window.__yabSheets = {});
+            var sheet = all['yab-veil'];
+            if (!sheet || !sheet.isConnected) {
+              sheet = document.createElement('style');
+              (document.head || document.documentElement).appendChild(sheet);
+              all['yab-veil'] = sheet;
+            }
+            sheet.textContent = css;
           }
-          sheet.textContent = `\(escaped)`;
+          if (document.documentElement) return put();
+          // Chromium runs a document's first scripts before it has <html>
+          // (CDP's new-document scripts, at the window's creation; WebKit's
+          // wait for the element): the sheet went nowhere, and what was
+          // hidden came back on every load (#1978). It goes in the moment
+          // <html> exists, before anything of the page is drawn.
+          var watch = new MutationObserver(function () {
+            if (!document.documentElement) return;
+            watch.disconnect();
+            put();
+          });
+          watch.observe(document, { childList: true });
         })();
         """
     }

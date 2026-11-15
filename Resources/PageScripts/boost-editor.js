@@ -23,6 +23,16 @@
     a.finished.catch(() => {}).finally(() => animations.delete(a));
     return a;
   }
+  // What is in the viewport, measured in one pass with nothing written in
+  // between, so the page lays out once.
+  function onScreen(list) {
+    const w = innerWidth, h = innerHeight, out = [];
+    for (const e of list) {
+      const b = e.getBoundingClientRect();
+      if ((b.width || b.height) && b.bottom > 0 && b.top < h && b.right > 0 && b.left < w) out.push(e);
+    }
+    return out;
+  }
   function remember(e) {
     if (owned.has(e)) return owned.get(e);
     const s = getComputedStyle(e);
@@ -98,12 +108,21 @@
       owned.forEach((r,e)=>Object.keys(r.last).forEach(p=>e.style.setProperty(p,r.last[p],'important')));
       sheet.textContent=css;
     } else fresh.forEach(remember);
+    // A colour move is drawn only where it can be seen, and every colour is
+    // read before any is written and after all are: a read between writes
+    // makes the page work out every style again, once per element, which
+    // held a page of 20 000 elements for seconds (#1908).
+    const moving = motion === 'scheme' || motion === 'peek' || motion === 'toggle';
+    const froms = new Map();
+    if (moving) onScreen(nodes).forEach(e => {
+      if (ignored(e) || e.matches(media) || e.closest('svg,picture')) return;
+      const s = getComputedStyle(e);
+      froms.set(e, {color: s.color, backgroundColor: s.backgroundColor, borderColor: s.borderTopColor});
+    });
     sheet.textContent = active ? look.css : '';
     nodes.forEach(e => {
       if (ignored(e)) return;
       const r = remember(e), isMedia = e.matches(media) || e.closest('svg,picture');
-      const before = (motion === 'scheme' || motion === 'peek' || motion === 'toggle') && !isMedia ? getComputedStyle(e) : null;
-      const from = before ? {color: before.color, backgroundColor: before.backgroundColor, borderColor: before.borderTopColor} : null;
       if (!isMedia) {
         put(e,'color',colors ? tint(r.color,look) : null);
         put(e,'background-color',colors && r.image === 'none' ? tint(r.background,look) : null);
@@ -112,17 +131,17 @@
         put(e,'text-transform',active && look.textCase ? cases[look.textCase] : null);
         put(e,'font-size',active && look.size !== 1 ? `${r.font*look.size}px` : null);
         put(e,'line-height',active && look.spacing !== 1 ? `${(Number.isFinite(r.line)?r.line:r.font*1.4)*look.spacing}px` : null);
-        if (from && (motion === 'scheme' || motion === 'peek' || motion === 'toggle')) {
-          const to = getComputedStyle(e);
-          animate(e,[from,{color:to.color,backgroundColor:to.backgroundColor,borderColor:to.borderTopColor}],
-            {duration:motion==='peek'?120:motion==='scheme'?300:220,easing:'cubic-bezier(.2,.8,.2,1)'});
-        }
       }
       if (e.matches('img,video,picture')) put(e,'filter',active && look.photos !== 1 ? `${r.filter==='none'?'':r.filter+' '}saturate(${look.photos})` : null);
     });
     // A plain page's transparent body still needs a paper behind it.
     put(document.documentElement,'background-color',colors ? tint(paperColor(),look) : null);
     put(document.documentElement,'color-scheme',active && look.mode ? look.mode : null);
+    froms.forEach((from, e) => {
+      const to = getComputedStyle(e);
+      animate(e,[from,{color:to.color,backgroundColor:to.backgroundColor,borderColor:to.borderTopColor}],
+        {duration:motion==='peek'?120:motion==='scheme'?300:220,easing:'cubic-bezier(.2,.8,.2,1)'});
+    });
     const selectors = new Set(active ? look.hidden.map(h=>h.selector) : []);
     // A peek draws copies over the existing layout. Disabling/resetting the
     // look really restores flow; only a held Original avoids moving siblings.
@@ -223,7 +242,9 @@
     cancel(); current=look; original=peek;
     if(motion==='font' && !reduced()) {
       const token=generation;
-      const text=[...document.querySelectorAll('h1,h2,h3,h4,p,a,li,label,button')].filter(e=>!ignored(e));
+      // Only what is on screen: a blur on every heading and link of a long
+      // page is thousands of layers nobody sees (#1908).
+      const text=onScreen(document.querySelectorAll('h1,h2,h3,h4,p,a,li,label,button')).filter(e=>!ignored(e));
       text.forEach(e=>animate(e,[{opacity:1,filter:'blur(0px)'},{opacity:.45,filter:'blur(1.6px)'},{opacity:1,filter:'blur(0px)'}],{duration:180,easing:'ease-in-out'}));
       setTimeout(()=>{if(token===generation) render(look,'direct')},70);
     } else if((motion==='glide'||motion==='reset') && previous && !reduced()) {

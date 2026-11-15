@@ -24,6 +24,7 @@ struct FloatHoverTests {
 
     private func scroll(_ phase: CGScrollPhase) throws -> NSEvent {
         let event = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 0, wheel2: 0, wheel3: 0))
+        event.flags = []
         event.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
         return try #require(NSEvent(cgEvent: event))
     }

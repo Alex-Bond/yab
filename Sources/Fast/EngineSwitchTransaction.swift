@@ -65,6 +65,7 @@ private struct EngineSwitchProfileTransfer: EngineSwitchTransfer {
     }
     func synchronize(_ original: EngineSwitchTransaction.Original) async throws {
         let bridge = try ChromiumDRMCookies.of(original.change.tab)
+        if let source = original.pageURL { bridge.include(source) }
         if let target = original.change.request?.url { bridge.include(target) }
         try await bridge.synchronizeForSwitching()
     }
@@ -120,7 +121,8 @@ enum EngineSwitchTransaction {
         }
         var current: Bool {
             let tab = change.tab
-            return change.isCurrent() && !tab.gone && tab.builtPage === page && page?.url == pageURL && tab.address == address &&
+            return change.isCurrent() && !tab.gone && tab.builtPage === page && page?.url?.documentAddress == pageURL?.documentAddress &&
+                tab.address?.documentAddress == address?.documentAddress &&
                 tab.chromiumProfile == profile && tab.engineNavigationRevision == navigation &&
                 tab.siteEngineTurn == turn && tab.engineKind == engine && tab.delegate.map({ ObjectIdentifier($0) }) == owner &&
                 ((tab.delegate as? Browser)?.spaceHolding(tab) ?? (tab.delegate as? Browser)?.spaceID) == placement
@@ -333,6 +335,16 @@ enum EngineSwitchWords {
             }
         }
         return "Couldn\u{2019}t open this page in \(SiteEngineWords.name(kind))"
+    }
+}
+
+extension URL {
+    /// Where the document is: a page rewriting its own #fragment while a
+    /// switch waits (Shaka's demo keeps its settings there) is the same page.
+    var documentAddress: URL {
+        guard fragment != nil, var parts = URLComponents(url: self, resolvingAgainstBaseURL: false) else { return self }
+        parts.fragment = nil
+        return parts.url ?? self
     }
 }
 

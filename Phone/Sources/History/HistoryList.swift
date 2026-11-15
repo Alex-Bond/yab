@@ -244,17 +244,61 @@ enum HistoryList {
 /// A page the field may offer for typed words: one place in History (every
 /// visit to it, here and on the Mac) or a bookmark of the Mac's.
 struct PlaceCandidate: Equatable, Sendable {
-    var key: String
+    var key: String { didSet { search = PlaceSearch(key: key, title: title) } }
     var url: String
-    var title: String
+    var title: String { didSet { search = PlaceSearch(key: key, title: title) } }
     var host: String
     var icon: String
     var count: Int
     var typed: Bool
     var last: Date?
     var bookmarked: Bool
+    /// The address and title as typed words are matched against them.
+    private(set) var search: PlaceSearch
+
+    init(key: String, url: String, title: String, host: String, icon: String, count: Int, typed: Bool, last: Date?,
+         bookmarked: Bool) {
+        self.key = key
+        self.url = url
+        self.title = title
+        self.host = host
+        self.icon = icon
+        self.count = count
+        self.typed = typed
+        self.last = last
+        self.bookmarked = bookmarked
+        search = PlaceSearch(key: key, title: title)
+    }
 
     var name: String { title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? host : title }
+}
+
+/// A place's address and title in the forms the typed words are matched
+/// against, made once with the place. Made on every letter for each of a
+/// Mac's weeks of places, folding the titles alone took most of a second
+/// per letter (#1637).
+struct PlaceSearch: Equatable, Sendable {
+    /// The key, lowercased.
+    let key: String
+    /// Its host, and the host after its first label ("github.com" of "www.github.com").
+    let host: String
+    let tail: String?
+    /// A site's front page: no path.
+    let root: Bool
+    /// The title folded, its words joined by single spaces after a leading
+    /// one, so " word" finds a word's start; nil for no title.
+    let title: String?
+
+    init(key: String, title: String) {
+        let lower = key.lowercased()
+        self.key = lower
+        let host = lower.split(separator: "/").first.map(String.init) ?? lower
+        self.host = host
+        tail = host.range(of: ".").map { String(host[$0.upperBound...]) }
+        root = !lower.contains("/")
+        self.title = title.isEmpty ? nil
+            : " " + HistoryList.fold(title).split { !$0.isLetter && !$0.isNumber }.joined(separator: " ")
+    }
 }
 
 /// A place and how well it answers the words.
@@ -337,25 +381,19 @@ enum Places {
         let needle = strip(typed)
         // Two letters or more, as tabs: one letter matches half the web.
         guard needle.count >= 2 else { return [] }
-        let words = needle.count >= 3 ? needle.split(whereSeparator: \.isWhitespace).map { " " + $0 } : []
+        let words = needle.count >= 3 ? needle.split(whereSeparator: \.isWhitespace).map { HistoryList.fold(" " + $0) } : []
+        let oneWord = !needle.contains(" ")
         var out: [RankedPlace] = []
         for place in candidates {
-            let key = place.key.lowercased()
-            let host = key.split(separator: "/").first.map(String.init) ?? key
-            let tail = host.range(of: ".").map { String(host[$0.upperBound...]) }
-            let root = !key.contains("/")
-            let standing = frecency(place, now: now) + (root ? 1.5 : 0)
+            let search = place.search
             var rank: Double?
-            if key.hasPrefix(needle) { rank = 6 }
-            else if let tail, tail.hasPrefix(needle) { rank = 3 }
-            else if !needle.contains(" "), host.contains(needle) { rank = 2 }
+            if search.key.hasPrefix(needle) { rank = 6 }
+            else if let tail = search.tail, tail.hasPrefix(needle) { rank = 3 }
+            else if oneWord, search.host.contains(needle) { rank = 2 }
             if let rank {
-                out.append(RankedPlace(place: place, score: rank + 4 + standing, strong: rank >= 3))
-            } else if !words.isEmpty, !place.title.isEmpty {
-                let title = " " + HistoryList.fold(place.title).split { !$0.isLetter && !$0.isNumber }.joined(separator: " ")
-                if words.allSatisfy({ title.contains(HistoryList.fold($0)) }) {
-                    out.append(RankedPlace(place: place, score: 5 + standing, strong: false))
-                }
+                out.append(RankedPlace(place: place, score: rank + 4 + standing(place, now: now), strong: rank >= 3))
+            } else if !words.isEmpty, let title = search.title, words.allSatisfy({ title.contains($0) }) {
+                out.append(RankedPlace(place: place, score: 5 + standing(place, now: now), strong: false))
             }
         }
         return out.sorted { a, b in
@@ -363,6 +401,11 @@ enum Places {
             if a.place.key.count != b.place.key.count { return a.place.key.count < b.place.key.count }
             return a.place.key < b.place.key
         }
+    }
+
+    /// Frecency, and a site's front page over a page inside it.
+    private static func standing(_ place: PlaceCandidate, now: Date) -> Double {
+        frecency(place, now: now) + (place.search.root ? 1.5 : 0)
     }
 
     /// Often, and lately (the Mac's History.frecency): a month-old visit

@@ -41,34 +41,51 @@
   // faceplate-text-input). Keep composed tree order so the name before a
   // password is still its name, including across sibling components.
   var listenedRoots = new WeakSet(), heardFocus = new WeakSet();
+  var fieldHosts = new Set();
+  function parent(node) {
+    return node && (node.parentElement || (node.getRootNode && node.getRootNode().host));
+  }
+  function learn(box) {
+    // Only enter roots on the focused field's composed ancestry. Once a
+    // host type is known to contain fields, its siblings can be queried too.
+    for (var node = box; node; node = parent(node)) {
+      var root = node.getRootNode && node.getRootNode();
+      if (!root || !root.host) continue;
+      fieldHosts.add(root.host.localName);
+      if (listenedRoots.has(root)) continue;
+      listenedRoots.add(root);
+      root.addEventListener('focusin', shadowFocus, true);
+      root.addEventListener('focusout', shadowFocus, true);
+      root.addEventListener('submit', function (event) {
+        if (event.composedPath().indexOf(document) < 0) offer(null, event.target);
+      }, true);
+    }
+  }
   function shadowFocus(event) {
-    // Focus between boxes of one component never reaches document when
-    // both ends retarget to the same host. Hear it once, in its root.
     if (event.composedPath().indexOf(document) >= 0 || heardFocus.has(event)) return;
     heardFocus.add(event);
     if (event.type === 'focusout') setTimeout(caret, 0);
     else caret();
   }
   function boxesIn(scope, selector) {
-    var found = [];
+    var found = [], hosts = Array.from(fieldHosts);
     function visit(root) {
-      if (root.host && !listenedRoots.has(root)) {
-        listenedRoots.add(root);
-        root.addEventListener('focusin', shadowFocus, true);
-        root.addEventListener('focusout', shadowFocus, true);
-        root.addEventListener('submit', function (event) {
-          if (event.composedPath().indexOf(document) < 0) offer(null);
-        }, true);
-      }
-      var nodes = root.querySelectorAll('*');
+      var nodes = root.querySelectorAll(selector + (hosts.length ? ',' + hosts.join(',') : ''));
       for (var i = 0; i < nodes.length; i++) {
         var node = nodes[i];
-        if (node.matches(selector)) found.push(node);
-        if (node.shadowRoot) visit(node.shadowRoot);
+        if (node.matches(selector)) { found.push(node); if (node.matches('input')) learn(node); }
+        if (node.shadowRoot && fieldHosts.has(node.localName)) visit(node.shadowRoot);
       }
     }
     visit(scope);
     return found;
+  }
+  function component(box) {
+    var fallback = box && (box.getRootNode().host ? box.getRootNode() : box.parentElement);
+    for (var node = parent(box); node && node !== document.documentElement; node = parent(node)) {
+      if (boxesIn(node, 'input').length >= 2) return node;
+    }
+    return fallback || document;
   }
 
   // closest() and input.form stop at a shadow boundary. A form around
@@ -81,9 +98,10 @@
     return null;
   }
 
-  function pair() {
-    var focused = inside(document.activeElement);
-    var scope = focused && formOf(focused) || document;
+  function pair(anchor, within) {
+    var focused = anchor || inside(document.activeElement);
+    if (focused) learn(focused);
+    var scope = within || (focused && (formOf(focused) || component(focused))) || document;
     var boxes = boxesIn(scope, 'input[type="password"]');
     var pass = null;
     // Focus in the second of two sign-ins must never fill the first one.
@@ -94,7 +112,7 @@
       if (r.width > 0 && r.height > 0 && !partial(b)) { pass = b; break; }
     }
     if (!pass) return null;
-    scope = formOf(pass) || document;
+    scope = formOf(pass) || component(pass);
     var all = boxesIn(scope, 'input');
     var said = null, shown = null, kept = null;
     for (var i = 0; i < all.length; i++) {
@@ -110,6 +128,24 @@
     return { user: said || shown || kept, pass: pass };
   }
 
+  // A box the page marked for passkey autofill (autocomplete="username
+  // webauthn"), as Chromium's autofill reads the token: the rows under it
+  // list the site's passkeys while a conditional get waits.
+  function webauthn(box) {
+    return !!(box && box.getAttribute &&
+      (box.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/).indexOf('webauthn') >= 0);
+  }
+  // Its form takes passkeys, a box of it marked so: Chrome fills nothing
+  // there by itself and waits for a pick (kAcceptsWebAuthnCredentials).
+  function webauthnForm(box) {
+    if (!box) return false;
+    if (webauthn(box)) return true;
+    var scope = formOf(box) || component(box);
+    var all = scope ? boxesIn(scope, 'input') : [];
+    for (var i = 0; i < all.length; i++) if (webauthn(all[i])) return true;
+    return false;
+  }
+
   // The first step of a sign-in that asks for the name alone, Google,
   // Microsoft, Apple, has no password box yet, and pair() finds nothing.
   // A box that says it holds the account name, with no password box on
@@ -123,11 +159,11 @@
     var r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return null;
     var auto = (el.getAttribute('autocomplete') || '').toLowerCase();
-    if (auto.indexOf('username') >= 0) return el;
+    if (auto.indexOf('username') >= 0 || webauthn(el)) return el;
     var named = kind === 'email' || auto.indexOf('email') >= 0 ||
       /user|login|email|e-mail|identifier|account/i.test((el.name || '') + ' ' + (el.id || ''));
     if (!named) return null;
-    var scope = formOf(el) || document;
+    var scope = formOf(el) || component(el);
     var all = boxesIn(scope, 'input');
     var boxes = 0;
     for (var i = 0; i < all.length; i++) {
@@ -188,7 +224,7 @@
   }
   function automatic(box, both) {
     if (!box || !visible(box) || box.disabled || box.readOnly || box.value) return false;
-    var scope = formOf(box) || document;
+    var scope = formOf(box) || component(box);
     if (freshPassword(scope)) return false;
     if (!both) {
       // An email box alone is also a newsletter or a checkout. A name
@@ -237,7 +273,7 @@
   document.addEventListener('input', function (e) {
     if (!e.isTrusted) return;
     report();
-    var el = e.target;
+    var el = e.composedPath ? e.composedPath()[0] : e.target;
     if (!el || typed.indexOf(el) >= 0) return;
     typed.push(el);
     if (typed.length > 40) typed.shift();
@@ -396,7 +432,7 @@
     generated: function (password) {
       var both = pair();
       if (!both) return false;
-      var scope = formOf(both.pass) || document;
+      var scope = formOf(both.pass) || component(both.pass);
       var boxes = boxesIn(scope, 'input[type="password"]'), n = 0;
       for (var i = 0; i < boxes.length; i++) {
         var r = boxes[i].getBoundingClientRect();
@@ -408,27 +444,34 @@
     },
     // Whether there is still a sign-in on the page. Asked after a
     // password went out, to tell a sign-in that took from one refused.
-    hasPassword: function () { return !!pair(); }
+    hasPassword: function () {
+      // Swift rechecks 1.5 seconds after "settled". Retain the submitted
+      // scope after its observer stops, so an unrelated login cannot veto
+      // the save, and a form restored after a rejection still can.
+      if (lastSubmitted && Date.now() - lastSubmitted.at < 45000)
+        return submittedPassword(lastSubmitted);
+      lastSubmitted = null;
+      return !!pair();
+    }
   };
 
-  // What is in the boxes when they are sent. Said every time, a click
-  // on "show password" says it too, because the browser only listens
-  // once the page has moved on, and keeps the last thing it heard.
-  function sending() {
-    var both = pair();
+  // Read the submitted form before its handler can remove or empty it.
+  // Swift keeps the offer pending until navigation or a settled sign-in.
+  function sending(anchor) {
+    var both = pair(anchor);
     if (!both) return null;
     var pass = chosen(both.pass);
     if (!pass.value) return null;
     var form = formOf(pass);
     return { user: both.user ? both.user.value : '', password: pass.value,
-      action: form && form.getAttribute('action') ? form.action : '' };
+      action: form && form.getAttribute('action') ? form.action : '', anchor: pass };
   }
 
   // `held`: what the boxes held as a button was pressed, for a page that
   // empties them or takes the form away in its own click handler, before
   // its fetch goes out, which is before this hears the click.
-  function offer(held) {
-    var now = sending() || (held && held.password ? held : null);
+  function offer(held, anchor) {
+    var now = sending(anchor) || (held && held.password ? held : null);
     if (!now) {
       if (pair() || !named || !named.isConnected || !named.value) return;
       window.webkit.messageHandlers.yabForms.postMessage({
@@ -442,8 +485,7 @@
       password: now.password,
       action: now.action || ''
     });
-    // A frame looks for its boxes going only once one was sent.
-    if (framed && !watching) { told = true; watch(); }
+    watchSubmitted(now.anchor);
   }
 
   // The password that is being kept, which on a form with more than one
@@ -451,7 +493,7 @@
   // first, and that one is already in the keychain. The box that says
   // it takes a new password, or else the last one filled in.
   function chosen(first) {
-    var scope = formOf(first) || document;
+    var scope = formOf(first) || component(first);
     var boxes = boxesIn(scope, 'input[type="password"]'), filled = [];
     for (var i = 0; i < boxes.length; i++) {
       var r = boxes[i].getBoundingClientRect();
@@ -464,7 +506,7 @@
     return filled.length ? filled[filled.length - 1] : first;
   }
 
-  document.addEventListener('submit', function () { offer(null); }, true);
+  document.addEventListener('submit', function (e) { offer(null, e.target); }, true);
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Enter') return;
     var both = pair();
@@ -474,44 +516,108 @@
   // Plenty of sign-in buttons aren't in a form and never fire submit.
   document.addEventListener('click', function (e) {
     var path = e.composedPath ? e.composedPath() : [e.target];
-    var pressed = path.some(function (el) {
-      return el.matches && el.matches('button, input[type="submit"], [role="button"]');
+    var button = path.find(function (el) {
+      return el.matches && el.matches('button, input[type="submit"], input[type="image"], [role="button"]');
     });
-    if (pressed) {
-      var held = sending();
-      setTimeout(function () { offer(held); }, 0);
+    if (button && !/reset/i.test(button.type || '')) {
+      var words = [button.textContent, button.value, button.getAttribute('aria-label')].join(' ');
+      if (/cancel|back|close|show|hide|forgot/i.test(words)) return;
+      var submits = button.form && /^(submit|image)$/i.test(button.type || '');
+      if (!submits && !/sign\s*in|log\s*in|sign\s*up|register|create.*(?:account|password)|continue|next|submit|(?:change|reset|save).*password|confirm|verify/i.test(words)) return;
+      var anchor = button.form || button;
+      var held = sending(anchor);
+      if (held) watchSubmitted(held.anchor);
+      setTimeout(function () { offer(held, anchor); }, 0);
     }
   }, true);
 
   var told = false;
-  function tell() {
-    if (framed || told || !pair()) return;
+  function tell(anchor) {
+    if (framed || told || !pair(anchor)) return;
     told = true;
     window.webkit.messageHandlers.yabForms.postMessage({ kind: 'form' });
   }
-  if (document.readyState === 'complete') { tell(); }
-  else { window.addEventListener('load', tell); }
-  // A form the page builds for itself, a moment after it loads, or the
-  // password step of a sign-in that asks for the name first.
-  setTimeout(tell, 700);
-  setTimeout(tell, 2200);
-  // The boxes going away without a new page, a sign-in done in place,
-  // is the other way a sign-in shows it took.
-  var settling = null, watching = false;
-  function watch() {
-    watching = true;
-    new MutationObserver(function () {
-      if (!told) { tell(); return; }
-      if (pair()) return;
-      told = false;
-      clearTimeout(settling);
-      settling = setTimeout(function () {
-        if (pair()) return;
-        window.webkit.messageHandlers.yabForms.postMessage({ kind: 'settled' });
-      }, 400);
-    }).observe(document.documentElement, { childList: true, subtree: true });
+  // One native load query. Dynamic forms announce themselves on focus;
+  // a feed changing elsewhere never triggers form discovery.
+  var initialPassword = document.querySelector('input[type="password"]');
+  if (initialPassword) tell(initialPassword);
+
+  var submitted = null, lastSubmitted = null;
+  function submittedScope(state) {
+    if (state.scope.isConnected) return state.scope;
+    var replacement = state.id && state.root.getElementById ? state.root.getElementById(state.id)
+      : state.parent && state.parent.children[state.index];
+    return replacement && replacement.tagName === state.scope.tagName ? replacement : state.scope;
   }
-  if (!framed) watch();
+  function submittedPassword(state) {
+    var scope = submittedScope(state);
+    if (!scope.isConnected) return false;
+    if (!state.single) return !!pair(state.anchor, scope);
+    // Direct children of body have no smaller form subtree. Track the
+    // submitted password itself instead of observing/querying the feed.
+    if (!scope.matches('input[type="password"]') || partial(scope)) return false;
+    var r = scope.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+  function stopSubmitted() {
+    if (!submitted) return;
+    submitted.observers.forEach(function (o) { o.disconnect(); });
+    clearTimeout(submitted.timer);
+    submitted = null;
+  }
+  function watchSubmitted(anchor, captured) {
+    if (!anchor) return;
+    stopSubmitted();
+    var scope = formOf(anchor) || component(anchor);
+    // No document-wide observer, even for a formless sign-in.
+    var single = scope === document || scope === document.body || scope === document.documentElement;
+    if (single) scope = anchor;
+    var state = captured || { anchor: anchor, scope: scope, root: scope.getRootNode(),
+      single: single,
+      id: scope.id, parent: scope.parentElement,
+      index: scope.parentElement ? Array.prototype.indexOf.call(scope.parentElement.children, scope) : -1,
+      at: Date.now() };
+    submitted = lastSubmitted = state;
+    scope = state.scope;
+    state.observers = []; state.timer = null; state.until = Date.now() + 10000; state.gone = 0;
+    function check() {
+      if (submitted !== state) return;
+      clearTimeout(state.timer);
+      var both = submittedPassword(state);
+      if (!both) {
+        if (!state.gone) state.gone = Date.now();
+        if (Date.now() - state.gone >= 400) {
+          stopSubmitted(); told = false;
+          window.webkit.messageHandlers.yabForms.postMessage({ kind: 'settled' });
+          return;
+        }
+      } else state.gone = 0;
+      if (Date.now() >= state.until) { stopSubmitted(); return; }
+      // Also notices the entire form being detached, without observing its
+      // parent (which could be the whole feed). Ends after ten seconds.
+      state.timer = setTimeout(check, 200);
+    }
+    var roots = [scope];
+    boxesIn(scope, 'input').forEach(function (box) {
+      var root = box.getRootNode();
+      if (root.host && roots.indexOf(root) < 0) roots.push(root);
+    });
+    roots.forEach(function (root) {
+      var observer = new MutationObserver(function (records) {
+        if (records.some(function (r) {
+          if (r.type === 'attributes') return r.target.matches('input, select, textarea, form');
+          return Array.from(r.addedNodes).concat(Array.from(r.removedNodes)).some(function (n) {
+            return n.nodeType === 1 && (n.matches('input, select, textarea, form') || n.contains(anchor));
+          });
+        })) { clearTimeout(state.timer); state.timer = setTimeout(check, 0); }
+      });
+      observer.observe(root, { childList: true, subtree: true, attributes: true,
+        attributeFilter: ['type', 'hidden', 'style', 'class'] });
+      state.observers.push(observer);
+    });
+    state.timer = setTimeout(check, 200);
+  }
+  window.addEventListener('pagehide', stopSubmitted);
 
   // Whether the caret is somewhere on the page that takes typing.
   //
@@ -575,6 +681,9 @@
     if (/verification.?code|verify.?code|authenticat|one.?time|[4-8][ -]?digit.?code|\botp\b|\btotp\b/i.test(said)) return [el];
     if (notCode.test(said)) return null;
     if (codeWords.test(said)) return [el];
+    // A box called only "code", X's "Enter code" under "Enter your
+    // verification code": the step around it says which code.
+    if (/\bcode\b/i.test(said) && codeStep(el)) return [el];
     var numeric = el.inputMode === 'numeric' || kind === 'tel' || kind === 'number' ||
       (el.maxLength >= 4 && el.maxLength <= 8);
     if (!numeric) return null;
@@ -584,6 +693,22 @@
     var shape = (el.getAttribute('placeholder') || '').replace(/[\s-]/g, '');
     return /^(\d)\1{3,7}$|^0?1234(5(6(78?)?)?)?$/.test(shape) &&
       (el.maxLength <= 0 || el.maxLength === shape.length) ? [el] : null;
+  }
+
+  // Whether the step a box is the only field of asks for a sign-in code,
+  // by its heading or instructions: up from the box until another field.
+  function codeStep(el) {
+    for (var up = el.parentElement, n = 0; up && n < 12; up = up.parentElement, n++) {
+      var others = [].some.call(up.querySelectorAll('input, textarea, select, [contenteditable="true"]'), function (b) {
+        return b !== el && b.type !== 'hidden' && visible(b);
+      });
+      if (others) return false;
+      var text = (up.innerText || '').trim();
+      if (text.length > 1200) return false;
+      if (/verification code|confirmation code|login code|security code|two.?factor|\b2fa\b|authenticat|code generat|one.?time/i.test(text)) return true;
+      if (up.tagName === 'FORM' || up.tagName === 'MAIN' || up.tagName === 'BODY') return false;
+    }
+    return false;
   }
 
   // The words a page drew over a box without tying them to it, as a
@@ -628,7 +753,7 @@
       if (!source) {
         var sms = /\bsms\b|text message|texted/i.test(text);
         var mail = /\be-?mail\b/i.test(text);
-        var key = /authenticator|authentication app|\btotp\b/i.test(text);
+        var key = /authenticator|authentication app|code generat|\btotp\b/i.test(text);
         if (Number(sms) + Number(mail) + Number(key) === 1) source = sms ? 'text' : mail ? 'mail' : 'key';
       }
       if (!digits) {
@@ -696,7 +821,9 @@
   var said = null, saidAt = undefined, hung = true, saidBox = false;
   function caret(scrolled) {
     var el = inside(document.activeElement);
-    var both = pair();
+    learn(el);
+    var both = el && el.matches && el.matches('input') ? pair(el) : null;
+    if (both) tell(el);
     var rect = null;
     var typed = '';
     var secret = false, empty = true;
@@ -710,7 +837,7 @@
     // box narrows nothing.
     if (box && (!both || box === both.user)) typed = box.value || '';
     if (box) { secret = !!both && box === both.pass; empty = !box.value; }
-    var fresh = secret && freshPassword(formOf(box) || document);
+    var fresh = secret && freshPassword(formOf(box) || component(box));
     // Who a password step is for, as the page itself says it: the name
     // kept in the form for password managers (Google's hidden
     // identifier), or the account chip it shows over the box.
@@ -760,6 +887,8 @@
       lines: !!at && !input && editable(at),
       label: label,
       signin: !!box,
+      webauthn: webauthn(box),
+      webauthnForm: webauthnForm(box),
       content: inputContent(at, row, box),
       code: !!row,
       codeSource: request.source || '',
@@ -784,9 +913,12 @@
   }
 
   if (framed) {
+    var early = window.__yabFormsSoon && window.__yabFormsSoon.take();
     document.addEventListener('focusin', caret, true);
     document.addEventListener('focusout', function () { setTimeout(caret, 0); }, true);
     document.addEventListener('input', function () { if (saidBox) caret(); }, true);
+    caret();
+    if (early) watchSubmitted(early.anchor, early.state);
     return;
   }
 

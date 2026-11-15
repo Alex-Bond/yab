@@ -230,7 +230,7 @@ enum AgentKey {
         return await withCheckedContinuation { done in
             DispatchQueue.global().async {
                 let process = Process()
-                process.executableURL = URL(fileURLWithPath: binary)
+                process.executableURL = ProcessLaunch.executableURL(binary)
                 process.arguments = ["login", "--with-api-key"]
                 process.environment = env
                 process.standardOutput = FileHandle.nullDevice

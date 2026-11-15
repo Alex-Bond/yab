@@ -2795,7 +2795,7 @@ struct PagedSpace: View, Equatable {
     /// The space's row, as it was when the page was made: once the space
     /// comes, the browser's own copy of it goes.
     let row: Parked?
-    /// The tabs that go with you from space to space (an agent's, a call),
+    /// The tabs that go with you from space to space (an agent's),
     /// as they were.
     let travelling: [Tab]
     /// The space, for its name over its rows as the column has it.
@@ -2842,7 +2842,7 @@ struct PagedSpace: View, Equatable {
             .accessibilityHidden(true)
         } else if let row {
             // Its row as the switch will lay it, the tabs that go with
-            // you from space to space included (an agent's, a call): left
+            // you from space to space included (an agent's): left
             // out, they came in on the switch and pushed everything under
             // them down.
             let all = row.tabs + travelling
@@ -3441,8 +3441,10 @@ struct PairRow: View {
     /// yet (PagedSpace) has no stage of its own to ask.
     var shown: Bool? = nil
     @State private var hoverState = RowLocalState(false)
+    /// The column's word in the AppKit column (SideRow's `columnPointed`).
+    @Environment(\.columnPointed) private var columnPointed
     private var hovering: Bool {
-        get { hoverState[first.id] }
+        get { columnPointed ?? hoverState[first.id] }
         nonmutating set { hoverState[first.id] = newValue }
     }
     @Environment(\.tone) private var tone
@@ -3509,7 +3511,7 @@ struct PairRow: View {
             }
         }
         .contentShape(RoundedRectangle(cornerRadius: SideBar.radius, style: .continuous))
-        .onHover { hovering = $0 }
+        .modifier(RowHover(on: columnPointed == nil) { hovering = $0 })
         .onChange(of: lifted) { _, held in if held { hovering = false; browser.glance.drop() } }
         // Between and round the chips too: the menu of the half pressed in,
         // the tab's own with the split's lines (TabMenu).
@@ -3554,7 +3556,7 @@ private struct PairChip: View {
                 }
             }
             if browser.editingTab == tab.id {
-                TabAddressField(browser: browser).frame(height: titleSize + 4)
+                TabAddressField(browser: browser, tab: tab.id).frame(height: titleSize + 4)
             } else {
                 Text(tab.rowLabel)
                     .font(.system(size: titleSize))
@@ -3735,7 +3737,13 @@ struct SideRow: View {
         nonmutating set { shakeState[tab.id] = newValue }
     }
 
-    private var hovering: Bool { hover.inside }
+    /// In the AppKit column the column says whether the pointer is on the
+    /// row, from where both are (ColumnPage.point), so a row that slides
+    /// or scrolls under a still pointer lights, and one that leaves it goes
+    /// dark (register 1239). `hover.row` there is only a space's page
+    /// sliding in under the pointer (SlidePointed).
+    @Environment(\.columnPointed) private var columnPointed
+    private var hovering: Bool { columnPointed.map { $0 || hover.row } ?? hover.inside }
 
     /// In the hand: it gets a ground of its own, the column's color, so it
     /// covers the rows it passes over instead of its title running into
@@ -3784,7 +3792,7 @@ struct SideRow: View {
         let _ = SpacePager.touched(pager: !closes)
         HStack(spacing: SideBar.markGap) {
             if editing {
-                TabAddressField(browser: browser)
+                TabAddressField(browser: browser, tab: tab.id)
                     .frame(height: titleSize + 4)
             } else {
                 HStack(spacing: 0) {
@@ -3849,8 +3857,9 @@ struct SideRow: View {
                     .equatable()
                     // Its short name just given: in behind the old one's dust.
                     .modifier(RenameReveal(since: away ? nil : tab.tidiedAt, tint: Rename.tint(tone)))
-                // Showing a page a screen, or shown to one (Share.swift).
-                ShareWord(tab: tab, hovering: hovering)
+                // No sharing words or Stop on the column's rows (owner,
+                // 0.46.10): the favicon's red dot and the speaker say a call
+                // is on; the band, the strip and the tag say a share.
                 // A share asked for while behind, waiting here (ShareWaiting.swift).
                 ShareWaiting(tab: tab)
                 // What a live folder's tab needs (LiveViews.swift).
@@ -3875,7 +3884,7 @@ struct SideRow: View {
         .overlay(alignment: .trailing) {
             TabEnd(browser: browser, tab: tab, live: live, hovering: hovering, editing: editing, tint: color, speaker: false, close: close,
                    unkeep: closes ? { [browser, tab] in browser.discard([tab], rekept: true) } : nil, reach: SideBar.row, plate: .column, pitch: TabEnd.beside, slotSide: 15,
-                   closeHover: { point($0, atClose: true) })
+                   closeHover: { if columnPointed == nil { point($0, atClose: true) } })
                 .padding(.trailing, SideBar.endInset)
         }
         .background { ground }
@@ -3899,15 +3908,15 @@ struct SideRow: View {
         // (RowLocalState), so nothing is written and the row draws once; only
         // the glance hears the last tab is no longer under the pointer.
         .onChange(of: tab.id) { old, _ in
-            if hoverState[old].inside { browser.glance.hover(old, false) }
+            if columnPointed == nil, hoverState[old].inside { browser.glance.hover(old, false) }
         }
-        .onHover { point($0, atClose: false) }
+        .modifier(RowHover(on: columnPointed == nil) { point($0, atClose: false) })
         // On a space's page sliding in, lit if it will be under the pointer.
         .modifier(SlidePointed(hovering: Binding(get: { hover.row }, set: { hover.row = $0 })))
         // Scrolled away: cheap for a row the pointer isn't on (`TabGlance.concerns`).
         .onDisappear {
-            if hovering { hover = Hover() }
-            browser.glance.hover(tab.id, false)
+            if hover.inside { hover = Hover() }
+            if columnPointed == nil { browser.glance.hover(tab.id, false) }
         }
         .onChange(of: lifted) { _, held in if held { browser.glance.drop() } }
         .steadyMenu(actions: true) { TabMenu(browser: browser, tab: tab, close: close) }
@@ -4394,8 +4403,8 @@ extension Transaction {
     @Entry var stretchBack = false
 }
 
-/// The column's edge: pull it to make the column wider or narrower, click
-/// it to put the column away, as ⌘S does. Notion's sidebar edge, measured
+/// The column's edge: pull it to make the column wider or narrower; ⌘S puts
+/// the column away (a click on the edge no longer does, #1852). Notion's sidebar edge, measured
 /// (feedback #287): a 12 pt strip, the column-resize cursor, a tip after a
 /// second's rest beside the pointer saying both ("Close  Click or ⌘\", "Resize  Drag"),
 /// and any move between press and release makes it a drag, none a click.
@@ -4434,14 +4443,15 @@ struct SideEdge: View {
     @State private var tip = KeyTipAnchor()
 
     /// What the edge's tip says, Notion's words on Yab's plate (picked Oct
-    /// 20): "Hide  Click or ⌘S", "Resize  Drag". Out over the page as a
-    /// card, a click does what ⌘S does there: the column back in its
-    /// place, "Dock", or, with no room for it beside a pair, the card away.
+    /// 20): "Hide  ⌘S", "Resize  Drag". Out over the page as a card, ⌘S
+    /// puts the column back in its place, "Dock". The edge itself takes no
+    /// click (feedback #1852), so the tip names only the key.
     static func tip(floating: Bool, docks: Bool = true) -> String {
         let how = KeyTipView.how
         let keys = Hotkeys.shared.keys("Hide Sidebar")
         let what = floating && docks ? "Dock" : "Hide"
-        return "\(what)\(how)\(keys.isEmpty ? "Click" : "Click or")\(how)\(keys)\nResize\(how)Drag"
+        let resize = "Resize\(how)Drag"
+        return keys.isEmpty ? resize : "\(what)\(how)\(keys)\n\(resize)"
     }
 
     var body: some View {
@@ -4501,14 +4511,10 @@ struct SideEdge: View {
                     withAnimation(Motion.reshape) { browser.sidePull = nil }
                 }
             },
+            // A click on the edge does nothing: it hid the column for people
+            // reaching for the edge to resize it (feedback #1852, owner's
+            // pick 2026-11-05). ⌘S still hides it, a drag still sizes it.
             doubled: {},
-            // A press let go where it was taken: what ⌘S does. Docked, the
-            // column away; out over the page as a card, the column back in
-            // its place (or the card away where a pair leaves no room).
-            clicked: { [browser] in
-                KeyTip.shared.leave(tip)
-                browser.toggleColumn()
-            },
             hover: { [tip, floating, browser] on in
                 guard on else { return KeyTip.shared.leave(tip) }
                 // A fixed gap from the hairline, at the latest pointer height.

@@ -164,6 +164,7 @@ enum TabImport {
     /// only it can read them may be asked through its scripting (Dia), and
     /// macOS's question about it comes from that press, never by itself.
     static func places(in source: Chromium.Source, ask: Bool = false) throws -> [Place] {
+        guard source.credentialAccess else { return [] }
         let found: [Place]
         switch source.bundle {
         case arc: found = try arcPlaces(source)
@@ -217,7 +218,9 @@ enum TabImport {
         // Dia is open: its own file stopped being written (feedback #113).
         let read = Result { try tabFile(file) }
         let data = try? read.get()
-        if ask, let scripted = DiaScript.places(names: names), scripted.contains(where: { !$0.isEmpty }) {
+        // An explicitly supplied folder (including a fixture) is not the
+        // running Dia app's profile and must never ask that app for its tabs.
+        if ask, source.dataRoot == nil, let scripted = DiaScript.places(names: names), scripted.contains(where: { !$0.isEmpty }) {
             // The script says a renamed tab's name as its title; its file
             // says which are renamed.
             let renamed = data.map(DiaContainers.names) ?? [:]
@@ -283,6 +286,7 @@ enum TabImport {
     /// (profiles_order), those it leaves out of that after, Default first
     /// and Profile 2 before Profile 10.
     static func profileOrder(in source: Chromium.Source) -> [String] {
+        guard source.credentialAccess else { return source.profiles.map(\.lastPathComponent) }
         let names = profileNames(in: source)
         let state = source.root.appendingPathComponent("Local State")
         let listed = (try? Data(contentsOf: state))
@@ -298,6 +302,9 @@ enum TabImport {
 
     /// Each profile's name, and the color it was given, as hex.
     private static func profileInfo(in source: Chromium.Source) -> [String: (name: String, color: String?)] {
+        guard source.credentialAccess else {
+            return Dictionary(uniqueKeysWithValues: source.profiles.map { ($0.lastPathComponent, (name: $0.lastPathComponent, color: nil)) })
+        }
         let state = source.root.appendingPathComponent("Local State")
         guard let data = try? Data(contentsOf: state),
               let top = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -735,7 +742,7 @@ enum DiaScript {
         let out = Pipe()
         process.standardOutput = out
         process.standardError = Pipe()
-        do { try process.run() } catch { return nil }
+        do { try process.runValidated() } catch { return nil }
         let deadline = Date().addingTimeInterval(20)
         while process.isRunning, Date() < deadline { usleep(50_000) }
         if process.isRunning { process.terminate(); return nil }
@@ -1121,6 +1128,7 @@ struct TabBringer: View {
     }
 
     private func bring(from source: Chromium.Source) {
+        let source = source.authorizingImport()
         stage = .asking(source.name)
         skipped = []
         TabImport.load(source, ask: true) { outcome in

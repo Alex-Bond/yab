@@ -149,6 +149,7 @@ struct MailSwipeTests {
     @MainActor private func wheel(_ window: NSWindow, x: Int32, y: Int32, phase: Int64) throws -> NSEvent {
         let event = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
                                         wheel1: y, wheel2: x, wheel3: 0))
+        event.flags = []
         event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
         event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
         event.setIntegerValueField(CGEventField(rawValue: 51)!, value: Int64(window.windowNumber))

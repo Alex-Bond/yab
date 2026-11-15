@@ -54,6 +54,11 @@ enum ManagerVault {
     struct Secret: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let user: String
         let password: String
+        /// The manager asked the person for this one before giving it (Apple
+        /// Passwords' helper's Touch ID, 1Password's approval): the question
+        /// Settings' "Ask before filling" puts, already answered
+        /// (Vault.proveToFill).
+        var proven = false
         var description: String { "Secret(\(user), ••••)" }
         var debugDescription: String { description }
     }
@@ -203,7 +208,7 @@ struct ManagerTool: Sendable {
         return try await withCheckedThrowingContinuation { done in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
-                process.executableURL = URL(fileURLWithPath: path)
+                process.executableURL = ProcessLaunch.executableURL(path)
                 process.arguments = arguments
                 let here = ProcessInfo.processInfo.environment
                 var environment: [String: String] = [
@@ -228,7 +233,7 @@ struct ManagerTool: Sendable {
                 DispatchQueue.global().async { collected = out.fileHandleForReading.readDataToEndOfFile(); reading.leave() }
                 reading.enter()
                 DispatchQueue.global().async { complaint = err.fileHandleForReading.readDataToEndOfFile(); reading.leave() }
-                do { try process.run() } catch {
+                do { try process.runValidated() } catch {
                     done.resume(throwing: ManagerVault.Failure.noTool)
                     return
                 }
@@ -333,6 +338,8 @@ final class BitwardenCLI: ManagerAdapter, @unchecked Sendable {
         })
     }
 
+    /// Never proven: the vault is open on the session key Yab got with the
+    /// saved unlock password, and `bw get` asks nobody.
     func secret(_ login: ManagerVault.Login) async throws -> ManagerVault.Secret {
         guard session.withLock({ $0 }) != nil else { throw ManagerVault.Failure.locked }
         let out = try await tool.run(["get", "item", login.item], env: sessionEnv)
@@ -366,7 +373,7 @@ struct OnePasswordCLI: ManagerAdapter {
     let provider = PasswordManagers.onePassword
     let depth = ManagerVault.Depth.vault
     let saves = true
-    let tool = ManagerTool(names: ["op"], key: "OP")
+    var tool = ManagerTool(names: ["op"], key: "OP")
 
     func state() async -> ManagerVault.State {
         guard tool.path != nil else { return .noTool }
@@ -395,9 +402,15 @@ struct OnePasswordCLI: ManagerAdapter {
         })
     }
 
+    /// Proven when Yab wasn't allowed as it asked (whoami answers without
+    /// asking anyone): then 1Password's app asked the person for this get,
+    /// with Touch ID or the account password. Allowed already, within the
+    /// app's 10 minutes, nobody was asked for it.
     func secret(_ login: ManagerVault.Login) async throws -> ManagerVault.Secret {
+        let allowed = (try? await tool.run(["whoami", "--format", "json"]))?.ok == true
         let out = try await tool.run(["item", "get", login.item, "--reveal", "--format", "json"], timeout: 90)
-        guard out.ok, let secret = Self.secret(out.out) else { throw ManagerVault.Failure.notFound }
+        guard out.ok, var secret = Self.secret(out.out) else { throw ManagerVault.Failure.notFound }
+        secret.proven = !allowed
         return secret
     }
 

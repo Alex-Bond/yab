@@ -1,9 +1,22 @@
 import AppKit
 
-/// The official CLI's own interactive sign-in, without a Terminal window.
-/// The CLI owns tokens. Yab relays its hosted callback code from its own tab.
+/// ACP sign-in owns the loopback callback. The TUI is used only for public
+/// identity inspection and compatibility with agy versions without ACP.
 @MainActor
 final class GeminiLogin {
+    private var acp: GeminiACP?
+    private var startupError: String?
+    private var openingDeadline = Date.distantFuture
+    var usesACP: Bool { acp != nil }
+    var authenticated: Bool { acp?.state == .authenticated }
+    var failure: String? {
+        if let startupError { return startupError }
+        if case .failed(let message) = acp?.state { return message }
+        if acp == nil, signingIn, !opened, identity == nil, authorizationURL == nil, Date() >= openingDeadline {
+            return "Google's sign-in page didn't open. Try again."
+        }
+        return nil
+    }
     private var process = Process()
     private var input = Pipe()
     private var output = Pipe()
@@ -11,7 +24,6 @@ final class GeminiLogin {
     private var text = ""
     private var ended = false
     private var tab: Tab?
-    private weak var browser: Browser?
     private var folder: URL?
     private var page: URL?
     private var trusted = false
@@ -28,16 +40,9 @@ final class GeminiLogin {
     private(set) var codeError: String?
     var submittedCode: Bool { codeSent }
 
-    nonisolated static let browserScript = """
-    #!/bin/sh
-    for url in "$@"; do
-      case "$url" in
-        https://*) printf '%s\\n' "$url" > "$YAB_GEMINI_PAGE"; exit 0 ;;
-      esac
-    done
-    exit 1
-
-    """
+    /// Yab's launcher (GeminiSupport.launcherScript), here with a page file
+    /// of this sign-in's own.
+    nonisolated static let browserScript = GeminiSupport.launcherScript
 
     nonisolated static func hinted(_ url: URL, email: String?) -> URL {
         guard let email, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
@@ -64,6 +69,8 @@ final class GeminiLogin {
         identity = nil; loggedOut = false; codeSent = false; readingCode = false; codeError = nil
         self.switching = switching
         self.signingIn = signingIn
+        startupError = nil
+        openingDeadline = Date().addingTimeInterval(15)
         let config = GeminiRunner.Configuration(binary: binary, profile: profile,
             workspace: profile.appendingPathComponent("sign-in"), model: nil, conversation: nil,
             command: "", mcpArgs: nil, brief: Agents.instructions(textOnly: true, full: false, remembering: false), environment: base)
@@ -71,7 +78,8 @@ final class GeminiLogin {
         let folder = profile.appendingPathComponent("sign-in-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         self.folder = folder
-        page = folder.appendingPathComponent("page")
+        let page = folder.appendingPathComponent("page")
+        self.page = page
         for name in ["open", "browser"] {
             let file = folder.appendingPathComponent(name)
             try Self.browserScript.write(to: file, atomically: true, encoding: .utf8)
@@ -80,16 +88,40 @@ final class GeminiLogin {
         var env = prepared.env
         env["PATH"] = folder.path + ":" + (env["PATH"] ?? "/usr/bin:/bin")
         env["BROWSER"] = folder.appendingPathComponent("browser").path
-        env["YAB_GEMINI_PAGE"] = page?.path
+        env["YAB_GEMINI_PAGE"] = page.path
         env["TERM"] = "xterm-256color"
         env["COLUMNS"] = "160"
         env["LINES"] = "50"
+        if signingIn {
+            let client = GeminiACP()
+            acp = client
+            client.changed = { [weak self, weak client] in
+                guard let self, let client, self.acp === client else { return }
+                if client.state == .unsupported {
+                    // Older agy releases have no ACP server. Fall back only
+                    // when initialize fails, never after an OAuth/logout error.
+                    self.acp = nil
+                    client.stop()
+                    if let page = self.page { try? FileManager.default.removeItem(at: page) }
+                    do { try self.startLegacy(binary: binary, env: env, cwd: prepared.cwd, permit: permit) }
+                    catch { self.ended = true; self.startupError = error.localizedDescription }
+                }
+                self.changed?()
+            }
+            try client.start(binary: binary, environment: env, cwd: prepared.cwd, page: page, switching: switching, permit: permit)
+        } else { try startLegacy(binary: binary, env: env, cwd: prepared.cwd, permit: permit) }
+        quitting = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stop(immediately: true) }
+        }
+    }
+
+    private func startLegacy(binary: String, env: [String: String], cwd: URL, permit: ProviderLaunchPermit) throws {
         // script supplies the TTY Google's interactive sign-in requires.
         // Its stdin stays open. Never send a model prompt.
         process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
         process.arguments = ["-q", "/dev/null", binary, "--agent", GeminiSupport.agentName]
         process.environment = env
-        process.currentDirectoryURL = prepared.cwd
+        process.currentDirectoryURL = cwd
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errors
@@ -112,9 +144,6 @@ final class GeminiLogin {
             self.changed?()
         } }
         guard try permit.start(process) else { stop(); throw GeminiStream.Failure("Gemini sign-in was canceled.") }
-        quitting = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.stop(immediately: true) }
-        }
     }
 
     private func heard(_ chunk: String) {
@@ -139,7 +168,7 @@ final class GeminiLogin {
         }
         if let who = GeminiIdentity.read(text) {
             identity = who
-            if switching, !loggedOut, plain.contains("? for shortcuts") {
+            if switching, !loggedOut, !codeSent, authorizationURL == nil, plain.contains("? for shortcuts") {
                 loggedOut = true
                 identity = nil
                 text = ""
@@ -155,7 +184,7 @@ final class GeminiLogin {
 
     nonisolated static func googleSelected(_ text: String) -> Bool {
         text.contains("Select login method:")
-            && text.range(of: #"(?m)^\s*>\s*1\.\s+Google OAuth\s*$"#, options: .regularExpression) != nil
+            && text.range(of: #"(?m)^\s*[>❯›▸●]\s*(?:1\.\s+)?Google OAuth\s*$"#, options: .regularExpression) != nil
     }
 
     /// Only a URL captured from the CLI's browser launcher opens a tab.
@@ -163,26 +192,63 @@ final class GeminiLogin {
     func openPage(in browser: Browser, choice: GeminiChoice) {
         guard !opened, let url = authorizationURL else { return }
         opened = true
-        self.browser = browser
-        if case .space(let id) = choice.source { browser.switchSpace(to: id) }
-        tab = browser.open(Self.hinted(url, email: choice.email), foreground: true, shy: choice.source == .another)
+        // Settings can outlive its browser window. Put OAuth in a real
+        // window rather than a detached Browser whose tab cannot be shown.
+        let target = BrowserWindows.shared.window(for: browser) != nil
+            ? browser : BrowserWindows.shared.newWindow(from: browser)
+        if case .space(let id) = choice.source { target.switchSpace(to: id) }
+        // The login owns this row immediately. Waiting for the first page
+        // frame leaves it in `outside`, which used to look like a close.
+        tab = target.open(Self.hinted(url, email: choice.email), foreground: true,
+                          shy: choice.source == .another, rowNow: true)
         show()
+        changed?()
     }
 
+    /// The page the CLI asked its browser launcher to open, or, in a
+    /// sign-in, the link its own screen prints under "Your browser should
+    /// open automatically. If not:". A CLI that opens the browser some other
+    /// way (absolute /usr/bin/open, LaunchServices, a newer agy) never calls
+    /// the launcher: waiting for it alone left Connect saying a private tab
+    /// was asking while none was made, and Show Sign-In doing nothing
+    /// (feedback #1829, #1884).
     var authorizationURL: URL? {
-        guard let page, let data = try? Data(contentsOf: page),
-              let text = String(data: data, encoding: .utf8), text.hasSuffix("\n"),
-              let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              url.scheme == "https", let host = url.host?.lowercased(),
-              host == "accounts.google.com" || host == "antigravity.google" || host.hasSuffix(".antigravity.google") else { return nil }
-        return url
+        if let acp { return acp.url }
+        if let page, let data = try? Data(contentsOf: page),
+           let text = String(data: data, encoding: .utf8), text.hasSuffix("\n"),
+           let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)), Self.allowed(url) { return url }
+        return signingIn && !ended ? Self.printedURL(text) : nil
+    }
+
+    nonisolated static func allowed(_ url: URL) -> Bool {
+        guard url.scheme == "https", url.user == nil, url.password == nil, let host = url.host?.lowercased() else { return false }
+        return host == "accounts.google.com" || host == "antigravity.google" || host.hasSuffix(".antigravity.google")
+    }
+
+    /// The last OAuth link on the CLI's screen: its OSC 8 hyperlink
+    /// ("Click here to authenticate") carries the whole address, where the
+    /// printed one is wrapped at the screen's width. Only Google's
+    /// authorization endpoint, with the CLI's own redirect and state.
+    nonisolated static func printedURL(_ text: String) -> URL? {
+        let pattern = "\u{1B}\\]8;[^;\u{07}\u{1B}]*;(https://[^\u{07}\u{1B}\\s]+)(?:\u{07}|\u{1B}\\\\)"
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let links = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            .compactMap { Range($0.range(at: 1), in: text).map { String(text[$0]) } }
+        for link in links.reversed() {
+            guard let url = URL(string: link), allowed(url), url.host?.lowercased() == "accounts.google.com",
+                  url.path.hasPrefix("/o/oauth2/"),
+                  let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                  items.contains(where: { $0.name == "redirect_uri" }), items.contains(where: { $0.name == "state" }) else { continue }
+            return url
+        }
+        return nil
     }
 
     /// Antigravity can use a hosted callback and ask its TUI for the code,
     /// rather than listen on loopback. Keep that redirect exactly as issued.
     /// Read only the active login's own tab, on the CLI's exact HTTPS callback.
     func completeCodePage() {
-        guard !ended, !codeSent, !readingCode, awaitingCode,
+        guard acp == nil, !ended, !codeSent, !readingCode, awaitingCode,
               let tab, let page = tab.builtPage, let url = page.url,
               Self.isCodePage(url, authorization: authorizationURL) else { return }
         readingCode = true
@@ -198,7 +264,7 @@ final class GeminiLogin {
     }
 
     var awaitingCode: Bool {
-        signingIn && !ended && !codeSent && Self.requestsCode(text)
+        acp == nil && signingIn && !ended && !codeSent && Self.requestsCode(text)
     }
 
     nonisolated static func requestsCode(_ text: String) -> Bool {
@@ -281,13 +347,15 @@ final class GeminiLogin {
 
     private var holder: Browser? {
         guard let tab else { return nil }
-        var browsers = BrowserWindows.shared.browsers
-        if let browser, !browsers.contains(where: { $0 === browser }) { browsers.append(browser) }
-        return browsers.first { $0.everyTab.contains { $0.id == tab.id } }
+        // A Browser retained by Settings after its window closed is not a
+        // place the person can return to. Only a registered window owns it.
+        return BrowserWindows.shared.browsers.first {
+            ($0.everyTab + $0.outside).contains { $0 === tab }
+        }
     }
 
     var closed: Bool { tab != nil && holder == nil }
-    var finished: Bool { ended }
+    var finished: Bool { ended || authenticated || failure != nil }
 
     func show() {
         guard let tab, let browser = holder else { return }
@@ -295,12 +363,24 @@ final class GeminiLogin {
             browser.switchSpace(to: space)
         }
         browser.select(tab)
-        (BrowserWindows.shared.window(for: browser) ?? Links.window)?.makeKeyAndOrderFront(nil)
+        if let window = BrowserWindows.shared.window(for: browser) {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+            // Settings, where Connect was pressed, opens on the active Space
+            // as a full-screen auxiliary window: over a full-screen browser it
+            // stays above the window just fronted and covers the sign-in.
+            if let settings = SettingsWindow.shared.window, settings.isVisible, settings !== window,
+               settings.frame.intersects(window.frame) {
+                settings.order(.below, relativeTo: window.windowNumber)
+            }
+        }
         NSApp.activate()
     }
 
     func stop(immediately: Bool = false) {
         ended = true
+        acp?.stop()
+        acp = nil
         if let quitting { NotificationCenter.default.removeObserver(quitting); self.quitting = nil }
         process.terminationHandler = nil
         for pipe in [output, errors] { pipe.fileHandleForReading.readabilityHandler = nil }

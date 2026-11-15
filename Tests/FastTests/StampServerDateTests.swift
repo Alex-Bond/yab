@@ -10,6 +10,29 @@ final class StampServerDateTests: XCTestCase {
         try check(defaults)
     }
 
+    // A normal cached date reaches the weak-linked Date >= operator in 0.46.1.
+    // On the reporter's macOS 27.2 it calls address zero during startup.
+    func testPositiveStoredServerDateOnLaunch() {
+        settings { defaults in
+            defaults.set(1_791_158_400.0, forKey: "stamp.serverSince")
+            XCTAssertEqual(MemberStamp.restoredSince(settings: defaults)?.timeIntervalSince1970, 1_791_158_400)
+        }
+    }
+
+    func testArbitraryStoredServerValuesAreIgnored() {
+        settings { defaults in
+            XCTAssertNil(MemberStamp.restoredSince(settings: defaults))
+            let values: [Any] = [0.0, -1.0, 1.0, Double.nan, Double.infinity,
+                                 -Double.infinity, Double.greatestFiniteMagnitude,
+                                 Date().timeIntervalSince1970 + 7 * 86_400,
+                                 "yesterday", Data([0, 1]), ["since": 1], [1, 2], true]
+            for value in values {
+                defaults.set(value, forKey: "stamp.serverSince")
+                XCTAssertNil(MemberStamp.restoredSince(settings: defaults), "Stored value: \(value)")
+            }
+        }
+    }
+
     func testRestoredDateReplacesEarlierHistoryAndSurvivesReload() {
         settings { defaults in
             let old = Date(timeIntervalSince1970: 1_788_307_200)

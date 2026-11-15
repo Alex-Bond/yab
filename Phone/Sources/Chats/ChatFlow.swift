@@ -674,7 +674,17 @@ extension AppModel {
 
     func archive(_ id: Chat.ID) {
         Haptics.play(.light, reason: Haptics.Reason.archive)
+        guard let before = chats.chat(id), !before.archived else { return }
         chats.setArchived(id, true)
+        registerArchiveUndo([before])
+    }
+
+    private func registerArchiveUndo(_ before: [Chat]) {
+        registerActionUndo("Archive Chat") { app in
+            for chat in before where app.chats.chat(chat.id)?.archived == true {
+                app.chats.update(chat.id) { $0.archived = chat.archived; $0.ephemeral = chat.ephemeral }
+            }
+        }
     }
 
     func unarchive(_ id: Chat.ID) {
@@ -688,7 +698,9 @@ extension AppModel {
         guard let id = sheet.chatID else { return }
         Haptics.play(.light, reason: Haptics.Reason.archive)
         sheet.fresh.remove(id)
+        guard let before = chats.chat(id) else { return }
         chats.update(id) { $0.archived = true; $0.ephemeral = false }
+        registerArchiveUndo([before])
         openHistory()
     }
 
@@ -778,6 +790,7 @@ extension AppModel {
         guard !under.isEmpty else { return }
         Haptics.play(.light, reason: Haptics.Reason.archive)
         Motion.columnRows.run { for chat in under { chats.setArchived(chat.id, true) } }
+        registerArchiveUndo(under)
     }
 
     func openChatInfo() {

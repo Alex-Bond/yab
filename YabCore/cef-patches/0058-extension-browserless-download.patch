@@ -1,0 +1,35 @@
+--- a/cef/libcef/browser/download_manager_delegate_impl.cc
++++ b/cef/libcef/browser/download_manager_delegate_impl.cc
+@@ -18,6 +18,8 @@
+ #include "cef/libcef/browser/download_item_impl.h"
+ #include "cef/libcef/browser/thread_util.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/common/constants.h"
+ #include "chrome/common/pref_names.h"
+ #include "components/prefs/pref_service.h"
+ #include "content/public/browser/browser_context.h"
+@@ -380,6 +382,23 @@
+   // association from either method.
+   CefRefPtr<CefBrowserHostBase> browser = GetOrAssociateBrowser(item);
+   if (!browser) {
++    // chrome.downloads.download from a worker or offscreen extension document
++    // legitimately has no CefBrowser. Let Chrome's existing download delegate
++    // own its target, saveAs picker, filename events, safety checks and lifetime.
++    // Do not invent a tab owner or associate it with another profile's browser.
++    auto* context = content::DownloadItemUtils::GetBrowserContext(item);
++    const auto& initiator = item->GetRequestInitiator();
++    if (context && context == manager->GetBrowserContext() && initiator &&
++        !initiator->opaque() &&
++        initiator->scheme() == extensions::kExtensionScheme &&
++        item->GetDownloadSource() == download::DownloadSource::EXTENSION_API) {
++      auto* registry = extensions::ExtensionRegistry::Get(context);
++      if (registry && registry->enabled_extensions().GetByID(initiator->host())) {
++        LOG(INFO) << "Browserless extension download delegated to Chrome: "
++                  << item->GetGuid() << " extension=" << initiator->host();
++        return;
++      }
++    }
+     // If the download is rejected (e.g. ALT+click on an invalid protocol link)
+     // then an "interrupted" download will be started via DownloadManagerImpl::
+     // StartDownloadWithId (originating from CreateInterruptedDownload) with no

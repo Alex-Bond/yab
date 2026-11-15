@@ -50,8 +50,9 @@ final class PageViewportTests: XCTestCase {
         }
     }
 
-    /// WebKit lays out interactive content inside the system column.
-    func testPageLayoutsInsideAStatusColumn() async throws {
+    /// A real page's own width: a status column at one side (the Duo's) took
+    /// it from the page and left a bar of nothing down that side (#1890).
+    func testPageTakesTheWholeWidthBesideAStatusColumn() async throws {
         let host = try XCTUnwrap(window.rootViewController?.view)
         let pool = WebPool(dataStore: .nonPersistent(), fixturesEnabled: false)
         let tab = PageFixtures.liveTab(for: try XCTUnwrap(URL(string: "about:blank")), id: "viewport.width", isPrivate: false)
@@ -62,7 +63,10 @@ final class PageViewportTests: XCTestCase {
         defer { view.removeFromSuperview() }
         PageViewport(size: view.bounds.size, hardware: UIEdgeInsets(top: 0, left: 0, bottom: 34, right: 84),
                      chrome: .init(folded: false, hasNow: false, visible: true)).apply(to: view)
+        XCTAssertEqual(view.obscuredContentInsets.right, 0)
+        XCTAssertEqual(view.scrollView.contentInset.right, 0)
         XCTAssertEqual(view.scrollView.verticalScrollIndicatorInsets.right, 84)
+        XCTAssertFalse(view.scrollView.automaticallyAdjustsScrollIndicatorInsets)
         view.loadHTMLString("<!doctype html><title>ready</title><meta name=viewport content='width=device-width'><body>", baseURL: nil)
         var width: CGFloat = 0
         for _ in 0..<100 {
@@ -70,7 +74,67 @@ final class PageViewportTests: XCTestCase {
             let title = try? await view.evaluateJavaScript("document.title") as? String
             if title == "ready", let inner = try? await view.evaluateJavaScript("innerWidth") as? CGFloat { width = inner; break }
         }
-        XCTAssertEqual(width, host.bounds.width - 84)
+        XCTAssertEqual(width, host.bounds.width)
+    }
+
+    /// The scroll bar on a Duo's cover stood a third of the way in (#1945):
+    /// UIKit added the window's column to indicator insets that had it
+    /// already. A real safe area at the right, as the cover's column is,
+    /// and the bar measured where UIKit draws it.
+    func testScrollIndicatorStandsBesideTheStatusColumnOnce() async throws {
+        let controller = UIViewController()
+        controller.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 84)
+        window.rootViewController = controller
+        window.layoutIfNeeded()
+        let host = try XCTUnwrap(controller.view)
+        let pool = WebPool(dataStore: .nonPersistent(), fixturesEnabled: false)
+        let tab = PageFixtures.liveTab(for: try XCTUnwrap(URL(string: "about:blank")), id: "viewport.indicator", isPrivate: false)
+        defer { pool.forget(tab.id) }
+        let view = pool.activate(tab)
+        view.frame = host.bounds
+        host.addSubview(view)
+        defer { view.removeFromSuperview() }
+        view.layoutIfNeeded()
+        XCTAssertEqual(view.safeAreaInsets.right, 84, "the column must be a real safe area for UIKit to add it")
+        let column = window.safeAreaInsets.right + 84
+        let viewport = PageViewport(size: view.bounds.size,
+                                    hardware: UIEdgeInsets(top: window.safeAreaInsets.top, left: window.safeAreaInsets.left,
+                                                           bottom: window.safeAreaInsets.bottom, right: column),
+                                    chrome: .init(folded: false, hasNow: false, visible: true))
+        viewport.apply(to: view)
+        view.loadHTMLString("""
+            <!doctype html><meta name=viewport content='width=device-width,viewport-fit=cover'><title>tall</title>
+            <style>body{margin:0;height:6000px}#probe{position:fixed;top:0;left:0;padding-right:env(safe-area-inset-right)}</style>
+            <div id=probe></div>
+            """, baseURL: nil)
+        var tall = false
+        for _ in 0..<100 {
+            try await Task.sleep(for: .milliseconds(50))
+            let title = try? await view.evaluateJavaScript("document.title") as? String
+            if title == "tall", view.scrollView.contentSize.height > view.bounds.height * 2 { tall = true; break }
+        }
+        XCTAssertTrue(tall, "a page tall enough to scroll")
+        // The site lays out the whole width and reads the column itself.
+        let inner = try await view.evaluateJavaScript("innerWidth") as? CGFloat
+        XCTAssertEqual(inner, view.bounds.width)
+        let env = try await view.evaluateJavaScript("getComputedStyle(document.getElementById('probe')).paddingRight") as? String
+        XCTAssertEqual(env, "\(Int(column))px")
+        view.scrollView.setContentOffset(CGPoint(x: 0, y: 400), animated: false)
+        view.scrollView.flashScrollIndicators()
+        view.scrollView.layoutIfNeeded()
+        func indicators(in root: UIView) -> [UIView] {
+            root.subviews.flatMap { sub in
+                (String(describing: type(of: sub)).contains("ScrollIndicator") ? [sub] : []) + indicators(in: sub)
+            }
+        }
+        let found = indicators(in: view.scrollView)
+        let bar = try XCTUnwrap(found.first { $0.bounds.height > $0.bounds.width },
+                                "no vertical indicator among \(view.scrollView.subviews.map { String(describing: type(of: $0)) })")
+        let frame = bar.convert(bar.bounds, to: view)
+        let gap = view.bounds.maxX - frame.maxX
+        // UIKit keeps a few points between the bar and its inset edge.
+        XCTAssertGreaterThanOrEqual(gap, column - 0.5, "the bar stands under the column: \(frame)")
+        XCTAssertLessThan(gap, column + 12, "the column counted twice: the bar \(gap) points from the edge")
     }
 
     func testRetiringPortraitHostCannotResizeTheMountedLandscapePage() async throws {
@@ -150,9 +214,12 @@ final class PageViewportTests: XCTestCase {
             let web = WKWebView(frame: container.bounds)
             container.show(web)
             container.updateViewport()
-            XCTAssertEqual(web.obscuredContentInsets.left, left ? 84 : 0)
-            XCTAssertEqual(web.obscuredContentInsets.right, left ? 0 : 84)
-            XCTAssertEqual(web.scrollView.verticalScrollIndicatorInsets, web.obscuredContentInsets)
+            // The page runs under the column; the indicators stand beside it.
+            XCTAssertEqual(web.obscuredContentInsets.left, 0)
+            XCTAssertEqual(web.obscuredContentInsets.right, 0)
+            XCTAssertEqual(web.scrollView.verticalScrollIndicatorInsets.left, left ? 84 : 0)
+            XCTAssertEqual(web.scrollView.verticalScrollIndicatorInsets.right, left ? 0 : 84)
+            XCTAssertEqual(web.scrollView.verticalScrollIndicatorInsets.bottom, web.obscuredContentInsets.bottom)
         }
     }
 
@@ -161,9 +228,11 @@ final class PageViewportTests: XCTestCase {
         defer { ChromeGeometry.extraSides = saved }
         let host = try XCTUnwrap(window.rootViewController?.view)
         let half = host.bounds.width / 2
-        for left in [false, true] {
-            ChromeGeometry.extraSides = .init(left: (left ? 84 : 0) - window.safeAreaInsets.left,
-                                              right: (left ? 0 : 84) - window.safeAreaInsets.right)
+        // A Duo's column on either side, then a notch's two sides.
+        for (columnLeft, columnRight) in [(CGFloat(0), CGFloat(84)), (84, 0), (62, 62)] {
+            ChromeGeometry.extraSides = .init(left: columnLeft - window.safeAreaInsets.left,
+                                              right: columnRight - window.safeAreaInsets.right)
+            let notch = columnLeft > 0 && columnRight > 0
             for second in [false, true] {
                 let pane = CGRect(x: second ? half : 0, y: 0, width: half, height: host.bounds.height)
                 let container = PageContainer(frame: pane)
@@ -173,13 +242,17 @@ final class PageViewportTests: XCTestCase {
                 host.addSubview(container)
                 defer { container.removeFromSuperview() }
                 container.show(web)
+                let left = second ? 0 : columnLeft, right = second ? columnRight : 0
                 for offset: CGFloat in [0, 60, -60, 416, -416, 0] {
                     container.transform = CGAffineTransform(translationX: offset, y: 0)
                     container.updateViewport()
                     let insets = web.obscuredContentInsets
-                    XCTAssertEqual(insets.left, left && !second ? 84 : 0, accuracy: 0.01)
-                    XCTAssertEqual(insets.right, !left && second ? 84 : 0, accuracy: 0.01)
-                    XCTAssertEqual(web.scrollView.verticalScrollIndicatorInsets, insets)
+                    // The page runs under a column and stays inside a notch.
+                    XCTAssertEqual(insets.left, notch ? left : 0, accuracy: 0.01)
+                    XCTAssertEqual(insets.right, notch ? right : 0, accuracy: 0.01)
+                    let indicators = web.scrollView.verticalScrollIndicatorInsets
+                    XCTAssertEqual(indicators.left, left, accuracy: 0.01)
+                    XCTAssertEqual(indicators.right, right, accuracy: 0.01)
                 }
             }
         }

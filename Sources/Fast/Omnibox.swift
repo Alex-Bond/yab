@@ -20,6 +20,9 @@ struct Omnibox: View {
     /// Room on the right not the field's: the other half, in split view,
     /// where the field stands over the half in front.
     let trail: CGFloat
+    /// Page edges used only by the Compact card. Full keeps its original layout.
+    let pageTop: CGFloat
+    let pageBottom: CGFloat
     /// Taken as a value, not read off the browser in the body: the browser
     /// is the same object before and after, so a refusal would otherwise
     /// give this view nothing to notice and the field would never shiver.
@@ -44,11 +47,13 @@ struct Omnibox: View {
     @State private var refused = false
     @StateObject private var retainedRows: RetainedFieldRows
 
-    init(browser: Browser, inset: CGFloat, trail: CGFloat = 0) {
+    init(browser: Browser, inset: CGFloat, trail: CGFloat = 0, pageTop: CGFloat = 0, pageBottom: CGFloat = 0) {
         self.browser = browser
         self.query = browser.query
         self.inset = inset
         self.trail = trail
+        self.pageTop = pageTop
+        self.pageBottom = pageBottom
         self.refusals = browser.refusals
         self.shy = browser.windowPurpose.isPrivate(active: (browser.fieldGuest ?? browser.active)?.shy)
         self.hushedAt = (browser.fieldGuest ?? browser.active)?.hushedAt
@@ -198,7 +203,7 @@ struct Omnibox: View {
     var body: some View {
         GeometryReader { space in
             VStack(spacing: 8) {
-                surface(room: compactList ? compactRoom : Self.placeRoom(in: space.size.height))
+                surface(room: compactList ? Self.compactRoom(in: space.size.height, pageTop: pageTop, pageBottom: pageBottom) : Self.placeRoom(in: space.size.height))
             }
                 .frame(width: compactList ? min(Self.compactWidth, Self.width(in: space.size.width)) : Self.width(in: space.size.width))
                 .animation(nil, value: compactList)
@@ -210,7 +215,9 @@ struct Omnibox: View {
                 // measuring. The top edge is what is placed, never the
                 // middle of the field and its list together, which rose by
                 // half of every row that came.
-                .padding(.top, Self.top(in: space.size.height))
+                .padding(.top, compactList
+                    ? Self.compactTop(in: space.size.height, pageTop: pageTop, pageBottom: pageBottom)
+                    : Self.top(in: space.size.height))
                 .frame(maxWidth: .infinity, alignment: .top)
         }
         .padding(.leading, inset)
@@ -235,16 +242,17 @@ struct Omnibox: View {
     /// The least room between the field and the page's sides.
     static let margin: CGFloat = 16
 
-    /// Where the field's top edge stands in a space this tall: a fifth of
-    /// the way down, where Raycast's stands, so what the box holds under
-    /// the field has the room below it. In a window too short for that,
+    /// Where the field's top edge stands in a space this tall: the existing
+    /// 18% position through 1050 points, then half of any extra height below
+    /// its 189-point anchor. In a window too short for that,
     /// the card at its fullest stands in the middle, as much room above it
     /// as below, rather than high with its list pressed to the bottom. The
     /// full card is what is measured, never the rows it has, so the field
     /// stays put as they come and go. A private tab's box too: Private is
     /// one of the field's places, the same card where every other one is.
     static func top(in height: CGFloat) -> CGFloat {
-        return max(16, min(((height - fieldHeight - bodyHeight) / 2).rounded(), (height * 0.18).rounded()))
+        let preferred = height <= 1050 ? (height * 0.18).rounded() : 189 + (height - 1050) / 2
+        return max(16, min(((height - fieldHeight - bodyHeight) / 2).rounded(), preferred))
     }
 
     /// The middle of the field, as a point of the space it stands in,
@@ -291,16 +299,27 @@ struct Omnibox: View {
         query.scope != nil || (shy && browser.privateLeavable && query.offers.isEmpty)
     }
 
-    /// The compact list's height: none while ⌘L still shows the page's
-    /// address (only the words, as the field is for editing them), else
-    /// its rows, up to `compactRows`, and the list's inset round them.
+    /// A fixed expanded list for Compact, including any footer. Both Cmd-T
+    /// and Cmd-L reserve five rows even when the query has fewer results.
+    static let compactBodyHeight = CGFloat(compactRows) * compactRowHeight + 2 * compactInset
+
     private var compactRoom: CGFloat {
+        if compactList { return Self.compactBodyHeight }
+        // Full also observes this value to suppress row animations. Keep
+        // its original calculation, including the untouched-address case.
         if browser.untouched != nil { return 0 }
         let count = min(query.offers.count, Self.compactRows)
         let rows = count == 0 ? 0 : CGFloat(count) * Self.compactRowHeight + 2 * Self.compactInset
-        // A site's search keeps its foot, the site's name, under its rows,
-        // and an empty private tab's field its Private.
         return rows + (compactFooted ? FieldFoot.room : 0)
+    }
+
+    static func compactRoom(in height: CGFloat, pageTop: CGFloat = 0, pageBottom: CGFloat = 0) -> CGFloat {
+        max(0, min(compactBodyHeight, height - pageTop - pageBottom - compactFieldHeight - 2 * margin))
+    }
+
+    static func compactTop(in height: CGFloat, pageTop: CGFloat = 0, pageBottom: CGFloat = 0) -> CGFloat {
+        let room = compactRoom(in: height, pageTop: pageTop, pageBottom: pageBottom)
+        return pageTop + max(0, (height - pageTop - pageBottom - compactFieldHeight - room) / 2)
     }
 
     private func surface(room: CGFloat) -> some View {
@@ -1075,6 +1094,9 @@ struct Omnibox: View {
                             }
                         case .page("mail-now"):
                             FieldMailEnd(lit: lit)
+                        case .page(let what) where what.hasPrefix("menu:"):
+                            // Concrete menu actions carry their own remapped key.
+                            if !offer.title.isEmpty { caps(offer.title) }
                         case .page(let what) where what.hasPrefix("ext:"):
                             if pageAddon { kind(offer.title) }
                             if let keys = Browser.extensionCommand(what).keys { caps(keys) }
@@ -1315,13 +1337,7 @@ struct Omnibox: View {
             }
         }
 
-        private var favicon: NSImage? {
-            // Yab's own page wears its tab's mark, not a letter of yab://.
-            if let own = Tab.ownIcon(offer.url) { return own }
-            guard let host = QuickActions.site(of: offer) ?? offer.url?.host()?.lowercased() else { return nil }
-            return Favicons.shared.cached(host)
-                ?? Favicons.shared.cached(host.hasPrefix("www.") ? String(host.dropFirst(4)) : "www." + host)
-        }
+        private var favicon: NSImage? { Omnibox.favicon(for: offer) }
 
         private var letter: String {
             let name = offer.url?.host().map { IDN.shown($0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0) } ?? offer.key
@@ -1432,11 +1448,44 @@ final class AddressEditor: NSTextView {
         super.doCommand(by: selector)
     }
 
+    /// Copy, Cut, a drag and Services all write the selection here: of the
+    /// untouched address ⌘L brought, the page's own address, scheme and all,
+    /// not the shortened words the field shows (feedback #1519). It used to
+    /// be put right by ⌘C alone, in the window's key monitor; Edit › Copy
+    /// and the field's own menu took "example.com/page" with no https://.
+    override func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+        let here = ((delegate as? NSTextField)?.delegate as? AddressField.Coordinator)?.browser.untouched
+        guard let whole = Self.copied(string, selectedRange(), here: here) else {
+            return super.writeSelection(to: pboard, types: types)
+        }
+        pboard.declareTypes([.string], owner: nil)
+        return pboard.setString(whole, forType: .string)
+    }
+
+    /// What a copy of `range` of the field's `text` takes when the text is
+    /// the address `here` as ⌘L shows it: all of it, the address itself; a
+    /// start of it, that start with its scheme put back, as Chromium copies
+    /// from its address bar. Nil leaves the words as they are.
+    static func copied(_ text: String, _ range: NSRange, here: URL?) -> String? {
+        guard let here, range.location == 0, range.length > 0, text == Address.whole(here) else { return nil }
+        let shown = text as NSString
+        guard range.length < shown.length else { return here.absoluteString }
+        guard let scheme = here.scheme, !text.lowercased().hasPrefix(scheme.lowercased() + ":") else { return nil }
+        return scheme + "://" + shown.substring(with: range)
+    }
+
     override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
         guard let words = pboard.string(forType: .string) else { return super.readSelection(from: pboard, type: type) }
+        pasting = true
+        defer { pasting = false }
         insertText(Self.pasted(words), replacementRange: selectedRange())
         return true
     }
+
+    /// Words a paste, a drop or a service is putting in, while they go in:
+    /// a space among them never starts a site's search (Scopes.spaced), as
+    /// Chrome's paste state keeps a paste out of keyword mode.
+    private(set) var pasting = false
 
     /// The edges' white space gone, a run of white space with a line break
     /// in it taken out (an address broken over lines comes back whole), and
@@ -1774,6 +1823,16 @@ struct AddressField: NSViewRepresentable {
                 words.settle()
             }
             words?.isHidden = !text.isEmpty || composing
+
+            // A space typed after a site's alias: that site's search, as Tab
+            // starts it (Settings › Field › Sites › Keyboard shortcut). The
+            // words before the change are still the browser's, and the
+            // field takes the site's words from updateNSView, as after Tab.
+            if !deleting, !composing, let editor = field.currentEditor() as? AddressEditor, !editor.pasting,
+               editor.selectedRange().length == 0,
+               browser.enterScope(spacing: browser.typed, to: text, caret: editor.selectedRange().location) {
+                return
+            }
 
             browser.replaceTyped(text, completing: !deleting && !composing)
             guard !deleting, !composing, let ending = browser.ending else {
@@ -2117,5 +2176,25 @@ struct FieldShadow: View {
         }
         .compositingGroup()
         .allowsHitTesting(false)
+    }
+}
+
+extension Omnibox {
+    /// The icon a row for a page or a site wears: only what is already on
+    /// this Mac, a list that fetched as you typed would be fetching for
+    /// every letter.
+    @MainActor static func favicon(for offer: Suggestion) -> NSImage? {
+        // Yab's own page wears its tab's mark, not a letter of yab://.
+        if let own = Tab.ownIcon(offer.url) { return own }
+        // A page seen before wears what it wore, a slideshow's own and
+        // not the Docs icon its host keeps (Favicons.pageIcon).
+        if QuickActions.site(of: offer) == nil, let url = offer.url, let hit = Favicons.shared.pageIcon(url) { return hit }
+        // A port's own site wears its own icon, none of its host's.
+        if QuickActions.site(of: offer) == nil, let url = offer.url, let site = Favicons.site(url), site != url.host()?.lowercased() {
+            return Favicons.shared.cached(site)
+        }
+        guard let host = QuickActions.site(of: offer) ?? offer.url?.host()?.lowercased() else { return nil }
+        return Favicons.shared.cached(host)
+            ?? Favicons.shared.cached(host.hasPrefix("www.") ? String(host.dropFirst(4)) : "www." + host)
     }
 }

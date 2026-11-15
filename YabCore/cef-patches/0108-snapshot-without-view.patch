@@ -1,0 +1,36 @@
+diff --git a/content/browser/renderer_host/render_widget_host_impl.cc b/content/browser/renderer_host/render_widget_host_impl.cc
+--- a/content/browser/renderer_host/render_widget_host_impl.cc
++++ b/content/browser/renderer_host/render_widget_host_impl.cc
+@@ -4001,10 +4001,16 @@ void RenderWidgetHostImpl::GotResponseToKeyboardLockRequest(bool allowed) {
+ void RenderWidgetHostImpl::GotResponseToForceRedraw(int snapshot_id) {
+   // Snapshots from surface do not need to wait for the screen update.
+   if (!pending_surface_browser_snapshots_.empty()) {
+-    GetView()->CopyFromSurface(
+-        gfx::Rect(), gfx::Size(), base::TimeDelta(),
+-        base::BindOnce(&RenderWidgetHostImpl::OnSnapshotFromSurfaceReceived,
+-                       weak_factory_.GetWeakPtr(), snapshot_id, 0));
++    if (GetView()) {
++      GetView()->CopyFromSurface(
++          gfx::Rect(), gfx::Size(), base::TimeDelta(),
++          base::BindOnce(&RenderWidgetHostImpl::OnSnapshotFromSurfaceReceived,
++                         weak_factory_.GetWeakPtr(), snapshot_id, 0));
++    } else {
++      OnSnapshotFromSurfaceReceived(
++          snapshot_id, /*retry_count=*/0,
++          base::unexpected(CopyFromSurfaceError::kFrameGone));
++    }
+   }
+ 
+   if (pending_browser_snapshots_.empty()) {
+@@ -4056,7 +4062,10 @@ void RenderWidgetHostImpl::OnSnapshotFromSurfaceReceived(
+     int retry_count,
+     const content::CopyFromSurfaceResult& result) {
+   static constexpr int kMaxRetries = 5;
+-  if (!result.has_value() && retry_count < kMaxRetries) {
++  // The view goes when the renderer does (RendererExited) or is destroyed,
++  // and a copy in flight then comes back empty. With no view there is nothing
++  // to retry on: the pending snapshots get the empty image below.
++  if (!result.has_value() && retry_count < kMaxRetries && GetView()) {
+     GetView()->CopyFromSurface(
+         gfx::Rect(), gfx::Size(), base::TimeDelta(),
+         base::BindOnce(&RenderWidgetHostImpl::OnSnapshotFromSurfaceReceived,

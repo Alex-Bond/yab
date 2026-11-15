@@ -3,6 +3,22 @@ import Testing
 @testable import Fast
 
 struct DownloadRequestTests {
+    @Test func extensionNamesKeepDirectoriesAndCannotEscapeTheDownloadFolder() throws {
+        #expect(DownloadRequest.relativeFilename("Pictures/original.png") == "Pictures/original.png")
+        for invalid in ["../outside.png", "/tmp/outside.png", "Pictures/../outside.png", "a//b", "a\\b", "a/./b"] {
+            #expect(DownloadRequest.relativeFilename(invalid) == nil)
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: outside) }
+        let folder = try DownloadRequest.extensionFolder(for: "Pictures/original.png", in: root)
+        #expect(folder == root.appendingPathComponent("Pictures", isDirectory: true))
+        #expect(try DownloadRequest.extensionFolder(for: "Pictures/second.png", in: root) == folder)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("escape"), withDestinationURL: outside)
+        #expect(throws: (any Error).self) { try DownloadRequest.extensionFolder(for: "escape/outside.png", in: root) }
+    }
     @Test func requestKeepsReferrerPolicyAndNeverLeaksCredentialsOrFragments() throws {
         let source = try #require(URL(string: "https://user:secret@images.example/results?q=map#selected"))
         let same = try #require(URL(string: "https://images.example/map.png"))

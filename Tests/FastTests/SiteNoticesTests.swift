@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Testing
 import UserNotifications
+import YabCoreClient
 @testable import Fast
 
 // A site's notifications (SiteNotices.swift): how an origin is written for
@@ -59,16 +60,70 @@ struct SiteNoticesTests {
 
     @Test func itsButtonsAndMailsAreOneSet() {
         let site = SiteNotices.categories
-        #expect(site.count == 1)
-        let category = site.first
-        #expect(category?.identifier == SiteNotices.category)
+        #expect(site.count == 2)
+        let category = site.first { $0.identifier == SiteNotices.category }
         #expect(category?.actions.map(\.identifier) == [SiteNotices.turnOff, SiteNotices.controls])
         // Swept away is heard, so the page's onclose fires.
         #expect(category?.options.contains(.customDismissAction) == true)
+        // An extension's has no site to turn off, and its onClosed hears a sweep.
+        let own = site.first { $0.identifier == SiteNotices.extensionCategory }
+        #expect(own?.actions.isEmpty == true)
+        #expect(own?.options.contains(.customDismissAction) == true)
         let all = MailNotifySystem.categories.union(site)
-        #expect(Set(all.map(\.identifier)) == [MailNotify.category, MailNotify.batchCategory, MailNotify.codeCategory, SiteNotices.category])
+        #expect(Set(all.map(\.identifier)) == [MailNotify.category, MailNotify.batchCategory, MailNotify.codeCategory,
+                                                SiteNotices.category, SiteNotices.extensionCategory])
         let code = all.first { $0.identifier == MailNotify.codeCategory }
         #expect(code?.actions.map(\.identifier) == [MailNotify.Act.copyCode.rawValue, MailNotify.Act.done.rawValue])
+    }
+
+    // chrome.notifications, as Chromium's macOS service hands it over: its
+    // origin the extension's, its id the extension's own (which may start
+    // with "p", as a worker's does), its subtitle the contextMessage.
+    static let fromExtension: [String: JSONValue] = [
+        "op": .string("show"), "key": .string("k1"), "id": .string("pkehgijcmpdhfbdbbnkijodmdjhbjlgp-timer"),
+        "origin": .string("chrome-extension://pkehgijcmpdhfbdbbnkijodmdjhbjlgp/"), "profile": .string("space-default"),
+        "incognito": .bool(false), "type": .number(2), "directory": .string("/tmp/Chromium"),
+        "title": .string("40% - Focus"), "subtitle": .string("Work block"), "body": .string("20 minutes left"),
+        "buttons": .array([.string("Pause"), .string("Stop")]),
+    ]
+
+    @Test func anExtensionsIsToldApartByItsOrigin() throws {
+        let chromium = try #require(SiteNotices.Chromium(event: Self.fromExtension))
+        #expect(chromium.extensionID == "pkehgijcmpdhfbdbbnkijodmdjhbjlgp")
+        #expect(chromium.worker == false)
+        #expect(chromium.tag == "")
+        #expect(chromium.subtitle == "Work block")
+        #expect(chromium.buttons == ["Pause", "Stop"])
+        var site = Self.fromExtension
+        site["origin"] = .string("https://app.slack.com/")
+        site["id"] = .string("p#https://app.slack.com/#1design")
+        site["type"] = .number(0)
+        let page = try #require(SiteNotices.Chromium(event: site))
+        #expect(page.extensionID == nil)
+        #expect(page.worker && page.tag == "design")
+        site["origin"] = .string("chrome-extension://not-an-id/")
+        #expect(SiteNotices.Chromium(event: site)?.extensionID == nil)
+    }
+
+    @MainActor @Test func anExtensionsSaysItsNameNotItsID() throws {
+        _ = NSApplication.shared
+        let chromium = try #require(SiteNotices.Chromium(event: Self.fromExtension))
+        let origin = try #require(SiteNotices.origin(webKit: chromium.origin))
+        var note = SiteNotices.Note(id: 7, worker: false, origin: origin, title: "40% - Focus", body: "20 minutes left",
+                                    tag: "", icon: "", tab: nil, chromium: chromium)
+        note.from = "Focus Timer"
+        var content = SiteNotices.content(note)
+        #expect(content.title == "40% - Focus")
+        #expect(content.subtitle == "Focus Timer · Work block")
+        #expect(content.categoryIdentifier == SiteNotices.extensionCategory)
+        #expect(content.threadIdentifier == SiteNotices.thread(origin))
+        // Shown over its own page too.
+        #expect(SiteNotices.presenting(content.userInfo).contains(.banner))
+        note.title = ""
+        note.chromium?.subtitle = ""
+        content = SiteNotices.content(note)
+        #expect(content.title == "Focus Timer")
+        #expect(content.subtitle == "Focus Timer")
     }
 
     @Test func aPictureIsMadeSmallAndPNG() throws {

@@ -15,27 +15,27 @@ struct FieldDismissTests {
         run(browser)
     }
 
-    @MainActor @Test func escapeReturnsToTheFormWithoutAnEmptyField() {
+    @MainActor @Test func escapeReturnsToDefaultBeforeTheForm() {
         withForm { browser in
             #expect(browser.query.form != nil)
             #expect(browser.fieldShowing)
-            #expect(browser.leavePlace(returnToForm: true))
-            #expect(!browser.fieldShowing)
+            #expect(browser.leavePlace())
+            #expect(browser.fieldShowing)
             #expect(browser.query.place == nil)
-            #expect(browser.query.form == nil)
+            #expect(browser.query.form != nil)
             #expect(browser.active?.typing == true)
         }
     }
 
-    @MainActor @Test func escapeClosesActionsBeforeReturningToTheForm() {
+    @MainActor @Test func escapeClosesActionsBeforeReturningToDefault() {
         withForm { browser in
             browser.query.acting = 0
-            #expect(browser.leavePlace(returnToForm: true))
+            #expect(browser.leavePlace())
             #expect(browser.query.acting == nil)
             #expect(browser.query.place == .passwords)
             #expect(browser.fieldShowing)
-            #expect(browser.leavePlace(returnToForm: true))
-            #expect(!browser.fieldShowing)
+            #expect(browser.leavePlace())
+            #expect(browser.fieldShowing)
         }
     }
 
@@ -52,7 +52,7 @@ struct FieldDismissTests {
         withForm { browser in
             browser.openFresh()
             browser.query.place = .passwords
-            #expect(browser.leavePlace(returnToForm: true))
+            #expect(browser.leavePlace())
             #expect(browser.query.place == nil)
             #expect(browser.fieldShowing)
             #expect(browser.asked == .tab)
@@ -62,7 +62,7 @@ struct FieldDismissTests {
     @MainActor @Test func aPlaceWithoutAFormStillReturnsToANewTab() {
         withForm { browser in
             browser.query.form = nil
-            #expect(browser.leavePlace(returnToForm: true))
+            #expect(browser.leavePlace())
             #expect(browser.query.place == nil)
             #expect(browser.fieldShowing)
             #expect(browser.asked == .tab)

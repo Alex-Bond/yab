@@ -39,9 +39,9 @@ indirect enum NativeValue: Codable, Equatable {
         }
     }
 
-    static func read(_ any: Any) throws -> NativeValue {
+    static func read(_ any: Any, requestLimit: Bool = true) throws -> NativeValue {
         let data = try JSONSerialization.data(withJSONObject: any, options: [.fragmentsAllowed, .sortedKeys])
-        guard data.count <= 65_536 else { throw NativeFailure("invalid_arguments", "The request is too large") }
+        guard !requestLimit || data.count <= 65_536 else { throw NativeFailure("invalid_arguments", "The request is too large") }
         return try JSONDecoder().decode(Self.self, from: data)
     }
 
@@ -124,8 +124,11 @@ final class NativeChanges {
 
     func update(_ id: String, status: String, result: [String: Any], after: NativeValue? = nil, version: String? = nil, undone: Bool = false) throws {
         guard let index = receipts.firstIndex(where: { $0.id == id }) else { throw NativeFailure("not_found", "No such operation") }
+        // This is Yab's result, including whole-space before/after snapshots,
+        // not the agent's request. Even a one-tab move can exceed 64 KiB here.
+        let value = try NativeValue.read(result, requestLimit: false)
         receipts[index].status = status
-        receipts[index].result = try NativeValue.read(result)
+        receipts[index].result = value
         if let after { receipts[index].after = after }
         if let version { receipts[index].version = version }
         receipts[index].undone = undone

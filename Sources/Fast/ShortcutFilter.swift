@@ -218,10 +218,10 @@ enum ShortcutFilter {
     }
 }
 
-/// Real toolbar items receive AppKit's Liquid Glass, sizing and keyboard
-/// behavior. A custom hosting view would bypass that toolbar treatment.
+/// Shortcuts' search and its filters, both real toolbar items (ToolbarSearch
+/// says why).
 @MainActor
-final class ShortcutFilterToolbar: NSObject, NSSearchFieldDelegate, NSMenuDelegate {
+final class ShortcutFilterToolbar: NSObject, NSMenuDelegate {
     static let searchID = NSToolbarItem.Identifier("SearchSettingsShortcutSearch")
     static let filterID = NSToolbarItem.Identifier("SearchSettingsShortcutFilters")
     static var identifiers: [NSToolbarItem.Identifier] { [searchID, filterID] }
@@ -229,15 +229,16 @@ final class ShortcutFilterToolbar: NSObject, NSSearchFieldDelegate, NSMenuDelega
     private let selection: ShortcutFilter.Selection
     private weak var toolbar: NSToolbar?
     private weak var window: NSWindow?
-    private var search: NSSearchToolbarItem?
+    private let search: ToolbarSearch
     private var filters: NSMenuToolbarItem?
-    private var searching = false
     private var following: AnyCancellable?
     nonisolated(unsafe) private var keys: Any?
 
     init(selection: ShortcutFilter.Selection, window: NSWindow) {
         self.selection = selection
         self.window = window
+        search = ToolbarSearch(id: Self.searchID, label: "Search shortcuts", prompt: "Search by name or alias", window: window,
+                               words: { selection.search }, typed: { selection.search = $0 })
         super.init()
         following = selection.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.sync() }
@@ -253,8 +254,9 @@ final class ShortcutFilterToolbar: NSObject, NSSearchFieldDelegate, NSMenuDelega
     /// while it is focused becomes the query, so ⌘T finds what ⌘T does.
     private static let editing: Set<String> = ["⌘A", "⌘C", "⌘V", "⌘X", "⌘Z", "⇧⌘Z", "⌘⌫", "⌥⌫", "⌃⌫"]
 
-    private func searchPressed(_ event: NSEvent) -> Bool {
-        guard let field = search?.searchField, field.currentEditor() != nil, event.window === window,
+    func searchPressed(_ event: NSEvent) -> Bool {
+        guard !Keymap.shared.recording,
+              let field = search.field, field.currentEditor() != nil, event.window === window,
               let key = Hotkey(event), !key.flags.intersection([.command, .option, .control]).isEmpty,
               !["←", "→", "↑", "↓", "home", "end"].contains(key.key), !Self.editing.contains(key.text) else { return false }
         field.stringValue = key.text
@@ -265,50 +267,14 @@ final class ShortcutFilterToolbar: NSObject, NSSearchFieldDelegate, NSMenuDelega
 
     func attach(to toolbar: NSToolbar, visible: Bool) {
         self.toolbar = toolbar
-        for id in Self.identifiers {
-            let index = toolbar.items.firstIndex { $0.itemIdentifier == id }
-            if visible, index == nil {
-                toolbar.insertItem(withItemIdentifier: id, at: toolbar.items.count)
-            } else if !visible, let index {
-                toolbar.removeItem(at: index)
-            }
-        }
-        if !visible { searching = false; search = nil; filters = nil }
+        search.attach(to: toolbar)
+        toolbar.keep(Self.identifiers, shown: visible)
+        if !visible { search.detach(); filters = nil }
         else { sync() }
     }
 
     func item(for id: NSToolbarItem.Identifier) -> NSToolbarItem? {
-        if id == Self.searchID {
-            if searching {
-                let field = NSSearchField()
-                field.placeholderString = "Search by name or alias"
-                field.setAccessibilityLabel("Search by name or alias")
-                field.focusRingType = .none
-                field.font = .systemFont(ofSize: 13)
-                field.sendsSearchStringImmediately = true
-                field.sendsWholeSearchString = false
-                field.delegate = self
-                field.target = self
-                field.action = #selector(searchChanged(_:))
-                field.stringValue = selection.search
-                let item = NSSearchToolbarItem(itemIdentifier: id)
-                item.searchField = field
-                item.preferredWidthForSearchField = 220
-                item.label = "Search shortcuts"
-                item.visibilityPriority = .high
-                search = item
-                return item
-            }
-            let item = NSToolbarItem(itemIdentifier: id)
-            item.label = "Search shortcuts"
-            item.toolTip = "Search by name or alias" // design: native toolbar items have no custom view for keyTip.
-            item.image = Glyphs.image("magnifyingglass", size: 15)
-            item.target = self
-            item.action = #selector(openSearch(_:))
-            item.isBordered = true
-            item.visibilityPriority = .high
-            return item
-        }
+        if id == Self.searchID { return search.item() }
         if id == Self.filterID {
             let item = NSMenuToolbarItem(itemIdentifier: id)
             item.label = "Shortcut filters"
@@ -342,9 +308,7 @@ final class ShortcutFilterToolbar: NSObject, NSSearchFieldDelegate, NSMenuDelega
     }
 
     private func sync() {
-        if let field = search?.searchField, field.stringValue != selection.search {
-            field.stringValue = selection.search
-        }
+        search.sync()
         filters?.title = filterTitle
         let active = active
         filters?.image = Glyphs.image(active.count == 1 ? active[0].icon : "line.3.horizontal.decrease", side: 14)
@@ -398,70 +362,17 @@ final class ShortcutFilterToolbar: NSObject, NSSearchFieldDelegate, NSMenuDelega
         DropPopup.show(list, under: button, width: 300, trailing: true) { _ in }
     }
 
-    @objc private func openSearch(_ sender: Any?) { _ = beginSearch() }
-
     @discardableResult
-    func beginSearch() -> NSSearchField? {
-        if !searching { searching = true; replaceSearch() }
-        guard let search else { return nil }
-        // AppKit must attach the newly inserted field before it can take
-        // keyboard focus. Do not start editing in a detached toolbar view.
-        window?.contentView?.superview?.layoutSubtreeIfNeeded()
-        search.beginSearchInteraction()
-        window?.contentView?.superview?.layoutSubtreeIfNeeded()
-        if search.searchField.window === window {
-            window?.makeFirstResponder(search.searchField)
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.search === search else { return }
-                window?.contentView?.superview?.layoutSubtreeIfNeeded()
-                search.beginSearchInteraction()
-                window?.makeFirstResponder(search.searchField)
-            }
-        }
-        return search.searchField
-    }
-
-    private func replaceSearch() {
-        guard let toolbar, let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == Self.searchID }) else { return }
-        search = nil
-        toolbar.removeItem(at: index)
-        toolbar.insertItem(withItemIdentifier: Self.searchID, at: index)
-    }
-
-    @objc private func searchChanged(_ sender: NSSearchField) { selection.search = sender.stringValue }
-
-    func controlTextDidChange(_ notification: Notification) {
-        if let field = notification.object as? NSSearchField { searchChanged(field) }
-    }
-
-    func controlTextDidEndEditing(_ notification: Notification) { collapseEmptySearch() }
-    func searchFieldDidEndSearching(_ sender: NSSearchField) {
-        // Deleting a query is still editing: keep the field so the next
-        // character can start a replacement query without another click.
-        searchChanged(sender)
-    }
-
-    private func collapseEmptySearch() {
-        DispatchQueue.main.async { [weak self] in
-            // Opening hands the field's focus along more than once, and each
-            // hand-over ends editing for a moment: only a field that has
-            // really lost the keys goes back to the glass.
-            guard let self, searching, selection.search.isEmpty,
-                  search?.searchField.currentEditor() == nil else { return }
-            searching = false
-            replaceSearch()
-        }
-    }
+    func beginSearch() -> NSSearchField? { search.begin() }
 
     /// Press the system-created button in probes, through its own action.
     var state: [String: Any] {
-        var result: [String: Any] = ["title": filterTitle, "searching": searching,
+        var result: [String: Any] = ["title": filterTitle, "searching": search.searching,
          "nativeMenu": filters != nil && filters?.view == nil,
          "bordered": filters?.isBordered == true, "filterVisible": filters?.isVisible == true,
-         "noFocusRing": search?.searchField.focusRingType == NSFocusRingType.none,
-         "focused": search?.searchField.currentEditor() != nil,
-         "fieldAttached": search?.searchField.window != nil, "query": selection.search]
+         "noFocusRing": search.field?.focusRingType == NSFocusRingType.none,
+         "focused": search.field?.currentEditor() != nil,
+         "fieldAttached": search.field?.window != nil, "query": selection.search]
         result["trailingItem"] = toolbar?.items.last?.itemIdentifier.rawValue
         result["filterIconWidth"] = filters?.image?.size.width
         if let frame = window?.contentView?.superview, let button = menuButton(in: frame) {

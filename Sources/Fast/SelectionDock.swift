@@ -24,7 +24,7 @@ struct SelectionDockContent: View {
         return "Result"
     }
 
-    private var width: CGFloat { max(160, min(456, (tab.built?.bounds.width ?? 480) - 24)) }
+    private var width: CGFloat { max(160, min(456, (tab.builtPage?.bounds.width ?? 480) - 24)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

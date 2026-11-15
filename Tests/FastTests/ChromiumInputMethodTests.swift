@@ -8,10 +8,214 @@ import YabCoreClient
 @Suite(.serialized)
 @MainActor
 struct ChromiumInputMethodTests {
+    @Test func checkingDocumentKeepsThePageAsItsNativeClient() {
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab)
+        defer { page.retire(call: false, pictureInPicture: false); tab.close() }
+        page.receiveNativeTextInput(native())
+        let client: any NSTextCheckingClient = page
+        #expect(client.selectedRange() == page.selectedRange())
+        page.contentType = .emailAddress
+        #expect((client as? NSTextContent)?.contentType == .emailAddress)
+        (client as? NSTextContent)?.contentType = .oneTimeCode
+        #expect(page.contentType == .oneTimeCode)
+        client.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0),
+                             replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(client.hasMarkedText() && page.hasMarkedText())
+        client.unmarkText()
+        #expect(!client.hasMarkedText() && !page.hasMarkedText())
+        // Calls through the native protocol retain the page's refusal gates.
+        client.insertText("dictation", replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(page.inputMethodTicket?.result == .refused && page.inputMethodDispatched == 0)
+    }
+
+    @Test func checkingDocumentKeepsNativeUTF16OffsetsAndBoundsAnnotations() throws {
+        var state = native()
+        state["surrounding"] = .string("a🙂 b\nnext")
+        state["surroundingOffset"] = .string("100")
+        let snapshot = try #require(ChromiumTextCheckingSnapshot(state: state))
+        #expect(snapshot.localRange(NSRange(location: 101, length: 2)) == NSRange(location: 1, length: 2))
+        #expect(snapshot.localRange(NSRange(location: 98, length: 4)) == NSRange(location: 0, length: 2))
+        #expect(snapshot.localRange(NSRange(location: 98, length: 1)) == nil)
+        #expect(snapshot.localRange(NSRange(location: 111, length: 0)) == nil)
+        #expect(snapshot.localRange(NSRange(location: NSNotFound, length: 0)) == NSRange(location: 0, length: 10))
+        #expect(snapshot.localRange(NSRange(location: 101, length: Int.max)) == NSRange(location: 1, length: 9))
+        #expect(snapshot.documentRange(NSRange(location: 1, length: 2)) == NSRange(location: 101, length: 2))
+        #expect(snapshot.mutationRange(NSRange(location: 101, length: 2)) == NSRange(location: 101, length: 2))
+        #expect(snapshot.mutationRange(NSRange(location: 98, length: 4)) == nil)
+        #expect(snapshot.mutationRange(NSRange(location: 101, length: Int.max)) == nil)
+        #expect(snapshot.mutationRange(NSRange(location: NSNotFound, length: 0)) == nil)
+        state["surroundingOffset"] = .string("-1")
+        #expect(ChromiumTextCheckingSnapshot(state: state) == nil)
+        state["surroundingOffset"] = .string(String(Int.max))
+        #expect(ChromiumTextCheckingSnapshot(state: state) == nil)
+    }
+
+    @Test func checkingDocumentNeverInventsSurroundingTextForAnUnknownEditor() throws {
+        var state = native()
+        #expect(ChromiumTextCheckingSnapshot(state: state) == nil)
+        state["hasSurrounding"] = .bool(false)
+        #expect(ChromiumTextCheckingSnapshot(state: state) == nil) // nonempty selection
+        state["selection"] = .object(["valid": .bool(true), "start": .number(0), "end": .number(0)])
+        #expect(ChromiumTextCheckingSnapshot(state: state) == nil) // a caret at zero does not prove emptiness
+        state["hasSurrounding"] = .bool(true)
+        state["surrounding"] = .string("")
+        state["surroundingOffset"] = .string("0")
+        let empty = try #require(ChromiumTextCheckingSnapshot(state: state))
+        #expect(empty.text.length == 0 && empty.offset == 0)
+        state["cancelled"] = .bool(true)
+        #expect(ChromiumTextCheckingSnapshot(state: state) == nil)
+    }
+
+    @Test func editableKeysReachTheInputContextWithoutTakingPageShortcuts() throws {
+        func key(_ text: String, _ flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+            try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: 1, windowNumber: 0, context: nil, characters: text,
+                charactersIgnoringModifiers: text, isARepeat: false, keyCode: 14))
+        }
+        let abc = "com.apple.keylayout.ABC"
+        #expect(ChromiumPage.usesInputContext(try key("´", .option), source: abc, marked: false, editable: true))
+        #expect(ChromiumPage.usesInputContext(try key("ç", .option), source: abc, marked: false, editable: true))
+        #expect(ChromiumPage.usesInputContext(try key(""), source: abc, marked: false, editable: true))
+        #expect(ChromiumPage.usesInputContext(try key("e"), source: abc, marked: true, editable: true))
+        #expect(ChromiumPage.usesInputContext(try key("e"), source: abc, marked: false, editable: true))
+        #expect(!ChromiumPage.usesInputContext(try key("e", [.command, .option]), source: abc, marked: true, editable: true))
+        #expect(ChromiumPage.usesInputContext(try key("k"), source: "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese", marked: false, editable: true))
+    }
+
+    // #1785: the page body is not an editing target. Selecting Pinyin must
+    // not turn video shortcuts into text or open the candidate window.
+    @Test func chineseInputMethodLeavesNonEditingPageShortcutsAlone() throws {
+        for (text, code) in [(" ", 49), ("k", 40), ("f", 3), ("m", 46)] {
+            let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [], timestamp: 1, windowNumber: 0, context: nil,
+                characters: text, charactersIgnoringModifiers: text, isARepeat: false,
+                keyCode: UInt16(code)))
+            #expect(!ChromiumPage.usesInputContext(event,
+                source: "com.apple.inputmethod.SCIM.ITABC", marked: false))
+        }
+    }
+
+    @Test func editingFocusGatesCompositionAndNativeStateOverridesOldCaretReports() throws {
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab)
+        defer { page.retire(call: false, pictureInPicture: false); tab.close() }
+        #expect(!page.inputMethodEditable)
+        tab.typing = true
+        #expect(page.inputMethodEditable) // older helper's caret report
+        var body = native(); body["editable"] = .bool(false)
+        page.receiveNativeTextInput(body)
+        #expect(!page.inputMethodEditable) // stale caret report cannot override it
+        page.receiveNativeTextInput(native())
+        #expect(page.inputMethodEditable)
+        var cancelled = native(); cancelled["cancelled"] = .bool(true)
+        page.receiveNativeTextInput(cancelled)
+        #expect(!page.inputMethodEditable)
+        let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            modifierFlags: [], timestamp: 1, windowNumber: 0, context: nil,
+            characters: "n", charactersIgnoringModifiers: "n", isARepeat: false, keyCode: 45))
+        for source in ["com.apple.inputmethod.SCIM.ITABC", "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese"] {
+            #expect(ChromiumPage.usesInputContext(event, source: source, marked: false, editable: true))
+            #expect(ChromiumPage.usesInputContext(event, source: source, marked: true, editable: true))
+            #expect(!ChromiumPage.usesInputContext(event, source: source, marked: false, editable: false))
+        }
+    }
+
+
+    @Test func interpretationKeepsPlainKeysButCommitsAnExistingComposition() {
+        let none = NSRange(location: NSNotFound, length: 0)
+        var read = ChromiumKeyInterpretation()
+        read.edits = [.insert("e", replacing: none)]
+        #expect(read.route(typed: "e", inputMethod: false, taken: true) == .page)
+        read.edits = [.insert("é", replacing: none)]
+        #expect(read.route(typed: "é", inputMethod: false, taken: true, composing: true) == .inputMethod)
+        read.edits = [.insert("é", replacing: NSRange(location: 4, length: 1))]
+        #expect(read.route(typed: "é", inputMethod: false, taken: true) == .inputMethod)
+        read.edits = [.mark("に", selected: NSRange(location: 1, length: 0), replacing: none)]
+        #expect(read.route(typed: "n", inputMethod: true, taken: true) == .inputMethod)
+        read.edits = []
+        #expect(read.route(typed: "2", inputMethod: false, taken: true) == .kept)
+        #expect(read.route(typed: "e", inputMethod: false, taken: false) == .page)
+        read.commands = 1
+        #expect(read.route(typed: "\u{7f}", inputMethod: false, taken: true) == .page)
+    }
+
+    @Test func replacementCoordinatesAreUTF16AndMarkedTextStartsAtTheSelection() {
+        #expect(ChromiumNativeTextInput.replacementFields(NSRange(location: NSNotFound, length: 0)).isEmpty)
+        #expect(ChromiumNativeTextInput.replacementFields(NSRange(location: Int.max - 1, length: 4)).isEmpty)
+        #expect(ChromiumNativeTextInput.replacementFields(NSRange(location: 3, length: 2)) ==
+                ["replacementStart": .number(3), "replacementLength": .number(2)])
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab)
+        defer { page.retire(call: false, pictureInPicture: false); tab.close() }
+        page.receiveNativeTextInput(native())
+        page.setMarkedText("に🙂", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(page.markedRange() == NSRange(location: 2, length: 3))
+        page.discardNativeComposition()
+        #expect(!page.hasMarkedText())
+    }
+
     private func native(_ token: String = "41") -> [String: JSONValue] {
         ["stateVersion": .number(1), "coordinateSpace": .string("rootPage"),
          "editable": .bool(true), "focusToken": .string(token), "revision": .string("8"),
          "selection": .object(["valid": .bool(true), "start": .number(2), "end": .number(4)])]
+    }
+
+    @Test func inactiveClientNeverOffersAContextOrGuessedCaret() {
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab)
+        defer { page.retire(call: false, pictureInPicture: false); tab.close() }
+        page.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        #expect(page.inputContext == nil)
+        #expect(page.nativeFirstRect(NSRange(location: 0, length: 0)) == .zero)
+        page.receiveNativeTextInput(native())
+        #expect(page.inputContext == nil, "A cached detached editable page must not become a text client")
+        #expect(page.nativeFirstRect(NSRange(location: 2, length: 0)) == .zero)
+        page.resetNativeTextInput()
+        #expect(page.inputContext == nil)
+    }
+
+    private final class InputWindow: NSWindow {
+        // The suite runs without a display lease. Model key-window status
+        // without activating a test window over another farm job's app.
+        override var isKeyWindow: Bool { true }
+    }
+
+    @Test func inputContextAndCaretFollowActualEditableResponder() throws {
+        _ = NSApplication.shared
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab)
+        let window = InputWindow(contentRect: NSRect(x: 100, y: 100, width: 900, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = page
+        defer { window.close(); page.retire(call: false, pictureInPicture: false); tab.close() }
+        #expect(window.makeFirstResponder(page))
+        #expect(page.inputMethodFocused)
+        #expect(page.inputContext == nil)
+        var state = native()
+        state["caretBounds"] = .object(["x": .number(100), "y": .number(80),
+                                       "width": .number(0), "height": .number(22)])
+        page.receiveNativeTextInput(state)
+        let context = try #require(page.inputContext)
+        // IME services must reach the editing responder itself. A second
+        // client can handle layout keys yet never start a conversion session.
+        #expect((context.client as AnyObject) === page)
+        #expect(context.client is NSTextCheckingClient)
+        #expect(page.nativeFirstRect(NSRange(location: 2, length: 0)) ==
+                window.convertToScreen(page.convert(NSRect(x: 100, y: page.bounds.height - 102, width: 1, height: 22), to: nil)))
+        state["caretBounds"] = nil
+        page.receiveNativeTextInput(state)
+        #expect(page.nativeFirstRect(NSRange(location: 2, length: 0)) == .zero)
+        state["editable"] = .bool(false)
+        page.receiveNativeTextInput(state)
+        #expect(page.inputContext == nil)
+        state["editable"] = .bool(true)
+        page.receiveNativeTextInput(state)
+        #expect(page.inputContext === context)
+        window.makeFirstResponder(nil)
+        #expect(page.inputContext == nil)
+        #expect(page.nativeFirstRect(NSRange(location: 2, length: 0)) == .zero)
     }
 
     @Test func helperLossClearsTheActualInputClientCompositionWithoutRecreatingAnEndpoint() {
@@ -53,6 +257,20 @@ struct ChromiumInputMethodTests {
         #expect(page.remoteID == nil && page.inputMethodDispatched == 0)
     }
 
+    @Test func legacyCocoaForwardingRequiresAnExplicitLegacyHelperAndNoInvalidSnapshot() {
+        #expect(ChromiumNativeTextInput.usesLegacyHelper(.number(0)))
+        #expect(ChromiumNativeTextInput.usesLegacyHelper(.bool(false)))
+        for capability in [nil, .null, .number(1), .bool(true), .string("false")] as [JSONValue?] {
+            #expect(!ChromiumNativeTextInput.usesLegacyHelper(capability))
+        }
+        #expect(!ChromiumNativeTextInput.canForward(nil, legacy: false))
+        #expect(ChromiumNativeTextInput.canForward(nil, legacy: true))
+        #expect(ChromiumNativeTextInput.canForward(native(), legacy: false))
+        #expect(!ChromiumNativeTextInput.canForward([:], legacy: true))
+        var cancelled = native(); cancelled["cancelled"] = .bool(true)
+        #expect(!ChromiumNativeTextInput.canForward(cancelled, legacy: true))
+    }
+
     @Test func focusMetadataAndUTF16RangesRejectMissingOrMalformedNativeAuthority() {
         var state = native()
         #expect(ChromiumNativeTextInput.focusToken(state) == "41")
@@ -79,75 +297,6 @@ struct ChromiumInputMethodTests {
         let uncertain = current.dispatchReport
         #expect(uncertain["dispatched"] is NSNull)
         #expect(uncertain["dispatchResult"] as? String == "unknown")
-    }
-
-    // MARK: - A page field's keys through Yab's input context
-
-    private typealias Heard = ChromiumKeyInterpretation
-    private var none: NSRange { NSRange(location: NSNotFound, length: 0) }
-
-    @Test func aPlainCharacterOrAnEditingCommandGoesToThePageAsTheKey() {
-        // The page reads the key into the same character, with its keydown,
-        // keypress and input events, as the Mac's own field would.
-        #expect(Heard(edits: [.insert("e", replacing: none)]).route(typed: "e", inputMethod: false, taken: true) == .page)
-        #expect(Heard(edits: [.insert("ß", replacing: none)]).route(typed: "ß", inputMethod: false, taken: true) == .page)
-        // A repeat the context typed again (no accents, or press and hold off).
-        #expect(Heard(edits: [.insert(" ", replacing: none)]).route(typed: " ", inputMethod: false, taken: true) == .page)
-        #expect(Heard(commands: 1).route(typed: "\u{7F}", inputMethod: false, taken: true) == .page)
-        #expect(Heard(commands: 1).route(typed: "\u{F702}", inputMethod: false, taken: true) == .page)
-        #expect(Heard().route(typed: "\u{F704}", inputMethod: false, taken: false) == .page)
-    }
-
-    @Test func aHeldLettersRepeatsAndTheMenusPickKeyStayWithTheAccentMenu() {
-        // Yab Alpha, 2026-11-05: holding a letter in a Chromium tab gave no
-        // accent menu.
-        #expect(Heard().route(typed: "e", inputMethod: false, taken: true) == .kept)
-        // Still kept once the menu marked the letter.
-        #expect(Heard().route(typed: "e", inputMethod: true, taken: true) == .kept)
-        // The digit that picks from the open menu: the accent comes a moment
-        // later as an insert of its own, and the digit is never typed
-        // (m4, 2026-11-05: "hello é2" until this).
-        #expect(Heard().route(typed: "2", inputMethod: false, taken: true) == .kept)
-        // Not taken: the page decides.
-        #expect(Heard().route(typed: "e", inputMethod: false, taken: false) == .page)
-    }
-
-    @Test func anAccentPickADeadKeyOrAnInputMethodsWordsGoAsTextEdits() {
-        let letter = NSRange(location: 4, length: 1)
-        // The menu's pick replaces the letter typed, by digit or by the menu.
-        #expect(Heard(edits: [.insert("é", replacing: letter)]).route(typed: "2", inputMethod: false, taken: true) == .inputMethod)
-        #expect(Heard(edits: [.insert("é", replacing: none)]).route(typed: "2", inputMethod: false, taken: true) == .inputMethod)
-        #expect(Heard(edits: [.mark("e", selected: NSRange(location: 1, length: 0), replacing: letter)])
-            .route(typed: "e", inputMethod: false, taken: true) == .inputMethod)
-        // Option-E on U.S.: the dead key's accent is marked, then the letter commits.
-        #expect(Heard(edits: [.mark("´", selected: NSRange(location: 1, length: 0), replacing: none)])
-            .route(typed: "", inputMethod: false, taken: true) == .inputMethod)
-        #expect(Heard(edits: [.insert("é", replacing: none)]).route(typed: "e", inputMethod: false, taken: true) == .inputMethod)
-        // Another letter closing the menu commits the marked one and types itself.
-        #expect(Heard(edits: [.insert("e", replacing: none), .insert("x", replacing: none)])
-            .route(typed: "x", inputMethod: false, taken: true) == .inputMethod)
-        // With an input method selected its words are always its own.
-        #expect(Heard(edits: [.insert("a", replacing: none)]).route(typed: "a", inputMethod: true, taken: true) == .inputMethod)
-    }
-
-    @Test func editsWaitForTheKeysRouteAndCarryTheirReplacementRange() {
-        let tab = Tab(shy: true)
-        let page = ChromiumPage(tab: tab)
-        defer { page.retire(call: false, pictureInPicture: false); tab.close() }
-        page.receiveNativeTextInput(native())
-        page.keyInterpretation = ChromiumKeyInterpretation()
-        page.setMarkedText("e", selectedRange: NSRange(location: NSNotFound, length: 0), replacementRange: NSRange(location: 3, length: 1))
-        #expect(page.markedRange() == NSRange(location: 3, length: 1), "The held letter is marked where it stands, not at the field's start")
-        page.insertText("é", replacementRange: NSRange(location: NSNotFound, length: 0))
-        page.doCommand(by: #selector(NSResponder.insertNewline(_:)))
-        #expect(page.keyInterpretation == ChromiumKeyInterpretation(edits: [
-            .mark("e", selected: NSRange(location: 1, length: 0), replacing: NSRange(location: 3, length: 1)),
-            .insert("é", replacing: none)], commands: 1))
-        #expect(page.inputMethodTicket == nil, "Nothing is sent while the key is being read")
-        page.keyInterpretation = nil
-        #expect(ChromiumNativeTextInput.replacementFields(none).isEmpty)
-        #expect(ChromiumNativeTextInput.replacementFields(NSRange(location: 3, length: 1)) ==
-                ["replacementStart": .number(3), "replacementLength": .number(1)])
     }
 
     @Test func unboundProbeRefusesMutationsAndCancelDoesNotPretendToFinish() {

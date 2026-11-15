@@ -41,8 +41,12 @@
   let fixes = null;
   let decision = null;
   let running = false;
+  let rootWatch = null;
   let reported = false;
   let printing = false;
+  // What the first look saw the site's ground made of (`shape`), for the
+  // second look after load to know whether anything it could hang on changed.
+  let looked = null;
   // What a look at the page found: 'own' when it is dark itself or asks
   // to be left alone.
   let found = null;
@@ -153,6 +157,21 @@
 
   const on = () => {
     if (running || printing) return;
+    // A learned light site can answer before Chromium creates <html>.
+    // Dark Reader's early fallback needs that root. Our fallback already
+    // waits for it, so keep it while waiting rather than failing the page.
+    if (!document.documentElement) {
+      if (!rootWatch) {
+        rootWatch = new MutationObserver(() => {
+          if (!document.documentElement) return;
+          rootWatch.disconnect();
+          rootWatch = null;
+          if (['engine', 'on', 'check'].includes(decision)) on();
+        });
+        rootWatch.observe(document, { childList: true });
+      }
+      return;
+    }
     if (document.querySelector('meta[name="darkreader-lock"]')) { off(); found = 'own'; report('own', { locked: true }); return; }
     try {
       if (!engine()) { dropFallback(); return; }
@@ -176,12 +195,55 @@
     whenLoaded(() => {
       if (!running) return;
       const sign = darkRules();
-      if ((decision === 'check' || sign) && siteIsDark()) { off(); found = 'own'; report('own', { late: true }); return; }
+      // The look turns every sheet of ours off and on, which restyles the
+      // whole document twice, in the middle of whatever the page does next
+      // (#1889: a third of Dark pages' cost on Speedometer). After a first
+      // look it is taken again only when something the ground hangs on has
+      // changed since: the site's sheets or their rules, the root's or the
+      // body's attributes, the color-scheme it asks for.
+      const again = decision === 'check' && (looked === null || shape() !== looked);
+      if ((again || sign) && siteIsDark()) { off(); found = 'own'; report('own', { late: true }); return; }
       report('engine', { sign });
     });
   };
 
+  // What a site's own ground is made of, as a string to compare: its sheets
+  // and how many rules each has, the attributes of <html> and <body> but
+  // ours, and the color-scheme <meta>. Reading these restyles nothing.
+  const shape = () => {
+    const ours = sheet => {
+      const owner = sheet.ownerNode;
+      return !!(owner && owner.classList && owner.classList.contains('darkreader')) ||
+        !!(sheet.cssRules && sheet.cssRules[0] && sheet.cssRules[0].selectorText === '#__darkreader__adoptedOverride');
+    };
+    const rules = sheet => { try { return sheet.cssRules.length; } catch (e) { return -1; } };
+    const parts = [];
+    for (const sheet of document.styleSheets) {
+      try { if (ours(sheet)) continue; } catch (e) { /* another origin's: still the site's */ }
+      parts.push((sheet.href || '') + '#' + rules(sheet) + (sheet.disabled ? 'off' : ''));
+    }
+    for (const sheet of document.adoptedStyleSheets || []) {
+      try { if (ours(sheet)) continue; } catch (e) { /* unreadable */ }
+      parts.push('adopted#' + rules(sheet));
+    }
+    const own = element => {
+      if (!element) return '-';
+      const seen = [];
+      for (const attribute of element.attributes) {
+        if (attribute.name.startsWith('data-darkreader')) continue;
+        // The engine's own custom properties in an inline style are ours too.
+        const value = attribute.name === 'style' ? attribute.value.replace(/--darkreader-[^;]*;?/g, '') : attribute.value;
+        seen.push(attribute.name + '=' + value);
+      }
+      return seen.join('&');
+    };
+    const meta = document.querySelector('meta[name="color-scheme" i]');
+    parts.push(own(document.documentElement), own(document.body), (meta && meta.content) || '');
+    return parts.join('|');
+  };
+
   const off = () => {
+    if (rootWatch) { rootWatch.disconnect(); rootWatch = null; }
     if (running) {
       try { window.DarkReader.disable(); } catch (e) { /* nothing to undo */ }
       running = false;
@@ -271,8 +333,44 @@
   const check = () => {
     stylesReady(() => {
       if (decision !== 'check') return;
-      if (siteIsDark()) { off(); found = 'own'; report('own'); } else { on(); }
+      if (siteIsDark()) { off(); found = 'own'; report('own'); return; }
+      looked = shape();
+      on();
     });
+  };
+
+  // A frame of another page starts the engine once it can be seen, or is
+  // about to be: a frame out of sight, too small to show anything (a tracker's
+  // 1 by 1, a hidden one) keeps only the fallback, which already makes its
+  // ground dark, and costs nothing more. The top document starts at once.
+  const shown = start => {
+    if (top || typeof IntersectionObserver !== 'function') { start(); return; }
+    let watch = null;
+    const big = () => innerWidth >= 2 && innerHeight >= 2;
+    const go = () => {
+      if (!watch) return;
+      watch.disconnect();
+      watch = null;
+      removeEventListener('resize', resized);
+      start();
+    };
+    let seen = false;
+    const resized = () => { if (seen && big()) go(); };
+    watch = new IntersectionObserver(entries => {
+      seen = entries.some(entry => entry.isIntersecting);
+      if (seen && big()) go();
+    }, { rootMargin: '100% 100%' });
+    addEventListener('resize', resized);
+    const observe = () => { if (watch) watch.observe(document.documentElement); };
+    if (document.documentElement) observe();
+    else {
+      const root = new MutationObserver(() => {
+        if (!document.documentElement) return;
+        root.disconnect();
+        observe();
+      });
+      root.observe(document, { childList: true });
+    }
   };
 
   const apply = given => {
@@ -283,10 +381,10 @@
       // A test run may start the engine once the document is parsed rather
       // than at its start, the fallback holding until then, to weigh what
       // the engine costs the first paint (evals/dark-pages, DEFER).
-      if (DEFER && document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => { if (decision === given) on(); }, { once: true });
-      else on();
+      if (DEFER && document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => { if (decision === given) shown(on); }, { once: true });
+      else shown(() => { if (decision === given) on(); });
     }
-    else if (given === 'check') check();
+    else if (given === 'check') shown(() => { if (decision === 'check') check(); });
     else off();
   };
 

@@ -1,0 +1,712 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1141,6 +1141,8 @@ source_set("libcef_static") {
+       "libcef/browser/views/external_text_input.cc",
+       "libcef/browser/views/external_text_value.h",
+       "libcef/browser/views/external_text_value.cc",
++      "libcef/browser/views/external_surfaces.cc",
++      "libcef/browser/views/external_surfaces.h",
+       "libcef/common/util_mac.h",
+       "libcef/common/util_mac.mm",
+ 
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -51,6 +51,7 @@
+ 
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_DISCARD_VERSION 1
++#define CEF_YAB_EXTENSION_SURFACES_VERSION 1
+ #define CEF_YAB_EXTERNAL_ACTION_VERSION 1
+ #define CEF_YAB_NATIVE_TAB_MODEL_VERSION 1
+ #define CEF_YAB_OPTIONS_CREATION_VERSION 1
+@@ -1358,6 +1359,48 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
+   /*--cef(added=experimental)--*/
+   virtual bool ReplyExternalPageSelect(int token, int index) = 0;
+ 
++  ///
++  /// The enabled extension's own context menu items for its toolbar button
++  /// on this bound page, as Chrome's ExtensionContextMenuModel lists them
++  /// above its own rows: contextMenus items of context "action" (MV2
++  /// "browser_action"/"page_action") or "all", visible ones only, in order.
++  /// Each row is a dictionary: id (the item's id, a string id or "#" and a
++  /// number), title, type ("normal", "checkbox", "radio" or "separator"),
++  /// checked, enabled and, for a parent, items (its rows). An empty list for
++  /// none; null if the extension or page is unavailable. UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefListValue> GetExtensionActionMenu(
++      const CefString& extension_id) = 0;
++
++  ///
++  /// Chooses the item |item_id| of GetExtensionActionMenu for this visible
++  /// bound page, as a click on it in Chrome's menu does: activeTab is
++  /// granted, a checkbox or radio item toggles, and contextMenus.onClicked
++  /// is dispatched with this tab. Call only for a person's choice. Returns
++  /// false for an item no longer listed, hidden or disabled. UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool RunExtensionActionMenuItem(const CefString& extension_id,
++                                          const CefString& item_id) = 0;
++
++  ///
++  /// The embedder's own address field in the enabled extension's omnibox
++  /// keyword, for this bound page, as Chrome's KeywordProvider tells it:
++  /// |input| has event ("started", "changed", "entered" or "cancelled"),
++  /// text, requestId (for "changed") and disposition ("currentTab",
++  /// "newForegroundTab" or "newBackgroundTab", for "entered"). Suggestions
++  /// for a "changed" come to this page's display handler as
++  /// OnExtensionTabCreated with requestedKind "omniboxSuggestions". Returns
++  /// listening (someone listens for the event) and default (the extension's
++  /// setDefaultSuggestion description, if any), or null if the extension has
++  /// no keyword or the page is unavailable. UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefDictionaryValue> SendExtensionOmniboxInput(
++      const CefString& extension_id,
++      CefRefPtr<CefDictionaryValue> input) = 0;
++
+   ///
+   /// Runs the enabled extension's original Chrome action for this externally
+   /// hosted, visible and externally focused browser. Call only for an actual
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -55,6 +55,10 @@
+ #include "components/spellcheck/browser/spellcheck_platform.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++#include "cef/libcef/browser/views/external_surfaces.h"
++#endif
++
+ namespace {
+ 
+ // Associates a CefBrowserHostBase instance with a WebContents. This object will
+@@ -294,6 +298,11 @@ void CefBrowserHostBase::InitializeBrowser() {
+   // Trigger a web preferences update now that the browser is attached.
+   // This ensures that OverrideWebPreferences can access browser settings.
+   web_contents->NotifyPreferencesChanged();
++
++#if BUILDFLAG(IS_MAC)
++  // Chrome's extension surfaces the client draws itself (once).
++  cef::external_host::InstallSurfaceHooks();
++#endif
+ }
+ 
+ void CefBrowserHostBase::DestroyWebContents(
+@@ -1205,6 +1214,40 @@ CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetExternalPageState() {
+ #endif
+ }
+ 
++CefRefPtr<CefListValue> CefBrowserHostBase::GetExtensionActionMenu(
++    const CefString& extension_id) {
++  CEF_REQUIRE_UIT_RETURN(nullptr);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::ActionMenu(this, extension_id.ToString());
++#else
++  return nullptr;
++#endif
++}
++
++bool CefBrowserHostBase::RunExtensionActionMenuItem(
++    const CefString& extension_id,
++    const CefString& item_id) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::RunActionMenuItem(this, extension_id.ToString(),
++                                               item_id.ToString());
++#else
++  return false;
++#endif
++}
++
++CefRefPtr<CefDictionaryValue> CefBrowserHostBase::SendExtensionOmniboxInput(
++    const CefString& extension_id,
++    CefRefPtr<CefDictionaryValue> input) {
++  CEF_REQUIRE_UIT_RETURN(nullptr);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::OmniboxInput(this, extension_id.ToString(),
++                                          input);
++#else
++  return nullptr;
++#endif
++}
++
+ bool CefBrowserHostBase::SetExternalPageSize(const CefSize& size) {
+   CEF_REQUIRE_UIT_RETURN(false);
+ #if BUILDFLAG(IS_MAC)
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -313,6 +313,13 @@ class CefBrowserHostBase : public CefBrowserHost,
+   bool SetExternalTabGroup(CefRefPtr<CefBrowser> lead, int index, bool active) override;
+   bool SetExternalPageFocus(bool focused) override;
+   bool ReplyExternalPageSelect(int token, int index) override;
++  CefRefPtr<CefListValue> GetExtensionActionMenu(
++      const CefString& extension_id) override;
++  bool RunExtensionActionMenuItem(const CefString& extension_id,
++                                  const CefString& item_id) override;
++  CefRefPtr<CefDictionaryValue> SendExtensionOmniboxInput(
++      const CefString& extension_id,
++      CefRefPtr<CefDictionaryValue> input) override;
+   bool OpenExtensionAction(const CefString& extension_id,
+                            const CefRect& anchor) override;
+   bool ControlExtensionPopup(const CefString& token, const CefRect& anchor,
+--- /dev/null
++++ b/cef/libcef/browser/views/external_surfaces.cc
+@@ -0,0 +1,446 @@
++#include "cef/libcef/browser/views/external_surfaces.h"
++
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/supports_user_data.h"
++#include "base/values.h"
++#include "cef/include/cef_client.h"
++#include "cef/include/cef_display_handler.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "chrome/browser/extensions/api/omnibox/omnibox_api.h"
++#include "chrome/browser/extensions/context_menu_matcher.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/external_surface_hooks.h"
++#include "chrome/browser/extensions/external_tab_model.h"
++#include "chrome/browser/extensions/menu_manager.h"
++#include "chrome/browser/omnibox/omnibox_suggestions_watcher_factory.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/common/extensions/api/omnibox/omnibox_handler.h"
++#include "components/omnibox/browser/extension_suggestion.h"
++#include "components/omnibox/browser/omnibox_suggestions_watcher.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/context_menu_params.h"
++#include "content/public/browser/visibility.h"
++#include "content/public/browser/web_contents.h"
++#include "extensions/browser/extension_prefs.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_util.h"
++#include "extensions/browser/permissions/active_tab_permission_granter.h"
++#include "extensions/common/api/extension_action/action_info.h"
++#include "extensions/common/extension.h"
++#include "ui/menus/simple_menu_model.h"
++#include "ui/base/window_open_disposition.h"
++
++namespace cef::external_host {
++namespace {
++
++using extensions::ActionInfo;
++using extensions::ContextMenuMatcher;
++using extensions::Extension;
++using extensions::MenuItem;
++
++// The CEF browser and display handler whose page owns |contents|.
++CefRefPtr<CefDisplayHandler> DisplayHandlerFor(
++    content::WebContents* contents,
++    CefRefPtr<CefBrowserHostBase>* browser) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !contents) {
++    return nullptr;
++  }
++  *browser = CefBrowserHostBase::GetBrowserForContents(contents);
++  auto client = *browser ? (*browser)->client() : nullptr;
++  return client ? client->GetDisplayHandler() : nullptr;
++}
++
++// Tells the client of the bound page |contents| about one of its surfaces,
++// over the channel 0095's "sidePanel" uses.
++void Tell(content::WebContents* contents, CefRefPtr<CefDictionaryValue> info) {
++  if (!contents || !extensions::ExternalTabWindow::Bound(contents)) {
++    return;
++  }
++  CefRefPtr<CefBrowserHostBase> browser;
++  auto handler = DisplayHandlerFor(contents, &browser);
++  if (handler && browser) {
++    handler->OnExtensionTabCreated(browser.get(), info);
++  }
++}
++
++// The page in |browser| an extension may act for: bound, alive, enabled
++// extension allowed in its profile. Null otherwise.
++content::WebContents* PageFor(CefBrowserHostBase* browser,
++                              const std::string& extension_id,
++                              const Extension** extension) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !browser) {
++    return nullptr;
++  }
++  auto* contents = browser->GetWebContents();
++  if (!contents || contents->IsBeingDestroyed() ||
++      !extensions::ExternalTabWindow::Bound(contents)) {
++    return nullptr;
++  }
++  auto* context = contents->GetBrowserContext();
++  *extension =
++      extensions::ExtensionRegistry::Get(context)->enabled_extensions().GetByID(
++          extension_id);
++  if (!*extension ||
++      (context->IsOffTheRecord() &&
++       !extensions::util::IsIncognitoEnabled(extension_id, context))) {
++    return nullptr;
++  }
++  return contents;
++}
++
++// The page Chrome would act for, as the active tab of its window: several
++// presented pages can share one logical Chrome window (0116's RunCommand).
++bool Front(content::WebContents* contents) {
++  if (auto* model = extensions::ExternalTabModel::Get(contents);
++      model && !model->Activate()) {
++    return false;
++  }
++  extensions::ExternalTabFocus::Remember(contents);
++  return true;
++}
++
++// --- The toolbar button's own menu ---------------------------------------
++
++// ExtensionContextMenuModel's MenuItemMatchesAction.
++bool MatchesAction(std::optional<ActionInfo::Type> type, const MenuItem* item) {
++  if (!type) {
++    return false;
++  }
++  const MenuItem::ContextList& contexts = item->contexts();
++  return contexts.Contains(MenuItem::ALL) ||
++         (contexts.Contains(MenuItem::PAGE_ACTION) &&
++          *type == ActionInfo::Type::kPage) ||
++         (contexts.Contains(MenuItem::BROWSER_ACTION) &&
++          *type == ActionInfo::Type::kBrowser) ||
++         (contexts.Contains(MenuItem::ACTION) &&
++          *type == ActionInfo::Type::kAction);
++}
++
++// The model's commands run through the matcher, never through it.
++class NoCommands : public ui::SimpleMenuModel::Delegate {
++ public:
++  void ExecuteCommand(int command_id, int event_flags) override {}
++};
++
++// The extension's items as Chrome's action menu appends them.
++struct ActionItems {
++  ActionItems(content::BrowserContext* context, const Extension& extension)
++      : model(&delegate),
++        matcher(context,
++                &delegate,
++                &model,
++                base::BindRepeating(
++                    &MatchesAction,
++                    ActionInfo::GetExtensionActionInfo(&extension)
++                        ? std::make_optional(
++                              ActionInfo::GetExtensionActionInfo(&extension)
++                                  ->type)
++                        : std::nullopt)) {
++    auto* manager = extensions::MenuManager::Get(context);
++    if (!manager ||
++        !manager->MenuItems(MenuItem::ExtensionKey(extension.id()))) {
++      return;
++    }
++    int index = 0;
++    matcher.AppendExtensionItems(MenuItem::ExtensionKey(extension.id()),
++                                 std::u16string(), &index,
++                                 /*is_action_menu=*/true);
++  }
++
++  NoCommands delegate;
++  ui::SimpleMenuModel model;
++  ContextMenuMatcher matcher;
++};
++
++std::string ItemID(const MenuItem::Id& id) {
++  return id.string_uid.empty() ? "#" + base::NumberToString(id.uid)
++                               : id.string_uid;
++}
++
++CefRefPtr<CefListValue> Rows(ui::MenuModel* model,
++                             ContextMenuMatcher& matcher,
++                             const std::map<int, MenuItem::Id>& ids) {
++  auto rows = CefListValue::Create();
++  size_t count = 0;
++  for (size_t i = 0; i < model->GetItemCount(); ++i) {
++    auto row = CefDictionaryValue::Create();
++    const auto type = model->GetTypeAt(i);
++    if (type == ui::MenuModel::TYPE_SEPARATOR) {
++      row->SetString("type", "separator");
++      rows->SetDictionary(count++, row);
++      continue;
++    }
++    const int command = model->GetCommandIdAt(i);
++    auto found = ids.find(command);
++    if (found == ids.end() || !matcher.IsCommandIdVisible(command)) {
++      continue;
++    }
++    row->SetString("id", ItemID(found->second));
++    row->SetString("title", model->GetLabelAt(i));
++    row->SetString("type", type == ui::MenuModel::TYPE_CHECK   ? "checkbox"
++                           : type == ui::MenuModel::TYPE_RADIO ? "radio"
++                                                               : "normal");
++    row->SetBool("checked", matcher.IsCommandIdChecked(command));
++    row->SetBool("enabled", matcher.IsCommandIdEnabled(command));
++    if (type == ui::MenuModel::TYPE_SUBMENU) {
++      if (auto* submenu = model->GetSubmenuModelAt(i)) {
++        row->SetList("items", Rows(submenu, matcher, ids));
++      }
++    }
++    rows->SetDictionary(count++, row);
++  }
++  return rows;
++}
++
++// --- The side panel's options ---------------------------------------------
++
++// The first bound page of |context|'s windows, in creation order.
++content::WebContents* AnyBoundPage(content::BrowserContext* context) {
++  if (auto* focused = extensions::ExternalTabFocus::Get(context)) {
++    if (extensions::ExternalTabWindow::Bound(focused)) {
++      return focused;
++    }
++  }
++  content::WebContents* found = nullptr;
++  GlobalBrowserCollection::GetInstance()->ForEach(
++      [&](BrowserWindowInterface* window) {
++        if (window->GetProfile() != context) {
++          return true;
++        }
++        TabStripModel* strip = window->GetTabStripModel();
++        for (int i = 0; strip && i < strip->count(); ++i) {
++          auto* contents = strip->GetWebContentsAt(i);
++          if (extensions::ExternalTabWindow::Bound(contents)) {
++            found = contents;
++            return false;
++          }
++        }
++        return true;
++      });
++  return found;
++}
++
++void SidePanelOptionsChanged(content::BrowserContext* context,
++                             const std::string& extension_id,
++                             int tab_id,
++                             const std::optional<std::string>& path,
++                             std::optional<bool> enabled) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !context) {
++    return;
++  }
++  content::WebContents* page = nullptr;
++  if (tab_id >= 0) {
++    extensions::ExtensionTabUtil::GetTabById(tab_id, context,
++                                             /*include_incognito=*/false,
++                                             &page);
++  } else {
++    page = AnyBoundPage(context);
++  }
++  if (!page) {
++    return;
++  }
++  auto info = CefDictionaryValue::Create();
++  info->SetString("requestedKind", "sidePanelOptions");
++  info->SetString("extensionId", extension_id);
++  info->SetInt("tabId", tab_id);
++  if (path) {
++    info->SetString("path", *path);
++  }
++  if (enabled) {
++    info->SetBool("enabled", *enabled);
++  }
++  Tell(page, info);
++}
++
++// --- The omnibox keyword --------------------------------------------------
++
++// The pages whose field last asked each extension for suggestions, on the
++// original profile, as the watcher is. The watcher, a keyed service, is gone
++// before the profile's user data: this never removes itself from it.
++class SuggestionsRelay : public base::SupportsUserData::Data,
++                         public OmniboxSuggestionsWatcher::Observer {
++ public:
++  static SuggestionsRelay* For(Profile* profile) {
++    auto* relay = static_cast<SuggestionsRelay*>(profile->GetUserData(&kKey));
++    if (relay) {
++      return relay;
++    }
++    auto* watcher =
++        OmniboxSuggestionsWatcherFactory::GetForBrowserContext(profile);
++    if (!watcher) {
++      return nullptr;
++    }
++    auto made = std::make_unique<SuggestionsRelay>();
++    relay = made.get();
++    profile->SetUserData(&kKey, std::move(made));
++    watcher->AddObserver(relay);
++    return relay;
++  }
++
++  void Asked(const std::string& extension_id, content::WebContents* page) {
++    pages_[extension_id] = page->GetWeakPtr();
++  }
++
++  // OmniboxSuggestionsWatcher::Observer:
++  void OnOmniboxSuggestionsReady(
++      const std::vector<ExtensionSuggestion>& suggestions,
++      const int request_id,
++      const std::string& extension_id) override {
++    auto found = pages_.find(extension_id);
++    content::WebContents* page =
++        found == pages_.end() ? nullptr : found->second.get();
++    if (!page || page->IsBeingDestroyed()) {
++      return;
++    }
++    auto rows = CefListValue::Create();
++    size_t count = 0;
++    for (const auto& suggestion : suggestions) {
++      auto row = CefDictionaryValue::Create();
++      row->SetString("content", suggestion.content);
++      row->SetString("description", suggestion.description);
++      rows->SetDictionary(count++, row);
++    }
++    auto info = CefDictionaryValue::Create();
++    info->SetString("requestedKind", "omniboxSuggestions");
++    info->SetString("extensionId", extension_id);
++    info->SetInt("requestId", request_id);
++    info->SetList("suggestions", rows);
++    Tell(page, info);
++  }
++
++ private:
++  inline static const int kKey = 0;
++  std::map<std::string, base::WeakPtr<content::WebContents>> pages_;
++};
++
++// omnibox.setDefaultSuggestion's description, as Chrome keeps it.
++std::optional<std::string> DefaultSuggestion(Profile* profile,
++                                             const std::string& extension_id) {
++  auto* prefs = extensions::ExtensionPrefs::Get(profile);
++  const base::DictValue* dict =
++      prefs ? prefs->ReadPrefAsDict(extension_id, "omnibox_default_suggestion")
++            : nullptr;
++  const std::string* description =
++      dict ? dict->FindString("description") : nullptr;
++  return description ? std::make_optional(*description) : std::nullopt;
++}
++
++}  // namespace
++
++void InstallSurfaceHooks() {
++  auto& hooks = extensions::GetExternalSurfaceHooks();
++  if (!hooks.side_panel_options_changed) {
++    hooks.side_panel_options_changed = &SidePanelOptionsChanged;
++  }
++}
++
++CefRefPtr<CefListValue> ActionMenu(CefBrowserHostBase* browser,
++                                   const std::string& extension_id) {
++  const Extension* extension = nullptr;
++  auto* contents = PageFor(browser, extension_id, &extension);
++  if (!contents) {
++    return nullptr;
++  }
++  ActionItems items(contents->GetBrowserContext(), *extension);
++  return Rows(&items.model, items.matcher, items.matcher.extension_item_map());
++}
++
++bool RunActionMenuItem(CefBrowserHostBase* browser,
++                       const std::string& extension_id,
++                       const std::string& item_id) {
++  const Extension* extension = nullptr;
++  auto* contents = PageFor(browser, extension_id, &extension);
++  if (!contents || item_id.empty() ||
++      contents->GetVisibility() != content::Visibility::VISIBLE) {
++    return false;
++  }
++  // The item as the menu lists it now, as Chrome's menu runs only a row it
++  // shows: rebuilt, so a removed, hidden or disabled one is refused.
++  ActionItems items(contents->GetBrowserContext(), *extension);
++  for (const auto& [command, id] : items.matcher.extension_item_map()) {
++    if (ItemID(id) != item_id) {
++      continue;
++    }
++    if (!items.matcher.IsCommandIdVisible(command) ||
++        !items.matcher.IsCommandIdEnabled(command) || !Front(contents)) {
++      return false;
++    }
++    // ExtensionContextMenuModel::ExecuteCommand: MenuManager grants
++    // activeTab, toggles a checkbox or radio and sends onClicked.
++    items.matcher.ExecuteCommand(command, contents, nullptr,
++                                 content::ContextMenuParams());
++    return true;
++  }
++  return false;
++}
++
++CefRefPtr<CefDictionaryValue> OmniboxInput(
++    CefBrowserHostBase* browser,
++    const std::string& extension_id,
++    CefRefPtr<CefDictionaryValue> input) {
++  const Extension* extension = nullptr;
++  auto* contents = PageFor(browser, extension_id, &extension);
++  if (!contents || !input ||
++      extensions::OmniboxInfo::GetKeyword(extension).empty()) {
++    return nullptr;
++  }
++  Profile* profile = Profile::FromBrowserContext(contents->GetBrowserContext());
++  const std::string event = input->GetString("event").ToString();
++  const std::string text = input->GetString("text").ToString();
++  auto result = CefDictionaryValue::Create();
++  bool listening = true;
++  if (event == "started") {
++    extensions::ExtensionOmniboxEventRouter::OnInputStarted(profile,
++                                                            extension_id);
++  } else if (event == "changed") {
++    if (auto* relay = SuggestionsRelay::For(profile->GetOriginalProfile())) {
++      relay->Asked(extension_id, contents);
++    }
++    listening = extensions::ExtensionOmniboxEventRouter::OnInputChanged(
++        profile, extension_id, text, input->GetInt("requestId"));
++  } else if (event == "entered") {
++    // OnInputEntered grants activeTab through this page's granter, and
++    // the extension acts on it as the window's active tab.
++    if (!extensions::ActiveTabPermissionGranter::FromWebContents(contents) ||
++        contents->GetVisibility() != content::Visibility::VISIBLE ||
++        !Front(contents)) {
++      return nullptr;
++    }
++    const std::string way = input->GetString("disposition").ToString();
++    WindowOpenDisposition disposition =
++        way == "newForegroundTab"   ? WindowOpenDisposition::NEW_FOREGROUND_TAB
++        : way == "newBackgroundTab" ? WindowOpenDisposition::NEW_BACKGROUND_TAB
++                                    : WindowOpenDisposition::CURRENT_TAB;
++    extensions::ExtensionOmniboxEventRouter::OnInputEntered(
++        contents, extension_id, text, disposition);
++  } else if (event == "cancelled") {
++    extensions::ExtensionOmniboxEventRouter::OnInputCancelled(profile,
++                                                              extension_id);
++  } else {
++    return nullptr;
++  }
++  result->SetBool("listening", listening);
++  if (event == "started" || event == "changed") {
++    if (auto description = DefaultSuggestion(profile, extension_id)) {
++      result->SetString("default", *description);
++    } else {
++      result->SetNull("default");
++    }
++  }
++  return result;
++}
++
++}  // namespace cef::external_host
+--- /dev/null
++++ b/cef/libcef/browser/views/external_surfaces.h
+@@ -0,0 +1,42 @@
++// Chrome's extension surfaces an embedder draws in its own UI for a page it
++// presents: the toolbar button's own menu items (contextMenus of context
++// "action"), the omnibox keyword's events and suggestions, and the side
++// panel's options as the extension changes them. Chrome keeps every rule;
++// the client only draws and forwards what a person did.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_SURFACES_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_SURFACES_H_
++#pragma once
++
++#include <string>
++
++#include "cef/include/cef_values.h"
++
++class CefBrowserHostBase;
++
++namespace cef::external_host {
++
++// Installs the side panel options hook (external_surface_hooks.h). Once;
++// later calls do nothing. UI thread.
++void InstallSurfaceHooks();
++
++// The extension's action menu items for |browser|'s page, as Chrome's
++// ExtensionContextMenuModel appends them; null if unavailable.
++CefRefPtr<CefListValue> ActionMenu(CefBrowserHostBase* browser,
++                                   const std::string& extension_id);
++
++// MenuManager::ExecuteCommand for an item ActionMenu still lists, visible
++// and enabled, with |browser|'s visible page.
++bool RunActionMenuItem(CefBrowserHostBase* browser,
++                       const std::string& extension_id,
++                       const std::string& item_id);
++
++// ExtensionOmniboxEventRouter for the client's address field in the
++// extension's keyword; null if the extension has no keyword.
++CefRefPtr<CefDictionaryValue> OmniboxInput(
++    CefBrowserHostBase* browser,
++    const std::string& extension_id,
++    CefRefPtr<CefDictionaryValue> input);
++
++}  // namespace cef::external_host
++
++#endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_SURFACES_H_
+--- a/chrome/browser/extensions/api/side_panel/side_panel_service.cc
++++ b/chrome/browser/extensions/api/side_panel/side_panel_service.cc
+@@ -33,6 +33,7 @@
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_surface_hooks.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
+ #endif
+ 
+@@ -252,6 +253,18 @@ void SidePanelService::SetOptions(const Extension& extension,
+     observer.OnPanelOptionsChanged(extension.id(),
+                                    extension_panel_options[tab_id]);
+   }
++
++#if !BUILDFLAG(IS_ANDROID)
++  // An embedder that shows extension panels itself hears what each
++  // ExtensionSidePanelCoordinator above heard: the options as now kept for
++  // this tab (-1: the global ones).
++  if (auto hook = GetExternalSurfaceHooks().side_panel_options_changed) {
++    const api::side_panel::PanelOptions& kept = extension_panel_options[tab_id];
++    hook(browser_context_, extension.id(),
++         tab_id == SessionID::InvalidValue().id() ? -1 : tab_id, kept.path,
++         kept.enabled);
++  }
++#endif
+ }
+ 
+ bool SidePanelService::HasExtensionPanelOptionsForTest(const ExtensionId& id) {
+--- /dev/null
++++ b/chrome/browser/extensions/external_surface_hooks.h
+@@ -0,0 +1,34 @@
++// Yab: what Chrome tells an embedder that draws an extension surface itself
++// (the side panel, here) instead of Chrome's own concealed window. Ordinary
++// Chrome installs no hook and nothing changes for it.
++#ifndef CHROME_BROWSER_EXTENSIONS_EXTERNAL_SURFACE_HOOKS_H_
++#define CHROME_BROWSER_EXTENSIONS_EXTERNAL_SURFACE_HOOKS_H_
++
++#include <optional>
++#include <string>
++
++namespace content {
++class BrowserContext;
++}
++
++namespace extensions {
++
++struct ExternalSurfaceHooks {
++  // chrome.sidePanel.setOptions kept |path| and |enabled| for |tab_id| (-1:
++  // the global options) of |extension_id| in |context|, after Chrome's own
++  // ExtensionSidePanelCoordinators heard it.
++  void (*side_panel_options_changed)(content::BrowserContext* context,
++                                     const std::string& extension_id,
++                                     int tab_id,
++                                     const std::optional<std::string>& path,
++                                     std::optional<bool> enabled) = nullptr;
++};
++
++inline ExternalSurfaceHooks& GetExternalSurfaceHooks() {
++  static ExternalSurfaceHooks hooks;
++  return hooks;
++}
++
++}  // namespace extensions
++
++#endif  // CHROME_BROWSER_EXTENSIONS_EXTERNAL_SURFACE_HOOKS_H_

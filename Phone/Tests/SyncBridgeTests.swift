@@ -404,6 +404,29 @@ final class SyncBridgeTests: XCTestCase {
         XCTAssertEqual(mac.row(work).all.count, 7)
     }
 
+    func testProfileLinkSurvivesMacToPhoneRenameAndExplicitDetach() async throws {
+        let server = SyncMemoryServer(), seal = Seal.make()
+        let mac = try await macWithWork(server, seal)
+        defer { mac.client.stop() }
+        let member = "BBBBBBBB-0000-4000-8000-000000002329"
+        try mac.write(SyncCollection.space, work, SyncSpace(id: work, name: "Work", icon: "💼", ownSignIns: true, order: "X").fields)
+        try mac.write(SyncCollection.space, member, SyncSpace(id: member, name: "Projects", icon: "📁", ownSignIns: true, order: "Z", signInWith: work).fields)
+        let app = try await phone(server, seal)
+        defer { app.sync.engine?.stop() }
+        let loaded = await until { app.browser.space(member)?.signInWith == self.work }
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(app.browser.space(member)?.signInWith, work)
+        app.browser.setSpace(member, name: "Renamed on iPhone")
+        app.sync.flushLocal()
+        let renamed = await until { mac.journal.record(.init(collection: SyncCollection.space, id: member))?["name"]?.string == "Renamed on iPhone" }
+        XCTAssertTrue(renamed)
+        XCTAssertEqual(mac.journal.record(.init(collection: SyncCollection.space, id: member))?["signInWith"]?.string, work)
+        try mac.write(SyncCollection.space, member, SyncSpace(id: member, name: "Renamed on iPhone", icon: "📁", ownSignIns: true, order: "Z").fields)
+        let detached = await until { app.browser.space(member)?.signInWith == nil }
+        XCTAssertTrue(detached)
+        XCTAssertTrue(app.browser.space(member)?.ownSignIns == true)
+    }
+
     // MARK: - the iPhone's changes
 
     /// #1479: the Mac publishes shared pins once, under Personal.
@@ -424,7 +447,7 @@ final class SyncBridgeTests: XCTestCase {
         XCTAssertTrue(loaded)
         let workSpace = try XCTUnwrap(app.browser.space(work))
         let ownSpace = try XCTUnwrap(app.browser.space(own))
-        XCTAssertEqual(app.sync.pins(in: workSpace).map(\.id), [app.sync.localID(pinID)])
+        XCTAssertEqual(app.sync.pins(in: workSpace).map(\.id), [app.sync.localID(pinID), app.sync.localID("AAAAAAAA-0000-4000-8000-000000000001")])
         XCTAssertTrue(app.sync.pins(in: ownSpace).isEmpty)
         XCTAssertEqual(app.browser.allTabs.filter { $0.id == app.sync.localID(pinID) }.count, 1)
         app.chooseFromSpacePage(app.sync.localID(pinID), in: work)
@@ -443,6 +466,46 @@ final class SyncBridgeTests: XCTestCase {
         let disabled = await until { !app.sync.sharesPins }
         XCTAssertTrue(disabled)
         XCTAssertEqual(app.sync.pins(in: workSpace).map(\.id), workSpace.visiblePins.map(\.id))
+    }
+
+    /// Row 2602: six pins on the Mac, three of them shared (Personal's) and
+    /// three still Work's own, as sync carries them until the Mac joins them
+    /// (or the iPhone pinned one there). The Mac's Work shows all six; the
+    /// iPhone showed the three shared ones in their place.
+    func testASharingSpaceShowsItsOwnPinsAfterTheSharedOnes() async throws {
+        let server = SyncMemoryServer(), seal = Seal.make()
+        let mac = try await macWithWork(server, seal)
+        defer { mac.client.stop() }
+        let shared = (1...3).map { n in
+            SyncTab(id: "AAAAAAAA-0000-4000-8000-00000000260\(n)", space: first, order: "A\(n)",
+                    url: "https://shared\(n).test/", title: "Shared \(n)", pin: "S")
+        }
+        let own = [
+            SyncTab(id: "AAAAAAAA-0000-4000-8000-000000002611", space: work, order: "A1", url: "https://own1.test/", title: "Own 1", pin: "O"),
+            SyncTab(id: "AAAAAAAA-0000-4000-8000-000000002612", space: work, order: "A2", url: "https://own2.test/", title: "Own 2", pin: "O"),
+            // At a shared pin's address: the Mac closes it as it joins, so it isn't shown twice.
+            SyncTab(id: "AAAAAAAA-0000-4000-8000-000000002613", space: work, order: "A3", url: "https://shared2.test/", title: "Again", pin: "S"),
+        ]
+        for tab in shared + own { try mac.write(SyncCollection.tab, tab.id, tab.fields) }
+        try mac.write(SyncCollection.setting, SyncBridge.sharedPinsKey, ["value": .bool(true)])
+        let app = try await phone(server, seal)
+        defer { app.sync.engine?.stop() }
+        let loaded = await until {
+            app.sync.sharesPins && app.browser.space(self.work)?.pins.count == 4
+                && app.browser.space(app.sync.localID(self.first))?.pins.count == 3
+        }
+        XCTAssertTrue(loaded)
+        let workSpace = try XCTUnwrap(app.browser.space(work))
+        let daybook = "AAAAAAAA-0000-4000-8000-000000000001"
+        XCTAssertEqual(app.sync.pins(in: workSpace).map(\.id),
+                       (shared.map(\.id) + [daybook, own[0].id, own[1].id]).map(app.sync.localID))
+        // Personal shows its own row as it is.
+        XCTAssertEqual(app.sync.pins(in: try XCTUnwrap(app.browser.space(app.sync.localID(first)))).map(\.id), shared.map(\.id).map(app.sync.localID))
+        // A pin made on the iPhone in Work stands among them at once.
+        let kept = app.sync.localID("AAAAAAAA-0000-4000-8000-000000000004")
+        ColumnState.of(app).pin(kept)
+        let pinned = await until { app.sync.pins(in: app.browser.space(self.work)!).contains { $0.id == kept } }
+        XCTAssertTrue(pinned)
     }
 
     func testSharedPinsSurviveDeletedPersonalWithoutRevivingOrMovingIt() async throws {
@@ -565,6 +628,46 @@ final class SyncBridgeTests: XCTestCase {
         XCTAssertEqual(Set(mac.row(work).today.map(\.id)).intersection(macs).count, 3, "the Mac's stay")
         XCTAssertEqual(mac.row(work).kept.count, 3, "the kept stay")
         XCTAssertEqual(mac.row(work).pins.count, 1, "and the pins")
+    }
+
+    func testSpaceSwitchesAndRemoteUpdatesKeepEveryMobileTodayTab() async throws {
+        let server = SyncMemoryServer(), seal = Seal.make()
+        let mac = try await macWithWork(server, seal)
+        defer { mac.client.stop() }
+        let app = try await phone(server, seal, fixturesEnabled: false)
+        let arrived = await until { app.browser.space(self.work) != nil && app.browser.space(self.first) != nil }
+        XCTAssertTrue(arrived)
+        app.field.openSpaces()
+        for space in [first, work] {
+            app.selectSpacePage(space)
+            for n in 0..<2 {
+                app.browser.open(Tab(id: UUID().uuidString, title: "Mobile \(n)", site: "Fixture", icon: "globe",
+                                     url: "https://example.test/\(space)/\(n)"))
+            }
+            app.sync.flushLocal()
+        }
+        await settle(mac, app)
+        let before = [first, work].compactMap { app.browser.space($0) }
+        XCTAssertEqual(before.count, 2)
+        XCTAssertTrue(before.allSatisfy { $0.today.count == 2 })
+        let remoteIDs = Set(mac.row(work).today.filter { $0.device != phoneID }.map(\.id))
+        for round in 0..<2 {
+            app.selectSpacePage(first)
+            app.sync.flushLocal()
+            app.selectSpacePage(work)
+            try mac.write(SyncCollection.space, work, ["name": .string("Work \(round)")])
+            let changed = await until { app.browser.space(self.work)?.name == "Work \(round)" }
+            XCTAssertTrue(changed)
+            app.selectSpacePage(first)
+            await settle(mac, app)
+            for space in before {
+                XCTAssertEqual(app.browser.space(space.id)?.today.map(\.id), space.today.map(\.id))
+                XCTAssertEqual(app.browser.space(space.id)?.current, space.current)
+                XCTAssertEqual(Set(mac.row(space.id).today.filter { $0.device == phoneID }.map(\.id)),
+                               Set(space.today.map(\.id)))
+            }
+            XCTAssertEqual(Set(mac.row(work).today.filter { $0.device != phoneID }.map(\.id)), remoteIDs)
+        }
     }
 
     /// Delete Space here: the space, its tabs and folder go on the Mac too.
@@ -1425,9 +1528,12 @@ final class SyncBridgeTests: XCTestCase {
         let app = try await phone(server, seal, refreshEvery: 600)
         // The Mac's tab of today isn't in this iPhone's rows: New Tab's Now
         // offers it from the Mac's word, to open here.
-        let known = await until(2) { NewTabContent.macNow(app) != nil && app.browser.macAsleep }
-        XCTAssertTrue(known, "now \(String(describing: NewTabContent.macNow(app))) asleep \(app.browser.macAsleep)")
-        guard case let .open(copy) = NewTabContent.macNow(app)?.action else { return XCTFail("a copy here") }
+        // Now belongs to the space the Mac's tab is in, not whichever one is in front.
+        let macTab = "AAAAAAAA-0000-4000-8000-000000000006"
+        func now() -> NewTabItem? { NewTabContent.macNow(app, in: app.sync.spaceOfMacTab(macTab)) }
+        let known = await until(2) { now() != nil && app.browser.macAsleep }
+        XCTAssertTrue(known, "now \(String(describing: now())) asleep \(app.browser.macAsleep)")
+        guard case let .open(copy) = now()?.action else { return XCTFail("a copy here") }
         XCTAssertEqual(copy.title, "Tern · Calm scheduling for busy teams")
         XCTAssertEqual(copy.port, ":5173")
     }
@@ -1715,6 +1821,88 @@ final class SyncBridgeTests: XCTestCase {
         XCTAssertEqual(BrowserProfile(folder: profile.folder).navigation[local.id], navigation)
         XCTAssertEqual(mac.journal.living(SyncCollection.tab).filter { $0["url"]?.string == local.url }.map(\.id), [wire.id], "relaunch never opens the same page under another wire id")
         again.sync.end()
+    }
+
+    func testPrivateExternalLinkReusesItsTabWhilePublicSyncIsPaused() async throws {
+        let server = SyncMemoryServer(), seal = Seal.make()
+        let mac = try await macWithWork(server, seal)
+        defer { mac.client.stop() }
+        let app = try await phone(server, seal, fixturesEnabled: false)
+        defer { app.sync.end() }
+        let privateSpace = try XCTUnwrap(app.browser.spaces.first(where: \.isPrivate))
+        app.browser.showSpace(privateSpace.id)
+        let target = URL(string: "https://private.example.test/page")!
+        app.openLink(target)
+        let original = app.browser.tab?.id
+        let count = app.browser.space.allTabs.count
+        app.sync.engine!.pause(within: 1)
+        let paused = await until { app.sync.line == .off }
+        XCTAssertTrue(paused)
+        app.privateLock.willResignActive()
+        app.privateLock.didEnterBackground()
+        app.openLink(target)
+        app.privateLock.didBecomeActive()
+        XCTAssertEqual(app.browser.tab?.id, original, "Private rows cannot be removed by public sync catch-up")
+        XCTAssertEqual(app.browser.space.allTabs.count, count)
+        XCTAssertTrue(app.browser.tab?.isPrivate == true)
+    }
+
+    func testActiveExternalLinkReusesRememberedTabWhenSyncIsLive() async throws {
+        let server = SyncMemoryServer(), seal = Seal.make()
+        let mac = try await macWithWork(server, seal)
+        defer { mac.client.stop() }
+        let app = try await phone(server, seal, fixturesEnabled: false)
+        defer { app.sync.end() }
+        let targetID = "AAAAAAAA-0000-4000-8000-000000000004"
+        let remembered = await until { app.browser.tab(targetID) != nil && app.sync.line == .live }
+        XCTAssertTrue(remembered)
+        app.browser.showSpace(work)
+        let count = app.browser.space.allTabs.count
+        app.openLink(URL(string: "https://ledger.app/tern/overview")!)
+        XCTAssertEqual(app.browser.tab?.id, targetID)
+        XCTAssertEqual(app.browser.space.allTabs.count, count, "an active, live profile keeps normal deduplication")
+    }
+
+    func testExternalLinkWinsOverCatchUpRemovalOfItsRememberedTab() async throws {
+        let server = SyncMemoryServer(), seal = Seal.make()
+        let mac = try await macWithWork(server, seal)
+        defer { mac.client.stop() }
+        let app = try await phone(server, seal, fixturesEnabled: false)
+        defer { app.sync.end() }
+        let targetID = "AAAAAAAA-0000-4000-8000-000000000004"
+        let target = URL(string: "https://ledger.app/tern/overview")!
+        let remembered = await until { app.browser.tab(targetID) != nil }
+        XCTAssertTrue(remembered)
+        app.browser.showSpace(work)
+        app.browser.select("AAAAAAAA-0000-4000-8000-000000000002")
+        app.sync.engine!.pause(within: 1)
+        let paused = await until { app.sync.line == .off }
+        XCTAssertTrue(paused)
+        app.pages.appWillResignActive()
+        app.privateLock.willResignActive()
+        app.tabClear.resigned()
+
+        // The Mac closes a remembered tab while the phone's line is down.
+        try mac.journal.remove(.init(collection: SyncCollection.tab, id: targetID))
+        let marker = "CCCCCCCC-0000-4000-8000-000000000099"
+        try mac.write(SyncCollection.tab, marker,
+                      SyncTab(id: marker, space: work, order: "z", url: "https://example.test/caught-up", title: "Caught up", kept: true).fields)
+        mac.client.kick()
+        let sent = await until { mac.pending == 0 }
+        XCTAssertTrue(sent)
+        XCTAssertNotNil(app.browser.tab(targetID), "the phone still remembers the old tab before catch-up")
+
+        // A first tap selects that remembered row before foreground catch-up.
+        app.openLink(target)
+        XCTAssertEqual(app.browser.tab?.navigationURL, target)
+        app.privateLock.didBecomeActive()
+        app.tabClear.becameActive()
+        app.pages.appDidBecomeActive()
+        app.sync.cameToFront()
+        let caughtUp = await until { app.browser.tab(marker) != nil }
+        XCTAssertTrue(caughtUp, "the remote batch must actually arrive")
+        XCTAssertEqual(app.browser.tab?.navigationURL, target,
+                       "catch-up must not replace the explicitly requested page with the old page")
     }
 
     /// Row 1176: a link from another app launched Yab, in sync, and the tab

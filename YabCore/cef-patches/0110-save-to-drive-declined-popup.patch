@@ -1,0 +1,17 @@
+diff --git a/chrome/browser/ui/views/save_to_drive/account_chooser_controller.cc b/chrome/browser/ui/views/save_to_drive/account_chooser_controller.cc
+--- a/chrome/browser/ui/views/save_to_drive/account_chooser_controller.cc
++++ b/chrome/browser/ui/views/save_to_drive/account_chooser_controller.cc
+@@ -211,6 +211,13 @@ void AccountChooserController::ShowAddAccountDialog() {
+           WindowOpenDisposition::NEW_POPUP, ui::PAGE_TRANSITION_AUTO_TOPLEVEL);
+   add_account_popup_ = source_window->GetDelegate()->OpenURLFromTab(
+       source_window, params, /*navigation_handle_callback=*/{});
++  if (!add_account_popup_) {
++    // An embedder's delegate may decline the popup (CEF hands it to its
++    // client, which opens links itself). With no way to add an account the
++    // upload cannot continue: cancel it rather than CHECK the missing popup.
++    OnFlowCancelled();
++    return;
++  }
+   ResizeAndFocusAddAccountPopup();
+   add_account_popup_observer_->ObservePopup(add_account_popup_);
+ }

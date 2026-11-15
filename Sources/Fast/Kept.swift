@@ -384,7 +384,7 @@ extension Browser {
     func newFolder(with group: [Tab], today: Bool = false, around: Tab? = nil) {
         if startsArranging { return arranging { newFolder(with: group, today: today, around: around) } }
         guard !blank else { return }
-        if today { return newTodayFolder(with: group) }
+        if today { return newTodayFolder(with: group, around: around) }
         let going = group.filter(\.keepable)
         guard !going.isEmpty else { return }
         let nest = Nest(name: "New Folder")
@@ -411,9 +411,10 @@ extension Browser {
     /// Two of today's tabs, one held over the other: a folder among today's,
     /// where the first of them stood, its name ready. Never kept, so it goes
     /// when today's do (Nest.today).
-    private func newTodayFolder(with group: [Tab]) {
-        let going = tabs.filter { tab in tab.keepable && group.contains { $0 === tab } }
-        guard going.count > 1, let first = going.first else { return }
+    private func newTodayFolder(with group: [Tab], around: Tab? = nil) {
+        let members = Set(group.flatMap { tab in [tab.id] + [partner(of: tab)?.id].compactMap { $0 } })
+        let going = tabs.filter { $0.keepable && members.contains($0.id) }
+        guard going.count > 1, let first = around ?? going.first else { return }
         let nest = Nest(name: "New Folder")
         nest.fleeting = true
         var loose = tabs.filter { tab in tab.pin == nil && !going.contains { $0 === tab } }

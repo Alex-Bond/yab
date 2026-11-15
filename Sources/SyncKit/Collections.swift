@@ -28,7 +28,7 @@ public enum SyncCollection {
     /// Every collection's merge rules. Runs before a journal opens, on
     /// every device, the collections a device never shows too.
     public static func register() {
-        Kind.register(Kind(space, groups: [Kind.place, ["icon", "iconChoice", "iconChoiceID"]]))
+        Kind.register(Kind(space, groups: [Kind.place, ["icon", "iconChoice", "iconChoiceID"], ["ownSignIns", "signInWith"]]))
         Kind.register(Kind(tab, removalWins: true, rules: ["seen": .most], groups: [Kind.place]))
         // A folder moved into another moves as one: the space, its place
         // there and the folder it is in.

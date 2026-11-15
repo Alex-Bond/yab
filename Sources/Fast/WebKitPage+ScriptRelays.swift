@@ -90,6 +90,12 @@ extension BadgeRelay: WKScriptMessageHandler {
     }
 }
 
+extension WindowRelay: WKScriptMessageHandler {
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        receive(PageScriptMessage(message))
+    }
+}
+
 extension WatchRelay: WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         receive(PageScriptMessage(message))

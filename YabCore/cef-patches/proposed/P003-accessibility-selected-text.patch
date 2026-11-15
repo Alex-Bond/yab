@@ -1,0 +1,53 @@
+# PROPOSED ONLY: not in the active SDK series. Not compiled or accepted.
+# Cause: Cocoa emits kReplaceSelectedText, but the renderer rejects it and
+# Blink has no handler; route that action to the native selection editor.
+# Source: Chromium d0c02bfad08ec92a6ffcf989e53cd995e6381a4c (main checkout).
+# Runtime acceptance: evals/golden/dictation_fields.py, plus readonly,
+# disabled, detached, unfocused, selected-substring, cancellation and undo.
+diff --git a/content/renderer/accessibility/render_accessibility_impl.cc b/content/renderer/accessibility/render_accessibility_impl.cc
+--- a/content/renderer/accessibility/render_accessibility_impl.cc
++++ b/content/renderer/accessibility/render_accessibility_impl.cc
+@@ -380,6 +380,7 @@
+     case ax::mojom::Action::kExpand:
+     case ax::mojom::Action::kIncrement:
+     case ax::mojom::Action::kReplaceRanges:
++    case ax::mojom::Action::kReplaceSelectedText:
+     case ax::mojom::Action::kRequestLayoutBasedAction:
+     case ax::mojom::Action::kScrollToPoint:
+     case ax::mojom::Action::kScrollToPositionAtRowColumn:
+@@ -402,7 +403,6 @@
+       break;
+     case ax::mojom::Action::kCustomAction:
+     case ax::mojom::Action::kHitTest:
+-    case ax::mojom::Action::kReplaceSelectedText:
+     case ax::mojom::Action::kNone:
+       NOTREACHED();
+     case ax::mojom::Action::kGetTextLocation:
+diff --git a/third_party/blink/renderer/modules/accessibility/ax_object.cc b/third_party/blink/renderer/modules/accessibility/ax_object.cc
+--- a/third_party/blink/renderer/modules/accessibility/ax_object.cc
++++ b/third_party/blink/renderer/modules/accessibility/ax_object.cc
+@@ -7855,6 +7855,16 @@
+       return RequestIncrementAction();
+     case ax::mojom::blink::Action::kReplaceRanges:
+       return RequestReplaceRangesAction(action_data);
++    case ax::mojom::blink::Action::kReplaceSelectedText:
++      // AXSelectedText replaces the focused editor's current selection, not
++      // its entire value. Use the same native editing path as AXReplaceRanges
++      // so beforeinput/input, cancellation and undo retain their semantics.
++      if (!IsEditable() || !IsFocused() || !document->GetFrame()) {
++        return false;
++      }
++      InsertTextAndSendInputEventsOfTypeInsertReplacementText(
++          *document->GetFrame(), String::FromUtf8(action_data.value));
++      return true;
+     case ax::mojom::blink::Action::kScrollToPoint:
+       return RequestScrollToGlobalPointAction(action_data.target_point);
+     case ax::mojom::blink::Action::kSetAccessibilityFocus:
+@@ -7905,7 +7915,6 @@
+     case ax::mojom::blink::Action::kInternalInvalidateTree:
+     case ax::mojom::blink::Action::kLoadInlineTextBoxes:
+     case ax::mojom::blink::Action::kNone:
+-    case ax::mojom::blink::Action::kReplaceSelectedText:
+     case ax::mojom::blink::Action::kSetSelection:
+     case ax::mojom::blink::Action::kSignalEndOfTest:
+     case ax::mojom::blink::Action::kResumeMedia:

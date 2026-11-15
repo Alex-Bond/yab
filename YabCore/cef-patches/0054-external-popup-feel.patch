@@ -1,0 +1,54 @@
+diff --color -ru a/cef/libcef/browser/browser_info_manager.cc b/cef/libcef/browser/browser_info_manager.cc
+--- a/cef/libcef/browser/browser_info_manager.cc	2026-11-01 22:42:38
++++ b/cef/libcef/browser/browser_info_manager.cc	2026-11-01 22:42:38
+@@ -26,6 +26,8 @@
+ #include "content/public/browser/web_ui.h"
+ #include "content/public/browser/web_ui_controller.h"
+ #include "content/public/common/url_constants.h"
++#include "extensions/browser/view_type_utils.h"
++#include "extensions/common/mojom/view_type.mojom.h"
+ 
+ namespace {
+ 
+@@ -623,6 +625,16 @@
+   }
+ 
+   auto* web_contents = content::WebContents::FromRenderFrameHost(rfh);
++  // Chrome's own extension hosts (an action popup, a background page, an
++  // offscreen document) have no CefBrowser. Left to the timeout, each of their
++  // documents waits two seconds before its first script.
++  const auto view_type = extensions::GetViewType(web_contents);
++  if (view_type != extensions::mojom::ViewType::kInvalid &&
++      view_type != extensions::mojom::ViewType::kTabContents &&
++      !CefBrowserHostBase::GetBrowserForHost(rfh)) {
++    return true;
++  }
++
+   if (WebUIContentsPreloadState::FromWebContents(web_contents)) {
+     // WebUIContentsPreloadManager creates non-tab contents for Chrome UI
+     // (omnibox popups, side panels, etc). The marker is set before navigation,
+diff --color -ru a/chrome/browser/ui/views/extensions/extension_popup.cc b/chrome/browser/ui/views/extensions/extension_popup.cc
+--- a/chrome/browser/ui/views/extensions/extension_popup.cc	2026-11-01 22:42:38
++++ b/chrome/browser/ui/views/extensions/extension_popup.cc	2026-11-01 22:42:38
+@@ -283,7 +283,21 @@
+     ShowPopupCallback callback)
+     : BubbleDialogDelegateView(anchor,
+                                arrow,
++#if BUILDFLAG(ENABLE_CEF)
++                               // A client's popover is the frame and the
++                               // shadow. Its surface is the page alone.
++                               [&] {
++                                 auto* origin =
++                                     extensions::ExternalActionOrigin::Get(
++                                         host->host_contents());
++                                 return origin && origin->external()
++                                            ? views::BubbleBorder::NO_SHADOW
++                                            : views::BubbleBorder::
++                                                  STANDARD_SHADOW;
++                               }(),
++#else
+                                views::BubbleBorder::STANDARD_SHADOW,
++#endif
+                                /*autosize=*/true),
+       browser_(browser),
+       host_(std::move(host)),

@@ -284,7 +284,7 @@ struct SearchSheetLines: View, Equatable {
                             if !app.field.sheetSwallowsTap { app.choose(item) }
                         } label: {
                             WordRowView(row: WordRow(action: .tab(id: item.id), icon: item.icon, title: item.title, subtitle: item.subtitle,
-                                                     key: .go, group: .tabs), best: false)
+                                                     key: .go, group: .tabs), best: false, pageURL: item.pageURL)
                         }
                         .buttonStyle(WordRowPress(best: false, fill: .clear))
                         .accessibilityIdentifier("search.recent.\(i)")
@@ -323,7 +323,7 @@ struct SearchSheetLines: View, Equatable {
                 }
                 ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
                     Button { app.choose(row) } label: {
-                        WordRowView(row: row, best: i == 0 && !keyCopies, dark: dark)
+                        WordRowView(row: row, best: i == 0 && !keyCopies, dark: dark, isPrivate: app.field.isPrivate)
                     }
                     .buttonStyle(WordRowPress(best: i == 0 && !keyCopies, fill: fill))
                     .accessibilityIdentifier(i == 0 ? "field.best" : "field.row.\(i)")
@@ -339,9 +339,8 @@ struct SearchSheetLines: View, Equatable {
     }
 }
 
-/// The spaces' foot, in place of a field: Settings, + for the sheet, the blue
-/// check back to the page. On Chats: a new chat, the search, the check. The
-/// list runs on under it.
+/// The phone spaces' foot: New Tab, the space picker, and Done.
+/// The tablet column keeps its own Settings and search controls.
 struct SpacesFootBar: View {
     @Environment(AppModel.self) private var app
     let size: CGSize
@@ -351,12 +350,33 @@ struct SpacesFootBar: View {
         // The column beside a page is a phone's width: its foot is a phone's
         // row, and only the window's left edge is reserved from it.
         let column = size.width < app.workspace.windowSize.width - 0.5
+        let phonePicker = !column && !app.workspace.tabletControls
         let layout = column
             ? TabGalleryLayout(screen: size, count: 0, verticalControls: false, sides: app.workspace.sides(ofSurface: size.width))
-            : TabGalleryLayout(screen: size, count: 0, verticalControls: app.workspace.verticalControls,
+            : TabGalleryLayout(screen: size, count: 0, verticalControls: phonePicker ? false : app.workspace.verticalControls,
                                leadingRail: app.workspace.leadingRail)
         let chats = NewTabPager.shared.onChats
         ZStack(alignment: .topLeading) {
+            if phonePicker {
+                button(layout.chats, Circle(), id: chats ? "spaces.newChat" : "spaces.new",
+                       label: chats ? "New Chat" : "Search",
+                       action: { if chats { app.newChatFromSpaces() } else { model.askFromSpaces() } }) {
+                    Glyph(.plusMedium, size: Metrics.Chrome.spaceEmoji, color: Ink.primary)
+                }
+                // The header's capsule itself, moved to the foot: it follows the
+                // pages under a finger and turns them, as it did on top.
+                let pager = NewTabPager.shared
+                let spaces = app.browser.spaces.filter { !$0.isPrivate }
+                let pages = [NewTabPager.chatsPage] + spaces.map(\.id)
+                let current = pager.onChats ? 0 : (pages.firstIndex(of: pager.spaceID ?? "") ?? 0)
+                CardCapsule(names: ["Chats"] + spaces.map(\.name), current: current,
+                            position: min(max(pager.position, 0), CGFloat(pages.count - 1)),
+                            width: SpacesFootBar.capsuleWidth(layout), dark: false, bare: true, shared: .foot) { i in
+                    app.field.putKeyboardAway()
+                    pager.jump = pages[i]
+                } sheetDrag: { _, _, _ in } about: {} settings: {}
+                .position(x: size.width / 2, y: layout.plus.midY)
+            } else {
             // One glass in each place; only its glyph turns, through a blur, as the page does.
             button(layout.chats, Circle(), id: chats ? "spaces.newChat" : "newtab.settings", label: chats ? "New Chat" : "Settings",
                    action: { if chats { app.newChatFromSpaces() } else { app.openSettingsFromSpaces(at: nil) } }) {
@@ -384,6 +404,7 @@ struct SpacesFootBar: View {
                     }
                 }
             }
+            }
             if !column {
             Button { model.close() } label: {
                 Image(systemName: "checkmark")
@@ -401,6 +422,11 @@ struct SpacesFootBar: View {
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
         .animation(Motion.disabled ? nil : .easeInOut(duration: 0.28), value: chats)
+    }
+
+    /// The capsule's room between + and Done, in the spaces' foot and All Tabs' alike.
+    static func capsuleWidth(_ layout: TabGalleryLayout) -> CGFloat {
+        layout.gear.minX - layout.chats.maxX - 2 * Metrics.NewTab.spacePickerControlGap
     }
 
     private func button<S: Shape, Label: View>(_ rect: CGRect, _ shape: S, id: String, label: String, action: @escaping () -> Void,

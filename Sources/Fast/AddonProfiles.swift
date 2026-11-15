@@ -23,8 +23,9 @@ struct AddonProfiles: Codable, Equatable {
     }
     /// The sign-in a space runs add-ons with: nil for the shared one.
     @MainActor static func of(space: UUID) -> UUID? {
-        if space == Space.firstID || space == Space.mailID || space == Space.pinsID || Spaces.sharing.contains(space) { return nil }
-        return Spaces.signIn(of: space)
+        if space == Space.mailID || space == Space.pinsID || Spaces.sharing.contains(space) { return nil }
+        let profile = Spaces.signIn(of: space)
+        return profile == Space.firstID ? nil : profile
     }
-    @MainActor static var existing: [UUID] { Spaces.read().filter(\.ownSignIns).map(\.id) }
+    @MainActor static var existing: [UUID] { Array(Set(Spaces.read().filter(\.ownSignIns).map(\.profileID))) }
 }

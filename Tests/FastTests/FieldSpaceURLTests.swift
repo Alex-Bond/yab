@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Testing
+import WebKit
 @testable import Fast
 
 /// #238: without a configured rule, a typed address belongs to this Space;
@@ -10,6 +11,17 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct FieldSpaceURLTests {
+    @Test(arguments: [false, true])
+    func profileDiscoveryKeepsTheFixturesSignIns(isolated: Bool) {
+        let w = World(isolated: isolated); defer { w.close() }
+        let original = Spaces.store(for: w.other.id)
+        // Native profile discovery reads the persisted Space list and rebuilds
+        // its sign-in map, just as opening a Chromium-backed tab does.
+        _ = ChromiumPersistentProfiles.plan(for: w.remote.store)
+        #expect(Spaces.sharing.contains(w.other.id) == !isolated)
+        #expect(Spaces.store(for: w.other.id) === original)
+    }
+
     @MainActor private final class World {
         let browser: Browser
         let home = Space(id: UUID(), name: "URL home", icon: "H", ownSignIns: false)
@@ -30,8 +42,9 @@ struct FieldSpaceURLTests {
             browser.prefs.usesSpaces = true
             browser.prefs.searchSuggest = false
             browser.spaces.append(contentsOf: [home, other])
-            Spaces.sharing.insert(home.id)
-            if !isolated { Spaces.sharing.insert(other.id) }
+            // Profile discovery reads spaces.json. A Browser-only list would
+            // lose these shared sign-ins when that read rebuilds the map.
+            Spaces.write(browser.spaces)
             browser.spaceID = other.id
             Spaces.current = other.id
             remote = Tab(later: Spaces.store(for: home.id))
@@ -55,6 +68,7 @@ struct FieldSpaceURLTests {
             Store.settings.set(previousSuggestions, forKey: "search.suggest")
             if let previousList { try? previousList.write(to: Store.file("spaces.json")) }
             else { try? FileManager.default.removeItem(at: Store.file("spaces.json")) }
+            _ = Spaces.read()
             for id in [home.id, other.id] {
                 Spaces.sharing.remove(id)
                 Spaces.pageCounts[id] = nil
@@ -74,11 +88,55 @@ struct FieldSpaceURLTests {
         }
     }
 
+    /// #865: exercise the composed popup delegate, including the kept-tab
+    /// Peek branch that used to consume this link before consulting rules.
+    @Test(arguments: [false, true])
+    func keptPagesNewTabUsesItsDestinationRule(background: Bool) async throws {
+        let w = World(isolated: true); defer { w.close() }
+        LinkRoutes.shared.set("chat.space238.test", to: w.home.id)
+        w.current.kept = true
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let source = Tab(configuration: configuration, factory: .webKitOnly)
+        source.restore(url: URL(string: "about:blank#page-link")!, title: "Source")
+        source.kept = true
+        w.browser.prepare(source)
+        w.browser.lay([source])
+        w.browser.activeID = source.id
+        let page = requireNativeWebKitFixture(source, "FieldSpaceURLTests")
+        let action = PageAction(request: URLRequest(url: w.target), kind: .linkActivated,
+            targetIsMainFrame: nil, source: nil, modifierFlags: [], buttonNumber: 0,
+            shouldPerformDownload: false, userInitiated: true)
+        let request = PagePopup(id: UUID(), action: action, width: nil, height: nil,
+            toolbarsVisible: nil, menuForeground: background ? false : nil)
+        var answers = 0
+        w.browser.page(page as any PageHandle, open: request) { child in
+            answers += 1
+            #expect(child == nil)
+        }
+        for _ in 0..<50 where !background && w.browser.spaceID != w.home.id {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(answers == 1)
+        #expect(w.browser.peeking == nil)
+        #expect(source.address == URL(string: "about:blank#page-link"))
+        if background {
+            #expect(w.browser.spaceID == w.other.id)
+            #expect(w.browser.parked[w.home.id]?.tabs.contains { $0.address == w.target } == true)
+        } else {
+            #expect(w.browser.spaceID == w.home.id)
+            #expect(w.browser.tabs.contains { $0.address == w.target })
+        }
+    }
+
     /// #866: a configured destination applies to a new site explicitly
     /// requested with Cmd-T, before its WebView chooses its cookie store.
     @Test(arguments: [false, true])
     func configuredFullURLUsesDestinationSpace(isolated: Bool) {
         let w = World(isolated: isolated); defer { w.close() }
+        // A newly requested site, rather than a result paired with an
+        // existing remote tab, still follows its configured destination.
+        w.remote.restore(url: URL(string: "https://unrelated.space238.test/")!, title: "Unrelated")
         LinkRoutes.shared.set("chat.space238.test", to: w.home.id)
         w.ask(w.target.absoluteString)
         w.browser.submit()
@@ -205,6 +263,110 @@ struct FieldSpaceURLTests {
         #expect(w.browser.active === local)
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func namedRemoteResultOffersCopyBeforeSwitch(isolated: Bool, pinned: Bool) throws {
+        let w = World(isolated: isolated); defer { w.close() }
+        if pinned { w.remote.pin = "C" }
+        w.ask("chat")
+        let rows = w.browser.offers
+        let copy = try #require(rows.firstIndex { $0.url == w.target && $0.tab == nil })
+        let jump = try #require(rows.firstIndex { $0.tab == w.remote.id })
+        #expect(copy < jump)
+        #expect(rows[copy].id != rows[jump].id)
+        let merged = SearchSuggestions.merge([Suggestion(key: "chat online", title: "", url: nil, kind: .suggested)],
+                                              into: rows, lead: w.browser.query.lead)
+        let web = try #require(merged.list.firstIndex { $0.kind == .suggested })
+        #expect(copy < web)
+        #expect(jump < web)
+        // Walking to the ordinary result opens here, regardless of which
+        // search/agent row is Return's initial choice for ambiguous words.
+        w.browser.picked = copy
+        #expect(w.browser.fieldActions.first?.title == Browser.openWords(.tab))
+        w.browser.submit()
+        #expect(w.browser.spaceID == w.other.id)
+        #expect(w.browser.active?.address == w.target)
+        #expect(w.browser.active !== w.remote)
+        #expect(w.browser.active?.store === Spaces.store(for: w.other.id))
+    }
+
+    @Test(arguments: [false, true])
+    func remoteHostPrefixDefaultsToHere(isolated: Bool) throws {
+        let w = World(isolated: isolated); defer { w.close() }
+        let target = URL(string: "https://quasar238.test/inbox")!
+        w.remote.restore(url: target, title: "Quasar Library")
+        w.ask("quasar")
+        let lead = try #require(w.browser.query.lead)
+        #expect(w.browser.offers[lead].url == target)
+        #expect(w.browser.offers[lead].tab == nil)
+        w.browser.submit()
+        #expect(w.browser.spaceID == w.other.id)
+        #expect(w.browser.active?.address == target)
+    }
+
+    @Test func remoteTitleDefaultOpensHere() throws {
+        let w = World(isolated: true); defer { w.close() }
+        w.remote.name = "Quasar Library"
+        w.ask("quasar")
+        let lead = try #require(w.browser.query.lead)
+        #expect(w.browser.offers[lead].url == w.target)
+        #expect(w.browser.offers[lead].tab == nil)
+        w.browser.submit()
+        #expect(w.browser.spaceID == w.other.id)
+        #expect(w.browser.active?.address == w.target)
+    }
+
+    @Test(arguments: [false, true])
+    func remoteCopyStaysHereDespiteSiteRule(isolated: Bool) throws {
+        let w = World(isolated: isolated); defer { w.close() }
+        LinkRoutes.shared.set("chat.space238.test", to: w.home.id)
+        w.ask(Address.pretty(w.target))
+        let lead = try #require(w.browser.query.lead)
+        #expect(w.browser.offers[lead].url == w.target)
+        #expect(w.browser.offers[lead].tab == nil)
+        w.browser.submit()
+        #expect(w.browser.spaceID == w.other.id)
+        #expect(w.browser.active?.address == w.target)
+        #expect(w.browser.active?.store === Spaces.store(for: w.other.id))
+    }
+
+    @Test func arrowsReachExplicitRemoteJump() throws {
+        let w = World(isolated: true); defer { w.close() }
+        w.ask("chat")
+        let jump = try #require(w.browser.offers.firstIndex { $0.tab == w.remote.id })
+        for _ in w.browser.offers.indices where w.browser.query.current != jump { w.browser.walk(1) }
+        #expect(w.browser.query.current == jump)
+        w.browser.submit()
+        #expect(w.browser.spaceID == w.home.id)
+        #expect(w.browser.active === w.remote)
+    }
+
+    @Test(arguments: [false, true])
+    func remoteCopiesFollowTabMatchSetting(tabs: Bool) {
+        let w = World(isolated: false); defer { w.close() }
+        let under = FieldUnder.shared
+        let previousTabs = under.tabs, previousPages = under.pages
+        defer { under.tabs = previousTabs; under.pages = previousPages }
+        under.tabs = tabs
+        under.pages = false
+        w.remote.name = "Remote library"
+        w.ask("library")
+        let rows = w.browser.offers.filter { $0.url == w.target }
+        #expect(rows.count == (tabs ? 2 : 0))
+    }
+
+    @Test func remoteAddressLabelHasDistinctCopyAndJumpIdentities() throws {
+        let w = World(isolated: true); defer { w.close() }
+        w.remote.name = History.key(for: w.target)
+        w.ask("chat")
+        let rows = w.browser.offers.filter { $0.url == w.target }
+        #expect(rows.count == 2)
+        #expect(Set(rows.map(\.id)).count == 2)
+        w.browser.picked = try #require(w.browser.offers.firstIndex { $0.tab == w.remote.id })
+        w.browser.guessAgain()
+        let selected = try #require(w.browser.query.current)
+        #expect(w.browser.offers[selected].tab == w.remote.id)
+    }
+
     /// #260a: the open tabs of the Space on screen come first. Three fresher
     /// tabs in another Space never push this Space's tab out of the list.
     private func boards(_ w: World) -> (design: Tab, work: [Tab]) {
@@ -234,7 +396,7 @@ struct FieldSpaceURLTests {
         #expect(rows.dropFirst().allSatisfy { $0.space == w.home.id })
     }
 
-    @Test func thisSpacesTabsThenPlacesThenOtherSpaces() throws {
+    @Test func thisSpacesTabsThenOtherSpacesThenHistory() throws {
         let w = World(isolated: false); defer { w.close() }
         let (design, work) = boards(w)
         let visited = URL(string: "https://board.space260.test/history")!
@@ -246,7 +408,16 @@ struct FieldSpaceURLTests {
         let place = try #require(offers.firstIndex { $0.url == visited && $0.tab == nil })
         let elsewhere = try #require(offers.firstIndex { $0.tab == work[0].id })
         #expect(here < place)
-        #expect(place < elsewhere)
+        #expect(elsewhere < place)
+        let suggestions = [Suggestion(key: "board games", title: "", url: nil, kind: .suggested)]
+        let merged = SearchSuggestions.merge(suggestions, into: offers, lead: w.browser.query.lead)
+        let web = try #require(merged.list.firstIndex { $0.kind == .suggested })
+        for tab in [design] + work {
+            let at = try #require(merged.list.firstIndex { $0.tab == tab.id })
+            #expect(at < web)
+            let history = try #require(merged.list.firstIndex { $0.url == visited && $0.tab == nil })
+            #expect(at < history)
+        }
         // Return never leads to another Space's tab.
         let workIDs = Set(work.map(\.id))
         if let lead = w.browser.query.lead, let tab = offers[lead].tab {

@@ -110,7 +110,7 @@ private struct FileItems: View {
         Button("Paste and Go") { selected.pasteAndGo() }
             .shortcut(.pasteAndGo)
         Divider()
-        // Close Tab and Close Window, in
+        // Close Tab and Close Window in
         // File, in place of AppKit's own Close and Close All (see
         // .saveItem): those kept ⌘W behind Close Tab and shut the
         // whole window once Close Tab had another key. Another
@@ -327,10 +327,9 @@ private struct TabsItems: View {
             Button("Copy Markdown Link") { selected.copyMarkdownLink() }
                 .shortcut(.copyMarkdownLink)
                 .disabled(selected.menuBlank)
-            if let url = selected.menuShare {
-                ShareLink(item: Diary.shareable(url)) {
-                    Text("Share Page…")
-                }
+            if selected.menuShare != nil {
+                Button("Share Page…") { selected.sharePage() }
+                    .shortcut(.sharePage)
             }
         }
         // A link looked at with ⇧-click (LinkPeek.swift), only while
@@ -645,13 +644,15 @@ private struct StripPlaced<Content: View>: View {
     /// ⌘S moves it, drawn as far down as `down` (Browser.stripDown).
     let moving: Bool
     let down: CGFloat
+    /// AppKit positions and clips its fullscreen accessory as one surface.
+    var nativeFullscreen = false
     /// The strip, lifted off the page or flat (StripPeek.card).
     @ViewBuilder let content: (_ lifted: Bool) -> Content
 
     /// In sight: in its place, or out over the page, the edge having
     /// brought it. Put away, it stays out of sight while ⇧⌘S takes the tabs
     /// down the side, rather than dropping into its place on its way out.
-    private var out: Bool { !shut || peek.out }
+    private var out: Bool { nativeFullscreen || !shut || peek.out }
 
     var body: some View {
         content(peek.card)
@@ -662,7 +663,7 @@ private struct StripPlaced<Content: View>: View {
             // off the page, just past its shadow too, where the column's
             // card starts (CardMotion.shadow): from further, the spring
             // spent its first frames with nothing to see.
-            .modifier(StripPlace(down: moving ? down : out ? 1 : 0,
+            .modifier(StripPlace(down: nativeFullscreen ? 1 : moving ? down : out ? 1 : 0,
                                  travel: Metrics.row + (peek.card ? CardMotion.shadow : 0)))
             // Pressed while a page has the screen too: WebKit lends the page
             // to a window of its own, on a desktop of its own, and this
@@ -810,6 +811,24 @@ struct GroundFill<S: Shape>: View {
     static func ground(_ tone: Tone?, browser: Browser?) -> Color {
         if let tone, tone.ink, let site = (browser ?? BrowserWindows.shared.activeBrowser)?.worn.color { return Color(nsColor: site) }
         return tone?.color ?? Palette.ground
+    }
+}
+
+/// The ground under the row of tabs edge to edge: the page's own color, or
+/// black while the page has the screen. `away` is the window's own word on
+/// that (ContentView.frontImmersed), handed in as a value. Read off the tab
+/// inside the closure handed to Toned, it was read again only when Toned's
+/// body ran for a new tone: the ground went black with a tone read while the
+/// page had the screen and stayed black after it came back, the tab no
+/// longer immersed, until another tab was chosen (register 2669, 0.47.0).
+private struct PageGround: View {
+    @ObservedObject var tab: Tab
+    let away: Bool
+
+    var body: some View {
+        let tone = tab.tone.map { Tone($0) }
+        (away ? Color.black : tone?.color ?? Palette.ground)
+            .animation(Motion.quick, value: tone)
     }
 }
 
@@ -968,9 +987,7 @@ struct ContentView: View {
                 )
                 }
             } else if let tab = browser.dresser, !browser.prefs.sidebar {
-                Toned(tab: tab) { tone in
-                    tab.immersed ? Color.black : tone?.color ?? Palette.ground
-                }
+                PageGround(tab: tab, away: frontImmersed)
             } else {
                 Palette.ground
             }
@@ -1217,24 +1234,36 @@ struct ContentView: View {
                     .transition(.opacity)
             } }
 
-            leaf { if !browser.prefs.sidebar || browser.turning {
+            leaf {
                 // Put away by ⌘S, up past the window's top edge, and out
                 // over the page while the pointer is at that edge.
+                FullscreenToolbar(fullScreen: browser.fullScreen, pinned: !browser.prefs.stripShut,
+                                  enabled: !browser.prefs.sidebar || browser.turning) {
+                if !browser.prefs.sidebar || browser.turning {
                 StripPlaced(peek: browser.topPeek, shut: browser.prefs.stripShut, moving: browser.stripMoving,
-                            down: browser.stripDown) { lifted in
+                            down: browser.stripDown, nativeFullscreen: browser.fullScreen) { lifted in
+                    // In a host of its own, so a change of space turns it in
+                    // Core Animation, on screen ahead of the window's own pass
+                    // (StripView); its ground stays outside, under the turn.
                     Group {
                         if carded {
                             Worn(browser: browser, mode: browser.prefs.backdrop, swatch: backdropTone, glassActive: glassActive) { tone in
-                                TabBar(browser: browser).background(ChorusInk(chorus: browser.chorus)).toned(tone).modifier(SidebarTypography())
-                                    .background { stripGround(tone, lifted: lifted) }
+                                StripHost(browser: browser) {
+                                    TabBar(browser: browser).background(ChorusInk(chorus: browser.chorus)).toned(tone).modifier(SidebarTypography())
+                                }
+                                .toned(tone)
+                                .background { stripGround(tone, lifted: lifted) }
                             }
                         } else if let tab = browser.dresser {
                             Toned(tab: tab) { tone in
-                                TabBar(browser: browser).background(ChorusInk(chorus: browser.chorus)).toned(tone).modifier(SidebarTypography())
-                                    .background { stripGround(tone, lifted: lifted) }
+                                StripHost(browser: browser) {
+                                    TabBar(browser: browser).background(ChorusInk(chorus: browser.chorus)).toned(tone).modifier(SidebarTypography())
+                                }
+                                .toned(tone)
+                                .background { stripGround(tone, lifted: lifted) }
                             }
                         } else {
-                            TabBar(browser: browser).modifier(SidebarTypography())
+                            StripHost(browser: browser) { TabBar(browser: browser).modifier(SidebarTypography()) }
                                 .background { stripGround(nil, lifted: lifted) }
                         }
                     }
@@ -1243,11 +1272,10 @@ struct ContentView: View {
                     // when a page takes the screen.
                     .modifier(Presence(shown: !browser.prefs.sidebar, edge: .top))
                 }
-                // Only the tabs clear macOS's revealed menu/title bar.
-                // Moving the whole stage also moved the page and its tools.
-                .offset(y: browser.menuDown)
                 .transition(.move(edge: .top).combined(with: .opacity))
-            } }
+                }
+                }
+            }
         }
         .ignoresSafeArea()
         // WebKit already animates its fullscreen window. Resizing our page
@@ -1450,9 +1478,9 @@ struct ContentView: View {
     /// must stay still; the source stage's corners never clip that window.
     /// In full screen with the tabs put away, the column or the strip, the
     /// page has the screen edge to edge, unless the chat's column or the
-    /// developer tools are out: then it is a card beside theirs, in by the
-    /// same inset, rather than a square edge against them
-    /// (Browser.pageShared).
+    /// developer tools are out, or two halves share the room: then it is a
+    /// card beside theirs, in by the same inset, rather than a square edge
+    /// against them (Browser.pageShared).
     private var laid: Bool { carded && !(browser.fullScreen && browser.tabsAway && !browser.pageShared) }
 
     /// The page's corners: a card's, or none, edge to edge.
@@ -1585,7 +1613,8 @@ struct ContentView: View {
     @ViewBuilder
     private func field(in space: CGSize) -> some View {
             let (lead, trail) = fieldRoom(in: space.width)
-            Omnibox(browser: browser, inset: lead, trail: trail)
+            Omnibox(browser: browser, inset: lead, trail: trail,
+                    pageTop: band + shelfRoom + margins.top + barHeight, pageBottom: margins.bottom)
                 // Keep the native editor and glass prepared with the window.
                 // Mounting them on Cmd-L put their first layout and render
                 // setup in the opening frame. Hidden fields cannot take
@@ -1714,6 +1743,27 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 browser.appBack()
             }
+            // The page's own window in or out of sight (automatic PiP, as
+            // Chrome decides it from the tab's view): this browser window,
+            // or the one its page in front was lent for full screen.
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) { note in
+                guard let changed = note.object as? NSWindow else { return }
+                browser.sightChanged(of: changed)
+            }
+            // A window sliding in or out of full screen: its occlusion means
+            // nothing meanwhile (`Browser.sightSliding`).
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { note in
+                if let window = note.object as? NSWindow { browser.fullscreenSlide(window, started: true) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.willExitFullScreenNotification)) { note in
+                if let window = note.object as? NSWindow { browser.fullscreenSlide(window, started: true) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
+                if let window = note.object as? NSWindow { browser.fullscreenSlide(window, started: false) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
+                if let window = note.object as? NSWindow { browser.fullscreenSlide(window, started: false) }
+            }
             .background(WindowSetup(prepare: { LaunchArrival.shared.prepare($0, primary: browser.windowID == nil) }) {
                 window = $0; dress($0)
             })
@@ -1818,8 +1868,8 @@ struct ContentView: View {
     private func stripGround(_ tone: Tone?, lifted: Bool) -> some View {
         // In full screen the strip steps down under macOS's menu bar, out
         // over the page, which stays where it was: grounded there too.
-        let over = lifted || browser.menuOut
-        if browser.stripAway || browser.stripMoving || browser.menuOut {
+        let over = lifted || browser.menuOut || browser.fullScreen
+        if browser.stripAway || browser.stripMoving || browser.menuOut || browser.fullScreen {
             ZStack(alignment: .bottom) {
                 if carded, let tone {
                     CardGround(paint: Column.paint(tone, prefs: browser.prefs)).environment(browser)
@@ -2007,20 +2057,13 @@ struct ContentView: View {
 
     /// The tab of the column's row the window has at `point` (its own, from
     /// its bottom left): the row the pointer is on as drawn, whatever
-    /// hovering has heard yet. Pins and a pair's halves validate hover
-    /// against their hit cell; a folder or an empty area says nothing.
+    /// hovering has heard yet. A pair's halves validate hover against
+    /// their hit cell; a folder or an empty area says nothing.
     private static func columnTab(at point: NSPoint, in window: NSWindow, hovered: Tab?) -> Tab.ID? {
         var view = window.contentView?.superview?.hitTest(point)
         while let each = view, !(each is ColumnCell) { view = each.superview }
         guard let cell = view as? ColumnCell else { return nil }
-        if let tab = cell.rowTab { return tab.id }
-        // Pins and the two halves of a pair still name themselves through
-        // hover. Accept that name only inside the cell that drew that tab,
-        // never over a folder, a gap or another row after the list moved.
-        guard cell.kind == .pin || cell.kind == .home || cell.kind == .pair,
-              let hovered, let look = cell.current,
-              look.tab == ObjectIdentifier(hovered) || look.other == ObjectIdentifier(hovered) else { return nil }
-        return hovered.id
+        return cell.tabUnderPointer(hovered: hovered)
     }
 
     // MARK: - keys
@@ -2171,7 +2214,7 @@ struct ContentView: View {
     /// the same event back through the app, and it comes here a second
     /// time. Only while the page has the keyboard; in the address field or
     /// a panel, yab's keys are yab's. The keys that make, close and move
-    /// between tabs stay yab's first, and so
+    /// between tabs stay yab's first, as a browser keeps them its own, and so
     /// does ⇧⌘V, which no page has a use for: `reserved`, for the ones
     /// Settings › Shortcuts can change whatever keys they have now
     /// (Shortcut.first).
@@ -2179,50 +2222,15 @@ struct ContentView: View {
         // Mail's page is only a ground under what the app draws (MailPage):
         // it has no use for a key, and handing it one is a trip to WebKit
         // and back for nothing, lost on the way when Yab isn't the active app.
-        guard !reserved, let page = event.window?.firstResponder as? PageView, !MailPage.isMail(page.url) else { return false }
+        let responder = event.window?.firstResponder
+        guard !reserved, let page = (responder as? PageView).map({ $0.url }) ?? (responder as? ChromiumPage).map({ $0.url }),
+              !MailPage.isMail(page) else { return false }
         if let passed = ContentView.passed, PageView.same(passed, event) {
             ContentView.passed = nil
             return false
         }
         ContentView.passed = event
         return true
-    }
-
-    /// A key the page kept that yab would have used, and until when the
-    /// same key again is yab's (`watchKept`).
-    private static var again: (action: Shortcut.Action, until: CFTimeInterval)?
-
-    /// ⌘S in a code editor, ⌘[ in Figma: the page has the key first, and
-    /// one that keeps it is right to. But the person may have meant the
-    /// sidebar, so the corner says the page took it, as Arc does, and the
-    /// same key while it says so is yab's. Kept is told by WebKit not sending
-    /// the key back within a moment; one sent back later still acts, and the
-    /// corner goes quiet.
-    private func watchKept(_ action: Shortcut.Action, _ event: NSEvent) {
-        guard Shortcut.again.contains(action) else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [browser] in
-            guard let passed = ContentView.passed, PageView.same(passed, event) else { return }
-            let words: String
-            let mark: String
-            switch action {
-            case .column:
-                let what = browser.prefs.sidebar ? "sidebar" : "tab bar"
-                words = (browser.tabsAway ? "Again to show the " : "Again to hide the ") + what
-                mark = browser.prefs.sidebar ? "sidebar.left" : "rectangle.split.3x1"
-            case .back:
-                guard browser.active?.canGoBack == true else { return }
-                words = "Again to go back"
-                mark = "arrow.left"
-            case .forward:
-                guard browser.active?.canGoForward == true else { return }
-                words = "Again to go forward"
-                mark = "arrow.right"
-            default:
-                return
-            }
-            ContentView.again = (action, CACurrentMediaTime() + Calls.again)
-            browser.toaster.pop(words, mark: mark, keys: Keymap.shared.keys(action)?.caps ?? [], stay: Calls.again)
-        }
     }
 
     /// The keys of the top row, by where they sit rather than what they type.
@@ -2395,11 +2403,6 @@ struct ContentView: View {
         // to yab's command, not through everything before it a second time.
         if let passed = ContentView.passed, PageView.same(passed, event) {
             ContentView.passed = nil
-            // Back later than `watchKept` waited: the page didn't keep it.
-            if let again = ContentView.again, Keymap.shared.action(for: event)?.action == again.action {
-                ContentView.again = nil
-                browser.toaster.dismiss()
-            }
             if let action = Hotkey.first(event, { QuickActions.shared.action(for: $0) })?.1 {
                 browser.run(action)
                 return true
@@ -2689,7 +2692,7 @@ struct ContentView: View {
             // list, then the field.
             // Rows picked together are put down first, the chosen one kept.
             if browser.fieldShowing, browser.unpickRows() { return true }
-            if browser.fieldShowing, browser.leavePlace(returnToForm: true) { return true }
+            if browser.fieldShowing, browser.leavePlace() { return true }
             // Out of the compact card's Actions, to its list.
             if browser.fieldShowing, browser.leaveActions() { return true }
             if browser.unchoose() { return true }
@@ -2801,6 +2804,8 @@ struct ContentView: View {
 
         // Extension keys use the same ownership check here and at the bench.
         // Recording one through Keymap.clash frees Yab's binding first.
+        // A Chromium tab's are the keys Chrome gave its extensions' commands.
+        if ChromiumExtensionCommands.take(event, in: browser) { return true }
         if #available(macOS 15.4, *), Extensions.of(browser).take(event) {
             return true
         }
@@ -2837,18 +2842,9 @@ struct ContentView: View {
             return Keymap.shared.run(command, in: browser)
         }
         if chord, let action = Keymap.shared.action(for: event)?.action {
-            // Pressed again while the corner says the page kept it: yab's.
-            let again = ContentView.again.map { $0.action == action && CACurrentMediaTime() < $0.until } ?? false
-            if again {
-                ContentView.again = nil
-                browser.toaster.dismiss()
-            }
             // F12 is the page's first (Shortcut.also).
             let reserved = Shortcut.reservesPageKey(action, readAs: Hotkey(event))
-            if pageFirst(event, reserved: reserved || again) {
-                watchKept(action, event)
-                return false
-            }
+            if pageFirst(event, reserved: reserved) { return false }
             return perform(action, event)
         }
         if chord, let action = Hotkey.first(event, { QuickActions.shared.action(for: $0) })?.1 {
@@ -2892,12 +2888,6 @@ struct ContentView: View {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.contains(.command), !flags.contains(.option), !flags.contains(.control) else { return false }
         switch key {
-        // ⌘C on the address ⌘L brought, all of it: the address itself, not
-        // the shortened one the field shows. Any other ⌘C is the field's.
-        case "c" where !shifted:
-            let editor = event.window?.firstResponder as? NSTextView
-            let all = editor.map { $0.selectedRange().location == 0 && $0.selectedRange().length == ($0.string as NSString).length } ?? false
-            guard editor?.isFieldEditor == true, browser.copyHere(selectedAll: all) else { return false }
         case "z" where !shifted:
             // While pointing, the hiding. A ⌘Z the page had first and sent
             // back unused is the window's, as the ⌘Z in the key monitor
@@ -2906,7 +2896,8 @@ struct ContentView: View {
             // (feedback #153).
             if browser.veiling {
                 browser.undoHiding()
-            } else if event.window?.firstResponder is PageView, browser.canUndoClose(nativeEditor: false) {
+            } else if (event.window?.firstResponder is PageView || event.window?.firstResponder is ChromiumPage),
+                      browser.canUndoClose(nativeEditor: false) {
                 browser.undoWindow()
             } else {
                 return false
@@ -2956,7 +2947,7 @@ struct ContentView: View {
             let number = Int(action.rawValue.dropFirst(3)) ?? 1
             browser.select(index: number == 9 ? browser.tabs.count - 1 : number - 1)
         case .space1, .space2, .space3, .space4, .space5, .space6, .space7, .space8, .space9:
-            guard browser.spacesShown else { return false }
+            guard browser.turnsSpaces else { return false }
             browser.switchSpace(index: (Int(action.rawValue.dropFirst(5)) ?? 1) - 1)
         case .sendSpace1, .sendSpace2, .sendSpace3, .sendSpace4, .sendSpace5, .sendSpace6, .sendSpace7, .sendSpace8, .sendSpace9:
             guard browser.spacesShown else { return false }
@@ -3017,12 +3008,13 @@ struct ContentView: View {
         case .closeBefore: browser.closeBefore()
         case .closeAfter: browser.closeAfter()
         case .nextSpace, .previousSpace:
-            guard browser.spacesShown else { return false }
+            guard browser.turnsSpaces else { return false }
             browser.stepSpace(action == .nextSpace ? 1 : -1)
         case .mute: browser.toggleMute(browser.several ? browser.chosen : nil)
         case .openAddress: browser.pressOpenAddress()
         case .copyAddress: browser.several ? browser.copyAddresses(browser.chosen) : browser.copyAddress()
         case .copyMarkdownLink: browser.copyMarkdownLink(browser.several ? browser.chosen : nil)
+        case .sharePage: return browser.sharePage()
         case .pasteAndMatchStyle:
             guard let key = Keymap.shared.keys(.pasteAndMatchStyle), PasteStyleMenuOrder.permits(key, in: NSApp.mainMenu) else { return false }
             return PasteStyleTarget.current(in: event.window).perform()
@@ -3115,6 +3107,10 @@ struct ContentView: View {
             if browser.jsonFront?.json.map({ $0.shown != .sent }) == true {
                 browser.saveJSON()
             } else {
+                // A held shortcut is one sidebar command. Consume repeats
+                // here, including remapped keys, before they reverse the
+                // current transition. The horizontal strip keeps its route.
+                if browser.prefs.sidebar, event.isARepeat { return true }
                 browser.toggleColumn()
             }
         case .bookmarksBar: browser.toggleBookmarkBar()
@@ -3157,7 +3153,7 @@ struct RecentlyVisited: View {
     let browser: Browser
 
     var body: some View {
-        if Narrow.menu { Listed(recent: RecentMenu.shared, browser: browser) } else { Live(history: history, browser: browser) }
+        if Narrow.menu { Listed(recent: RecentMenu.following(history), browser: browser) } else { Live(history: history, browser: browser) }
     }
 
     /// The places a moment after the history changes (RecentMenu).

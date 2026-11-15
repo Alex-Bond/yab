@@ -40,7 +40,7 @@ extension Bench {
         let agents = c.agents
         let session = c.session
         // An assistant in the cloud's, or a task one started: what it may do.
-        let mine: Any = agents.assistant(of: session).map { Bench.assistantCaps($0, browser: browser) as Any } ?? NSNull()
+        let mine = agents.assistant(of: session).map { AgentCapabilityCache.Assistant.read($0, browser: browser) }
         // Another app's agent through `yab mcp` gets mail tools only once the
         // person gave them to other apps (MailConsent.others).
         // Yab's own chat gets them with Mail you hand to Claude off too: its
@@ -51,16 +51,17 @@ extension Bench {
         let mailHere = !agents.offMail(session)
             && (own || (MailCenter.agentsAllowed && (MailConsent.others || Store.testing)))
         // Getting to know the user: only then its own two tools.
-        answer(["folder": Routines.shared.running(session)?.folder == true, "boost": Boosts.shared.mayCreate(session: session),
-                "messages": browser.prefs.agentsMessages, "mail": browser.prefs.mailCodes,
+        let state = AgentCapabilityCache.State(folder: Routines.shared.running(session)?.folder == true, boost: Boosts.shared.mayCreate(session: session),
+                messages: browser.prefs.agentsMessages, mail: browser.prefs.mailCodes,
                 // With Mail on, before any account is in too:
                 // an agent setting one up needs mail_probe (docs/mail-providers.md, M3).
-                "mailbox": (MailCenter.shared.connected || MailExperiment.otherAccounts()) && mailHere,
+                mailbox: (MailCenter.shared.connected || MailExperiment.otherAccounts()) && mailHere,
                 // Mail on, or an account in: mail_accounts connects one.
-                "mailAgents": (MailExperiment.enabled() || MailCenter.shared.connected) && mailHere && MailCenter.agentsAllowed,
-                "recall": MailRecall.wanted && mailHere,
-                "asking": browser.prefs.asking(session).rawValue, "knowing": agents.session(session)?.knowing == true,
-                "assistant": mine])
+                mailAgents: (MailExperiment.enabled() || MailCenter.shared.connected) && mailHere && MailCenter.agentsAllowed,
+                recall: MailRecall.wanted && mailHere,
+                asking: browser.prefs.asking(session).rawValue, knowing: agents.session(session)?.knowing == true,
+                assistant: mine)
+        answer(agentCapabilities.answer(session: session, state: state))
     }
 
     func handleAgentFolderAccessRecheck(_ c: AgentCall) {
@@ -532,6 +533,7 @@ extension Bench {
                 detail: "Its passwords and cookies, for you and for the agents working in \(Links.appName).",
                 icon: NSApp.applicationIconImage, ownIcon: true, yes: "Bring In"))
             guard yes else { answer(["error": "Not brought in: the answer in Yab was no."]); return }
+            let source = source.authorizingImport()
             DispatchQueue.global(qos: .userInitiated).async {
                 let read = Result { try Chromium.read(source) }
                 let passwords = (try? read.get()).map { Vault.take($0) }

@@ -8,7 +8,7 @@ import WebKit
 struct TabEngineTests {
     /// An NSView with no WebKit inheritance proves ownership and state
     /// delivery do not depend on the compatibility accessors.
-    private final class Page: NSView, PageHandle, PageAudioControl, PageSleepActivity {
+    fileprivate final class Page: NSView, PageHandle, PageAudioControl, PageSleepActivity {
         let engine: PageEngineKind
         weak var events: (any PageEvents)?
         weak var stateEvents: (any PageStateEvents)?
@@ -40,6 +40,7 @@ struct TabEngineTests {
         var shots: [PageShot] = []
         var picture: NSImage?
         var scriptResult: Any?
+        var lastScriptFrame: PageFrame?
         var scriptReply: ((@escaping @MainActor (Result<Any?, Error>) -> Void) -> Void)?
         var presses: [NSEvent] = []
         var inserted: [String] = []
@@ -70,6 +71,7 @@ struct TabEngineTests {
         func pdf(rect: CGRect?, done: @escaping @MainActor (Result<Data, Error>) -> Void) { done(.failure(PageShotFailed())) }
         func evaluate(_ script: PageCode, in world: PageWorld, frame: PageFrame?, gesture: Bool,
                       done: (@MainActor (Result<Any?, Error>) -> Void)?) {
+            lastScriptFrame = frame
             if let done, let scriptReply { scriptReply(done) }
             else { done?(.success(scriptResult)) }
         }
@@ -87,7 +89,7 @@ struct TabEngineTests {
     }
 
     @MainActor
-    private final class Factory {
+    fileprivate final class Factory {
         var choices: [PageEngineKind] = []
         var pages: [Page] = []
         let sites = SiteEngineSettings(store: UserDefaults(suiteName: "site-engine-tests-" + UUID().uuidString)!)
@@ -101,7 +103,7 @@ struct TabEngineTests {
         }
     }
 
-    private func make(_ factory: Factory, engine: PageEngineKind = .webKit) -> Tab {
+    fileprivate func make(_ factory: Factory, engine: PageEngineKind = .webKit) -> Tab {
         _ = NSApplication.shared
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
@@ -125,6 +127,90 @@ struct TabEngineTests {
         #expect(tab.chromiumDRMEnabled == (engine == .chromium))
         #expect(tab.page.engine == engine && factory.choices == [engine])
         #expect(tab.built == nil, "The injected NSView must not acquire a shadow WebKit view")
+    }
+
+    /// A page built and put to sleep, as memory stood at `level`.
+    private func wake(_ tab: Tab, level: Int?) -> PageEngineKind {
+        Pressure.forced = level
+        defer { Pressure.forced = nil }
+        let engine = tab.page.engine
+        tab.unbuildForEngineTest()
+        return engine
+    }
+
+    @Test func webKitFirstMovesAWakingTabAndRemembersWhy() {
+        let factory = Factory()
+        factory.sites.store.set(EngineDefault.webKitFirst.rawValue, forKey: EngineRules.defaultKey)
+        let tab = make(factory, engine: .webKit)
+        defer { tab.close() }
+        tab.go(to: URL(string: "https://plain.test/")!)
+        tab.unbuildForEngineTest()
+        #expect(wake(tab, level: 2) == .chromium)
+        #expect(tab.engineMemoryMoved && !tab.chromiumDRMEnabled)
+        // Still short: it stays.
+        #expect(wake(tab, level: 4) == .chromium)
+        // Memory back: home to WebKit, and nothing left to remember.
+        #expect(wake(tab, level: 1) == .webKit)
+        #expect(!tab.engineMemoryMoved)
+    }
+
+    @Test func aTabGoingSomewhereUnderPressureNavigatesOnTheEngineItGets() {
+        // On the engine told beforehand a WebKit path would load nothing.
+        let factory = Factory()
+        factory.sites.store.set(EngineDefault.webKitFirst.rawValue, forKey: EngineRules.defaultKey)
+        let tab = make(factory, engine: .webKit)
+        defer { tab.close() }
+        Pressure.forced = 2
+        defer { Pressure.forced = nil }
+        let url = URL(string: "https://plain.test/")!
+        #expect(factory.factory.upcoming(tab, at: url) == .chromium)
+        tab.go(to: url)
+        #expect(tab.builtPage?.engine == .chromium)
+        #expect((tab.builtPage as? Page)?.requests.last?.url == url)
+    }
+
+    @Test func webKitFirstLeavesARuledSiteAlone() {
+        let factory = Factory()
+        factory.sites.store.set(EngineDefault.webKitFirst.rawValue, forKey: EngineRules.defaultKey)
+        let tab = make(factory, engine: .webKit)
+        defer { tab.close() }
+        tab.go(to: URL(string: "https://open.spotify.com/")!)
+        tab.unbuildForEngineTest()
+        #expect(wake(tab, level: 2) == .webKit)
+        #expect(!tab.engineMemoryMoved)
+    }
+
+    @Test func autoKeepsChromiumWhenAWakingTabIsUnderPressure() {
+        let factory = Factory()
+        let tab = make(factory, engine: .chromium)
+        defer { tab.close() }
+        tab.go(to: URL(string: "https://plain.test/")!)
+        tab.unbuildForEngineTest()
+        // Auto stays on Chromium under pressure (owner, 2026-11-02).
+        // WebKit First's separate wake/move coverage above remains intact.
+        #expect(wake(tab, level: 2) == .chromium)
+        #expect(!tab.engineMemoryMoved)
+        #expect(wake(tab, level: 1) == .chromium)
+        #expect(!tab.engineMemoryMoved)
+    }
+
+    @Test func aDefaultChosenAfterAMemoryMoveWinsAtTheNextWake() {
+        let factory = Factory()
+        factory.sites.store.set(EngineDefault.webKitFirst.rawValue, forKey: EngineRules.defaultKey)
+        let tab = make(factory, engine: .webKit)
+        defer { tab.close() }
+        tab.go(to: URL(string: "https://plain.test/")!)
+        tab.unbuildForEngineTest()
+        Pressure.forced = 2
+        defer { Pressure.forced = nil }
+        #expect(tab.page.engine == .chromium)
+        // Plain WebKit picked while the page is up: it stays, and is told.
+        factory.sites.store.set(EngineDefault.auto.rawValue, forKey: EngineRules.defaultKey)
+        tab.followDefaultEngine(.webKit)
+        #expect(tab.page.engine == .chromium && tab.enginePendingDefault == .webKit)
+        tab.unbuildForEngineTest()
+        #expect(tab.page.engine == .webKit)
+        #expect(!tab.engineMemoryMoved && tab.enginePendingDefault == nil)
     }
 
     @Test func standardFactoryStillFollowsTheDevelopmentEngineOverride() {
@@ -317,6 +403,38 @@ struct TabEngineTests {
         answer(.success(false))
         #expect(reason == "page changed")
         #expect(tab.builtPage === page && !tab.asleep && !page.retired)
+    }
+
+    @Test func returningDuringDraftProbeCancelsAutomaticSleep() throws {
+        let factory = Factory(), browser = Browser(windowID: UUID())
+        let tab = Tab(shy: true, engine: .chromium, factory: factory.factory)
+        let front = Tab(shy: true, engine: .chromium, factory: factory.factory)
+        defer { for page in browser.tabs { page.close() } }
+        tab.go(to: URL(string: "ownership:/sleep-candidate")!)
+        front.go(to: URL(string: "ownership:/foreground")!)
+        browser.lay([tab, front]); browser.activeID = front.id
+        let page = try #require(tab.builtPage as? Page)
+        page.sleepActivityUnavailable = false
+        page.lastInput = 1
+        tab.touch(at: Date().addingTimeInterval(-Browser.seenGrace - 60))
+        browser.recent = []
+        #expect(browser.relief(now: AwakeClock.now) === tab)
+
+        var reply: (@MainActor (Result<Any?, Error>) -> Void)?, reason: String?
+        page.scriptReply = { reply = $0 }
+        browser.sleep(tab, urgent: true, reason: .memoryCritical) { reason = $0 }
+        let answer = try #require(reply, "the actual draft probe is pending")
+        #expect(reason == nil && !tab.asleep)
+        browser.activeID = tab.id
+        browser.activeID = front.id
+        #expect(tab.idle(at: AwakeClock.now) < Browser.seenGrace)
+        #expect(browser.recentlyUsed().contains(tab.id))
+        answer(.success(false))
+
+        #expect(reason != nil, "the invalidated sleep request reports completion")
+        #expect(reason != "asleep", "returning to a tab invalidates the old sleep decision")
+        #expect(tab.builtPage === page && !tab.asleep && !page.retired,
+                "the document just visited must survive the late draft reply")
     }
 
     @Test func unknownChromiumActivityCannotBeWaivedBeforeADraftProbe() {
@@ -888,7 +1006,14 @@ struct TabEngineTests {
         try await other.setSiteEngineChoice(.chromium)
         #expect(other.siteEngineRowFacts == nil)
         try await other.setSiteEngineChoice(.recommended)
+        // On WebKit with no move of Yab's behind it (⌘K's Open in, a window
+        // a WebKit page opened): no row says protected video (#1605).
+        other.applySiteEngineChoice(.webKit, at: URLRequest(url: other.address!))
+        #expect(other.siteEngineRowFacts == nil)
+        other.applySiteEngineChoice(.chromium, at: URLRequest(url: other.address!))
         // Yab's own move for protected video: not a choice, so no cross.
+        // The player's refusal names its site before WebKit's page is built.
+        other.engineProtectedSite = Tab.protectedSite(other.address)
         other.applySiteEngineChoice(.webKit, at: URLRequest(url: other.address!))
         let moved = try #require(other.siteEngineRowFacts)
         #expect(moved.title == "Opens in WebKit" && !moved.chosen && moved.said == "For its protected video")
@@ -926,6 +1051,118 @@ struct TabEngineTests {
         tab.go(to: url)
         #expect(factory.choices == [.chromium] && tab.built == nil)
         #expect(factory.pages[0].requests.map(\.url) == [url])
+    }
+
+    @Test(arguments: [false, true])
+    func youtubeRuleSelectsChromiumFromAWebKitTabWhenOpeningOrWaking(waking: Bool) {
+        let factory = Factory(), tab = make(factory, engine: .webKit)
+        defer { tab.close() }
+        factory.sites.setOwn(.chromium, host: "youtube.com")
+        let url = URL(string: "https://www.youtube.com/watch?v=engine-rule")!
+        if waking {
+            tab.restore(url: url, title: "YouTube")
+            #expect(tab.wake())
+        } else {
+            tab.go(to: url)
+        }
+        #expect(factory.choices == [.chromium])
+        #expect(factory.pages.first?.requests.map(\.url) == [url])
+        #expect(tab.engineKind == .chromium)
+    }
+
+    /// #1605: Auto is Chromium, and a built-in rule moved this tab to WebKit
+    /// for Netflix. Every site after it in the tab stayed on WebKit, under
+    /// "Auto (Chromium)" and "For its protected video".
+    @Test func aTabMovedToWebKitForOneSiteGoesBackToItsDefaultOnTheNextSite() async throws {
+        let factory = Factory(), tab = make(factory, engine: .chromium)
+        defer { tab.close() }
+        let netflix = URL(string: "https://www.netflix.com/title/1")!
+        tab.restore(url: netflix, title: "Netflix")
+        let page = try #require(tab.page as? Page)
+        page.url = netflix
+        #expect(page.engine == .webKit && tab.chromiumDRMEnabled)
+        let elsewhere = URL(string: "https://example.com/")!
+        // Netflix's own pages stay on WebKit, untouched.
+        #expect(try await tab.routeSiteEngine(URLRequest(url: URL(string: "https://www.netflix.com/browse")!), byPerson: true) == false)
+        // A redirect or a script on its own is a hop of a flow under way
+        // (a sign-in's way out and back): it stays where it started.
+        #expect(try await tab.routeSiteEngine(URLRequest(url: elsewhere), byPerson: false) == false)
+        var post = URLRequest(url: elsewhere)
+        post.httpMethod = "POST"
+        #expect(try await tab.routeSiteEngine(post, byPerson: true) == false)
+        // A person's navigation to another site is taken to Chromium
+        // (refused here, with no native authority, not let on in WebKit).
+        await #expect(throws: (any Error).self) {
+            _ = try await tab.routeSiteEngine(URLRequest(url: elsewhere), byPerson: true)
+        }
+        // So is Yab's own load there (typed, a bookmark, a link from another app).
+        tab.engineSent = elsewhere
+        await #expect(throws: (any Error).self) {
+            _ = try await tab.routeSiteEngine(URLRequest(url: elsewhere), byPerson: false)
+        }
+        #expect(tab.builtPage === page && !page.retired && tab.engineSent == nil)
+    }
+
+    /// A player's refusal of the missing Widevine moves its tab for that site
+    /// only: its own pages and subdomains stay on WebKit (no route straight
+    /// back on WebKit's first navigation), any other site is Chromium's.
+    @Test func aPlayersRefusalKeepsOnlyItsOwnSiteOnWebKit() async throws {
+        let factory = Factory(), tab = make(factory, engine: .chromium)
+        defer { tab.close() }
+        let player = URL(string: "https://www.videoplayer.com/watch/1")!
+        tab.restore(url: player, title: "Player")
+        let page = try #require(tab.page as? Page)
+        page.url = player
+        #expect(page.engine == .chromium && tab.wantsWebKit(for: player, emeFailure: true) && !tab.wantsWebKit(for: player))
+        // What ChromiumPage's switch installs before WebKit's page is built.
+        tab.engineProtectedSite = Tab.protectedSite(player)
+        tab.applySiteEngineChoice(.webKit, at: URLRequest(url: player))
+        let webKit = try #require(tab.builtPage as? Page)
+        webKit.url = player
+        #expect(webKit.engine == .webKit)
+        for raw in ["https://www.videoplayer.com/watch/1", "https://cdn.videoplayer.com/x", "https://videoplayer.com/"] {
+            let url = URL(string: raw)!
+            #expect(tab.wantsWebKit(for: url) && !tab.routesToChromium(url))
+        }
+        for raw in ["https://example.com/", "https://videoplayer.com.evil.org/"] {
+            #expect(tab.routesToChromium(URL(string: raw)!) && !tab.wantsWebKit(for: URL(string: raw)!))
+        }
+        // An own WebKit rule elsewhere still keeps that site on WebKit.
+        factory.sites.set(.webKit, for: URL(string: "https://kept.test/")!)
+        #expect(!tab.routesToChromium(URL(string: "https://kept.test/a")!))
+        let row = try #require(tab.siteEngineRowFacts)
+        #expect(row.said == "For its protected video" && !row.chosen)
+        // Auto chosen again starts the site afresh.
+        tab.unbuildForEngineTest()
+        try await tab.setSiteEngineChoice(.recommended)
+        #expect(tab.engineProtectedSite == nil && !tab.wantsWebKit(for: player))
+    }
+
+    /// Chromium picked by name as the default keeps a page whose player
+    /// refuses the missing Widevine; Auto moves it. Rules apply to both.
+    @Test func chromiumByNameKeepsAPlayersPageAutoMovesIt() {
+        let factory = Factory(), tab = make(factory, engine: .chromium)
+        defer { tab.close() }
+        let player = URL(string: "https://www.videoplayer.com/watch/1")!
+        #expect(tab.wantsWebKit(for: player, emeFailure: true))
+        factory.sites.store.set(EngineDefault.chromium.rawValue, forKey: EngineRules.defaultKey)
+        #expect(!tab.wantsWebKit(for: player, emeFailure: true))
+        #expect(tab.wantsWebKit(for: URL(string: "https://www.netflix.com/")!))
+        factory.sites.store.set(EngineDefault.auto.rawValue, forKey: EngineRules.defaultKey)
+        #expect(tab.wantsWebKit(for: player, emeFailure: true))
+    }
+
+    /// A window a WebKit page opened keeps its engine on another site: the
+    /// move would cut window.opener and its sign-in would never end.
+    @Test func aWindowAnotherPageOpenedStaysOnWebKit() throws {
+        let factory = Factory(), opener = make(factory, engine: .chromium), tab = make(factory, engine: .chromium)
+        defer { tab.close(); opener.close() }
+        tab.opener = opener.id
+        let netflix = URL(string: "https://www.netflix.com/login")!
+        tab.restore(url: netflix, title: "Netflix")
+        let page = try #require(tab.page as? Page)
+        page.url = netflix
+        #expect(page.engine == .webKit && !tab.routesToChromium(URL(string: "https://accounts.example.com/")!))
     }
 
     @Test func allowedNavigationPolicyCannotReplaceTheOriginalWithoutNativeAuthority() async throws {
@@ -1076,6 +1313,103 @@ struct TabEngineTests {
         #expect(tab.builtPage == nil && factory.choices.isEmpty && tab.siteEngineChoice == .recommended)
     }
 
+}
+
+/// Submission provenance and asynchronous replies at the native page seam.
+/// The full forms eval separately exercises the actual JS and save card.
+@Suite(.serialized)
+@MainActor
+struct FrameSignInTests {
+    private func frame() -> PageFrame {
+        PageFrame(isMain: false, url: URL(string: "https://accounts.test/login"), token: NSObject(),
+                  origin: PageOrigin(scheme: "https", host: "accounts.test", port: 443))
+    }
+
+    @Test(arguments: [PageEngineKind.webKit, .chromium])
+    func recheckUsesTheSubmittingFrameAndKeepsItsSite(engine: PageEngineKind) {
+        let factory = TabEngineTests.Factory(), tab = TabEngineTests().make(factory, engine: engine)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page, source = frame()
+        page.emit(.url(URL(string: "https://console.test/login")!))
+        page.scriptResult = false
+        var offers = 0
+        tab.onCredentials = { _, host, user, password, clear, frame in
+            offers += 1
+            #expect(host == "accounts.test" && user == "fixture" && password == "synthetic")
+            #expect(!clear && frame?.token === source.token)
+        }
+        tab.sentSignIn(user: "fixture", password: "synthetic", frame: source)
+        tab.settleSignIn(looked: true)
+        #expect(page.lastScriptFrame?.token === source.token && offers == 1)
+    }
+
+    @Test func aParentRouteChangeKeepsTheSameFrameSubmission() {
+        let factory = TabEngineTests.Factory(), tab = TabEngineTests().make(factory)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        page.emit(.url(URL(string: "https://console.test/login")!))
+        page.scriptResult = false
+        var offers = 0
+        tab.onCredentials = { _, _, _, _, _, _ in offers += 1 }
+        tab.sentSignIn(user: "fixture", password: "synthetic", frame: frame())
+        page.emit(.url(URL(string: "https://console.test/code#step2")!))
+        tab.settleSignIn(looked: true)
+        #expect(offers == 1)
+    }
+
+    @Test func aRestoredFrameFormVetoesSaving() {
+        let factory = TabEngineTests.Factory(), tab = TabEngineTests().make(factory)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        page.scriptResult = true
+        var offers = 0
+        tab.onCredentials = { _, _, _, _, _, _ in offers += 1 }
+        tab.sentSignIn(user: "fixture", password: "synthetic", frame: frame())
+        tab.settleSignIn(looked: true)
+        page.scriptResult = false
+        tab.settleSignIn(looked: true)
+        #expect(offers == 0)
+    }
+
+    @Test func oldRecheckCannotConsumeANewerSubmission() {
+        let factory = TabEngineTests.Factory(), tab = TabEngineTests().make(factory)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        var reply: (@MainActor (Result<Any?, Error>) -> Void)?
+        page.scriptReply = { reply = $0 }
+        var offered: [String] = []
+        tab.onCredentials = { _, _, user, _, _, _ in offered.append(user) }
+        let source = frame()
+        tab.sentSignIn(user: "old", password: "synthetic", frame: source)
+        tab.settleSignIn(looked: true)
+        let check = tab.passwordOfferCheck
+        tab.sentSignIn(user: "new", password: "synthetic", frame: source)
+        #expect(tab.passwordOfferCheck != check)
+        reply?(.success(false))
+        #expect(offered.isEmpty)
+        page.scriptReply = nil
+        page.scriptResult = false
+        tab.settleSignIn(looked: true)
+        #expect(offered == ["new"])
+    }
+
+    @Test func parentNavigationAndUnreadableFrameCannotProveSuccess() {
+        let factory = TabEngineTests.Factory(), tab = TabEngineTests().make(factory)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        page.emit(.url(URL(string: "https://console.test/login")!))
+        var offers = 0
+        tab.onCredentials = { _, _, _, _, _, _ in offers += 1 }
+        tab.sentSignIn(user: "fixture", password: "synthetic", frame: frame())
+        page.scriptReply = { $0(.failure(PageEngineError.foreignFrame)) }
+        tab.settleSignIn(looked: true)
+        #expect(offers == 0)
+        page.scriptReply = nil
+        page.scriptResult = false
+        page.emit(.url(URL(string: "https://other.test/")!))
+        tab.settleSignIn(looked: true)
+        #expect(offers == 0)
+    }
 }
 
 
@@ -1539,5 +1873,132 @@ extension TabEngineTests {
         #expect(tab.builtPage === replacement && tab.builtPage !== original)
         #expect(factory.pages.count == 2 && !factory.pages[1].retired && tab.siteEngineChoice == .recommended)
         #expect(tab.engineSwitchDocument == nil)
+    }
+}
+
+@Suite(.serialized)
+@MainActor
+struct NavigationTitleTests {
+    @Test func sameDocumentAddressChangeKeepsItsPageIcon() {
+        let factory = TabEngineTests.Factory()
+        let tab = TabEngineTests().make(factory, engine: .chromium)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        let host = UUID().uuidString.lowercased() + ".test"
+        page.emit(.url(URL(string: "https://\(host)/old")!))
+        let icon = NSImage(size: NSSize(width: 16, height: 16))
+        tab.icon = icon
+        page.emit(.url(URL(string: "https://\(host)/new")!))
+        #expect(tab.icon === icon)
+    }
+
+    @Test func chromiumSameSiteDestinationDoesNotKeepThePreviousPageIcon() {
+        let factory = TabEngineTests.Factory()
+        let tab = TabEngineTests().make(factory, engine: .chromium)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        let host = UUID().uuidString.lowercased() + ".test"
+        page.emit(.url(URL(string: "https://\(host)/old")!))
+        tab.icon = NSImage(size: NSSize(width: 16, height: 16))
+        // A document navigation starts before its URL arrives. A URL event
+        // alone can be pushState in the current document, which keeps its icon.
+        tab.navigationStarted(PageNavigation())
+        page.emit(.url(URL(string: "https://\(host)/new")!))
+        #expect(tab.icon == nil, "An uncached destination uses its site fallback, not the old page's custom icon")
+    }
+
+    @Test func chromiumCommitResetBeatsThePreviousDocumentsQueuedTitle() async throws {
+        let factory = TabEngineTests.Factory()
+        let tab = TabEngineTests().make(factory, engine: .chromium)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        page.emit(.url(URL(string: "https://example.test/old")!))
+        page.emit(.title("Previous document"))
+        page.emit(.title("Previous document — queued"))
+        page.emit(.url(URL(string: "https://example.test/new")!))
+        page.emit(.title(""))
+        #expect(tab.title.isEmpty)
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(tab.title.isEmpty)
+        page.emit(.title("New document"))
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(tab.title == "New document")
+    }
+
+    @Test(arguments: [false, true])
+    func delayedTitleCannotRenameRestoredOrFreshPage(restored: Bool) async throws {
+        let factory = TabEngineTests.Factory()
+        let tab = TabEngineTests().make(factory, engine: .chromium)
+        defer { tab.close() }
+        let oldPage = tab.page as! TabEngineTests.Page
+        oldPage.emit(.url(URL(string: "ownership:/old-document")!))
+        oldPage.emit(.title("Previous document"))
+        oldPage.emit(.title("Previous document — delayed"))
+        let next = URL(string: "ownership:/fresh-document")!
+        let expected = restored ? "Saved destination" : ""
+        if restored {
+            tab.unbuildForEngineTest()
+            tab.restore(url: next, title: expected)
+        } else {
+            tab.goFresh(to: next)
+        }
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(tab.address == next && tab.title == expected)
+        let newPage = tab.page as! TabEngineTests.Page
+        newPage.emit(.title("Loaded destination"))
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(tab.title == "Loaded destination")
+    }
+
+    @Test func delayedTitleCannotRenameTheNextNavigation() async throws {
+        let factory = TabEngineTests.Factory()
+        let tab = TabEngineTests().make(factory, engine: .chromium)
+        defer { tab.close() }
+        let page = tab.page as! TabEngineTests.Page
+        let old = URL(string: "ownership:/hanlons-razor")!
+        let next = URL(string: "ownership:/search?q=yab+browser")!
+        page.emit(.url(old))
+        page.emit(.title("Hanlon’s razor"))
+        #expect(tab.title == "Hanlon’s razor")
+        // A title update is coalesced for 250 ms. The search starts before
+        // that write lands; its response may take seconds on a poor link.
+        page.emit(.title("Hanlon’s razor — updated"))
+        tab.go(to: next)
+        #expect(tab.title.isEmpty)
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(tab.address == next)
+        #expect(tab.title.isEmpty, "The preceding document's delayed title must not name the search")
+        page.emit(.title("yab browser — Search"))
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(tab.title == "yab browser — Search")
+    }
+
+}
+
+/// Isolated from the engine-policy suite so this navigation regression has
+/// its own deferred check, independent of memory-pressure policy assertions.
+@Suite(.serialized)
+@MainActor
+struct FieldNavigationTitleTests {
+    /// Feedback #1752: a throttled title from the old document must not
+    /// repopulate the row after the field has sent it to a new address.
+    @Test func navigationClearsAQueuedOldDocumentTitle() async throws {
+        for engine in [PageEngineKind.webKit, .chromium] {
+            let factory = TabEngineTests.Factory()
+            let tab = TabEngineTests().make(factory, engine: engine)
+            defer { tab.close() }
+            let page = tab.page as! TabEngineTests.Page
+            page.emit(.title("Old page"))
+            page.emit(.title("Hanlon's razor"))
+            let destination = URL(string: "ownership:/search?q=yab-browser")!
+            tab.go(to: destination)
+            #expect(tab.title.isEmpty)
+            try await Task.sleep(for: .milliseconds(350))
+            #expect(tab.address == destination)
+            #expect(tab.title.isEmpty)
+            page.emit(.title("Yab Browser"))
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(tab.title == "Yab Browser")
+        }
     }
 }

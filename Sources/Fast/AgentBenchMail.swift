@@ -122,11 +122,12 @@ extension Bench {
             // a yes to every address and the words, so a changed word asks again.
             guard let session, let asker = agents.session(session) else { answer(["error": "no task to send for"]); return }
             if let why = Bench.sendRefusal(asker, what: "a mail") { answer(["error": why]); return }
-            guard let tab = agents.askTab(for: session, in: browser) else { answer(["error": "no tab to ask in"]); return }
+            let call = Agents.mailCall(request)
             // Several at once (mails): one card listing each, one yes for all.
             if let many = request["mails"] as? [[String: Any]] {
                 guard !many.isEmpty, many.count <= 20 else { answer(["error": "mails takes 1 to 20 mails"]); return }
                 Task { @MainActor in
+                    if let receipt = await agents.completedMailCall(call, session: session) { answer(receipt); return }
                     var outs: [MailAgent.Outgoing] = []
                     for (index, one) in many.enumerated() {
                         var later: Date?
@@ -139,7 +140,7 @@ extension Bench {
                         out.at = later
                         outs.append(out)
                     }
-                    answer(await agents.sendMails(outs, in: tab, session: session))
+                    answer(await agents.queueMail(outs, session: session, hold: nil, call: call))
                 }
                 return
             }
@@ -151,10 +152,11 @@ extension Bench {
                 later = at
             }
             Task { @MainActor in
+                if let receipt = await agents.completedMailCall(call, session: session) { answer(receipt); return }
                 let (made, why) = await MailAgent.outgoing(Array(center.engines.values), request)
                 guard var out = made else { answer(["error": why]); return }
                 out.at = later
-                answer(await agents.sendMail(out, in: tab, session: session, mode: browser.prefs.asking(session)))
+                answer(await agents.queueMail([out], session: session, hold: nil, call: call))
             }
         case "agent-mail-file":
             // A file of a thread kept here, its words (mail_file).
@@ -261,9 +263,8 @@ extension Bench {
             // tab's browser cookies and must work on either page engine.
             read = { fin in center.quick(for: 20); fin(center.recent(minutes: minutes)) }
         } else {
-            guard let store = tab.webKitOnly("WebKit mail-code cookie context", build: false)?.configuration.websiteDataStore else {
-                done([]); return
-            }
+            // The tab's own cookie store, on either page engine.
+            let store = tab.pageStore
             read = { fin in MailCodes.unread(store: store, done: fin) }
         }
         read { mail in

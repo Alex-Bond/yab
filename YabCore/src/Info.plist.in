@@ -9,6 +9,9 @@
 <key>CFBundleShortVersionString</key><string>@VERSION_SHORT@</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
+<key>LSBackgroundOnly</key><true/>
+<key>NSSupportsAutomaticTermination</key><false/>
+<key>NSSupportsSuddenTermination</key><false/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict></plist>

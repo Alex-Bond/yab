@@ -120,8 +120,7 @@ enum AgentModels {
         // task after a restart fell to Claude (evals/agent-providers).
         if !plan.listedAway { return CursorRunner.connected && (Shell.cached.map { $0.cursor != nil } ?? true) }
         if let assumed = Agents.assumedInTests, Store.testing { return assumed }
-        guard let found = Shell.cached else { return true }
-        return found[keyPath: plan.binary] != nil
+        return AgentLaunch.here(cli) ?? true
     }
 
     static func agentName(_ cli: String) -> String { AgentSetupModel.name(cli) }
@@ -1060,6 +1059,7 @@ private struct GeminiPlanRow: View {
         switch gemini.waiting {
         case .installing: return "Paste the command in Terminal to install Antigravity CLI."
         case .signingIn:
+            if !gemini.pageOpen { return "Opening Google's sign-in…" }
             if let choice = gemini.choice, let email = choice.email {
                 return "Allow Gemini in the " + (choice.place ?? "Yab") + " tab as " + email
             }

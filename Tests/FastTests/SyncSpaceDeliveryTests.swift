@@ -11,6 +11,44 @@ import SyncKit
 struct SyncSpaceDeliveryTests {
     init() { SyncShapes.register() }
 
+    @Test func partialSpaceCatchupKeepsLocalPinsUntilTheirSpaceArrives() throws {
+        let original = Spaces.read()
+        let space = Space(id: UUID(), name: "Pinned locally", icon: "P", ownSignIns: false)
+        defer {
+            Spaces.write(original)
+            Session.erase(space: space.id)
+        }
+        Spaces.write(original + [space])
+        let pin = UUID().uuidString
+        let row = Session.Shape(tabs: [.init(url: "https://delivery.test/pin", title: "Pin", pin: "P", id: pin)], active: 0)
+        Session.write(now: true, space: space.id, row)
+        let a = try Journal(path: nil, device: "phone")
+        let b = try Journal(path: nil, device: "mac")
+        let center = SyncCenter()
+        try a.reconcile(SyncShapes.space, SyncShapes.spaces(original + [space], orders: [:]))
+        let out = SyncShapes.rows([space.id: row], orders: [:], device: "phone")
+        try a.reconcile(SyncShapes.tab, out.tabs)
+        // The first page has another space; the local space is still unknown.
+        let first = a.all(SyncShapes.space).filter { $0.id != space.id.uuidString }
+        let changes = try SyncCenter.receive(first.map { ($0, 1) }, into: b, localRows: nil, device: "mac")
+        center.adopt(changes, from: b)
+        #expect(Spaces.read().contains { $0.id == space.id })
+        #expect(Session.read(space: space.id).tabs.compactMap(\.id) == [pin])
+        // A lost local row can also be materialized from the phone's copy.
+        Spaces.write(original)
+        Session.write(now: true, space: space.id, .init(tabs: [], front: nil))
+        let rest = a.all(SyncShapes.tab) + a.all(SyncShapes.space).filter { $0.id == space.id.uuidString }
+        let delivered = try SyncCenter.receive(rest.map { ($0, 2) }, into: b, localRows: nil, device: "mac")
+        center.adopt(delivered, from: b)
+        #expect(Session.read(space: space.id).tabs.compactMap(\.id) == [pin])
+        #expect(Session.read(space: space.id).tabs.first?.pin == "P")
+        // Actual deletion still wins; do not resurrect deliberately removed spaces.
+        try a.remove(.init(collection: SyncShapes.space, id: space.id.uuidString))
+        let removed = try b.receive(a.all(SyncShapes.space).filter { $0.id == space.id.uuidString }.map { ($0, 3) })
+        center.adopt(removed, from: b)
+        #expect(!Spaces.read().contains { $0.id == space.id })
+    }
+
     private func lateSpace(joining: Bool) throws {
         #expect(Store.testing)
         let original = Spaces.read()

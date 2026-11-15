@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UniformTypeIdentifiers
 
 // Adding an extension is an arrival, not a form, the way
 // connecting an account or naming websites should feel. One column in the middle of the
@@ -22,10 +23,8 @@ struct ExtensionsPane<Rows: View>: View {
     @ViewBuilder let rows: () -> Rows
 
     var body: some View {
-        if PageEngineFactory.chromiumEnabled {
-            rows()
-        } else if #available(macOS 15.4, *) {
-            Chooser(browser: browser, model: model, extensions: ExtensionsPage.listed(browser, model), adding: .shared, rows: rows)
+        if #available(macOS 15.4, *) {
+            Chooser(browser: browser, model: model, extensions: PageEngineFactory.chromiumEnabled ? Extensions.of(browser) : ExtensionsPage.listed(browser, model), adding: .shared, rows: rows)
         } else {
             rows()
         }
@@ -43,7 +42,7 @@ struct ExtensionsPane<Rows: View>: View {
             Group {
                 if let step = ExtensionAdd.step(model.opened) {
                     ExtensionAdd(step: step, browser: browser, model: model, extensions: extensions, adding: adding)
-                } else if model.opened == nil, extensions.installed.isEmpty && !SignIns.split(browser) || adding.busy {
+                } else if model.opened == nil, (!PageEngineFactory.chromiumEnabled && extensions.installed.isEmpty && !SignIns.split(browser)) || adding.busy {
                     // Nothing yet: the page is the way in. And while the first
                     // ones are going in, it stays that way until they land.
                     // With spaces signed in apart, the list stays, with which
@@ -53,8 +52,18 @@ struct ExtensionsPane<Rows: View>: View {
                     rows()
                 }
             }
+            .dropDestination(for: URL.self) { urls, _ in
+                guard let file = urls.first, file.isFileURL,
+                      file.pathExtension.lowercased() == "crx" else { return false }
+                adding.choose(folder: file, model: model)
+                return true
+            }
             // Added to the sign-in the list is of (ExtensionSignIns).
-            .task(id: ObjectIdentifier(extensions)) { adding.target = extensions }
+            .task(id: ObjectIdentifier(extensions)) {
+                adding.target = extensions
+                adding.chromium = PageEngineFactory.chromiumEnabled ? ChromiumExtensions.of(browser) : nil
+                adding.chromium?.joinList(signIn: extensions.signIn)
+            }
         }
     }
 }
@@ -103,6 +112,7 @@ final class ExtensionAdding: ObservableObject {
 
     /// The sign-in what is added goes to: the one Settings lists.
     var target: Extensions = .shared
+    var chromium: ChromiumExtensions?
     private var extensions: Extensions { target }
 
     // MARK: looking
@@ -153,15 +163,31 @@ final class ExtensionAdding: ObservableObject {
                 return
             }
             let text = link
-            look(model, "Looking at it…") { try await self.extensions.prepare(link: text) }
+            look(model, "Looking at it…") { try await self.extensions.prepare(link: text, chromium: self.chromium) }
         case .folder:
             let panel = NSOpenPanel()
             panel.canChooseDirectories = true
-            panel.canChooseFiles = false
+            panel.canChooseFiles = true
+            panel.allowedContentTypes = [.folder, UTType(filenameExtension: "crx") ?? .data]
             panel.prompt = "Choose"
-            panel.message = "Choose the folder that holds the extension's manifest.json."
+            panel.message = "Choose an extension's folder (with its manifest.json) or a .crx file."
             guard panel.runModal() == .OK, let folder = panel.url else { return }
-            look(model, "Reading it…") { try await self.extensions.prepare(folder: folder) }
+            choose(folder: folder, model: model)
+        }
+    }
+
+    func choose(folder: URL, model: SettingsModel) {
+        guard !busy else { return }
+        dropCandidate()
+        error = nil
+        chosen = .folder
+        model.open(extension: ExtensionAdd.Step.arrival.rawValue)
+        look(model, "Reading it…") {
+            if folder.pathExtension.lowercased() == "crx",
+               (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true {
+                return try await self.extensions.prepare(package: folder, chromium: self.chromium)
+            }
+            return try await self.extensions.prepare(folder: folder, chromium: self.chromium)
         }
     }
 
@@ -174,6 +200,8 @@ final class ExtensionAdding: ObservableObject {
                 given = []
                 candidate = found
                 model.open(extension: ExtensionAdd.Step.review.rawValue)
+            } catch is CancellationError {
+                withAnimation(Motion.settle) { phase = .idle }
             } catch {
                 withAnimation(Motion.settle) {
                     phase = .idle
@@ -194,17 +222,50 @@ final class ExtensionAdding: ObservableObject {
 
     /// The ticked ones in, one after another.
     func bring(from name: String, _ model: SettingsModel) {
-        let list = (fresh[name] ?? []).filter { picked.contains($0.id) }
+        let list = (fresh[name] ?? []).filter {
+            picked.contains($0.id) && !ApplePasswordExtensionRoute.intercept($0.id, browser: extensions.browser)
+        }
         guard !list.isEmpty, !busy else { return }
         error = nil
         withAnimation(Motion.settle) { phase = .working(list.count == 1 ? "Adding…" : "Adding 1 of \(list.count)…") }
         Task {
-            let added = await extensions.bring(list, from: name) { index in
-                if index > 0 { self.phase = .working("Adding \(index + 1) of \(list.count)…") }
+            let added: [String]
+            if let chromium {
+                added = await bringNative(list, from: name, into: chromium)
+            } else {
+                added = await extensions.bring(list, from: name) { index in
+                    if index > 0 { self.phase = .working("Adding \(index + 1) of \(list.count)…") }
+                }
             }
             // uBlock Origin's sites came, the extension itself never does.
             await land(added, model, keptOnly: list.contains(where: \.keptOnly))
         }
+    }
+
+    /// Import uses the same approved package path as a store/folder review,
+    /// never the other browser's rewritten files or a WebKit runtime.
+    private func bringNative(_ items: [Chromium.Extension], from name: String, into native: ChromiumExtensions) async -> [String] {
+        var added: [String] = []
+        for (index, item) in items.enumerated() {
+            phase = .working(items.count == 1 ? "Adding…" : "Adding \(index + 1) of \(items.count)…")
+            extensions.bringKept(item, from: name)
+            if item.keptOnly { continue }
+            do {
+                let candidate: Extensions.Candidate
+                if item.fromStore {
+                    candidate = try await extensions.prepare(link: item.id, chromium: native)
+                } else {
+                    candidate = try await extensions.prepare(folder: item.folder, chromium: native)
+                }
+                defer { extensions.discard(candidate) }
+                try await native.add(candidate, into: extensions)
+                extensions.bringKeys(item, as: candidate.id)
+                added.append(candidate.id)
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+        return added
     }
 
     /// The yes on the page.
@@ -213,14 +274,24 @@ final class ExtensionAdding: ObservableObject {
         error = nil
         withAnimation(Motion.settle) { phase = .working("Adding…") }
         Task {
-            _ = await extensions.add(candidate, giving: given)
+            if let chromium, candidate.chromiumFolder != nil {
+                do { try await chromium.add(candidate, into: extensions, giving: given) }
+                catch {
+                    phase = .idle
+                    self.error = error.localizedDescription
+                    return
+                }
+                extensions.discard(candidate)
+            } else {
+                _ = await extensions.add(candidate, giving: given)
+            }
             self.candidate = nil
-            await land(extensions.installed.contains { $0.id == candidate.id } ? [candidate.id] : [], model)
+            await land(extensions.installed.contains { $0.id == candidate.id } ? [candidate.id] : [], model, icon: candidate.icon)
         }
     }
 
     /// The tick, held long enough to be seen, then what was added.
-    private func land(_ ids: [String], _ model: SettingsModel, keptOnly: Bool = false) async {
+    func land(_ ids: [String], _ model: SettingsModel, keptOnly: Bool = false, icon: NSImage? = nil) async {
         guard !ids.isEmpty || keptOnly else {
             withAnimation(Motion.settle) {
                 phase = .idle
@@ -228,8 +299,14 @@ final class ExtensionAdding: ObservableObject {
             }
             return
         }
+        if chromium != nil {
+            model.leaveAdding(to: ids.count == 1 ? ids[0] : nil)
+            extensions.arrivedQuietly(ids)
+            reset()
+            return
+        }
         landedNames = ids.compactMap { id in extensions.installed.first { $0.id == id }?.name } + (keptOnly ? ["uBlock Origin's sites"] : [])
-        landedIcon = ids.count == 1 ? ExtensionIconShape.rounded(extensions.contexts[ids[0]]?.webExtension.icon(for: CGSize(width: 128, height: 128))) : nil
+        landedIcon = ids.count == 1 ? icon ?? ExtensionIconShape.rounded(extensions.contexts[ids[0]]?.webExtension.icon(for: CGSize(width: 128, height: 128))) : nil
         withAnimation(Motion.settle) { phase = .landed }
         try? await Task.sleep(for: .seconds(0.9))
         model.leaveAdding(to: ids.count == 1 ? ids[0] : nil)
@@ -418,7 +495,7 @@ struct ExtensionAdd: View {
             return "From \(from ?? "the other browser"). The ones switched on there are ticked."
         case .review:
             guard let candidate = adding.candidate else { return "" }
-            let origin = candidate.fromStore ? "Chrome Web Store" : "From “\(candidate.source?.lastPathComponent ?? "a folder")”"
+            let origin = candidate.fromStore ? "Chrome Web Store" : "From “\(candidate.packageName ?? candidate.source?.lastPathComponent ?? "a folder")”"
             let meta = [candidate.version.isEmpty ? nil : candidate.version, origin].compactMap { $0 }.joined(separator: " · ")
             return candidate.about.isEmpty ? meta : "\(candidate.about)\n\(meta)"
         }
@@ -435,7 +512,7 @@ struct ExtensionAdd: View {
             switch adding.way {
             case .browser(let name): return "Choose from \(name)"
             case .store: return adding.linkIsGood ? "View Extension" : "Open Chrome Web Store"
-            case .folder: return "Choose a Folder…"
+            case .folder: return "Choose a Folder or .crx…"
             }
         case .pick:
             let list = from.flatMap { adding.fresh[$0] } ?? []
@@ -456,7 +533,7 @@ struct ExtensionAdd: View {
             switch adding.way {
             case .browser(let name): return "The extensions come over; what they kept, sign-ins, settings, stays in \(name), so you sign in to them again."
             case .store: return "Each one shows here what it may do before it is added."
-            case .folder: return "Reload on its page brings in what you change in the folder."
+            case .folder: return "Choose a folder or a .crx file. Reload brings in changes to a folder."
             }
         case .pick: return nil
         case .review: return "On its page you can keep it off some sites, or make it wait until you press it."
@@ -511,8 +588,12 @@ struct ExtensionAdd: View {
                 .disabled(count == 0)
             }
             if !adding.sources.isEmpty { Divider() }
-            Button("Chrome Web Store") { adding.chosen = .store; adding.error = nil }
-            Button("A Folder on This Mac") { adding.chosen = .folder; adding.error = nil }
+            Button { adding.chosen = .store; adding.error = nil } label: {
+                Label { Text("Chrome Web Store") } icon: { Symbol("bag", size: 14) }
+            }
+            Button { adding.chosen = .folder; adding.error = nil } label: {
+                Label { Text("A Folder on This Mac") } icon: { Symbol("folder", size: 14) }
+            }
         } label: {
             HStack(spacing: 8) {
                 switch adding.way {
@@ -543,6 +624,7 @@ struct ExtensionAdd: View {
         .buttonStyle(PressStyle(scale: ButtonSize.large.pressed))
         .menuIndicator(.hidden)
         .accessibilityLabel("From")
+        .benchSpot("extension-add-source")
     }
 
     private var checklist: some View {

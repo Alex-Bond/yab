@@ -52,6 +52,35 @@ struct KeyNumbersTests {
         #expect(!numbers.shown)
     }
 
+    /// Feedback #1898: ⌘ held while the pointer goes to a link to ⌘-click
+    /// it put numbers in place of the icons; aiming is not counting tabs.
+    @Test func thePointerTravellingWithCommandHeldShowsNoNumbers() {
+        var time: TimeInterval = 0
+        var at = CGPoint(x: 100, y: 100)
+        let numbers = KeyNumbers(now: { time }, keyPresses: { 10 }, commandAlone: { true }, pointer: { at })
+        defer { numbers.hold(false) }
+        numbers.modifiers(.command, inBrowser: true)
+        time = 0.2
+        at = CGPoint(x: 100 + KeyNumbers.aim + 20, y: 140)
+        numbers.checkHold()
+        time = 0.6
+        numbers.checkHold()
+        #expect(!numbers.shown)
+        // A hand resting on the trackpad, the pointer a point or two off.
+        numbers.modifiers([], inBrowser: true)
+        numbers.modifiers(.command, inBrowser: true)
+        time = 1.0
+        at.x += 2
+        numbers.checkHold()
+        time = 1.5
+        numbers.checkHold()
+        #expect(numbers.shown)
+        // Shown, then the pointer sets off for a link: gone.
+        at.x += 40
+        numbers.checkHold()
+        #expect(!numbers.shown)
+    }
+
     @Test func systemShortcutWithoutLocalKeyDownCancelsPendingHints() {
         var time: TimeInterval = 0
         var presses: UInt32 = 10

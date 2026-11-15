@@ -1,0 +1,400 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1016,6 +1016,7 @@
+     "//net",
+     "//pdf",
+     "//printing/buildflags",
++    "//services/device/public/cpp/geolocation",
+     "//services/network:network_service",
+     "//services/network/public/cpp",
+     "//services/service_manager/public/cpp",
+@@ -1129,6 +1130,8 @@
+       "libcef/browser/views/external_consent.h",
+       "libcef/browser/views/external_webauthn.cc",
+       "libcef/browser/views/external_webauthn.h",
++      "libcef/browser/views/external_geolocation.cc",
++      "libcef/browser/views/external_geolocation.h",
+       "libcef/browser/views/external_crx.cc",
+       "libcef/browser/views/external_crx.h",
+       "libcef/browser/views/external_print.cc",
+--- a/cef/include/cef_browser_process_handler.h
++++ b/cef/include/cef_browser_process_handler.h
+@@ -51,6 +51,7 @@
+ #define CEF_YAB_EXTENSION_CONSENT_VERSION 1
+ #define CEF_YAB_EXTENSION_ACTION_CHANGED_VERSION 1
+ #define CEF_YAB_WEBAUTHN_PROXY_VERSION 1
++#define CEF_YAB_GEOLOCATION_SOURCE_VERSION 1
+ 
+ #if CEF_API_ADDED(CEF_EXPERIMENTAL)
+ ///
+@@ -94,6 +95,39 @@
+                        const CefString& error_name,
+                        const CefString& error_message) = 0;
+ };
++
++///
++/// Where the device is, as the embedder knows it: the browser's location
++/// source when the process runs with --yab-external-geolocation (see
++/// CefBrowserProcessHandler::OnGeolocationSource). Chromium then makes no
++/// CoreLocation manager of its own; macOS is asked by the embedder, which
++/// hands over its answer and its fixes. May be called on any thread.
++///
++/*--cef(source=library,added=experimental)--*/
++class CefGeolocationSource : public virtual CefBaseRefCounted {
++ public:
++  ///
++  /// What macOS said about the embedder: 0 not determined, 1 denied (or
++  /// Location Services off), 2 allowed. Chromium starts as not determined.
++  ///
++  /*--cef()--*/
++  virtual void SetPermission(int status) = 0;
++
++  ///
++  /// A fix: |position| has latitude, longitude and accuracy (meters), and may
++  /// have altitude, altitudeAccuracy, heading, speed and timestamp
++  /// (milliseconds since the Unix epoch; now if absent).
++  ///
++  /*--cef()--*/
++  virtual void SetPosition(CefRefPtr<CefDictionaryValue> position) = 0;
++
++  ///
++  /// No fix could be had: |code| 1 permission denied, 2 position
++  /// unavailable.
++  ///
++  /*--cef(optional_param=message)--*/
++  virtual void SetError(int code, const CefString& message) = 0;
++};
+ #endif
+ 
+ ///
+@@ -287,6 +321,29 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual void OnWebAuthnRequestCanceled(const CefString& request) {}
++
++  ///
++  /// With --yab-external-geolocation, called once, early on the UI thread,
++  /// with the source the browser reads where the device is from. Keep it and
++  /// tell it macOS's answer as soon as it is known, and every change.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnGeolocationSource(CefRefPtr<CefGeolocationSource> source) {}
++
++  ///
++  /// A page started (|watching| true) or the last one stopped watching where
++  /// the device is. |high_accuracy| is whether any of them asked for it.
++  /// Called on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnGeolocationWatch(bool watching, bool high_accuracy) {}
++
++  ///
++  /// Chromium would ask macOS about the app now (a page's <geolocation>
++  /// element, while macOS has not been asked). Called on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnGeolocationPermissionRequested() {}
+ #endif
+ };
+ 
+--- a/cef/libcef/browser/chrome/chrome_browser_main_extra_parts_cef.cc
++++ b/cef/libcef/browser/chrome/chrome_browser_main_extra_parts_cef.cc
+@@ -25,6 +25,10 @@
+ #include "chrome/browser/win/app_icon.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++#include "cef/libcef/browser/views/external_geolocation.h"
++#endif
++
+ ChromeBrowserMainExtraPartsCef::ChromeBrowserMainExtraPartsCef() = default;
+ 
+ ChromeBrowserMainExtraPartsCef::~ChromeBrowserMainExtraPartsCef() {
+@@ -99,6 +103,12 @@
+   SetConstrainedWindowViewsClient(CreateAlloyConstrainedWindowViewsClient(
+       CreateChromeConstrainedWindowViewsClient()));
+ 
++#if BUILDFLAG(IS_MAC)
++  // Before Chrome's BrowserProcessPlatformPart makes its own CoreLocation
++  // source (PreMainMessageLoopRun), which it skips once one is set.
++  cef::external_host::InstallGeolocationSource();
++#endif
++
+ #if BUILDFLAG(IS_LINUX)
+   printing_delegate_ = std::make_unique<CefPrintingContextLinuxDelegate>();
+   auto* default_delegate =
+new file mode 100644
+--- /dev/null
++++ b/cef/libcef/browser/views/external_geolocation.cc
+@@ -0,0 +1,254 @@
++#include "cef/libcef/browser/views/external_geolocation.h"
++
++#include <memory>
++#include <optional>
++#include <utility>
++
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/mac/mac_util.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/synchronization/lock.h"
++#include "base/time/time.h"
++#include "cef/include/cef_browser_process_handler.h"
++#include "cef/include/cef_values.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "cef/libcef/common/app_manager.h"
++#include "content/public/browser/browser_task_traits.h"
++#include "content/public/browser/browser_thread.h"
++#include "services/device/public/cpp/geolocation/geolocation_system_permission_manager.h"
++#include "services/device/public/cpp/geolocation/geoposition.h"
++#include "services/device/public/cpp/geolocation/location_system_permission_status.h"
++#include "services/device/public/cpp/geolocation/system_geolocation_source.h"
++#include "services/device/public/mojom/geoposition.mojom.h"
++
++namespace cef::external_host {
++namespace {
++
++constexpr char kSwitch[] = "yab-external-geolocation";
++
++using device::LocationSystemPermissionStatus;
++using device::SystemGeolocationSource;
++
++CefRefPtr<CefBrowserProcessHandler> Handler() {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
++    return nullptr;
++  }
++  auto app = CefAppManager::Get()->GetApplication();
++  return app ? app->GetBrowserProcessHandler() : nullptr;
++}
++
++void OnUI(base::OnceClosure task) {
++  if (content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
++    std::move(task).Run();
++    return;
++  }
++  content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, std::move(task));
++}
++
++// The browser's SystemGeolocationSource, fed by the embedder. Owned by the
++// GeolocationSystemPermissionManager singleton for the life of the process.
++class ExternalSource;
++ExternalSource* g_source = nullptr;
++
++class ExternalSource : public SystemGeolocationSource {
++ public:
++  ExternalSource()
++      : observers_(base::MakeRefCounted<PositionObserverList>()) {
++    g_source = this;
++  }
++  ExternalSource(const ExternalSource&) = delete;
++  ExternalSource& operator=(const ExternalSource&) = delete;
++  ~ExternalSource() override {
++    if (g_source == this) {
++      g_source = nullptr;
++    }
++  }
++
++  // SystemGeolocationSource, on the UI thread unless said otherwise.
++  void RegisterPermissionUpdateCallback(
++      PermissionUpdateCallback callback) override {
++    permission_callback_ = std::move(callback);
++    permission_callback_.Run(status_);
++  }
++
++  void OpenSystemPermissionSetting() override {
++    base::mac::OpenSystemSettingsPane(
++        base::mac::SystemSettingsPane::kPrivacySecurity_LocationServices);
++  }
++
++  // Any sequence: CoreLocationProvider's.
++  void AddPositionUpdateObserver(PositionObserver* observer) override {
++    observers_->AddObserver(observer);
++  }
++  void RemovePositionUpdateObserver(PositionObserver* observer) override {
++    observers_->RemoveObserver(observer);
++  }
++
++  // Any sequence. A fix from the last two minutes answers at once, as
++  // CoreLocation's cached one does for Chrome's own source; a fresh one
++  // follows from the embedder.
++  void StartWatchingPosition(bool high_accuracy) override {
++    std::optional<device::mojom::Geoposition> last;
++    {
++      base::AutoLock hold(lock_);
++      last = last_;
++    }
++    if (last && base::Time::Now() - last->timestamp < base::Minutes(2)) {
++      observers_->Notify(FROM_HERE, &PositionObserver::OnPositionUpdated,
++                         *last);
++    }
++    OnUI(base::BindOnce(
++        [](bool high) {
++          if (auto handler = Handler()) {
++            handler->OnGeolocationWatch(true, high);
++          }
++        },
++        high_accuracy));
++  }
++
++  void StopWatchingPosition() override {
++    OnUI(base::BindOnce([] {
++      if (auto handler = Handler()) {
++        handler->OnGeolocationWatch(false, false);
++      }
++    }));
++  }
++
++  void RequestPermission() override {
++    OnUI(base::BindOnce([] {
++      if (auto handler = Handler()) {
++        handler->OnGeolocationPermissionRequested();
++      }
++    }));
++  }
++
++  // From the embedder, on the UI thread.
++  void SetPermission(LocationSystemPermissionStatus status) {
++    if (status == status_) {
++      return;
++    }
++    status_ = status;
++    if (permission_callback_) {
++      permission_callback_.Run(status_);
++    }
++  }
++
++  // From the embedder, any thread.
++  void SetPosition(const device::mojom::Geoposition& position) {
++    {
++      base::AutoLock hold(lock_);
++      last_ = position;
++    }
++    observers_->Notify(FROM_HERE, &PositionObserver::OnPositionUpdated,
++                       position);
++  }
++
++  void SetError(const device::mojom::GeopositionError& error) {
++    observers_->Notify(FROM_HERE, &PositionObserver::OnPositionError, error);
++  }
++
++ private:
++  LocationSystemPermissionStatus status_ =
++      LocationSystemPermissionStatus::kNotDetermined;
++  PermissionUpdateCallback permission_callback_;
++  scoped_refptr<PositionObserverList> observers_;
++  base::Lock lock_;
++  std::optional<device::mojom::Geoposition> last_;
++};
++
++class GeolocationSourceImpl : public CefGeolocationSource {
++ public:
++  GeolocationSourceImpl() = default;
++  GeolocationSourceImpl(const GeolocationSourceImpl&) = delete;
++  GeolocationSourceImpl& operator=(const GeolocationSourceImpl&) = delete;
++
++  void SetPermission(int status) override {
++    const auto value = status == 2   ? LocationSystemPermissionStatus::kAllowed
++                       : status == 1 ? LocationSystemPermissionStatus::kDenied
++                                     : LocationSystemPermissionStatus::kNotDetermined;
++    OnUI(base::BindOnce(
++        [](LocationSystemPermissionStatus value) {
++          if (g_source) {
++            g_source->SetPermission(value);
++          }
++        },
++        value));
++  }
++
++  void SetPosition(CefRefPtr<CefDictionaryValue> position) override {
++    if (!position || position->GetType("latitude") != VTYPE_DOUBLE ||
++        position->GetType("longitude") != VTYPE_DOUBLE ||
++        position->GetType("accuracy") != VTYPE_DOUBLE) {
++      return;
++    }
++    device::mojom::Geoposition fix;
++    fix.latitude = position->GetDouble("latitude");
++    fix.longitude = position->GetDouble("longitude");
++    fix.accuracy = position->GetDouble("accuracy");
++    if (position->GetType("altitude") == VTYPE_DOUBLE) {
++      fix.altitude = position->GetDouble("altitude");
++    }
++    if (position->GetType("altitudeAccuracy") == VTYPE_DOUBLE) {
++      fix.altitude_accuracy = position->GetDouble("altitudeAccuracy");
++    }
++    if (position->GetType("heading") == VTYPE_DOUBLE) {
++      fix.heading = position->GetDouble("heading");
++    }
++    if (position->GetType("speed") == VTYPE_DOUBLE) {
++      fix.speed = position->GetDouble("speed");
++    }
++    fix.timestamp =
++        position->GetType("timestamp") == VTYPE_DOUBLE
++            ? base::Time::FromMillisecondsSinceUnixEpoch(
++                  static_cast<int64_t>(position->GetDouble("timestamp")))
++            : base::Time::Now();
++    if (!device::ValidateGeoposition(fix)) {
++      return;
++    }
++    OnUI(base::BindOnce(
++        [](device::mojom::Geoposition fix) {
++          if (g_source) {
++            g_source->SetPosition(fix);
++          }
++        },
++        fix));
++  }
++
++  void SetError(int code, const CefString& message) override {
++    device::mojom::GeopositionError error;
++    error.error_code =
++        code == 1 ? device::mojom::GeopositionErrorCode::kPermissionDenied
++                  : device::mojom::GeopositionErrorCode::kPositionUnavailable;
++    error.error_message = message.ToString();
++    OnUI(base::BindOnce(
++        [](device::mojom::GeopositionError error) {
++          if (g_source) {
++            g_source->SetError(error);
++          }
++        },
++        std::move(error)));
++  }
++
++ private:
++  IMPLEMENT_REFCOUNTING(GeolocationSourceImpl);
++};
++
++}  // namespace
++
++void InstallGeolocationSource() {
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kSwitch) ||
++      device::GeolocationSystemPermissionManager::GetInstance()) {
++    return;
++  }
++  auto handler = Handler();
++  if (!handler) {
++    return;
++  }
++  device::GeolocationSystemPermissionManager::SetInstance(
++      std::make_unique<device::GeolocationSystemPermissionManager>(
++          std::make_unique<ExternalSource>()));
++  handler->OnGeolocationSource(new GeolocationSourceImpl());
++}
++
++}  // namespace cef::external_host
+new file mode 100644
+--- /dev/null
++++ b/cef/libcef/browser/views/external_geolocation.h
+@@ -0,0 +1,13 @@
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_GEOLOCATION_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_GEOLOCATION_H_
++
++namespace cef::external_host {
++
++// With --yab-external-geolocation, makes the browser's location source the
++// embedder's (CefGeolocationSource) before Chrome would make its own
++// CoreLocation one. Called once, early on the UI thread (ToolkitInitialized).
++void InstallGeolocationSource();
++
++}  // namespace cef::external_host
++
++#endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_GEOLOCATION_H_

@@ -237,15 +237,18 @@ struct SpaceDownloadFolderTests {
         world.browser.prefs.asksWhereToSave = true
         var offered: URL?
         let chosen = world.changed.appendingPathComponent("chosen.bin")
-        world.browser.chooseDownloadLocation = { name, folder in
-            #expect(name == "fixture.bin"); offered = folder; return chosen
+        // The panel answers later, after the job that asked has ended (#1715):
+        // the download waits for that answer.
+        world.browser.chooseDownloadLocation = { name, folder, done in
+            #expect(name == "fixture.bin"); offered = folder
+            DispatchQueue.main.async { done(chosen) }
         }
         let download = Download(page: world.page)
         let file = try await destination(download, in: world.browser)
         #expect(offered == world.custom)
         #expect(file == chosen && world.browser.downloadFiles[ObjectIdentifier(download)] == chosen)
         var canceled = false
-        world.browser.chooseDownloadLocation = { _, _ in nil }
+        world.browser.chooseDownloadLocation = { _, _, done in done(nil) }
         let second = Download(page: world.page)
         world.browser.download(second, decideDestinationUsing: URLResponse(), suggestedFilename: "canceled.bin") {
             #expect($0 == nil); canceled = true

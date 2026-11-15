@@ -18,11 +18,34 @@ struct Bookmark: Codable, Identifiable, Hashable {
     /// when nobody said, as for those kept before Yab noted it, and for
     /// Safari's, whose files have no dates.
     var added: Date?
+    /// Imported profile collection: shown in this Space by the bookmark bar.
+    var space: UUID?
+    var importKey: String?
 
     var isFolder: Bool { url == nil }
 
     var host: String? {
         url.flatMap { URL(string: $0)?.host()?.lowercased() }
+    }
+
+    /// The name its site's icon is kept under (Favicons.site): the host,
+    /// with the port where the address names one of its own.
+    var iconSite: String? {
+        url.flatMap(URL.init(string:)).flatMap(Favicons.site)
+    }
+
+    /// The icon its page wore when last open, its site's otherwise
+    /// (Favicons.cached(page:)): a slideshow's bookmark, not the Docs icon.
+    @MainActor var savedIcon: NSImage? {
+        url.flatMap(URL.init(string:)).flatMap(Favicons.shared.cached(page:))
+    }
+
+    /// Its site's icon fetched, if none is kept yet: from its own front
+    /// page, on its own scheme and port.
+    @MainActor func fetchIcon() {
+        guard let site = iconSite, Favicons.shared.cached(site) == nil,
+              let page = url.flatMap(URL.init(string:)) else { return }
+        Favicons.shared.fetch(page: page)
     }
 
     static func site(_ title: String, _ url: URL, added: Date? = Date()) -> Bookmark {
@@ -57,6 +80,34 @@ final class Bookmarks: ObservableObject {
     }
 
     var isEmpty: Bool { roots.isEmpty }
+
+    /// Global bookmarks plus this Space's imported collection, without a
+    /// wrapper folder in the bar. The library retains every collection.
+    func barRoots(in space: UUID, profile: String? = nil) -> [Bookmark] {
+        roots.flatMap { node in
+            guard let owner = node.space else { return [node] }
+            let sameProfile = node.importKey.map { key in
+                profile == key || profile?.hasPrefix(key + ":") == true
+            } ?? false
+            return owner == space || sameProfile ? (node.children ?? []) : []
+        }
+    }
+
+    @discardableResult
+    func takeProfile(_ nodes: [Bookmark], key: String, name: String, space: UUID) -> Int {
+        guard !nodes.isEmpty else { return 0 }
+        let at = roots.firstIndex { $0.importKey == key }
+        let old = at.map { roots[$0].children ?? [] } ?? []
+        let plan = Self.plan(nodes, into: old, from: key, brought: Self.brought(from: key) ?? Brought(urls: Self.addresses(old), top: true))
+        Self.remember(plan.brought, from: key)
+        var collection = at.map { roots[$0] } ?? Bookmark.folder(name, [])
+        collection.space = space
+        collection.importKey = key
+        collection.children = plan.roots
+        if let at { roots[at] = collection } else { roots.append(collection) }
+        save()
+        return plan.added
+    }
 
     /// How many sites, folders included.
     var count: Int { Bookmarks.count(roots) }
@@ -163,7 +214,7 @@ final class Bookmarks: ObservableObject {
     /// Whether any site kept here is on `host`.
     func contains(host: String) -> Bool {
         func walk(_ nodes: [Bookmark]) -> Bool {
-            nodes.contains { $0.host == host || walk($0.children ?? []) }
+            nodes.contains { $0.iconSite == host || walk($0.children ?? []) }
         }
         return walk(roots)
     }

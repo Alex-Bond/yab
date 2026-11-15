@@ -1,0 +1,650 @@
+--- a/chrome/browser/extensions/external_action_origin.h
++++ b/chrome/browser/extensions/external_action_origin.h
+@@ -5,6 +5,8 @@
+ #include <memory>
+ #include <string>
+ #include <utility>
++#include "base/values.h"
++#include "base/functional/callback.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/supports_user_data.h"
+ #include "base/unguessable_token.h"
+@@ -31,6 +33,11 @@
+ // Embedder hooks, set by CEF on the UI thread before any browser exists. Null
+ // hooks are no-ops, so ordinary builds keep Chrome's behavior.
+ struct ExternalExtensionHooks {
++  // The embedder owns logical tab placement. Physically moving its concealed
++  // producers would invalidate the one-page external-host binding.
++  bool (*tab_operation)(content::WebContents*, const std::string&,
++                        const std::string&, const base::ListValue&,
++                        base::OnceCallback<void(base::Value, std::string)>*) = nullptr;
+   // The action popup |popup| (with an ExternalActionOrigin) was shown in
+   // |widget|, or is being destroyed.
+   void (*popup_shown)(content::WebContents* popup, views::Widget* widget) =
+--- /dev/null
++++ b/chrome/browser/extensions/external_tab_operations.h
+@@ -0,0 +1,38 @@
++// Native extension operations on the embedder's authoritative tab model.
++#ifndef CHROME_BROWSER_EXTENSIONS_EXTERNAL_TAB_OPERATIONS_H_
++#define CHROME_BROWSER_EXTENSIONS_EXTERNAL_TAB_OPERATIONS_H_
++#include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_tab_model.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "extensions/browser/extension_function.h"
++#include "extensions/common/extension.h"
++namespace extensions {
++inline bool RequestExternalTabOperation(ExtensionFunction* function,
++    const std::string& method, const base::ListValue& args,
++    base::OnceCallback<void(base::Value, std::string)> done) {
++  auto hook = GetExternalExtensionHooks().tab_operation;
++  if (!hook || !function->extension()) return false;
++  auto* owner = function->GetSenderWebContents();
++  if (auto* origin = owner ? ExternalActionOrigin::Get(owner) : nullptr)
++    owner = origin->Owner(owner);
++  auto usable = [function](content::WebContents* page) {
++    auto* model = ExternalTabModel::Get(page);
++    return page && page->GetBrowserContext() == function->browser_context() &&
++           model && model->embedded();
++  };
++  if (!usable(owner)) owner = ExternalTabFocus::Get(function->browser_context());
++  if (!usable(owner)) {
++    owner = nullptr;
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
++        [&](BrowserWindowInterface* browser) {
++          auto* page = browser->GetTabStripModel()->GetActiveWebContents();
++          if (!usable(page)) return true;
++          owner = page; return false;
++        });
++  }
++  return owner && hook(owner, function->extension()->id(), method, args, &done);
++}
++}  // namespace extensions
++#endif
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -27,6 +27,7 @@
+ #include "chrome/browser/extensions/browser_window_util.h"
+ #include "chrome/browser/extensions/chrome_extension_function_details.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/external_tab_operations.h"
+ #include "chrome/browser/extensions/open_tab_helper.h"
+ #include "chrome/browser/extensions/tab_helper.h"
+ #include "chrome/browser/extensions/window_controller.h"
+@@ -1058,6 +1059,18 @@
+   std::optional<windows::Create::Params> params =
+       windows::Create::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if ((!params->create_data || params->create_data->type == windows::CreateType::kNone || params->create_data->type == windows::CreateType::kNormal) && RequestExternalTabOperation(this, "windows.create", args(),
++      base::BindOnce([](scoped_refptr<WindowsCreateFunction> self, base::Value value, std::string error) {
++
++        if (error.empty() && value.is_int()) {
++          auto* window = ExtensionTabUtil::GetControllerFromWindowID(ChromeExtensionFunctionDetails(self.get()), value.GetInt(), &error);
++          if (window) value = base::Value(window->CreateWindowValueForExtension(self->extension(), WindowController::kPopulateTabs, self->source_context_type()));
++        }
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   DCHECK(extension() || source_context_type() == mojom::ContextType::kWebUi ||
+          source_context_type() == mojom::ContextType::kUntrustedWebUi);
+@@ -1418,7 +1431,9 @@
+       // Its own window, the one the response names, not the owner's.
+       if (ExternalTabModel::BindOwnWindow(
+               external_page.get(), owner,
+-              ExtensionTabUtil::GetWindowId(new_window))) {
++              // The controller can still see the inherited owner model here.
++              // Seed the new popup from its own session, before rebinding it.
++              new_window->GetSessionID().id())) {
+         hooks.tab_created(external_page.get(), nullptr, false, -1,
+                           extension()->id());
+       }
+@@ -1838,6 +1853,13 @@
+   std::optional<windows::Remove::Params> params =
+       windows::Remove::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "windows.remove", args(),
++      base::BindOnce([](scoped_refptr<WindowsRemoveFunction> self, base::Value value, std::string error) {
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   WindowController* window_controller = nullptr;
+   std::string error;
+@@ -2170,11 +2192,13 @@
+     return false;
+   }
+ 
+-  if (!MatchesBool(query_info_.pinned, candidate_tab->IsPinned())) {
+-    return false;
+-  }
+-
+-  if (query_info_.group_id.has_value()) {
++  if (!MatchesBool(query_info_.pinned, model && model->embedded() ? model->pinned() : candidate_tab->IsPinned())) {
++    return false;
++  }
++
++  if (query_info_.group_id.has_value() && model && model->embedded()) {
++    if (*query_info_.group_id != model->group_id()) return false;
++  } else if (query_info_.group_id.has_value()) {
+     std::optional<tab_groups::TabGroupId> group = candidate_tab->GetGroup();
+     if (query_info_.group_id.value() == -1) {
+       if (group.has_value()) {
+@@ -2187,7 +2211,6 @@
+       return false;
+     }
+   }
+-
+   if (query_info_.split_view_id.has_value()) {
+     std::optional<split_tabs::SplitTabId> split = candidate_tab->GetSplit();
+     if (query_info_.split_view_id.value() == -1) {
+@@ -2286,6 +2309,20 @@
+   std::optional<tabs::Create::Params> params =
+       tabs::Create::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabs.create", args(),
++      base::BindOnce([](scoped_refptr<TabsCreateFunction> self, base::Value value, std::string error) {
++
++        if (error.empty() && value.is_int()) {
++          WindowController* window = nullptr; content::WebContents* contents = nullptr; int index = -1;
++          if (tabs_internal::GetTabById(value.GetInt(), self->browser_context(), self->include_incognito_information(), &window, &contents, &index, &error))
++            value = base::Value(tabs_internal::CreateTabObjectHelper(contents, self->extension(), self->source_context_type(),
++                window ? window->GetBrowserWindowInterface() : nullptr, index).ToValue());
++        }
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   const tabs::Create::Params::CreateProperties& create_properties =
+       params->create_properties;
+@@ -3219,6 +3256,27 @@
+ ExtensionFunction::ResponseAction TabsMoveFunction::Run() {
+   std::optional<tabs::Move::Params> params = tabs::Move::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabs.move", args(),
++      base::BindOnce([](scoped_refptr<TabsMoveFunction> self, base::Value value, std::string error) {
++
++        if (error.empty()) {
++          std::vector<int> ids;
++          if (value.is_int()) ids.push_back(value.GetInt());
++          else if (value.is_list()) for (const auto& id : value.GetList()) if (id.is_int()) ids.push_back(id.GetInt());
++          base::ListValue result;
++          for (int id : ids) {
++            WindowController* window = nullptr; content::WebContents* contents = nullptr; int index = -1;
++            if (!tabs_internal::GetTabById(id, self->browser_context(), self->include_incognito_information(), &window, &contents, &index, &error)) break;
++            result.Append(tabs_internal::CreateTabObjectHelper(contents, self->extension(), self->source_context_type(),
++                window ? window->GetBrowserWindowInterface() : nullptr, index).ToValue());
++          }
++          value = result.size() == 1 ? std::move(result[0]) : base::Value(std::move(result));
++        }
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   int new_index = params->move_properties.index;
+   const auto& window_id = params->move_properties.window_id;
+@@ -3569,6 +3627,13 @@
+   std::optional<tabs::Group::Params> params =
+       tabs::Group::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabs.group", args(),
++      base::BindOnce([](scoped_refptr<TabsGroupFunction> self, base::Value value, std::string error) {
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   std::string error;
+ 
+@@ -3716,6 +3781,13 @@
+   std::optional<tabs::Ungroup::Params> params =
+       tabs::Ungroup::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabs.ungroup", args(),
++      base::BindOnce([](scoped_refptr<TabsUngroupFunction> self, base::Value value, std::string error) {
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   std::vector<int> tab_ids;
+   if (params->tab_ids.as_integers) {
+--- a/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
++++ b/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
+@@ -8,6 +8,7 @@
+ #include <string>
+ #include <utility>
+ #include <vector>
++#include "base/functional/bind.h"
+ 
+ #include "base/strings/pattern.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -15,6 +16,7 @@
+ #include "chrome/browser/extensions/browser_extension_window_controller.h"
+ #include "chrome/browser/extensions/chrome_extension_function_details.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/external_tab_operations.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/tab_list/tab_list_interface.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+@@ -98,6 +100,13 @@
+   DCHECK(params.has_value());
+ 
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabGroups.get", args(),
++      base::BindOnce([](scoped_refptr<TabGroupsGetFunction> self, base::Value value, std::string error) {
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+   int group_id = params->group_id;
+ 
+   tab_groups::TabGroupId id = tab_groups::TabGroupId::CreateEmpty();
+@@ -119,6 +128,13 @@
+   std::optional<api::tab_groups::Query::Params> params =
+       api::tab_groups::Query::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabGroups.query", args(),
++      base::BindOnce([](scoped_refptr<TabGroupsQueryFunction> self, base::Value value, std::string error) {
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   base::ListValue result_list;
+   Profile* profile = Profile::FromBrowserContext(browser_context());
+@@ -220,6 +236,13 @@
+   std::optional<api::tab_groups::Update::Params> params =
+       api::tab_groups::Update::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabGroups.update", args(),
++      base::BindOnce([](scoped_refptr<TabGroupsUpdateFunction> self, base::Value value, std::string error) {
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   int group_id = params->group_id;
+   WindowController* window = nullptr;
+@@ -318,6 +341,13 @@
+   std::optional<api::tab_groups::Move::Params> params =
+       api::tab_groups::Move::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++  if (RequestExternalTabOperation(this, "tabGroups.move", args(),
++      base::BindOnce([](scoped_refptr<TabGroupsMoveFunction> self, base::Value value, std::string error) {
++        self->Respond(error.empty() ? (value.is_none() ? self->NoArguments()
++                                      : self->WithArguments(std::move(value)))
++                                    : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)))) return RespondLater();
++
+ 
+   int group_id = params->group_id;
+   int new_index = params->move_properties.index;
+--- a/chrome/browser/extensions/external_tab_model.h
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -3,6 +3,9 @@
+ #define CHROME_BROWSER_EXTENSIONS_EXTERNAL_TAB_MODEL_H_
+ #include <algorithm>
+ #include <memory>
++#include <map>
++#include <string>
++#include "components/sessions/core/session_id.h"
+ #include <utility>
+ #include <vector>
+ #include "base/supports_user_data.h"
+@@ -221,6 +224,48 @@
+   }
+   bool active() const { return contents_ && group_->active.get() == contents_.get(); }
+   int window() const { return group_->window; }
++  static bool BindLogicalWindow(content::WebContents* contents,
++                                const std::string& key, int index, bool active) {
++    if (!contents || contents->IsBeingDestroyed() || key.empty()) return false;
++    auto* context = contents->GetBrowserContext();
++    auto* windows = static_cast<LogicalWindows*>(context->GetUserData(&kWindowsKey));
++    if (!windows) {
++      auto made = std::make_unique<LogicalWindows>(); windows = made.get();
++      context->SetUserData(&kWindowsKey, std::move(made));
++    }
++    auto group = windows->all[key].lock();
++    if (!group) {
++      group = std::make_shared<Group>(); group->window = SessionID::NewUnique().id();
++      group->embedded = true; windows->all[key] = group;
++    }
++    auto* current = Get(contents);
++    if (current && current->group_ != group) {
++      std::erase_if(current->group_->tabs, [contents](const auto& tab) { return tab.get() == contents; });
++      if (current->group_->active.get() == contents) current->group_->active.reset();
++    }
++    if (!current || current->group_ != group) {
++      contents->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
++          new ExternalTabModel(contents, group, nullptr, nullptr)));
++    }
++    Compact(*group);
++    auto& tabs = group->tabs;
++    std::erase_if(tabs, [contents](const auto& tab) { return tab.get() == contents; });
++    const auto at = index < 0 ? tabs.size() : std::min(static_cast<size_t>(index), tabs.size());
++    tabs.insert(tabs.begin() + at, contents->GetWeakPtr());
++    if (active) group->active = contents->GetWeakPtr();
++    if (!context->GetUserData(&kEmbeddedKey))
++      context->SetUserData(&kEmbeddedKey, std::make_unique<base::SupportsUserData::Data>());
++    return true;
++  }
++  int group_id() const { return folder_; }
++  void SetGroupId(int id) { folder_ = id; }
++  bool pinned() const { return pinned_; }
++  void SetPinned(bool pinned) { pinned_ = pinned; }
++  void SetOpener(content::WebContents* opener) {
++    opener_ = opener && contents_ && !opener->IsBeingDestroyed() &&
++        opener->GetBrowserContext() == contents_->GetBrowserContext()
++        ? opener->GetWeakPtr() : base::WeakPtr<content::WebContents>();
++  }
+   int index() const {
+     Compact(*group_);
+     for (size_t i = 0; i < group_->tabs.size(); ++i)
+@@ -246,6 +291,10 @@
+     base::WeakPtr<content::WebContents> active;
+     std::vector<base::WeakPtr<content::WebContents>> tabs;
+   };
++  struct LogicalWindows : base::SupportsUserData::Data {
++    std::map<std::string, std::weak_ptr<Group>> all;
++  };
++  inline static const int kWindowsKey = 0;
+   static void Compact(Group& group) {
+     std::erase_if(group.tabs, [](const auto& tab) {
+       return !tab || tab->IsBeingDestroyed();
+@@ -259,6 +308,8 @@
+         owner_(owner ? owner->GetWeakPtr() : base::WeakPtr<content::WebContents>()) {}
+   inline static const int kKey = 0;
+   inline static const int kEmbeddedKey = 0;
++  bool pinned_ = false;
++  int folder_ = -1;
+   std::shared_ptr<Group> group_;
+   base::WeakPtr<content::WebContents> contents_, opener_, owner_;
+ };
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -404,10 +404,10 @@
+   tab_object.selected = is_active;
+   tab_object.highlighted = external_model ? external_model->active()
+                                           : tab_interface && tab_interface->IsSelected();
+-  tab_object.pinned = tab_interface && tab_interface->IsPinned();
+-
+-  tab_object.group_id = -1;
+-  if (tab_interface) {
++  tab_object.pinned = external_model && external_model->embedded() ? external_model->pinned() : tab_interface && tab_interface->IsPinned();
++
++  tab_object.group_id = external_model && external_model->embedded() ? external_model->group_id() : -1;
++  if (tab_interface && !(external_model && external_model->embedded())) {
+     std::optional<tab_groups::TabGroupId> group = tab_interface->GetGroup();
+     if (group.has_value()) {
+       tab_object.group_id = GetGroupId(group.value());
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -59,6 +59,7 @@
+ #define CEF_YAB_OPTIONS_CREATION_VERSION 1
+ #define CEF_YAB_EXTENSION_WINDOW_VERSION 1
+ #define CEF_YAB_EXTERNAL_TAB_GROUP_VERSION 1
++#define CEF_YAB_EMBEDDED_TAB_OPERATIONS_VERSION 1
+ #define CEF_YAB_EXTERNAL_PAGE_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ #define CEF_YAB_NATIVE_MEDIA_SESSION_VERSION 1
+@@ -1367,6 +1368,13 @@
+   /*--cef(added=experimental)--*/
+   virtual bool SetExternalTabGroup(CefRefPtr<CefBrowser> lead, int index,
+                                    bool active) = 0;
++
++  ///
++  /// Apply the embedder's logical group metadata or answer one pending native
++  /// tab operation. No page or physical producer is moved. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetExternalTabState(CefRefPtr<CefDictionaryValue> state) = 0;
+   ///
+   /// Delegates native key status to the exact bound page. UI thread only.
+   ///
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -311,6 +311,7 @@
+   bool SetExternalPageSize(const CefSize& size) override;
+   bool SetExternalPageVisibility(bool visible) override;
+   bool SetExternalTabGroup(CefRefPtr<CefBrowser> lead, int index, bool active) override;
++  bool SetExternalTabState(CefRefPtr<CefDictionaryValue> state) override;
+   bool SetExternalPageFocus(bool focused) override;
+   bool ReplyExternalPageSelect(int token, int index) override;
+   CefRefPtr<CefListValue> GetExtensionActionMenu(
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1255,6 +1255,15 @@
+   CEF_REQUIRE_UIT_RETURN(false);
+ #if BUILDFLAG(IS_MAC)
+   return cef::external_host::ResizePage(this, size);
++#else
++  return false;
++#endif
++}
++
++bool CefBrowserHostBase::SetExternalTabState(CefRefPtr<CefDictionaryValue> state) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::SetTabState(this, state);
+ #else
+   return false;
+ #endif
+--- a/cef/libcef/browser/views/external_host_mac.h
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -17,6 +17,7 @@
+ bool ResizePage(CefBrowserHostBase* browser, const CefSize& size);
+ bool ShowPage(CefBrowserHostBase* browser, bool visible);
+ bool GroupPage(CefBrowserHostBase* browser, CefBrowserHostBase* lead, int index, bool active);
++bool SetTabState(CefBrowserHostBase* browser, CefRefPtr<CefDictionaryValue> state);
+ bool FocusPage(CefBrowserHostBase* browser, bool focused);
+ bool SelectPage(CefBrowserHostBase* browser, int token, int index);
+ bool OpenAction(CefBrowserHostBase* browser, const std::string& extension_id,
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -32,6 +32,10 @@
+ #include "chrome/browser/extensions/external_extension_window.h"
+ #include "chrome/browser/extensions/external_identity_flow.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "include/cef_parser.h"
++#include "chrome/common/extensions/api/tab_groups.h"
+ #include "chrome/common/extensions/api/tabs.h"
+ #include "extensions/browser/event_router.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+@@ -873,6 +877,7 @@
+   result->SetInt("browserId", browser->GetIdentifier());
+   result->SetInt("extensionTabId", extensions::ExtensionTabUtil::GetTabId(contents));
+   result->SetInt("extensionWindowId", extensions::ExtensionTabUtil::GetWindowIdOfTab(contents));
++  result->SetString("extensionWindowType", extensions::ExternalExtensionWindow::Get(contents) ? "popup" : "normal");
+   return result;
+ }
+ bool ResizePage(CefBrowserHostBase* browser, const CefSize& size) {
+@@ -898,6 +903,60 @@
+ }
+ 
+ namespace {
++bool LogicalTabUpdated(base::WeakPtr<content::WebContents> weak,
++    const std::vector<std::string>& properties,
++    content::BrowserContext* context, extensions::mojom::ContextType target,
++    const extensions::Extension* extension, const base::DictValue* filter,
++    std::optional<base::ListValue>& args,
++    extensions::mojom::EventFilteringInfoPtr& filtering, bool* separate) {
++  auto* contents = weak.get();
++  if (!contents) return false;
++  auto scrub = extensions::ExtensionTabUtil::GetScrubTabBehavior(extension, target, contents);
++  auto tab = extensions::ExtensionTabUtil::CreateTabObject(contents, scrub, extension).ToValue();
++  base::DictValue changed;
++  for (const auto& property : properties)
++    if (const auto* value = tab.Find(property)) changed.Set(property, value->Clone());
++  args.emplace(); args->Append(extensions::ExtensionTabUtil::GetTabId(contents));
++  args->Append(std::move(changed)); args->Append(std::move(tab));
++  return true;
++}
++class TabOperations : public base::SupportsUserData::Data {
++ public:
++  using Done = base::OnceCallback<void(base::Value, std::string)>;
++  inline static const int key = 0;
++  int next = 0;
++  std::map<int, Done> pending;
++  ~TabOperations() override {
++    for (auto& [id, done] : pending)
++      std::move(done).Run(base::Value(), "The owning window was closed");
++  }
++  static TabOperations* Get(content::WebContents* page) {
++    auto* value = static_cast<TabOperations*>(page->GetUserData(&key));
++    if (!value) {
++      auto made = std::make_unique<TabOperations>(); value = made.get();
++      page->SetUserData(&key, std::move(made));
++    }
++    return value;
++  }
++};
++bool TabOperationRequested(content::WebContents* contents,
++    const std::string& extension, const std::string& method,
++    const base::ListValue& args, TabOperations::Done* done) {
++  CefRefPtr<CefBrowserHostBase> browser;
++  auto handler = DisplayHandlerFor(contents, &browser);
++  if (!handler) return false;
++  auto* operations = TabOperations::Get(contents);
++  const int token = ++operations->next;
++  operations->pending.emplace(token, std::move(*done));
++  std::string json; base::JSONWriter::Write(args, &json);
++  auto value = CefDictionaryValue::Create();
++  value->SetString("requestedKind", "tabOperation");
++  value->SetString("extensionId", extension);
++  value->SetString("method", method); value->SetString("arguments", json);
++  value->SetInt("operation", token);
++  handler->OnExtensionTabCreated(browser.get(), value);
++  return true;
++}
+ void TabActivateRequested(content::WebContents* contents) {
+   CefRefPtr<CefBrowserHostBase> browser;
+   auto handler = DisplayHandlerFor(contents, &browser);
+@@ -938,6 +997,82 @@
+ }
+ }  // namespace
+ 
++bool SetTabState(CefBrowserHostBase* browser, CefRefPtr<CefDictionaryValue> state) {
++  auto* contents = browser ? browser->GetWebContents() : nullptr;
++  if (!contents || !state) return false;
++  auto* previous_model = extensions::ExternalTabModel::Get(contents);
++  const bool was_active = previous_model && previous_model->active();
++  const int old_group = previous_model ? previous_model->group_id() : -1;
++  const bool old_pinned = previous_model && previous_model->pinned();
++  if (state->HasKey("windowKey") && !extensions::ExternalTabModel::BindLogicalWindow(
++      contents, state->GetString("windowKey").ToString(), state->GetInt("index"), state->GetBool("active"))) return false;
++  if (state->HasKey("windowKey") && state->GetBool("active") && !was_active) {
++    extensions::api::tabs::OnActivated::ActiveInfo info;
++    info.tab_id = extensions::ExtensionTabUtil::GetTabId(contents);
++    info.window_id = extensions::ExtensionTabUtil::GetWindowIdOfTab(contents);
++    if (auto* router = extensions::EventRouter::Get(contents->GetBrowserContext())) {
++      router->BroadcastEvent(std::make_unique<extensions::Event>(
++          extensions::events::TABS_ON_ACTIVATED,
++          extensions::api::tabs::OnActivated::kEventName,
++          extensions::api::tabs::OnActivated::Create(info),
++          contents->GetBrowserContext()));
++    }
++  }
++  if (state->HasKey("groupId")) {
++    auto* model = extensions::ExternalTabModel::Get(contents);
++    if (!model || !model->embedded()) return false;
++    model->SetGroupId(state->GetInt("groupId"));
++    if (state->HasKey("pinned")) model->SetPinned(state->GetBool("pinned"));
++    if (state->HasKey("openerTabId")) {
++      extensions::WindowController* window = nullptr; content::WebContents* opener = nullptr; int index = -1;
++      extensions::ExtensionTabUtil::GetTabById(state->GetInt("openerTabId"), contents->GetBrowserContext(), false, &window, &opener, &index);
++      model->SetOpener(opener);
++    }
++  }
++  if (state->HasKey("groupId")) {
++    auto* model = extensions::ExternalTabModel::Get(contents);
++    std::vector<std::string> changed;
++    if (old_group != model->group_id()) changed.push_back("groupId");
++    if (old_pinned != model->pinned()) changed.push_back("pinned");
++    if (!changed.empty()) {
++      if (auto* router = extensions::EventRouter::Get(contents->GetBrowserContext())) {
++        auto event = std::make_unique<extensions::Event>(extensions::events::TABS_ON_UPDATED,
++            extensions::api::tabs::OnUpdated::kEventName, base::ListValue(), contents->GetBrowserContext());
++        event->will_dispatch_callback = base::BindRepeating(&LogicalTabUpdated, contents->GetWeakPtr(), changed);
++        router->BroadcastEvent(std::move(event));
++      }
++    }
++  }
++  if (const int token = state->GetInt("operation")) {
++    auto* operations = TabOperations::Get(contents);
++    auto found = operations->pending.find(token);
++    if (found == operations->pending.end()) return false;
++    auto done = std::move(found->second); operations->pending.erase(found);
++    auto events = base::JSONReader::Read(state->GetString("events").ToString(), base::JSON_PARSE_RFC);
++    if (events && events->is_list()) {
++      auto* router = extensions::EventRouter::Get(contents->GetBrowserContext());
++      for (const auto& entry : events->GetList()) {
++        if (!router || !entry.is_dict()) continue;
++        const auto* name = entry.GetDict().FindString("name");
++        const auto* group = entry.GetDict().FindDict("group");
++        if (!name || !group) continue;
++        extensions::events::HistogramValue histogram;
++        std::string event;
++        if (*name == "created") { histogram = extensions::events::TAB_GROUPS_ON_CREATED; event = "tabGroups.onCreated"; }
++        else if (*name == "updated") { histogram = extensions::events::TAB_GROUPS_ON_UPDATED; event = "tabGroups.onUpdated"; }
++        else if (*name == "removed") { histogram = extensions::events::TAB_GROUPS_ON_REMOVED; event = "tabGroups.onRemoved"; }
++        else if (*name == "moved") { histogram = extensions::events::TAB_GROUPS_ON_MOVED; event = "tabGroups.onMoved"; }
++        else continue;
++        base::ListValue args; args.Append(group->Clone());
++        router->BroadcastEvent(std::make_unique<extensions::Event>(histogram, event, std::move(args), contents->GetBrowserContext()));
++      }
++    }
++    auto result = base::JSONReader::Read(state->GetString("result").ToString(), base::JSON_PARSE_RFC);
++    std::move(done).Run(result ? std::move(*result) : base::Value(), state->GetString("error").ToString());
++  }
++  return true;
++}
++
+ bool GroupPage(CefBrowserHostBase* browser, CefBrowserHostBase* lead, int index, bool active) {
+   auto* contents = browser ? browser->GetWebContents() : nullptr;
+   auto* owner = lead ? lead->GetWebContents() : nullptr;
+@@ -983,6 +1118,7 @@
+   hooks.tab_created = &TabCreated;
+   hooks.tab_model_created = &BindNativeTabModel;
+   hooks.tab_activate_requested = &TabActivateRequested;
++  hooks.tab_operation = &TabOperationRequested;
+   hooks.window_focus_requested = &WindowFocusRequested;
+   hooks.side_panel_open = &SidePanelOpen;
+   InstallConsentHooks();
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -137,6 +137,8 @@
+ }
+ 
+ int BrowserExtensionWindowController::GetWindowId() const {
++  if (auto* model = ExternalTabModel::Get(GetActiveTab()); model && model->embedded())
++    return model->window();
+   return static_cast<int>(session_id_.id());
+ }
+ 
+@@ -145,7 +147,8 @@
+   // producer, except one an extension's windows.create({type: "popup"}) made
+   // (ExternalExtensionWindow), which is a "popup" as in Chrome: wallets look
+   // for their notification window by that type to focus it again.
+-  if (ExternalTabWindow::Bound(GetActiveTab())) {
++  auto* model = ExternalTabModel::Get(GetActiveTab());
++  if ((model && model->embedded()) || ExternalTabWindow::Bound(GetActiveTab())) {
+     return api::tabs::ToString(ExternalExtensionWindow::Get(GetActiveTab())
+                                    ? api::tabs::WindowType::kPopup
+                                    : api::tabs::WindowType::kNormal);

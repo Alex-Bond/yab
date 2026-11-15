@@ -43,7 +43,7 @@ final class SpaceSignInsUITests: XCTestCase {
     private func launch(reopening: Bool = false) {
         if reopening { app.launchArguments = ["-YabProfileDirectory", folder.path, "-YabNoAnim", "YES"] }
         app.terminate(); app.launch()
-        let notNow = app.buttons["welcome.start"]
+        let notNow = app.buttons["welcome.skip"]
         XCTAssertTrue(wait { notNow.exists || self.element("chrome.plate").exists })
         // The page draws before the welcome's tray rises over it (1.3 s in): wait for it.
         app.passWelcome(timeout: 6)

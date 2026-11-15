@@ -1,0 +1,271 @@
+--- a/chrome/browser/file_system_access/file_system_access_permission_request_manager.h
++++ b/chrome/browser/file_system_access/file_system_access_permission_request_manager.h
+@@ -90,6 +90,16 @@
+       base::OnceCallback<void(permissions::PermissionAction result)> callback,
+       base::ScopedClosureRunner fullscreen_block);
+ 
++  // Yab: an embedder's own prompt in place of the tab-modal dialogs, for an
++  // embedder whose windows have no host for them. Returns true when it took
++  // `callback`, which it then runs once with the user's answer.
++  using ShowPromptFunction = bool (*)(
++      content::WebContents* web_contents,
++      const RequestData& request,
++      base::OnceCallback<void(permissions::PermissionAction result)>&
++          callback);
++  static void SetShowPromptFunction(ShowPromptFunction function);
++
+   // Do NOT use this method in production code. Use this method in browser
+   // tests that need to accept or deny permissions when requested in
+   // JavaScript. Your test needs to call this before permission is requested,
+--- a/chrome/browser/file_system_access/file_system_access_permission_request_manager.cc
++++ b/chrome/browser/file_system_access/file_system_access_permission_request_manager.cc
+@@ -51,6 +51,9 @@
+              b.file_request_data[0].handle_type;
+ }
+ 
++FileSystemAccessPermissionRequestManager::ShowPromptFunction
++    g_show_prompt_function = nullptr;
++
+ }  // namespace
+ 
+ struct FileSystemAccessPermissionRequestManager::Request {
+@@ -127,6 +130,12 @@
+     ScheduleShowRequest();
+ }
+ 
++// static
++void FileSystemAccessPermissionRequestManager::SetShowPromptFunction(
++    ShowPromptFunction function) {
++  g_show_prompt_function = function;
++}
++
+ FileSystemAccessPermissionRequestManager::
+     FileSystemAccessPermissionRequestManager(content::WebContents* web_contents)
+     : content::WebContentsObserver(web_contents),
+@@ -163,6 +172,17 @@
+     return;
+   }
+ 
++  if (g_show_prompt_function) {
++    base::OnceCallback<void(permissions::PermissionAction result)> callback =
++        base::BindOnce(
++            &FileSystemAccessPermissionRequestManager::OnPermissionDialogResult,
++            weak_factory_.GetWeakPtr());
++    if (g_show_prompt_function(web_contents(), current_request_->data,
++                               callback)) {
++      return;
++    }
++  }
++
+   switch (current_request_->data.request_type) {
+     case RequestType::kNewPermission:
+       ShowFileSystemAccessPermissionDialog(
+--- a/cef/libcef/browser/permission_prompt.cc
++++ b/cef/libcef/browser/permission_prompt.cc
+@@ -4,13 +4,18 @@
+ 
+ #include "cef/libcef/browser/permission_prompt.h"
+ 
++#include <tuple>
++
+ #include "base/logging.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/notreached.h"
+ #include "cef/libcef/browser/browser_host_base.h"
++#include "chrome/browser/file_system_access/file_system_access_permission_request_manager.h"
+ #include "chrome/browser/ui/permission_bubble/permission_prompt.h"
+ #include "components/permissions/permission_request.h"
++#include "components/permissions/permission_uma_constants.h"
+ #include "components/permissions/resolvers/permission_prompt_options.h"
++#include "content/public/browser/web_contents_observer.h"
+ 
+ namespace permission_prompt {
+ 
+@@ -329,11 +334,187 @@
+   *default_handling = true;
+   return nullptr;
+ }
++
++// Yab: File System Access asks for a picked file's or folder's access with a
++// tab-modal dialog of its own, outside PermissionRequestManager. Alloy style
++// has no host for tab-modal dialogs on macOS, so that dialog never appeared
++// and the request was never answered: a folder picked with mode "readwrite",
++// or a later requestPermission({mode: "readwrite"}), never got write access
++// (Yab #1683). The request goes to the client's OnShowPermissionPrompt as
++// CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS instead, with the same prompt ids
++// and OnDismissPermissionPrompt as every other prompt.
++//
++// Owns itself from the moment the client takes the request until it is
++// answered, its page is replaced or its WebContents goes.
++class CefFileSystemAccessPrompt : public content::WebContentsObserver {
++ public:
++  using RequestType = FileSystemAccessPermissionRequestManager::RequestType;
++  using ResultCallback =
++      base::OnceCallback<void(permissions::PermissionAction result)>;
++
++  CefFileSystemAccessPrompt(content::WebContents* web_contents,
++                            CefRefPtr<CefBrowserHostBase> browser,
++                            uint64_t prompt_id,
++                            RequestType request_type)
++      : content::WebContentsObserver(web_contents),
++        browser_(browser),
++        prompt_id_(prompt_id),
++        request_type_(request_type) {}
++
++  CefFileSystemAccessPrompt(const CefFileSystemAccessPrompt&) = delete;
++  CefFileSystemAccessPrompt& operator=(const CefFileSystemAccessPrompt&) =
++      delete;
++
++  CefPermissionPromptCallbackImpl::CallbackType MakeClientCallback() {
++    return base::BindOnce(&CefFileSystemAccessPrompt::OnClientResult,
++                          weak_ptr_factory_.GetWeakPtr());
++  }
++
++  base::WeakPtr<CefFileSystemAccessPrompt> GetWeakPtr() {
++    return weak_ptr_factory_.GetWeakPtr();
++  }
++
++  // The client took the request: its answer goes to `callback`.
++  void Attach(CefRefPtr<CefPermissionPromptCallbackImpl> client_callback,
++              ResultCallback callback) {
++    client_callback_ = client_callback;
++    callback_ = std::move(callback);
++    // From here on an answer from the UI thread runs at once, as with
++    // CefPermissionPrompt.
++    client_callback_->MarkSafeToRunSync();
++  }
+ 
++  // The client didn't take it: gone without answering or telling anyone.
++  void Discard() { delete this; }
++
++ private:
++  ~CefFileSystemAccessPrompt() override = default;
++
++  // content::WebContentsObserver:
++  void PrimaryPageChanged(content::Page& page) override {
++    // Chrome's tab-modal dialog closes with the page that asked.
++    Finish(CEF_PERMISSION_RESULT_IGNORE, /*answer=*/true);
++  }
++  void WebContentsDestroyed() override {
++    // The request manager goes with the WebContents, and its requests with
++    // it, unanswered as with Chrome's own dialog.
++    Finish(CEF_PERMISSION_RESULT_IGNORE, /*answer=*/false);
++  }
++
++  void OnClientResult(cef_permission_request_result_t result,
++                      bool notify_delegate) {
++    Finish(result, notify_delegate);
++  }
++
++  void Finish(cef_permission_request_result_t result, bool answer) {
++    CEF_REQUIRE_UIT();
++    if (client_callback_) {
++      // A late Continue() from the client finds nothing to run.
++      std::ignore = client_callback_->Disconnect();
++    }
++    auto browser = browser_;
++    const auto prompt_id = prompt_id_;
++    auto callback = std::move(callback_);
++    const auto action = ToAction(result, request_type_);
++    // Before anything that may reenter: the client's dismissal and the
++    // request manager's next request.
++    delete this;
++
++    if (auto client = browser->GetClient()) {
++      if (auto handler = client->GetPermissionHandler()) {
++        handler->OnDismissPermissionPrompt(browser, prompt_id, result);
++      }
++    }
++    if (answer && callback) {
++      // A no-op once the request manager is gone.
++      std::move(callback).Run(action);
++    }
++  }
++
++  // Chrome's own dialog answers GRANTED or DISMISSED and never DENIED, which
++  // would deny the handle for good: the site may ask again, and Yab asks each
++  // time. A restored grant is for this visit only, as Yab keeps no file
++  // grants.
++  static permissions::PermissionAction ToAction(
++      cef_permission_request_result_t result,
++      RequestType request_type) {
++    if (result == CEF_PERMISSION_RESULT_ACCEPT) {
++      return request_type == RequestType::kRestorePermissions
++                 ? permissions::PermissionAction::GRANTED_ONCE
++                 : permissions::PermissionAction::GRANTED;
++    }
++    return permissions::PermissionAction::DISMISSED;
++  }
++
++  const CefRefPtr<CefBrowserHostBase> browser_;
++  const uint64_t prompt_id_;
++  const RequestType request_type_;
++  ResultCallback callback_;
++  CefRefPtr<CefPermissionPromptCallbackImpl> client_callback_;
++
++  base::WeakPtrFactory<CefFileSystemAccessPrompt> weak_ptr_factory_{this};
++};
++
++bool ShowFileSystemAccessPromptImpl(
++    content::WebContents* web_contents,
++    const FileSystemAccessPermissionRequestManager::RequestData& request,
++    base::OnceCallback<void(permissions::PermissionAction result)>& callback) {
++  CEF_REQUIRE_UIT();
++
++  auto browser = CefBrowserHostBase::GetBrowserForContents(web_contents);
++  if (!browser) {
++    // Not a CEF browser's contents: Chrome's own dialog, as before.
++    return false;
++  }
++
++  if (auto client = browser->GetClient()) {
++    if (auto handler = client->GetPermissionHandler()) {
++      const auto prompt_id = ++g_next_prompt_id;
++      auto* prompt = new CefFileSystemAccessPrompt(
++          web_contents, browser, prompt_id, request.request_type);
++      auto weak_prompt = prompt->GetWeakPtr();
++      // Continue() stays asynchronous until Attach(), so an answer given
++      // inside OnShowPermissionPrompt reaches a prompt that is set up.
++      CefRefPtr<CefPermissionPromptCallbackImpl> callbackImpl(
++          new CefPermissionPromptCallbackImpl(prompt->MakeClientCallback()));
++      bool handled = handler->OnShowPermissionPrompt(
++          browser, prompt_id, request.origin.GetURL().spec(),
++          CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS, callbackImpl.get());
++      if (!weak_prompt) {
++        // The page went while the client was being asked.
++        std::move(callback).Run(permissions::PermissionAction::DISMISSED);
++        return true;
++      }
++      if (callbackImpl->IsDisconnected() || handled) {
++        LOG_IF(ERROR, !handled)
++            << "Should return true from OnShowPermissionPrompt when "
++               "executing the callback";
++        prompt->Attach(callbackImpl, std::move(callback));
++        return true;
++      }
++      // Not taken: answered below as if there were no handler.
++      std::ignore = callbackImpl->Disconnect();
++      prompt->Discard();
++    }
++  }
++
++  if (browser->IsAlloyStyle()) {
++    // No tab-modal host to show Chrome's dialog in: the request is dismissed,
++    // as Alloy style's default for other prompts is IGNORE.
++    std::move(callback).Run(permissions::PermissionAction::DISMISSED);
++    return true;
++  }
++
++  // Chrome style shows Chrome's own dialog.
++  return false;
++}
++
+ }  // namespace
+ 
+ void RegisterCreateCallback() {
+   SetCreatePermissionPromptFunction(&CreatePermissionPromptImpl);
++  FileSystemAccessPermissionRequestManager::SetShowPromptFunction(
++      &ShowFileSystemAccessPromptImpl);
+ }
+ 
+ }  // namespace permission_prompt

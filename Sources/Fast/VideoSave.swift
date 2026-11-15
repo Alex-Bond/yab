@@ -72,6 +72,25 @@ enum VideoSave {
         case none
     }
 
+    /// The native context-menu source wins over an older page message.
+    /// Keep playlist hints only when they describe that same media element.
+    static func pointed(source: URL, heard: PointedMedia?, audio: Bool) -> PointedMedia {
+        if var heard, heard.src == source.absoluteString {
+            heard.audio = audio
+            return heard
+        }
+        return PointedMedia(src: source.absoluteString, audio: audio)
+    }
+
+    static func downloadTitle(_ media: PointedMedia) -> String {
+        let kind = media.audio ? "Audio" : "Video"
+        switch route(media) {
+        case .none: return "\(kind) Download Unavailable"
+        case .blob: return "Download \(kind) (No Direct File)"
+        default: return "Download \(kind)"
+        }
+    }
+
     static func isPlaylist(_ url: URL) -> Bool {
         url.path.lowercased().hasSuffix(".m3u8")
     }
@@ -255,7 +274,9 @@ enum VideoSave {
     typealias Context = (cookies: [HTTPCookie], page: URL?, agent: String)
 
     @MainActor static func headers(for tab: Tab) async -> Context {
-        let cookies = await tab.webKitOnly("WebKit video-save cookie context", build: false)?.configuration.websiteDataStore.httpCookieStore.allCookies() ?? []
+        // A Chromium tab's cookies reach this jar for the sites it visited
+        // (ChromiumDRMCookies), the same bridge the agents' reads use.
+        let cookies = await tab.pageStore.httpCookieStore.allCookies()
         return (cookies, tab.address, AgentRead.userAgent)
     }
 
@@ -392,7 +413,7 @@ enum VideoSave {
     /// A blob: read by its page, when it is a whole file rather than a
     /// MediaSource: at most `limit` bytes.
     @MainActor static func blob(_ url: URL, in tab: Tab, limit: Int = 512 << 20) async -> Data? {
-        guard let web = tab.webKitOnly("WebKit video-save cookie context", build: false) else { return nil }
+        guard let web = tab.builtPage else { return nil }
         let read = """
         try {
           const r = await fetch(src);
@@ -404,8 +425,7 @@ enum VideoSave {
           return btoa(s);
         } catch (e) { return ''; }
         """
-        let found = try? await web.callAsyncJavaScript(read, arguments: ["src": url.absoluteString, "limit": limit],
-                                                       in: nil, contentWorld: .defaultClient)
+        let found = try? await web.call(read, arguments: ["src": url.absoluteString, "limit": limit], in: .client)
         return (found as? String).flatMap { $0.isEmpty ? nil : Data(base64Encoded: $0) }
     }
 
@@ -423,12 +443,13 @@ enum VideoSave {
 extension Browser {
     /// Download Video (or Audio) picked: see VideoSave.
     func saveMedia(_ media: PointedMedia, from tab: Tab) {
-        guard tab.webKitOnly("Video save authenticated source context", build: false) != nil else { return }
+        guard tab.builtPage != nil else { return }
         let route = VideoSave.route(media)
         let destination = downloadFolder(for: tab)
         DebugLog.note("media.save", ["route": String(describing: route).prefix(200).description])
         switch route {
         case .download(let url):
+            if let chromium = tab.builtPage as? ChromiumPage { chromium.startDownload(url); return }
             guard let web = tab.webKitOnly("WebKit video-save cookie context", build: false) else { return }
             web.startDownload(using: DownloadRequest.resource(url, from: tab.address)) { [weak self] download in
                 self?.downloadFolders[ObjectIdentifier(download)] = destination
@@ -456,7 +477,7 @@ extension Browser {
     }
 
     private func assembleVideo(_ lists: [URL], from tab: Tab, media: PointedMedia, destination: URL) {
-        guard tab.webKitOnly("Video save authenticated source context", build: false) != nil else { return }
+        guard tab.builtPage != nil else { return }
         announce(media.audio ? "Saving audio\u{2026}" : "Saving video\u{2026}", mark: "arrow.down.circle")
         Task {
             let context = await VideoSave.headers(for: tab)

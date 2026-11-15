@@ -24,6 +24,50 @@ struct GeminiLaunchSafetyTests {
         #expect(script.contains("cd \"$ANTIGRAVITY_GEMINI_DIR\""))
     }
 
+    /// #2038: signed out, `agy -p /usage` opens Google itself with `open`.
+    /// Every run Yab starts finds Yab's launcher first, which keeps the page
+    /// out of the Mac's default browser.
+    @Test func everyAgyRunOpensPagesOnlyThroughYabsLauncher() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Library/Keychains"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agy = root.appendingPathComponent("bin/agy")
+        try "#!/bin/sh\ncommand -v open\necho \"$BROWSER\"\nopen 'https://accounts.google.com/o/oauth2/auth?state=x' && echo kept\n"
+            .write(to: agy, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: agy.path)
+        let prepared = try GeminiRunnerTests.config(root: root, binary: agy.path,
+                                                    inherited: ["HOME": root.path, "PATH": "/usr/bin:/bin"]).prepare()
+        let launcher = URL(fileURLWithPath: try #require(prepared.env["HOME"])).appendingPathComponent(GeminiSupport.launcherPath)
+        let ran = await Shell.timed(agy.path, [], env: prepared.env, in: prepared.cwd)
+        let lines = ran.output.split(separator: "\n").map(String.init)
+        #expect(lines == [launcher.appendingPathComponent("open").path, launcher.appendingPathComponent("browser").path, "kept"])
+    }
+
+    /// A readiness check whose agy starts a sign-in of its own ends when the
+    /// page reaches Yab's launcher, not after agy's minute of waiting.
+    @Test func aCheckThatStartsASignInEndsAtOnce() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Library/Keychains"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agy = root.appendingPathComponent("bin/agy")
+        try "#!/bin/sh\necho 'Authentication required. Please visit the URL to log in:' >&2\nopen 'https://accounts.google.com/o/oauth2/auth?state=x'\nsleep 30\necho late\n"
+            .write(to: agy, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: agy.path)
+        let prepared = try GeminiRunnerTests.config(root: root, binary: agy.path,
+                                                    inherited: ["HOME": root.path, "PATH": "/usr/bin:/bin"]).prepare()
+        let asked = SignInAsked()
+        defer { asked.end() }
+        var env = prepared.env
+        env["YAB_GEMINI_PAGE"] = asked.page?.path
+        let began = Date()
+        let ran = await Shell.timed(agy.path, ["-p", "/usage"], env: env, limit: 20, in: prepared.cwd, started: { asked.watch($0) })
+        #expect(asked.asked)
+        #expect(!ran.late && !ran.output.contains("late"))
+        #expect(Date().timeIntervalSince(began) < 5)
+    }
+
     @Test func anExistingKeychainIsNeverReplaced() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let login = root.appendingPathComponent("login"), profile = root.appendingPathComponent("profile")

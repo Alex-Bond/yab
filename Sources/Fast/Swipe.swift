@@ -86,13 +86,19 @@ enum Swipe {
         known.forEach(function(ref) { var el = ref.deref(); if (el) check(el); });
         path.forEach(check);
       }
+      // Pinched in, the fingers are moving around inside what was magnified,
+      // and the page itself may be no wider than the window. Chromium knows
+      // the scale only here: its pinch is not the page view's magnification.
+      function magnified() {
+        return !!window.visualViewport && window.visualViewport.scale > 1.01;
+      }
       function report(final) {
         pending.forEach(function(e) { owned = owned || e.defaultPrevented; });
         pending = [];
         if (seen) checkAll();
         path = [];
         window.webkit.messageHandlers.yabScroll.postMessage({
-          side: owned || !seen ? 'taken' : 'free', gesture: gesture, finished: final
+          side: owned || !seen || magnified() ? 'taken' : 'free', gesture: gesture, finished: final
         });
       }
       // The wheel handlers have had their time: answer once the page has

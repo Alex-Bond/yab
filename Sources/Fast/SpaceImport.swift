@@ -220,11 +220,31 @@ extension Browser {
     func profileSpaces(from source: Chromium.Source) -> Int {
         let names = TabImport.profileNames(in: source)
         let folders = source.profiles.map(\.lastPathComponent).filter {
-            $0 != "Default" && (names.isEmpty ? !["Guest Profile", "System Profile"].contains($0) : names[$0] != nil)
+            !["Default", "Guest Profile", "System Profile"].contains($0) && (names.isEmpty || names[$0] != nil)
         }
         let before = spaces.count
         for folder in folders { _ = cookieSpaces(for: folder, name: names[folder], from: source) }
         return spaces.count - before
+    }
+
+    /// Use the same profile identity as tab and cookie import, regardless
+    /// of the Space's current name or the order import categories run in.
+    @discardableResult
+    func takeProfileBookmarks(_ nodes: [Bookmark], profile: String, name: String, from source: Chromium.Source) -> Int {
+        let key = "\(source.name):\(profile)"
+        let target: UUID
+        if let existing = spaces.first(where: { $0.origin == key || $0.signedInAs == key }) {
+            target = existing.id
+        } else if profile == "Default" {
+            target = spaces.first(where: \.isFirst)?.id ?? spaceID
+            if let at = spaces.firstIndex(where: { $0.id == target }), spaces[at].origin == nil {
+                spaces[at].origin = key
+            }
+        } else {
+            target = cookieSpaces(for: profile, name: name, from: source).compactMap { $0 }.first!
+        }
+        Spaces.write(spaces)
+        return bookmarks.takeProfile(nodes, key: key, name: "\(source.name) › \(name)", space: target)
     }
 
     func cookieSpaces(for profile: String, name: String?, from source: Chromium.Source) -> [UUID?] {
@@ -299,7 +319,8 @@ extension Browser {
         guard let at = spaces.firstIndex(where: { $0.id == id }) else { return (0, 0) }
         if showsShared(id), !pins.isEmpty {
             writePins(now: true)
-            var shared = Session.read(space: Space.pinsID).tabs
+            let savedPins = Session.read(space: Space.pinsID)
+            var shared = savedPins.tabs
             let row = id == spaceID ? tabs : parked[id]?.tabs
             let urls = row.map { $0.compactMap { ($0.pending ?? $0.address).map(TabImport.key) } }
                 ?? Session.read(space: id, window: windowID).tabs.compactMap { URL(string: $0.url).map(TabImport.key) }
@@ -314,8 +335,8 @@ extension Browser {
                 } else { over.append(entry) }
             }
             if !added.isEmpty {
-                Session.write(now: true, space: Space.pinsID, .init(tabs: shared, active: 0))
-                for window in SharedPins.windows(with: self) where window.pinsShared { window.followPins(shared) }
+                Session.write(now: true, space: Space.pinsID, .init(tabs: shared, active: 0, pairs: savedPins.pairs))
+                for window in SharedPins.windows(with: self) where window.pinsShared { window.followPins(shared, pairs: savedPins.pairs ?? []) }
             }
             // Overflow stays in its destination space, with its kept tabs.
             let rest = lay([], kept: over + kept, open: open, into: id)

@@ -75,13 +75,14 @@ struct RowsCard: View {
     let dark: Bool
     /// False while the answer plate over the rows is what the key does.
     var bestLit = true
+    var isPrivate = false
     let choose: (WordRow) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             ForEach(Array(rows.enumerated().reversed()), id: \.element.id) { i, row in
                 Button { choose(row) } label: {
-                    WordRowView(row: row, best: i == 0 && bestLit, dark: dark)
+                    WordRowView(row: row, best: i == 0 && bestLit, dark: dark, isPrivate: isPrivate)
                 }
                 .buttonStyle(WordRowPress(best: i == 0 && bestLit, fill: WordRowView.bestFill(dark: dark)))
                 .accessibilityIdentifier(i == 0 ? "field.best" : "field.row.\(i)")
@@ -102,6 +103,8 @@ struct WordRowView: View {
     let row: WordRow
     let best: Bool
     var dark = false
+    var pageURL: URL? = nil
+    var isPrivate = false
 
     private typealias C = Metrics.FieldCard
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -120,7 +123,7 @@ struct WordRowView: View {
         // light enough to keep them their usual color.
         let lit = dark
         HStack(spacing: C.rowGap) {
-            RowIcon(icon: row.icon, dark: lit)
+            RowIcon(icon: row.icon, dark: lit, pageURL: pageURL ?? row.pageURL, isPrivate: isPrivate)
             let main = Text(line.main).foregroundStyle(lit ? Color.white : Ink.primary)
             let detail = Text(line.detail.map { "  " + $0 } ?? "")
                 .foregroundStyle(lit ? Color.white.opacity(0.72) : Ink.rowSubtitle)
@@ -181,11 +184,13 @@ struct RowIcon: View {
     let icon: WordRow.Icon
     var dark = false
     var glyphSize: CGFloat = Metrics.FieldCard.rowIcon
+    var pageURL: URL? = nil
+    var isPrivate = false
 
     var body: some View {
         Group {
             switch icon {
-            case let .favicon(key, host): Favicon(icon: key, host: host, size: Metrics.FieldCard.rowFavicon)
+            case let .favicon(key, host): Favicon(icon: key, host: host, size: Metrics.FieldCard.rowFavicon, url: pageURL, isPrivate: isPrivate)
             case .magnifier: glyph(.magnifyingGlass)
             // Asking Claude: its face with the eyes, as the chat's avatar.
             case .sparkle: AgentFace(size: glyphSize, color: dark ? .white : Ink.primary)
@@ -315,7 +320,7 @@ struct NewTabCard: View {
 
     private func itemRow(_ item: NewTabItem) -> some View {
         Button { app.choose(item) } label: {
-            NewTabRowView(icon: item.icon, title: item.title, subtitle: item.subtitle)
+            NewTabRowView(icon: item.icon, title: item.title, subtitle: item.subtitle, pageURL: item.pageURL)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("newtab.item.\(item.id)")
@@ -342,6 +347,7 @@ struct NewTabRowView: View {
     let title: String
     let subtitle: String
     var tab: Tab? = nil
+    var pageURL: URL? = nil
 
     private typealias C = Metrics.FieldCard
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -353,7 +359,7 @@ struct NewTabRowView: View {
                         url: tab.navigationURL, isPrivate: tab.isPrivate, mark: tab.customMark)
                     .frame(width: C.rowIconColumn, height: C.rowIconColumn)
             } else {
-                RowIcon(icon: icon)
+                RowIcon(icon: icon, pageURL: pageURL)
             }
             VStack(alignment: .leading, spacing: C.rowLineGap) {
                 Text(title)

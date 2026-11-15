@@ -513,6 +513,7 @@ enum BoostWords {
             #"The user attached files on this Mac: .*?when the task needs it\. "#,
             #"The user points you at their tab .*?\(\S*\), ".*?"\. "#,
             #"Its words, read just now \(the page's.*?only for what they don't\. "#,
+            #"This message is about th(?:at tab|ose tabs) \([^)]*\): .*?say plainly what stops you\. "#,
             #"They selected this on the page: «.*?»\. "#,
             #"The user points you at the email ".*?"[^.]*?\(thread [^)]*\)\. Read it with mail_read\. "#,
         ]

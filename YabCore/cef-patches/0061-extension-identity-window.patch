@@ -1,0 +1,74 @@
+--- /dev/null
++++ b/chrome/browser/extensions/external_identity_flow.h
+@@ -0,0 +1,21 @@
++// Only Chromium's original WebAuthFlow marks a native identity provider.
++#ifndef CHROME_BROWSER_EXTENSIONS_EXTERNAL_IDENTITY_FLOW_H_
++#define CHROME_BROWSER_EXTENSIONS_EXTERNAL_IDENTITY_FLOW_H_
++#include <memory>
++#include "base/supports_user_data.h"
++#include "content/public/browser/web_contents.h"
++namespace extensions {
++class ExternalIdentityFlow : public base::SupportsUserData::Data {
++ public:
++  static void Mark(content::WebContents* contents) {
++    if (contents && !contents->IsBeingDestroyed())
++      contents->SetUserData(&kKey, std::make_unique<ExternalIdentityFlow>());
++  }
++  static bool IsProvider(content::WebContents* contents) {
++    return contents && !contents->IsBeingDestroyed() && contents->GetUserData(&kKey);
++  }
++ private:
++  inline static const int kKey = 0;
++};
++}  // namespace extensions
++#endif
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -338,6 +338,7 @@
+     "extension_view_host.cc",
+     "extension_view_host.h",
+     "external_action_origin.h",
++    "external_identity_flow.h",
+     "extension_view_host_factory.cc",
+     "extension_view_host_factory.h",
+     "external_component_loader.cc",
+--- a/chrome/browser/extensions/api/identity/web_auth_flow.cc
++++ b/chrome/browser/extensions/api/identity/web_auth_flow.cc
+@@ -50,6 +50,7 @@
+ 
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+ #include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_identity_flow.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
+ #include "chrome/browser/ui/browser_window.h"
+ #include "chrome/browser/ui/tabs/tab_enums.h"
+@@ -325,6 +326,9 @@
+   // a recent launch, or an arbitrary unrequested popup in the same profile.
+   ScopedExternalTabCreation creation(external ? owner : nullptr, nullptr,
+                                      true, -1);
++  // Keep the real provider window distinct from an ordinary tabs.create.
++  // Selecting a same-window tab would destroy an action popup API caller.
++  if (external) extensions::ExternalIdentityFlow::Mark(web_contents_.get());
+   BrowserWindowCreateParams browser_params(BrowserWindowInterface::TYPE_POPUP,
+                                            profile_, user_gesture_);
+   browser_params.omit_from_session_restore = true;
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -27,6 +27,7 @@
+ #include "cef/libcef/browser/views/external_consent.h"
+ #include "cef/libcef/browser/views/external_print.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_identity_flow.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
+ #include "chrome/common/extensions/api/tabs.h"
+ #include "extensions/browser/event_router.h"
+@@ -562,7 +563,8 @@
+   auto owner=model && model->owner()?CefBrowserHostBase::GetBrowserForContents(model->owner()):nullptr;
+   value->SetInt("ownerBrowserId",owner?owner->GetIdentifier():0);
+   value->SetInt("ownerVersion",1);
+-  value->SetString("requestedKind","tab");
++  value->SetString("requestedKind", extensions::ExternalIdentityFlow::IsProvider(contents)
++                                         ? "identity" : "tab");
+   handler->OnExtensionTabCreated(browser.get(), value);
+ }
+ }  // namespace

@@ -91,6 +91,7 @@ struct WheelNotchTests {
         guard let window = web.window,
               let event = CGEvent(scrollWheelEvent2Source: nil, units: smooth ? .pixel : .line, wheelCount: 1,
                                   wheel1: dy, wheel2: 0, wheel3: 0) else { return }
+        event.flags = []
         if smooth { event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1) }
         let point = NSPoint(x: 400, y: 300)
         let screen = window.convertPoint(toScreen: point)

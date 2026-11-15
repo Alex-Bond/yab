@@ -695,12 +695,30 @@ final class Preferences: ObservableObject, Relaying {
         willSet { relay.send(\.diaryText, newValue) }
         didSet { store.set(diaryText, forKey: "diary.text") }
     }
-    /// Whether sites may ask for a passkey here. Off sends them to the
-    /// password instead, the only thing that works in a build without
-    /// Apple's browser entitlement.
+    /// The person's own switch, Settings › Passwords › Offer passkeys: on
+    /// until they turn it off. Off sends sites to the password instead.
+    /// Only this switch writes its key, and only where it can be turned.
     var passkeys: Bool {
         willSet { relay.send(\.passkeys, newValue) }
-        didSet { store.set(passkeys, forKey: "passkeys") }
+        didSet { store.set(passkeys, forKey: Self.passkeysKey) }
+    }
+    /// The switch's key, since 0.46.29. "passkeys" held the switch and also
+    /// whether pages were offered them: every launch that couldn't do
+    /// passkeys wrote false there (each build before 0.41.0's entitlement,
+    /// any build without it), Sync carried that false to Macs that can, and
+    /// their pages saw no PublicKeyCredential: Apple's sign-in asked for a
+    /// newer browser (#1936, #1944). Nearly every false kept there was a
+    /// machine's, not a choice, so the switch starts on again under a key
+    /// nothing else writes; "passkeys" is left to older builds.
+    nonisolated static let passkeysKey = "passkeys.offer"
+    /// The switch as a store holds it: on unless turned off.
+    nonisolated static func passkeysOn(in store: UserDefaults) -> Bool {
+        store.object(forKey: passkeysKey) as? Bool ?? true
+    }
+    /// Whether pages are offered passkeys: the switch, on a Mac that can do
+    /// them. Worked out each time, never kept (FormRelay.passkeysOffered).
+    nonisolated static func offersPasskeys(in store: UserDefaults, possible: Bool) -> Bool {
+        possible && passkeysOn(in: store)
     }
     /// Whether this build can actually do them: signed with the entitlement,
     /// its profile embedded. Fixed for the life of the process.
@@ -709,7 +727,7 @@ final class Preferences: ObservableObject, Relaying {
     /// Asked of the running process's own signature, which is the only thing
     /// that decides it, a profile file in the bundle proves nothing on its
     /// own, and an ad-hoc build has neither.
-    static var entitledToPasskeys: Bool {
+    nonisolated static var entitledToPasskeys: Bool {
         guard let task = SecTaskCreateFromSelf(nil) else { return false }
         let value = SecTaskCopyValueForEntitlement(
             task, "com.apple.developer.web-browser.public-key-credential" as CFString, nil
@@ -749,7 +767,9 @@ final class Preferences: ObservableObject, Relaying {
     }
     /// Who fills and saves here (PasswordManagers.Source).
     var passwordSource: PasswordManagers.Source {
-        PasswordManagers.Source(yab: usesYabPasswords, saver: PasswordManagers.savingManager)
+        let saver = PasswordManagers.savingManager
+        return PasswordManagers.Source(yab: usesYabPasswords, saver: saver,
+                                       asksForApple: saver == PasswordManagers.apple && PasswordManagers.appleNative)
     }
     /// Offer the code a site mailed under the box that asks for it, read
     /// from Gmail with the tab's sign-in (MailCodes.swift).
@@ -1080,7 +1100,13 @@ final class Preferences: ObservableObject, Relaying {
         // to be made should be made in the right appearance. Through `shared`,
         // not `NSApp`: on macOS 14 SwiftUI makes this before the application,
         // and `NSApp` is still nil here.
-        NSApplication.shared.appearance = chosen.appearance
+        let application = NSApplication.shared
+        let appearance = chosen.appearance
+        // A new window reads the same global choice. Assigning it again
+        // invalidates every existing window's appearance and view tree.
+        if application.appearance?.name != appearance?.name {
+            application.appearance = appearance
+        }
         // The key once held the swatch itself, with "none" for edge to edge:
         // a swatch there is a window painted in it, and the swatch it was.
         let kept = Self.american(store.string(forKey: "backdrop"))
@@ -1143,20 +1169,13 @@ final class Preferences: ObservableObject, Relaying {
         shielded = store.object(forKey: "shield") as? Bool ?? true
         extensionsInPrivate = store.bool(forKey: "extensions.private")
         diaryText = store.object(forKey: "diary.text") as? Bool ?? true
-        // Offered by default only in a build that can actually do them,
-        // one with Apple's browser entitlement and its profile embedded. A
-        // choice made while they couldn't work is not a choice about them:
-        // the first run of a build that can offers them, whatever was set
-        // before; from then on the switch is the person's.
-        let entitled = Preferences.entitledToPasskeys
-        passkeysPossible = entitled
-        if entitled, !store.bool(forKey: "passkeys.entitled") {
-            passkeys = true
-            store.set(true, forKey: "passkeys")
-        } else {
-            passkeys = store.object(forKey: "passkeys") as? Bool ?? entitled
-        }
-        store.set(entitled, forKey: "passkeys.entitled")
+        // Offered only in a build that can actually do them, one with
+        // Apple's browser entitlement and its profile embedded; the switch
+        // is the person's, on until they turn it off (passkeysKey). Nothing
+        // is written here: a launch that can't do them leaves the switch as
+        // it found it, for this Mac and every other.
+        passkeysPossible = Preferences.entitledToPasskeys
+        passkeys = Self.passkeysOn(in: store)
         // A test run downloads into its own folder: ~/Downloads would have
         // macOS stop it to ask for access, with a dialog on the screen of
         // whoever is working beside it.

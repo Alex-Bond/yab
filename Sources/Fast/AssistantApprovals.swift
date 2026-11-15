@@ -29,9 +29,9 @@ final class AssistantApprovals: ObservableObject {
     enum State: String { case open, approved, denied, expired, done, skipped }
 
     enum Place: Equatable {
-        case tab(UUID), chat(String)
+        case tab(UUID), chat(String), mail(String)
         var wire: String {
-            switch self { case .tab(let id): id.uuidString.lowercased(); case .chat(let id): "chat:" + id }
+            switch self { case .tab(let id): id.uuidString.lowercased(); case .chat(let id): "chat:" + id; case .mail(let id): id }
         }
     }
 
@@ -93,6 +93,25 @@ final class AssistantApprovals: ObservableObject {
         if let browser = Agents.shared.browser { seen(in: browser) }
     }
 
+    static func mailLines(_ permit: AgentPermit) -> [String] {
+        [permit.detail, String(permit.draft.prefix(600))].filter { !$0.isEmpty }
+    }
+
+    func opened(mail id: String, _ permit: AgentPermit, by asker: Asker) {
+        let record = Record(id: UUID().uuidString.lowercased(), assistant: asker.id, session: permit.session,
+                            place: .mail(id), kind: .yes, title: "\(asker.name): \(permit.question)",
+                            lines: Self.mailLines(permit), expires: Date().addingTimeInterval(Self.lifetime(for: permit.session)),
+                            key: permit.key, local: asker.local)
+        keep(record)
+        publish(record)
+    }
+
+    func settled(mail id: String, _ permit: AgentPermit, yes: Bool) {
+        for record in records.values where record.place == .mail(id) && record.state == .open && record.key == permit.key {
+            finish(record.id, yes ? .approved : .denied)
+        }
+    }
+
     static func lines(_ root: Agents.Session) -> [String] {
         [root.title ?? root.name, root.askedOnce].filter { !$0.isEmpty }
     }
@@ -133,6 +152,8 @@ final class AssistantApprovals: ObservableObject {
     /// Only a card actually in front of the person counts as opened.
     func seen(in browser: Browser) {
         guard NSApp.isActive, BrowserWindows.shared.browser(for: NSApp.keyWindow) === browser else { return }
+        if let shown = AskStand.shared.presented[ObjectIdentifier(browser)], shown.actionable,
+           case .mail(let id) = shown.held { seen(.mail(id), key: shown.key) }
         if let id = browser.chatID, browser.chatOpen, !browser.chatHistory {
             seen(.chat(id))
             for tab in browser.tabs where tab.permit.map({ Agents.shared.root(of: $0.session) == id }) == true { seen(on: tab) }
@@ -218,7 +239,11 @@ final class AssistantApprovals: ObservableObject {
     }
 
     func left(session: String) {
-        for record in records.values where record.session == session && record.state == .open { finish(record.id, .skipped) }
+        for record in records.values where record.session == session && record.state == .open {
+            // An app-owned mail operation remains answerable after its caller ends.
+            if case .mail = record.place { continue }
+            finish(record.id, .skipped)
+        }
     }
 
     func handed(_ tab: Tab, session: String, reason: String, grant: AssistantGrant) {
@@ -338,6 +363,13 @@ final class AssistantApprovals: ObservableObject {
               record.title == request.title, record.lines == request.lines,
               request.choices == nil || request.choices == record.choices else { return }
         if record.local, Agents.shared.browser?.prefs.agentsAskElsewhere == false { return }
+        if case .mail(let id) = record.place {
+            guard let pending = Agents.shared.mailRequest(id), pending.permit.session == record.session,
+                  pending.permit.key == record.key, Self.mailLines(pending.permit) == request.lines else { return }
+            if yes { ApprovalDetails.shared.answered(request.id, tab: nil, permit: pending.permit) }
+            Agents.shared.answerMail(id, yes: yes)
+            return
+        }
         if case .chat(let id) = record.place {
             guard let root = Agents.shared.session(id), let permit = root.permit,
                   permit.session == record.session, permit.key == record.key else { return }

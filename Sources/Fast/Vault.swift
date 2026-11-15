@@ -557,30 +557,9 @@ enum Vault {
         return theirs > ours
     }
 
-    /// Every browser passwords were ever brought in from, at onboarding or
-    /// since, taken again without asking: a login saved there since then is
-    /// here too, and a sign-in never comes up empty just because the import
-    /// was a while ago. Only where macOS hands over the browser's key without
-    /// a prompt, it does once you have said "Always Allow", and at most
-    /// every few hours.
-    static func refresh() {
-        // Only what the settings say, here: which browsers are still
-        // installed is a walk of their folders, 18 ms on the main thread
-        // at launch, before the window's first frame, and waits with the
-        // rest.
-        guard !(Store.settings.stringArray(forKey: fromAllKey) ?? []).isEmpty || Store.settings.string(forKey: fromKey) != nil else { return }
-        let last = Store.settings.double(forKey: refreshedKey)
-        guard Date().timeIntervalSince1970 - last > 6 * 3600 else { return }
-        // After launch has settled; nothing waits on this.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20) {
-            for source in broughtFrom {
-                guard let found = try? Chromium.read(source, quiet: true) else { continue }
-                let kept = take(found)
-                if kept > 0 { NSLog("Vault: %d new or changed from %@", kept, source.name) }
-            }
-            Store.settings.set(Date().timeIntervalSince1970, forKey: refreshedKey)
-        }
-    }
+    /// Prior imports and keychain ACLs do not authorize another credential read.
+    /// Kept for callers from older startup paths; refresh requires Bring In.
+    static func refresh() {}
 
     /// Which browsers those are, each added by the import that worked.
     static func broughtIn(from source: Chromium.Source) {
@@ -798,6 +777,8 @@ enum Vault {
     private static var waiting: [(site: String, agent: Bool, done: (Proven) -> Void)] = []
     /// The question up now, for the bench to see and take down.
     private(set) static var asking: LAContext?
+    /// Questions put this launch, for the bench to count.
+    private(set) static var questions = 0
     private static var lockWatch: [NSObjectProtocol] = []
 
     /// Answers whether a kept password may go into a page on `host` now.
@@ -805,9 +786,20 @@ enum Vault {
     /// and no yes has been given within the grace. A fill an agent started
     /// is asked about every time and its yes lends nothing to the next: the
     /// person is answering for that one sign-in.
-    static func proveToFill(on host: String, agent: Bool = false, _ done: @escaping (Proven) -> Void) {
+    ///
+    /// `already`: the password manager the password came from asked the
+    /// person for it just now (Apple Passwords' Touch ID, 1Password's
+    /// approval), as the iCloud Passwords extension asks once.
+    /// A pick the person made goes without a second question, and the grace
+    /// starts from that yes as from Yab's own. An agent's fill is still
+    /// asked: the manager's question didn't say which sign-in it was for.
+    static func proveToFill(on host: String, agent: Bool = false, already: Bool = false, _ done: @escaping (Proven) -> Void) {
         guard Store.settings.bool(forKey: proveKey) else { done(.yes); return }
-        if !agent, let provenAt, Date().timeIntervalSince(provenAt) < grace { done(.yes); return }
+        if already, !agent {
+            watchForLock()
+            provenAt = Date()
+        }
+        if !asks(agent: agent, already: already, provenAt: provenAt) { done(.yes); return }
         if agent, let elsewhere = provenElsewhere, elsewhere.site == registrable(host), Date().timeIntervalSince(elsewhere.at) < 120 {
             provenElsewhere = nil
             done(.yes)
@@ -817,6 +809,20 @@ enum Vault {
         guard waiting.count == 1 else { return }
         ask()
     }
+
+    /// Whether a fill, with the switch on, needs Yab's question: an agent's
+    /// always (short of a yes given elsewhere), a pick whose manager just
+    /// asked the person never, any other only when the last yes is older
+    /// than the grace.
+    static func asks(agent: Bool, already: Bool, provenAt: Date?, now: Date = Date()) -> Bool {
+        if agent { return true }
+        if already { return false }
+        guard let provenAt else { return true }
+        return now.timeIntervalSince(provenAt) >= grace
+    }
+
+    /// A yes given within the grace still stands.
+    static var yesStands: Bool { !asks(agent: false, already: false, provenAt: provenAt) }
 
     /// The question, for the first fill waiting; the others that are for
     /// the same site, and started the same way, hear its answer.
@@ -833,6 +839,7 @@ enum Vault {
             return
         }
         asking = context
+        questions += 1
         let site = first.site.isEmpty ? "this page" : first.site
         context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "fill your password on \(site)") { ok, _ in
             DispatchQueue.main.async { answer(ok ? .yes : .no, for: first) }

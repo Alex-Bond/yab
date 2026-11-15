@@ -82,6 +82,37 @@ final class FolderArtworkSyncTests: XCTestCase {
         let gone = await until { again.sync.engine?.journal.record(.init(collection: SyncCollection.icon, id: name))?.alive() == false && again.sync.folderArtwork.image("image:" + name) == nil }
         XCTAssertTrue(gone)
     }
+    func testPublicSiteIconSyncReplacementOfflineRestoreAndRemoval() async throws {
+        let server = SyncMemoryServer(), seal = Seal.make(), owner = try TestMac(server: server, seal: seal)
+        mac = owner; leases.append(OwnedLease(owner.client))
+        let name = "site-example.png", red = try png(.red, side: 128), green = try png(.green, side: 128)
+        let page = URL(string: "https://example.test/document")!
+        try owner.write(SyncCollection.icon, name, ["data": .string(red.base64EncodedString()), "origin": .string("https://example.test")])
+        owner.client.start()
+        let uploaded = await until { owner.client.state == .live && owner.pending == 0 }
+        XCTAssertTrue(uploaded)
+        let made = makeApp(server, seal)
+        let hydrated = await until { made.sync.folderArtwork.siteImage(for: page) != nil }
+        XCTAssertTrue(hydrated)
+        let first = try XCTUnwrap(made.sync.folderArtwork.siteImage(for: page)?.pngData())
+        XCTAssertNil(made.sync.folderArtwork.siteImage(for: page, isPrivate: true))
+        XCTAssertNil(made.sync.folderArtwork.siteImage(for: URL(string: "http://example.test/document")!))
+        XCTAssertNil(made.sync.folderArtwork.siteImage(for: URL(string: "https://example.test:8443/document")!))
+        try owner.write(SyncCollection.icon, name, ["data": .string(green.base64EncodedString()), "origin": .string("https://example.test")])
+        let replaced = await until { made.sync.folderArtwork.siteImage(for: page)?.pngData() != first }
+        XCTAssertTrue(replaced)
+        made.sync.end()
+        XCTAssertNil(made.sync.folderArtwork.siteImage(for: page))
+        setOffline(server, true)
+        let again = makeApp(server, seal)
+        let restored = await until { again.sync.folderArtwork.siteImage(for: page) != nil }
+        XCTAssertTrue(restored)
+        setOffline(server, false); again.sync.engine?.start()
+        try owner.journal.remove(.init(collection: SyncCollection.icon, id: name)); owner.client.kick()
+        let gone = await until { again.sync.folderArtwork.siteImage(for: page) == nil }
+        XCTAssertTrue(gone)
+    }
+
     func testAccountReplacementAndLateOldAccountDeltaCannotExposeOldPixels() throws {
         let store = SyncFolderArtwork(), red = try png(.red), green = try png(.green)
         let key = "same.png"

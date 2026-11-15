@@ -128,7 +128,7 @@ enum ExtensionContentSettings {
         case "popups":
             if said == true { WindowGate.allow(site.bare) } else { WindowGate.forget(site.bare) }
         case "automaticDownloads":
-            if let said { SiteDownloads.rememberMany(site.host, said) } else { SiteDownloads.forgetMany(site.host) }
+            if let said { SiteDownloads.rememberMany(site.host, said, origin: site.origin) } else { SiteDownloads.forgetMany(site.host) }
         default: break
         }
     }

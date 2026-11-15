@@ -123,7 +123,7 @@ import WebKit
     static func manager(of url: URL?) -> String? {
         guard let url, url.scheme?.hasSuffix("-extension") == true, let host = url.host() else { return nil }
         return kept.first { id in
-            PasswordManagers.installed(id).flatMap { Extensions.here.contexts[$0.id] }?.baseURL.host() == host
+            PasswordManagers.installed(id).flatMap { ManagerExtensions.shared.base($0.id) }?.host() == host
         }
     }
 
@@ -147,20 +147,23 @@ import WebKit
     /// one within a few seconds, unlocked right there, Touch ID first the
     /// first time this session.
     static func inPlacePage(_ page: any PageHandle, url: URL?) {
-        guard manager(of: url) != nil,
-              let web = WebKitOnly.page(page, for: "Legacy password-manager unlock") else { return }
-        inPlace(web, url: url)
+        guard manager(of: url) != nil else { return }
+        inPlace(ManagerUnlock.Page(page), url: url)
     }
 
     static func inPlace(_ web: WKWebView, url: URL?) {
+        inPlace(ManagerUnlock.Page(popup: web), url: url)
+    }
+
+    private static func inPlace(_ page: ManagerUnlock.Page, url: URL?) {
         guard let id = manager(of: url), !busy.contains(id) else { return }
         busy.insert(id)
-        Task { @MainActor [weak web] in
+        Task { @MainActor in
             defer { busy.remove(id) }
-            guard let web, await ManagerUnlock.lockScreen(web, seconds: 6) else { return }
+            guard await ManagerUnlock.lockScreen(page, seconds: 6) else { return }
             guard await permit(id, mayAsk: true) else { last[id] = "in place: not allowed"; return }
             guard let secret = secret(id) else { return }
-            settle(id, await ManagerUnlock.enter(secret, into: web), "in place")
+            settle(id, await ManagerUnlock.enter(secret, into: page), "in place")
         }
     }
 

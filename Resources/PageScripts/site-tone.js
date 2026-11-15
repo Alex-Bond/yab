@@ -80,6 +80,23 @@
   const region = tops[0]?.r;
   const regions = [{x: 0, y: region ? Math.max(0, region.top) + 2 : 2,
     width: W, height: region ? Math.min(18, region.height - 2) : Math.min(18, H - 2)}];
+  // The pixels are the site's chrome only while nothing lies over it. A
+  // page's own full screen, or a modal's veil over the whole page, is there
+  // for a moment and covers it: read then, the browser wore the veil's gray
+  // or the film's black (register 2669). Covered, say so, and the color
+  // the page was last seen in stays until it shows again.
+  const covered = !!(document.fullscreenElement || document.webkitFullscreenElement) ||
+    !chosen && [W * .12, W * .5, W * .88].some(function (x) {
+      const top = document.elementFromPoint(x, regions[0].y + 1);
+      if (!top || top === html || top === body) return false;
+      if (tops[0]) return !tops[0].el.contains(top);
+      for (let n = top; n && n !== body; n = n.parentElement) {
+        if (getComputedStyle(n).position !== 'fixed') continue;
+        const r = n.getBoundingClientRect();
+        return r.width >= W - 4 && r.height >= H * .9;
+      }
+      return false;
+    });
 
   // Watch only the roots and the selected controls' surfaces. No subtree
   // observer on the document: video, canvas and scrolling must stay quiet.
@@ -119,6 +136,6 @@
       nodes.forEach(el => watch.observer.observe(el, {attributes: true, attributeOldValue: true}));
     }
   }
-  return {color: chosen?.color || null, source, regions, width: W, height: H,
+  return {color: chosen?.color || null, source, regions, width: W, height: H, covered,
     href: location.href, origin: performance.timeOrigin};
 })()

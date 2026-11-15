@@ -7,6 +7,7 @@ per-feature implementation and acceptance plan is
 [evidence/chromium-webkit-implementation-plan.md](evidence/chromium-webkit-implementation-plan.md),
 with exact base-source hashes in its JSON companion. All 122 labels are
 covered, including remaining safe refusals and engine-neutral fixtures.
+[chromium-features.md](chromium-features.md) says what is true of the features.
 
 Yab's page code reaches a tab's engine through `PageHandle` (see
 [page-engine.md](page-engine.md)). A feature still using the guarded WK path

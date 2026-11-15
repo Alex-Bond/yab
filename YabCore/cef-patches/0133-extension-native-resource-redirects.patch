@@ -1,0 +1,56 @@
+--- a/cef/libcef/browser/net_service/proxy_url_loader_factory.cc
++++ b/cef/libcef/browser/net_service/proxy_url_loader_factory.cc
+@@ -395,6 +395,8 @@
+   scoped_refptr<net::HttpResponseHeaders> override_headers_;
+   GURL original_url_;
+   GURL redirect_url_;
++  // A native extension alias redirect must keep its loader's upstream GUID.
++  GURL extension_redirect_url_;
+   GURL header_client_redirect_url_;
+   const net::MutableNetworkTrafficAnnotationTag traffic_annotation_;
+   std::optional<network::mojom::CredentialsMode> original_crendentials_mode_;
+@@ -517,7 +519,11 @@
+       scheme::IsCorsEnabledScheme(request_.url.scheme());
+ 
+   // Match logic in network::cors::ShouldCheckCors.
++  // ExtensionURLLoader owns extension-origin / web-accessible-resource
++  // authorization, including dynamic GUID URLs. A generic network CORS
++  // scheme check rejects those URLs before the native loader can inspect them.
+   bool should_check_cors =
++      !request_.url.SchemeIs(extensions::kExtensionScheme) &&
+       is_cross_origin &&
+       request_.mode != network::mojom::RequestMode::kNavigate &&
+       request_.mode != network::mojom::RequestMode::kNoCors;
+@@ -713,6 +719,11 @@
+   // False while a redirect is in-progress to avoid duplicate notifications.
+   bool notify_client = !redirect_in_progress_;
+ 
++  extension_redirect_url_ =
++      request_.url.SchemeIs(extensions::kExtensionScheme) &&
++              redirect_info.new_url.SchemeIs(extensions::kExtensionScheme)
++          ? redirect_info.new_url
++          : GURL();
+   current_response_ = std::move(head);
+   current_body_.reset();
+   current_cached_metadata_.reset();
+@@ -811,6 +822,20 @@
+   if (!target_client_) {
+     return;
+   }
++
++  // ExtensionURLLoader remembers the GUID which authorized a dynamic
++  // resource. Recreating it for the canonical extension-id hop loses that
++  // provenance and correctly rejects the now-direct URL. Follow the native
++  // redirect in place; explicit client URL overrides still restart below.
++  if (target_loader_ && !new_url && !extension_redirect_url_.is_empty() &&
++      request_.url == extension_redirect_url_) {
++    extension_redirect_url_ = GURL();
++    headers_update_params.removed_headers = std::move(removed_headers);
++    headers_update_params.modified_headers = std::move(modified_headers);
++    target_loader_->FollowRedirect(std::move(headers_update_params), std::nullopt);
++    return;
++  }
++  extension_redirect_url_ = GURL();
+ 
+   // Normally we would call FollowRedirect on the target loader and it would
+   // begin loading the redirected request. However, the client might want to

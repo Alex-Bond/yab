@@ -104,6 +104,33 @@ struct SharedTabHandOffTests {
         }
     }
 
+    /// A muted pin's page goes over muted, and the tab it leaves in its
+    /// place is muted too: picked there later, its own page comes up silent
+    /// (feedback #2018).
+    @Test func aMutedSharedPinLeavesAMutedTabBehind() async throws {
+        try #require(AudioWatch.canMute)
+        let key = UUID()
+        try await world({ a, b, live in
+            live.pin = "L"
+            live.everywhere = key
+            a.lay([live])
+            a.select(live)
+            live.mute(true)
+            // The windows as the app has them, before the copy is made.
+            BrowserWindows.shared.handOffWindows = [a, b]
+            let entry = try #require(a.sessionEntry(live, id: key))
+            let mine = try #require(b.madePin(entry, key: key))
+            b.lay([mine])
+            return mine
+        }) { a, b, live, mine in
+            #expect(mine.muted)
+            b.select(mine)
+            #expect(b.active === live && live.muted)
+            let left = try #require(a.tabs.first { $0.everywhere == key })
+            #expect(left !== live && left.muted, "the tab left behind for a muted pin must be muted")
+        }
+    }
+
     /// An agent's pick, or none awake elsewhere, wakes this window's own.
     @Test func notByHandItWakesItsOwn() async throws {
         try await world({ a, b, live in

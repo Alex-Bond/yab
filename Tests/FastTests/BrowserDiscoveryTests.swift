@@ -37,7 +37,7 @@ struct BrowserDiscoveryTests {
         #expect(source.profiles.isEmpty)
         #expect(source.scan.trouble != nil)
         #expect(Chromium.installed(among: [source]).count == 1)
-        #expect(throws: TabImport.Trouble.folderUnreadable) { try TabImport.places(in: source) }
+        #expect(throws: TabImport.Trouble.folderUnreadable) { try TabImport.places(in: source.authorizingImport()) }
     }
 
     @MainActor

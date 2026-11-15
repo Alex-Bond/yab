@@ -16,20 +16,7 @@ extension Bench {
 
     /// What an assistant may do, as its `yab mcp` lists its tools by.
     static func assistantCaps(_ grant: AssistantGrant, browser: Browser) -> [String: Any] {
-        let space = browser.spaces.first { $0.id == grant.space } ?? browser.spaces.first
-        return ["id": grant.id, "name": grant.name, "client": grant.client,
-                "space": grant.spaceName(in: browser.spaces),
-                "allSpaces": grant.allSpaces == true,
-                "spaces": grant.allSpaces == true ? browser.spaces.map(\.name) : [space?.name].compactMap { $0 },
-                "mode": grant.mode.rawValue, "mail": grant.mail && MailCenter.shared.connected, "messages": grant.messages,
-                "cards": grant.cards, "paused": grant.paused, "never": grant.never,
-                "allowedSites": grant.allowedSites ?? [], "only": grant.only,
-                "approvalDevices": SyncCenter.shared.assistantAnswerers.map(\.name),
-                "tasks": AgentSetupModel.shared.canRunTasks(),
-                "mac": Host.current().localizedName ?? "Mac",
-                // Its tasks, newest first: one started while the Mac was away
-                // has an id the assistant never heard.
-                "started": Agents.shared.sessions.filter { $0.assistant == grant.id && $0.cli != "external" }.sorted { $0.began > $1.began }.prefix(10).map(\.id)]
+        AgentCapabilityCache.Assistant.read(grant, browser: browser).answer
     }
 
     func handleAgentAssistant(_ c: AgentCall) {
@@ -44,6 +31,13 @@ extension Bench {
     /// any: what `needs_user` says.
     func handleAgentApproval(_ c: AgentCall) {
         guard let session = c.request["callerSession"] as? String ?? c.session else { c.answer(["error": "no session"]); return }
+        if let mail = c.request["mailAsk"] as? String {
+            guard let record = AssistantApprovals.shared.records.values.first(where: {
+                $0.place == .mail(mail) && $0.session == session && $0.state == .open
+            }) else { c.answer(["none": true]); return }
+            c.answer(Bench.approval(record))
+            return
+        }
         let tab = find(c.request, in: c.browser)
         // A task this assistant started asks under its own session.
         let task = c.request["task"] as? String

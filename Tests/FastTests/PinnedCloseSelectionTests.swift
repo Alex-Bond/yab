@@ -96,14 +96,15 @@ struct PinnedCloseSelectionTests {
         }
     }
 
-    @Test func sleepingTodaysTabRemainsTheFallback() {
+    @Test func sleepingTodaysTabIsNotWokenWhenNoLivePageRemains() {
         world { browser in
             let today = page(browser, "today")
             let closing = page(browser, "closing", pin: true)
             today.rest()
             browser.select(closing)
             browser.close(closing)
-            #expect(browser.active === today && !today.asleep)
+            #expect(browser.activeID == nil && browser.fieldShowing)
+            #expect(today.asleep)
         }
     }
 
@@ -123,16 +124,9 @@ struct PinnedCloseSelectionTests {
             #expect(browser.active === reddit && !browser.fieldShowing)
             #expect(!browser.tabs.contains { $0 === home })
             #expect(!reddit.asleep && !x.asleep)
-            // On from there: reddit put down lands on X (a kept tab put down
-            // lands among today's only, register #388, so on the field), X
-            // put down ends on the field, and neither is woken again
-            // (feedback #171).
+            // Both kinds of retained page follow the live picking order.
+            // X put down then ends on the field; neither is woken again.
             browser.shut(browser.chosen, byKey: true)
-            if kept {
-                #expect(browser.activeID == nil && browser.fieldShowing)
-                #expect(reddit.asleep && !x.asleep)
-                return
-            }
             #expect(browser.active === x && reddit.asleep)
             browser.shut(browser.chosen, byKey: true)
             #expect(browser.activeID == nil && browser.fieldShowing)

@@ -47,6 +47,9 @@ struct PageToneReading {
     let color: NSColor?
     let rect: CGRect
     let href: String
+    /// Something of the page's own lay over its chrome as it was read, its
+    /// full screen or a modal's veil: no color of the site's to take.
+    let covered: Bool
 
     init?(_ answer: Any?, size: CGSize) {
         guard let row = answer as? [String: Any], let href = row["href"] as? String,
@@ -56,6 +59,7 @@ struct PageToneReading {
               let x = region["x"], let y = region["y"], let w = region["width"], let h = region["height"],
               [x, y, w, h].allSatisfy(\.isFinite), w > 0, h > 0 else { return nil }
         self.href = href
+        covered = row["covered"] as? Bool ?? false
         let rect = CGRect(x: x * size.width / width, y: y * size.height / height,
                           width: w * size.width / width, height: h * size.height / height)
             .intersection(CGRect(origin: .zero, size: size))

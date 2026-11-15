@@ -1,0 +1,54 @@
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -742,7 +742,7 @@
+         FROM_HERE, base::BindOnce(&ExternalPage::ApplySize, weak_.GetWeakPtr()));
+   }
+   void ApplySize() {
+-    if (applied_ || requested_.IsEmpty() || !Owns()) return;
++    if (requested_.IsEmpty() || !Owns()) return;
+     auto* renderer = web_contents()->GetRenderWidgetHostView();
+     if (!renderer || static_cast<content::RenderWidgetHostViewBase*>(renderer)
+                          ->IsRenderWidgetHostViewChildFrame()) return;
+@@ -750,6 +750,22 @@
+     NSView* page = renderer->GetNativeView().GetNativeNSView();
+     if (!page || page.window != window || NSWidth(page.bounds) <= 0 || NSHeight(page.bounds) <= 0)
+       return;
++    // Chrome can add or animate native chrome (for example the identity
++    // infobar) after the first size is applied. Reconcile its real page
++    // inset, but never accumulate deltas while a previous window resize is
++    // still in flight. Both the physical NSWindow and a compositor frame
++    // must have reached that resize before another delta is allowed.
++    if (applied_) {
++      auto* compositor = widget_->GetCompositor();
++      const gfx::Size native_window(std::lround(NSWidth(window.frame)),
++                                    std::lround(NSHeight(window.frame)));
++      const gfx::Size native_pixels(
++          std::lround(NSWidth(window.contentView.bounds) * scale_),
++          std::lround(NSHeight(window.contentView.bounds) * scale_));
++      if (native_window != applied_window_ || !context_ || scale_ <= 0 ||
++          !compositor || compositor->size() != pixels_ ||
++          pixels_ != native_pixels) return;
++    }
+     gfx::Rect bounds = widget_->GetWindowBoundsInScreen();
+     const int width = bounds.width() + requested_.width() - std::lround(NSWidth(page.bounds));
+     const int height = bounds.height() + requested_.height() - std::lround(NSHeight(page.bounds));
+@@ -759,7 +775,9 @@
+     // Mark BEFORE dispatch, including no-op sizes. Layout can be asynchronous;
+     // repeating outer-minus-page deltas before it settles grows the window.
+     applied_ = true;
+-    bounds.set_size(gfx::Size(width, height));
++    applied_window_ = gfx::Size(width, height);
++    if (bounds.size() == applied_window_) return;
++    bounds.set_size(applied_window_);
+     widget_->SetBounds(bounds);
+   }
+   void Frame(uint32_t context, const gfx::Size& pixels, float scale) {
+@@ -776,7 +794,7 @@
+   base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{this};
+   gfx::AcceleratedWidget accelerated_ = gfx::kNullAcceleratedWidget;
+   uint32_t context_ = 0;
+-  gfx::Size pixels_, requested_;
++  gfx::Size pixels_, requested_, applied_window_;
+   float scale_ = 1;
+   bool visible_ = true, applied_ = false;
+   const base::UnguessableToken token_;

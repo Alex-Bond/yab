@@ -289,7 +289,7 @@ struct PinHomeField: View {
     var body: some View {
         HStack(spacing: 8) {
             Mark(icon: tab.displayIcon, letter: tab.monogram, size: 15)
-            TabAddressField(browser: browser)
+            TabAddressField(browser: browser, tab: tab.id)
                 .frame(height: titleSize + 4)
         }
         .padding(.leading, SideBar.inner)

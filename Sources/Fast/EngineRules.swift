@@ -9,11 +9,16 @@ import SwiftUI
 //      in, Settings' table), stored as `site.engine.<host>` as before;
 //   2. a built-in rule Yab ships (protected video and Apple Pay to WebKit,
 //      the Chrome Web Store to Chromium), which the table can override;
-//   3. the default engine. Auto is Chromium, except that a tab opening or
-//      waking while memory is tight gets WebKit. Auto never moves a live tab.
+//   3. the default engine. Auto is Chromium, always: WebKit only through the
+//      built-in rules above (protected video, Apple Pay), never because memory
+//      is tight (the owner, 2026-11-02). WebKit First is WebKit, except that a
+//      tab opening or waking while memory is tight gets Chromium. Neither ever
+//      moves a live tab: a move reloads the page, and a page's memory, media
+//      and scripts don't carry.
 //
-// Only a build with Yab's own Chromium (YAB_CEF=1) offers any of this; one
-// without it keeps WebKit and shows no Engine page or actions.
+// A build with Yab's own Chromium and no choice made is on Auto, an upgrade
+// from a WebKit-only version included (PageEngineSelection.requested). A build
+// without it, Intel included, keeps WebKit and shows no Engine page or actions.
 
 /// A rule Yab ships: a family of hosts, the engine they need, and why.
 struct EngineBuiltInRule: Identifiable, Equatable, Sendable {
@@ -41,6 +46,7 @@ struct EngineBuiltInRule: Identifiable, Equatable, Sendable {
         .init(id: "hulu", name: "Hulu", domains: ["hulu.com"], engine: .webKit, reason: protectedVideo),
         .init(id: "peacock", name: "Peacock", domains: ["peacocktv.com"], engine: .webKit, reason: protectedVideo),
         .init(id: "paramountplus", name: "Paramount+", domains: ["paramountplus.com"], engine: .webKit, reason: protectedVideo),
+        .init(id: "crunchyroll", name: "Crunchyroll", domains: ["crunchyroll.com"], engine: .webKit, reason: protectedVideo),
         .init(id: "applepay", name: "Apple Pay checkouts",
               domains: ["store.apple.com", "checkout.stripe.com", "buy.stripe.com", "pay.shopify.com", "shop.app", "checkout.square.site"],
               engine: .webKit, reason: "Apple Pay"),
@@ -55,13 +61,26 @@ struct EngineBuiltInRule: Identifiable, Equatable, Sendable {
 
 /// The default engine, as the Settings menu names it.
 enum EngineDefault: String, CaseIterable, Sendable {
-    case auto, webKit, chromium
+    case auto, webKit, webKitFirst, chromium
+
+    /// What the menu offers. WebKit First stays out until its cost under memory
+    /// pressure is understood (the 8 GB stand: 19% more memory than WebKit).
+    static let offered: [EngineDefault] = [.auto, .webKit, .chromium]
 
     var title: String {
         switch self {
         case .auto: "Auto"
         case .webKit: "WebKit"
+        case .webKitFirst: "WebKit First"
         case .chromium: "Chromium"
+        }
+    }
+
+    /// The engine of a tab with no rule and memory to spare.
+    var base: PageEngineKind {
+        switch self {
+        case .auto, .chromium: .chromium
+        case .webKit, .webKitFirst: .webKit
         }
     }
 }
@@ -75,7 +94,8 @@ struct EngineDecision: Equatable, Sendable {
         case builtIn(String)
         /// The default engine, Auto or not.
         case standard
-        /// Auto chose WebKit because memory was tight when the tab opened.
+        /// Memory was tight when the tab opened: WebKit First chose Chromium.
+        /// Auto never spares (the owner, 2026-11-02).
         case spared
     }
     let kind: PageEngineKind
@@ -104,12 +124,17 @@ enum EngineRules {
     }
 
     /// macOS says memory is short (warning or critical), as Sleep reads it.
-    static var memoryTight: Bool { (Pressure.level ?? 1) >= 2 }
+    /// A test world that names its engine keeps it, whatever a busy farm Mac's
+    /// memory says, or its checks quietly run on the other engine.
+    static var memoryTight: Bool {
+        if Store.testing, Pressure.forced == nil, ProcessInfo.processInfo.environment["YAB_ENGINE"]?.isEmpty == false { return false }
+        return (Pressure.level ?? 1) >= 2
+    }
 
     /// The rule order, kept free of the store so it can be tested alone.
     /// `base` is the engine the tab would use with no rule: the window's.
     static func decide(held: PageEngineKind?, own: SiteEngineChoice, builtIn: (rule: String, kind: PageEngineKind)?,
-                       base: PageEngineKind, auto: Bool, tight: Bool) -> EngineDecision {
+                       base: PageEngineKind, auto: Bool, webKitFirst: Bool = false, tight: Bool) -> EngineDecision {
         if let held { return EngineDecision(kind: held, source: .tab) }
         switch own {
         case .chromium: return EngineDecision(kind: .chromium, source: .own)
@@ -117,7 +142,7 @@ enum EngineRules {
         case .recommended: break
         }
         if let builtIn { return EngineDecision(kind: builtIn.kind, source: .builtIn(builtIn.rule)) }
-        if base == .chromium, auto, tight { return EngineDecision(kind: .webKit, source: .spared) }
+        if base == .webKit, webKitFirst, tight { return EngineDecision(kind: .chromium, source: .spared) }
         return EngineDecision(kind: base, source: .standard)
     }
 }
@@ -168,14 +193,25 @@ extension SiteEngineSettings {
         return nil
     }
 
-    /// Auto unless Chromium was picked by name. WebKit is the window's own
-    /// engine (YabPageEngine), not a value kept here.
-    var auto: Bool { store.string(forKey: EngineRules.defaultKey) != EngineDefault.chromium.rawValue }
+    /// Auto unless Chromium or WebKit First was picked by name. WebKit is the
+    /// window's own engine (YabPageEngine), not a value kept here.
+    var auto: Bool {
+        let picked = store.string(forKey: EngineRules.defaultKey)
+        return picked != EngineDefault.chromium.rawValue && picked != EngineDefault.webKitFirst.rawValue
+    }
+
+    var webKitFirst: Bool { store.string(forKey: EngineRules.defaultKey) == EngineDefault.webKitFirst.rawValue }
+
+    /// Chromium picked by name as the default engine, not Auto: no page is
+    /// moved to WebKit on a guess, only by a rule.
+    var chromiumByName: Bool { store.string(forKey: EngineRules.defaultKey) == EngineDefault.chromium.rawValue }
 
     func decide(_ base: PageEngineKind, at url: URL?, held: PageEngineKind? = nil,
                 tight: Bool = EngineRules.memoryTight) -> EngineDecision {
-        EngineRules.decide(held: held, own: choice(for: url), builtIn: builtIn(for: url),
-                           base: base, auto: auto, tight: tight)
+        if ChromePages.needsChromium(url) { return EngineDecision(kind: .chromium, source: .own) }
+        if EngineRules.onlyWebKit(url) { return EngineDecision(kind: .webKit, source: .own) }
+        return EngineRules.decide(held: held, own: choice(for: url), builtIn: builtIn(for: url),
+                                  base: base, auto: auto, webKitFirst: webKitFirst, tight: tight)
     }
 }
 
@@ -183,24 +219,32 @@ extension SiteEngineSettings {
 extension EngineRules {
     /// What the Default engine menu shows.
     static var standard: EngineDefault {
-        guard (PageEngineFactory.requestedEngine ?? .webKit) == .chromium else { return .webKit }
-        return SiteEngineSettings.shared.auto ? .auto : .chromium
+        let sites = SiteEngineSettings.shared
+        guard (PageEngineFactory.requestedEngine ?? .webKit) == .chromium else { return sites.webKitFirst ? .webKitFirst : .webKit }
+        return sites.auto ? .auto : .chromium
     }
 
-    /// Auto and Chromium both make Chromium the window's engine; WebKit makes
-    /// it WebKit. Written at once: new tabs and tabs with no page take it now,
-    /// and no working page is touched (EngineSwitchGlobal).
+    /// Auto and Chromium both make Chromium the window's engine; WebKit and
+    /// WebKit First make it WebKit. Written at once: new tabs and tabs with no
+    /// page take it now, and no working page is touched (EngineSwitchGlobal).
     static func choose(_ value: EngineDefault) {
-        let kind: PageEngineKind = value == .webKit ? .webKit : .chromium
         do {
-            try EngineSwitchGlobal.choose(kind)
-            Store.settings.set(value == .chromium ? EngineDefault.chromium.rawValue : EngineDefault.auto.rawValue, forKey: defaultKey)
+            try EngineSwitchGlobal.choose(value.base)
+            // WebKit is only the engine set above; the key tells the others.
+            Store.settings.set((value == .chromium || value == .webKitFirst ? value : .auto).rawValue, forKey: defaultKey)
         } catch {
             NSLog("Default engine: %@", String(describing: error))
             BrowserWindows.shared.browsers.first?.announce("Chromium isn\u{2019}t in this build", mark: "exclamationmark.triangle",
                                                            on: SettingsWindow.shared.toaster)
         }
         EngineRulesModel.shared.reload()
+    }
+
+    /// Yab's own pages: their addresses are answered by handlers on WebKit's
+    /// configuration, and Chromium would show a failed load.
+    nonisolated static func onlyWebKit(_ url: URL?) -> Bool {
+        guard let scheme = url?.scheme?.lowercased() else { return false }
+        return scheme == "yab" || scheme == "yab-artifact"
     }
 
     /// Which pages the default engine applies to: web pages and a tab with
@@ -232,8 +276,9 @@ final class EngineRulesModel: ObservableObject {
 
     private init() {
         reload()
-        watch = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { EngineRulesModel.shared.reload() }
+        watch = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: nil) { _ in
+            // Never queue: .main: a writer on another thread would wait for the main thread.
+            DispatchQueue.main.async { MainActor.assumeIsolated { EngineRulesModel.shared.reload() } }
         }
     }
 
@@ -252,24 +297,34 @@ final class EngineRulesModel: ObservableObject {
 
 @MainActor
 extension PageEngineFactory {
-    /// The engine a tab opens or wakes into: the one time Auto looks at
-    /// memory. A tab Auto spared remembers it, so it wakes into Chromium
-    /// again once memory is back.
+    /// The engine a tab opens or wakes into: the one time the default looks
+    /// at memory. A tab it moved remembers that, so it wakes into the
+    /// default's own engine again once memory is back.
     func opening(_ tab: Tab) -> PageEngineKind {
         if let pending = tab.enginePendingDefault { tab.followDefaultEngine(pending) }
-        let base: PageEngineKind = tab.engineAutoSpared && tab.chromiumDRMEnabled ? .chromium : tab.engineKind
+        let base: PageEngineKind = tab.engineMemoryMoved ? tab.engineDefaultBase : tab.engineKind
         let decision = sites.decide(base, at: tab.address, held: tab.engineHeld)
-        tab.engineAutoSpared = decision.source == .spared
+        tab.engineMemoryMoved = decision.source == .spared
         return resolved(decision.kind)
+    }
+
+    /// What `opening` will say for a tab with no page yet, deciding nothing:
+    /// the way to a page depends on the engine it will be built on, and
+    /// memory can send it to the other one.
+    func upcoming(_ tab: Tab, at url: URL?) -> PageEngineKind {
+        let base = tab.enginePendingDefault ?? (tab.engineMemoryMoved ? tab.engineDefaultBase : tab.engineKind)
+        return resolved(sites.decide(base, at: url, held: tab.engineHeld).kind)
     }
 }
 
 @MainActor
 extension Tab {
+    /// The default's own engine for this tab, memory aside.
+    var engineDefaultBase: PageEngineKind { chromiumDRMEnabled ? .chromium : .webKit }
+
     /// The decision behind the tab's engine now.
     var engineDecision: EngineDecision {
-        let base: PageEngineKind = engineAutoSpared ? .chromium : (chromiumDRMEnabled ? .chromium : .webKit)
-        return engineFactory.sites.decide(base, at: address, held: engineHeld, tight: engineAutoSpared)
+        engineFactory.sites.decide(engineDefaultBase, at: address, held: engineHeld, tight: engineMemoryMoved)
     }
 
     /// The engine in words: "WebKit", "WebKit · Protected video", "Chromium",
@@ -291,9 +346,19 @@ extension Tab {
         // The default now, not the one the spare was built under.
         let base: PageEngineKind = engineFactory.followsGlobalSelection
             ? PageEngineFactory.requestedEngine ?? .webKit : chromiumDRMEnabled ? .chromium : .webKit
-        guard engineFactory.resolved(engineFactory.sites.decide(base, at: url).kind) == built else { return false }
+        let decision = engineFactory.sites.decide(base, at: url)
+        guard engineFactory.resolved(decision.kind) == built else { return false }
         chromiumDRMEnabled = base == .chromium
+        // A spare's engine can be memory's choice now though it wasn't then.
+        engineMemoryMoved = decision.source == .spared
         return true
+    }
+
+    /// Whether a new tab for `url` opens on another engine than this page's.
+    func leavesEngine(for url: URL) -> Bool {
+        guard let built = builtPage?.engine, engineFactory.kinds.contains(.chromium) else { return false }
+        let base: PageEngineKind = chromiumDRMEnabled ? .chromium : .webKit
+        return engineFactory.resolved(engineFactory.sites.decide(base, at: url).kind) != built
     }
 
     /// ⌘K's Open in: this tab only, no rule written. It holds until the tab

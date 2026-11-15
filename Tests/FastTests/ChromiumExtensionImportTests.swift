@@ -66,6 +66,38 @@ struct ChromiumExtensionImportTests {
         #expect(ChromiumExtensionImport.pins([c.id, b.id, a.id], remembering: b, order: [a, b]) == [c.id, a.id])
     }
 
+    @Test func movingEnginesAsksOnlyForWhatChromeWarnsOfOrANewSite() {
+        let saved = ChromiumExtensionGrants.normalized(["storage", "activeTab", "https://a.test/*"])
+        func beyond(_ grants: [String], approved: [String] = []) -> Set<String> {
+            ChromiumExtensionGrants.beyondApproval(required: ChromiumExtensionGrants.normalized(grants), saved: saved,
+                                                   approvedManifest: ChromiumExtensionGrants.normalized(approved))
+        }
+        #expect(beyond(["storage", "https://a.test/*"]).isEmpty)
+        // What WebKit never saved, and Chrome adds with no warning or only for its own app.
+        #expect(beyond(["offscreen", "sidePanel", "nativeMessaging", "identity"]).isEmpty)
+        // A match WebKit dropped from the list, in the manifest that was approved.
+        #expect(beyond(["https://local.test:8443/*"], approved: ["https://local.test:8443/*"]).isEmpty)
+        // A site the approved manifest never had: an update's.
+        #expect(beyond(["https://b.test/*"]) == ["site:https://b.test/*"])
+        // Chrome warns of these, whatever the manifest said under WebKit.
+        #expect(beyond(["debugger"], approved: ["debugger"]) == ["permission:debugger"])
+        #expect(beyond(["tabCapture", "history"]) == ["permission:tabCapture", "permission:history"])
+    }
+
+    @Test func anExtensionsRowsCrossInPartsOfValidJSON() throws {
+        let rows = [(key: "a", value: "1"), (key: "b\"c", value: "{\"x\":[1,2]}"), (key: "broken", value: "{oops"), (key: "d", value: "\"é😀\"")]
+        let parts = ChromiumExtensionStorage.parts(rows, size: 20)
+        #expect(parts.count > 1)
+        var seen: [String: Any] = [:]
+        for part in parts {
+            let object = try #require(try JSONSerialization.jsonObject(with: Data(part.utf8)) as? [String: Any])
+            seen.merge(object) { first, _ in first }
+        }
+        #expect(Set(seen.keys) == ["a", "b\"c", "d"])
+        #expect(seen["d"] as? String == "é😀")
+        #expect(ChromiumExtensionStorage.parts([]) == [])
+    }
+
     @Test func journalWriteFailureNeverForgetsTheUnfinishedItem() async throws {
         let a = item("a"), b = item("b")
         var persisted = Set<String>()

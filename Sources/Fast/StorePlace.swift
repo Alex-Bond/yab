@@ -26,10 +26,10 @@ extension Browser {
         var out: [PlaceItem] = []
         // Arc's own boosts, first, while some aren't here (ArcBoosts).
         let arc = ArcBoosts.waitingSoon()
-        if !arc.isEmpty, words.isEmpty || words.allSatisfy({ "arc boosts import bring".contains($0) }) {
+        if ArcBoosts.available, words.isEmpty || words.allSatisfy({ "arc boosts import bring".contains($0) }) {
             let sites = Array(Set(arc.compactMap { $0.sites.first.map { $0 == "<all_urls>" ? "every site" : Browser.site($0) } })).sorted()
             out.append(PlaceItem(id: "store.arc", section: "From Arc", title: "Bring Boosts from Arc",
-                                 source: (arc.count == 1 ? "1 boost" : "\(arc.count) boosts") + " · " + sites.prefix(3).joined(separator: ", "),
+                                 source: arc.isEmpty ? "Arc" : (arc.count == 1 ? "1 boost" : "\(arc.count) boosts") + " · " + sites.prefix(3).joined(separator: ", "),
                                  tile: .symbol("wand.and.stars"), what: .storeMake("arc")))
         }
         if words.isEmpty {

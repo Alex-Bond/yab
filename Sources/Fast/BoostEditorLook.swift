@@ -112,9 +112,22 @@ final class BoostEditorLooks: ObservableObject {
     func set(_ look: BoostEditorLook, host: String, profile: UUID?) {
         var look = look
         look.normalize()
+        let previous = self.look(host: host, profile: profile)
         let key = AddonProfiles.key(profile)
         if look.changed { looks[key, default: [:]][host] = look }
         else { looks[key]?[host] = nil }
+        if self === Self.shared,
+           previous.hidden != look.hidden || previous.enabled != look.enabled || previous.changed != look.changed {
+            // A hidden rule must reach other tabs before their next load.
+            // Continuous color/font edits keep the editor's existing
+            // rearming cadence, rather than installing per slider pixel.
+            for browser in BrowserWindows.shared.browsers {
+                let open = browser.everyTab + browser.outside + [browser.peeking].compactMap { $0 }
+                for tab in open where !tab.shy && AddonProfiles.of(tab) == profile {
+                    (tab.builtPage as? ChromiumPage)?.refreshFeatureScripts()
+                }
+            }
+        }
         saving?.cancel()
         let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.flush() } }
         saving = work
@@ -136,9 +149,29 @@ final class BoostEditorLooks: ObservableObject {
         guard saved.changed, saved.enabled else { return nil }
         // The frozen script also checks location: a redirect must not wear
         // the previous site's colors, CSS or hidden selectors.
-        let source = "if (location.hostname.toLowerCase() === \(BoostScript.json(host))) {\n"
+        let source = "if (\(PageScripts.documentHost) === \(BoostScript.json(PageScripts.scriptHost(host)))) {\n"
             + BoostEditorScript.source + "\nwindow.__yabEditor.apply(\(BoostScript.json(saved.payload)), 'direct');\n}"
         return PageScripts.made("site-look", source) { WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: Web.world) }
+    }
+
+    /// CDP registrations survive Back/Forward, redirects and renderer-led
+    /// navigation. Carry this sign-in's exact-host looks, and let each new
+    /// document choose its own. A normalized Curtain key cannot enter here.
+    func chromiumSource(for tab: Tab) -> String? {
+        guard !tab.shy else { return nil }
+        let saved = (looks[AddonProfiles.key(AddonProfiles.of(tab))] ?? [:])
+            .filter { $0.value.changed && $0.value.enabled }
+            .mapValues(\.payload)
+        guard !saved.isEmpty else { return nil }
+        let entries = saved.sorted { $0.key < $1.key }.map { [PageScripts.scriptHost($0.key), $0.value] as [Any] }
+        return """
+        (() => {
+          const look = new Map(\(BoostScript.json(entries))).get(\(PageScripts.documentHost));
+          if (!/^https?:$/.test(location.protocol) || !look) return;
+          \(BoostEditorScript.source)
+          window.__yabEditor.apply(look, 'direct');
+        })();
+        """
     }
 }
 

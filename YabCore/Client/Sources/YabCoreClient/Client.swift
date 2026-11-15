@@ -4,8 +4,20 @@ import CryptoKit
 /// One client owns one helper. Consume events once, in order, and reduce
 /// page.state patches into the application's own page state.
 public actor YabCoreClient {
+    private final class InputSubmission: @unchecked Sendable {
+        private let lock = NSLock()
+        private var callback: (@Sendable () -> Void)?
+        init(_ callback: @escaping @Sendable () -> Void) { self.callback = callback }
+        func finish() {
+            lock.lock()
+            let callback = self.callback
+            self.callback = nil
+            lock.unlock()
+            callback?()
+        }
+    }
     public nonisolated let events: AsyncStream<YabCoreEvent>
-    private let eventSink: AsyncStream<YabCoreEvent>.Continuation
+    private nonisolated let eventFlow: EventFlow
     private let socket: Socket
     private let diagnosticObservation: Bool
     private let diagnosticImagePinned: Bool
@@ -39,8 +51,40 @@ public actor YabCoreClient {
     private struct OriginalSourceReservation {
         let journal: NativeSwitchJournal, intent: NativeSwitchJournal.Intent, context: OriginalNativeContext
     }
-    private var pending: [String: CheckedContinuation<JSONValue, Error>] = [:]
+    private var pending: [String: CheckedContinuation<JSONValue, Error>] = [:] { didSet { admit() } }
+    /// Requests waiting for room, in order. The helper counts none in flight;
+    /// this window is the flow control. A window of 139 tabs restored on a
+    /// busy Mac passed 128: waiting is fine, a page failed is not.
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var admitted = 0
+    private static let inFlight = 128
+    /// What a page's load waits on: the helper itself (hello), its profile,
+    /// the tab and its first size and sound, the scripts that must be in
+    /// before the document starts, and the navigation's own command. A busy
+    /// or briefly stopped helper (a loaded Mac, swap, a cold start after an
+    /// update) answers these late, not never; with 20 s each, late was "The
+    /// page couldn't load" and a PageLoadFailure/chromium/4 report (R2256),
+    /// or /1 when the helper's own 20 s ran out first (R1982). Chrome fails
+    /// a navigation only for the network or a dead process; its commit timeout only
+    /// calls the renderer unresponsive (NavigationRequest::OnCommitTimeout).
+    /// These wait up to the protocol's ceiling, the helper is told the same,
+    /// and the helper's exit still ends them at once.
+    static let loadPath: Set<String> = ["hello", "profile.open", "tab.create", "scripts.define", "scripts.install",
+        "scripts.appearance", "tab.navigate", "tab.loadHTML", "tab.reload", "tab.back", "tab.forward", "history.go",
+        "tab.restore", "media.mute", "tab.resize"]
+    static let loadAllowance: TimeInterval = 300
+    private func admit() {
+        while !waiting.isEmpty, pending.count + admitted < Self.inFlight {
+            admitted += 1
+            waiting.removeFirst().resume()
+        }
+    }
     private var timers: [String: Task<Void, Never>] = [:]
+    /// What each request in flight is and when it went, for the one line a
+    /// timeout leaves in the log: which request, and whether the helper had
+    /// it at all (`written`: its bytes went into the socket's output).
+    private var asked: [String: (method: String, at: Date, written: Date?)] = [:]
+    let scriptBundles = ScriptBundles()
     private var connected = true
     var originalPeerLost = false
     // Only the original socket/witness sealed-image factory may create this.
@@ -110,20 +154,27 @@ public actor YabCoreClient {
         self.socket = socket
         self.diagnosticObservation = diagnosticObservation
         self.diagnosticImagePinned = diagnosticImagePinned
-        var sink: AsyncStream<YabCoreEvent>.Continuation!
-        // A dropped event is a disconnect, and a disconnect ends the helper and
-        // every Chromium page. 512 was overrun while 120 tabs loaded at once
-        // and the main thread was busy laying them out: give a burst room.
-        events = AsyncStream(bufferingPolicy: .bufferingOldest(32_768)) { sink = $0 }
-        eventSink = sink
+        // Bounded by flow control, never by dropping: events past the window
+        // wait in the helper until the consumer asks for more (EventFlow).
+        // Before, a fixed buffer overflowed (512 events at 120 loading tabs,
+        // then 32,768) and its overflow ended the helper and every page.
+        let flow = EventFlow()
+        eventFlow = flow
+        events = AsyncStream(unfolding: { await flow.next() })
     }
     public static func connect(path: String, originalLaunch: NativePeerIdentity.LaunchWitness? = nil) async throws -> YabCoreClient {
         let socket = try Socket(path: path, originalLaunch: originalLaunch)
         let client = YabCoreClient(socket: socket, diagnosticObservation: originalLaunch?.isDiagnosticObservation == true, diagnosticImagePinned: originalLaunch?.isDiagnosticImagePinned == true)
         await client.start()
         do {
-            let hello = try await client.request("hello", params: socket.originalHandshakeParameters)
+            var parameters = socket.originalHandshakeParameters
+            let window = client.eventFlow.window
+            parameters["eventWindow"] = .object(["bytes": .number(Double(window.bytes)), "count": .number(Double(window.count))])
+            let hello = try await client.request("hello", params: parameters)
             guard hello["version"] == .number(1) else { throw YabCoreError.protocolViolation("Unsupported negotiated version") }
+            guard hello["eventFlow"] == .number(1) else { throw YabCoreError.protocolViolation("Helper without event flow control") }
+            client.eventFlow.start { [socket] bytes, count in socket.credit(bytes: bytes, count: count) }
+            await client.retainScriptBundles(hello)
             await client.retainDiagnosticHello(hello)
             await client.retainNativeHooks(hello)
             await client.bindOriginalCaller(hello)
@@ -152,55 +203,127 @@ public actor YabCoreClient {
                 // A cancelled request can still finish in the helper.
                 guard let continuation = pending.removeValue(forKey: id) else { return }
                 timers.removeValue(forKey: id)?.cancel()
+                asked[id] = nil
                 if let error = message.error {
                     continuation.resume(throwing: YabCoreError.remote(error["message"].string ?? "Remote operation failed"))
                 } else { continuation.resume(returning: message.result ?? .null) }
             } else if let name = message.event {
                 let event = YabCoreEvent(name: name, params: message.params ?? [:])
                 observeOriginalSourceLoss(event) // Negative only, never source authority from event labels.
-                if case .dropped = eventSink.yield(event) {
-                    throw YabCoreError.protocolViolation("Event consumer fell behind")
+                guard eventFlow.append(event, size: data.count + 1) else {
+                    throw YabCoreError.protocolViolation("Helper sent events past its credit")
                 }
             } else { throw YabCoreError.protocolViolation("Message has neither id nor event") }
         } catch { fail(error) }
     }
+    /// What ended the connection, once it has: for diagnostics only.
+    public private(set) var endedBy: YabCoreError?
     private func fail(_ error: Error, originalLoss: NativeSwitchJournal.Loss = .nativeOutcomeUnknown) {
         guard connected else { return }
+        endedBy = error as? YabCoreError ?? .transport("")
         // Always said: losing the helper loses every Chromium page.
         FileHandle.standardError.write(Data("YabCore client disconnected: \(String(describing: error))\n".utf8))
         loseOriginalPeer(originalLoss)
         connected = false
         let continuations = pending.values
-        pending.removeAll()
+        pending.removeAll(); asked.removeAll()
+        // Each finds the connection gone.
+        admitted += waiting.count
+        let held = waiting
+        waiting.removeAll()
+        held.forEach { $0.resume() }
         timers.values.forEach { $0.cancel() }; timers.removeAll()
         continuations.forEach { $0.resume(throwing: error) }
-        eventSink.finish(); socket.close(); reader?.cancel(); reader = nil
+        scriptBundles.fail(error)
+        eventFlow.finish(); socket.close(); reader?.cancel(); reader = nil
     }
     public func disconnect() { fail(YabCoreError.disconnected) }
+    var socketForTests: Socket { socket }
     private func cancel(_ id: String, error: Error) {
         timers.removeValue(forKey: id)?.cancel()
-        pending.removeValue(forKey: id)?.resume(throwing: error)
+        let request = asked.removeValue(forKey: id)
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        if case .timeout? = error as? YabCoreError, let request {
+            let written = request.written.map { String(format: "in the socket %.1f s after it was asked", $0.timeIntervalSince(request.at)) } ?? "never in the socket (behind the write window)"
+            FileHandle.standardError.write(Data(String(format: "YabCore request timed out: %@ after %.1f s, %@; %ld in flight, %ld waiting\n",
+                request.method, Date().timeIntervalSince(request.at), written, pending.count, waiting.count).utf8))
+        }
+        continuation.resume(throwing: error)
     }
+    private func wrote(_ id: String) { if asked[id] != nil { asked[id]?.written = Date() } }
     public func request(_ method: String, params: [String: JSONValue] = [:], timeout: TimeInterval = 20) async throws -> JSONValue {
+        if method == "scripts.install", scriptBundles.enabled, let scripts = params["scripts"], case .array = scripts {
+            return try await installShared(scripts, params: params, timeout: timeout)
+        }
+        return try await request(method, params: params, timeout: timeout, submitted: nil)
+    }
+    func retainScriptBundles(_ hello: JSONValue) { scriptBundles.enabled = hello["scriptBundles"] == .number(1) }
+    /// scripts.install naming a bundle defined once (ScriptBundles).
+    private func installShared(_ scripts: JSONValue, params: [String: JSONValue], timeout: TimeInterval) async throws -> JSONValue {
+        let identity = try ScriptBundles.identity(scripts)
+        let bundle = scriptBundles.use(identity) { name in
+            Task { [weak self] in
+                guard let self else { throw YabCoreError.disconnected }
+                _ = try await self.request("scripts.define", params: ["bundle": .string(name), "scripts": scripts],
+                                           timeout: max(timeout, 60), submitted: nil)
+            }
+        }
+        var failed = false
+        defer {
+            for name in scriptBundles.release(identity, failed: failed) where connected {
+                Task { [weak self] in _ = try? await self?.request("scripts.forget", params: ["bundle": .string(name)], timeout: 20, submitted: nil) }
+            }
+        }
+        do { try await bundle.definition.value } catch { failed = true; throw error }
+        var shared = params
+        shared["scripts"] = nil
+        shared["bundle"] = .string(bundle.name)
+        return try await request("scripts.install", params: shared, timeout: timeout, submitted: nil)
+    }
+    /// Input may follow earlier input once its bytes enter the ordered socket
+    /// queue; it need not wait for a native wheel handler's reply. The result
+    /// still reports that reply/error, and uses the ordinary in-flight limit.
+    /// `submitted` fires exactly once, including failure before submission.
+    public func sendInput(_ params: [String: JSONValue], submitted: @escaping @Sendable () -> Void) async throws -> JSONValue {
+        try await request("input.send", params: params, timeout: 20, submitted: submitted)
+    }
+    /// Any request the same way: what is sent after `submitted` reaches the
+    /// helper after it (a page's picture before its hide).
+    public func request(_ method: String, params: [String: JSONValue], timeout: TimeInterval,
+                        submitted: (@Sendable () -> Void)?) async throws -> JSONValue {
+        let submission = submitted.map(InputSubmission.init)
+        defer { submission?.finish() }
         guard connected else { throw YabCoreError.disconnected }
         if method.hasPrefix("switch.group.") {
             return try await requestOriginalNative(method, params: params, timeout: timeout)
         }
-        guard pending.count < 128, timeout.isFinite, timeout > 0, timeout <= 300 else {
-            throw YabCoreError.protocolViolation("Request limit or invalid timeout")
+        guard timeout.isFinite, timeout > 0, timeout <= 300 else {
+            throw YabCoreError.protocolViolation("Invalid timeout")
+        }
+        let loading = Self.loadPath.contains(method)
+        let timeout = loading ? max(timeout, Self.loadAllowance) : timeout
+        if !waiting.isEmpty || pending.count + admitted >= Self.inFlight {
+            await withCheckedContinuation { waiting.append($0) }
+            admitted -= 1
+            guard connected else { throw YabCoreError.disconnected }
         }
         let id = UUID().uuidString
-        let data = try JSONEncoder().encode(Request(id: id, method: method, params: params))
+        let data = try JSONEncoder().encode(Request(id: id, method: method, params: params, timeout: loading ? timeout : nil))
         guard data.count <= Socket.limit else { throw YabCoreError.protocolViolation("Request too large") }
         return try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 pending[id] = continuation
+                asked[id] = (method, Date(), nil)
                 timers[id] = Task { [weak self] in
                     do { try await Task.sleep(nanoseconds: UInt64(timeout * 1e9)) } catch { return }
                     await self?.cancel(id, error: YabCoreError.timeout)
                 }
-                socket.send(data)
+                socket.send(data) { [weak self] error in
+                    submission?.finish()
+                    if let error { Task { await self?.cancel(id, error: error) } }
+                    else { Task { await self?.wrote(id) } }
+                }
             }
         }, onCancel: { Task { await self.cancel(id, error: CancellationError()) } })
     }
@@ -460,8 +583,14 @@ public actor YabCoreClient {
         waiters.forEach { $0.resume(throwing: YabCoreError.disconnected) }
         // Retain rows/contexts/tickets. No replacement, reconnect or new replies.
     }
-    public func openProfile(_ profile: String, privateMode: Bool = false) async throws {
-        _ = try await request("profile.open", params: ["profile": .string(profile), "private": .bool(privateMode)])
+    /// `parent`, for a private profile only: the open space profile whose
+    /// off-the-record side it becomes, where that space's extensions allowed
+    /// in private tabs run (nativeHooks "privateExtensions"). Without it, or
+    /// that capability, a private profile stands alone.
+    public func openProfile(_ profile: String, privateMode: Bool = false, parent: String? = nil) async throws {
+        var params: [String: JSONValue] = ["profile": .string(profile), "private": .bool(privateMode)]
+        if let parent { params["parent"] = .string(parent) }
+        _ = try await request("profile.open", params: params)
     }
     public func createTab(profile: String, url: String = "about:blank") async throws -> String {
         let value = try await request("tab.create", params: ["profile": .string(profile), "url": .string(url)])
@@ -487,7 +616,7 @@ public actor YabCoreClient {
     public func bind(tab: String, world: String, name: String) async throws {
         _ = try await request("script.bind", params: ["tab": .string(tab), "world": .string(world), "name": .string(name)])
     }
-    deinit { socket.close(); reader?.cancel(); eventSink.finish() }
+    deinit { socket.close(); reader?.cancel(); eventFlow.finish() }
 }
 
 /// A partial native-source metadata token, NOT NativeVerifiedPhaseReceipt.

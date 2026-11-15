@@ -17,18 +17,48 @@ struct PageViewport: Equatable {
     let size: CGSize
     let hardware: UIEdgeInsets
     let chrome: Chrome
+    /// The window reserves one side only (an iPhone Duo's status column), so
+    /// the page runs under it. A pane's own hardware can't tell: a split
+    /// pane beside a notch touches one of the window's two sides too.
+    let statusColumn: Bool
+
+    init(size: CGSize, hardware: UIEdgeInsets, chrome: Chrome, statusColumn: Bool? = nil) {
+        self.size = size
+        self.hardware = hardware
+        self.chrome = chrome
+        self.statusColumn = statusColumn
+            ?? (ChromeGeometry.Sides(left: max(0, hardware.left), right: max(0, hardware.right)).foot == .zero)
+    }
 
     var minimum: UIEdgeInsets { insets(folded: true) }
     var maximum: UIEdgeInsets { insets(folded: false) }
     var current: UIEdgeInsets { insets(folded: chrome.folded) }
 
+    /// The page's own hardware sides, whether the page runs under them or not.
+    private var sides: ChromeGeometry.Sides {
+        ChromeGeometry.Sides(left: max(0, hardware.left), right: max(0, hardware.right))
+    }
+
+    /// Where Yab's own things on the page stand (the scroll indicators, the
+    /// failure pane's words): the viewport, clear of a status column too.
+    var clear: UIEdgeInsets { beside(current) }
+
+    private func beside(_ insets: UIEdgeInsets) -> UIEdgeInsets {
+        var out = insets
+        out.left = max(out.left, sides.left)
+        out.right = max(out.right, sides.right)
+        return out
+    }
+
     private func insets(folded: Bool) -> UIEdgeInsets {
         let layout = ChromeGeometry(size: size, folded: folded, hasNow: chrome.hasNow, verticalControls: chrome.verticalControls, leadingRail: chrome.leadingRail)
         let topOfChrome = chrome.hasNow ? min(layout.plate.minY, layout.now.minY) : layout.plate.minY
         let occupied = chrome.visible ? max(0, size.height - topOfChrome) : 0
-        // Keep interactive content inside each hardware edge. WebKit owns
-        // the background that extends beneath the system column.
-        let sides = ChromeGeometry.Sides(left: max(0, hardware.left), right: max(0, hardware.right))
+        // The page runs under a status column, or the site lays out short of
+        // the window's edge and leaves a bar of nothing down that whole side
+        // (#1890: 382 of the cover's 466 points). Sites still read the column
+        // from env(safe-area-inset-*). A notch's two sides stay inset.
+        let sides = statusColumn ? .zero : self.sides
         return UIEdgeInsets(top: max(0, hardware.top), left: sides.left,
                             bottom: max(max(0, hardware.bottom), occupied), right: sides.right)
     }
@@ -95,21 +125,35 @@ struct PageViewport: Equatable {
         // throws an Objective-C exception if either inset pair empties its frame.
         let frame = view.frame.size
         guard frame.width.isFinite, frame.height.isFinite, frame.width > 0, frame.height > 0 else { return }
-        let maximum = fitting(self.maximum, to: frame)
-        let folded = fitting(self.minimum, to: frame)
+        // A field of the page's own holds the keyboard: the keyboard is chrome
+        // over the page as the plate is, so WebKit lays the page out above it
+        // and lifts a field low on the page, or a chat's fixed to the bottom,
+        // into view. .never keeps UIKit and WebKit from making that room
+        // themselves, so such a field stayed under the keyboard (owner, 0.1.39).
+        let keyboard = PageKeyboard.room(over: view)
+        func raised(_ insets: UIEdgeInsets) -> UIEdgeInsets {
+            var out = insets
+            out.bottom = max(out.bottom, keyboard)
+            return out
+        }
+        let maximum = fitting(raised(self.maximum), to: frame)
+        let folded = fitting(raised(self.minimum), to: frame)
         let minimum = UIEdgeInsets(top: min(folded.top, maximum.top), left: min(folded.left, maximum.left),
                                    bottom: min(folded.bottom, maximum.bottom), right: min(folded.right, maximum.right))
         let current = chrome.folded ? minimum : maximum
         let refreshTop = view.scrollView.refreshControl?.isRefreshing == true
             ? max(0, view.scrollView.contentInset.top - view.obscuredContentInsets.top) : 0
+        let identity = ObjectIdentifier(view)
         var scrollInsets = current
         scrollInsets.top += refreshTop
+        let indicators = fitting(beside(current), to: frame)
         guard view.minimumViewportInset != minimum || view.maximumViewportInset != maximum
                 || view.obscuredContentInsets != current || view.scrollView.contentInset != scrollInsets
-                || view.scrollView.verticalScrollIndicatorInsets != current else { return }
+                || view.scrollView.verticalScrollIndicatorInsets != indicators
+                || view.scrollView.horizontalScrollIndicatorInsets != indicators
+                || view.scrollView.automaticallyAdjustsScrollIndicatorInsets else { return }
         // These setters can synchronously move contentOffset even during a
         // drag or deceleration. That movement is layout, not a new swipe.
-        let identity = ObjectIdentifier(view)
         Self.wrote[identity] = ProcessInfo.processInfo.systemUptime
         Self.applying[identity, default: 0] += 1
         defer {
@@ -121,11 +165,63 @@ struct PageViewport: Equatable {
         }
         if view.obscuredContentInsets != current { view.obscuredContentInsets = current }
         // .never prevents UIKit from adding the hardware edges a second time.
-        // The scroll range and indicators need the same edges as the viewport.
+        // The scroll range needs the same edges as the viewport.
         if view.scrollView.contentInset != scrollInsets { view.scrollView.contentInset = scrollInsets }
-        if view.scrollView.verticalScrollIndicatorInsets != current {
-            view.scrollView.verticalScrollIndicatorInsets = current
+        // The indicators stand beside a status column the page runs under.
+        // UIKit's own adjustment added the window's safe area on top of
+        // these, so on a Duo's cover the bar stood 168 points in (#1945).
+        if view.scrollView.automaticallyAdjustsScrollIndicatorInsets {
+            view.scrollView.automaticallyAdjustsScrollIndicatorInsets = false
         }
+        if view.scrollView.verticalScrollIndicatorInsets != indicators {
+            view.scrollView.verticalScrollIndicatorInsets = indicators
+        }
+        if view.scrollView.horizontalScrollIndicatorInsets != indicators {
+            view.scrollView.horizontalScrollIndicatorInsets = indicators
+        }
+    }
+}
+
+/// The keyboard over a page while one of the page's own fields holds it:
+/// the page viewport counts it as browser chrome at the bottom.
+@MainActor
+enum PageKeyboard {
+    /// Its frame in screen coordinates, and the page whose field brought it.
+    private static var frame: CGRect?
+    private static weak var page: WKWebView?
+    fileprivate static weak var found: UIResponder?
+
+    /// The page containers call this for each keyboard notification, then
+    /// lay their page out again.
+    static func note(_ notification: Notification) {
+        guard notification.name != UIResponder.keyboardWillHideNotification,
+              let end = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
+              !end.isEmpty else {
+            frame = nil; page = nil; return
+        }
+        frame = end
+        found = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.yabNoteFirstResponder(_:)), to: nil, from: nil, for: nil)
+        let responder = found as? UIView
+        found = nil
+        // The page itself holds the field's focus, or a view of its own does.
+        var view: UIView? = responder
+        while let current = view, !(current is WKWebView) { view = current.superview }
+        page = view as? WKWebView
+    }
+
+    static func room(over view: WKWebView) -> CGFloat {
+        guard let frame, page === view, let window = view.window else { return 0 }
+        let keyboard = view.convert(frame, from: window.screen.coordinateSpace)
+        guard keyboard.minY < view.bounds.maxY, keyboard.maxY > view.bounds.minY else { return 0 }
+        return max(0, view.bounds.maxY - keyboard.minY)
+    }
+}
+
+extension UIResponder {
+    /// Answers which responder is first (UIKit has no public question for it).
+    @objc fileprivate func yabNoteFirstResponder(_ sender: Any?) {
+        PageKeyboard.found = self
     }
 }
 

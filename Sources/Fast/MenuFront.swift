@@ -89,6 +89,16 @@ final class MenuFront {
 @MainActor
 final class RecentMenu: ObservableObject {
     static let shared = RecentMenu(History.shared)
+    private static var profiles: [ObjectIdentifier: RecentMenu] = [:]
+
+    static func following(_ history: History) -> RecentMenu {
+        if history === History.shared { return shared }
+        let key = ObjectIdentifier(history)
+        if let kept = profiles[key] { return kept }
+        let made = RecentMenu(history)
+        profiles[key] = made
+        return made
+    }
 
     @Published private(set) var visited: [History.Trace] = []
     private var watch: AnyCancellable?

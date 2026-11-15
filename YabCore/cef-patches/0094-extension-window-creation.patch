@@ -1,0 +1,229 @@
+--- /dev/null
++++ b/chrome/browser/extensions/external_extension_window.h
+@@ -0,0 +1,37 @@
++// Only Chromium's original windows.create marks a native extension window.
++#ifndef CHROME_BROWSER_EXTENSIONS_EXTERNAL_EXTENSION_WINDOW_H_
++#define CHROME_BROWSER_EXTENSIONS_EXTERNAL_EXTENSION_WINDOW_H_
++#include <memory>
++#include <optional>
++#include "base/supports_user_data.h"
++#include "content/public/browser/web_contents.h"
++namespace extensions {
++class ExternalExtensionWindow : public base::SupportsUserData::Data {
++ public:
++  // The bounds the extension asked for; unset when it gave none.
++  static void Mark(content::WebContents* contents, std::optional<int> left,
++                   std::optional<int> top, std::optional<int> width,
++                   std::optional<int> height) {
++    if (!contents || contents->IsBeingDestroyed()) return;
++    auto window = std::make_unique<ExternalExtensionWindow>();
++    window->left_ = left;
++    window->top_ = top;
++    window->width_ = width;
++    window->height_ = height;
++    contents->SetUserData(&kKey, std::move(window));
++  }
++  static const ExternalExtensionWindow* Get(content::WebContents* contents) {
++    return contents && !contents->IsBeingDestroyed()
++        ? static_cast<ExternalExtensionWindow*>(contents->GetUserData(&kKey))
++        : nullptr;
++  }
++  std::optional<int> left() const { return left_; }
++  std::optional<int> top() const { return top_; }
++  std::optional<int> width() const { return width_; }
++  std::optional<int> height() const { return height_; }
++ private:
++  inline static const int kKey = 0;
++  std::optional<int> left_, top_, width_, height_;
++};
++}  // namespace extensions
++#endif
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -339,6 +339,7 @@
+     "extension_view_host.h",
+     "external_action_origin.h",
+     "external_identity_flow.h",
++    "external_extension_window.h",
+     "extension_view_host_factory.cc",
+     "extension_view_host_factory.h",
+     "external_component_loader.cc",
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -54,6 +54,7 @@
+ #define CEF_YAB_EXTERNAL_ACTION_VERSION 1
+ #define CEF_YAB_NATIVE_TAB_MODEL_VERSION 1
+ #define CEF_YAB_OPTIONS_CREATION_VERSION 1
++#define CEF_YAB_EXTENSION_WINDOW_VERSION 1
+ #define CEF_YAB_EXTERNAL_TAB_GROUP_VERSION 1
+ #define CEF_YAB_EXTERNAL_PAGE_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+--- a/chrome/browser/extensions/api/tabs/tabs_api.h
++++ b/chrome/browser/extensions/api/tabs/tabs_api.h
+@@ -12,6 +12,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/raw_ref.h"
+ #include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/types/expected.h"
+ #include "base/values.h"
+ #include "chrome/browser/extensions/chrome_extension_function_details.h"
+@@ -235,6 +236,10 @@
+   // Whether to set the calling extension context as the opener of the newly-
+   // created window. Not supported for service worker callers.
+   bool set_self_as_opener_ = false;
++
++  // The original native owner of an embedder's extension popup window,
++  // captured before Chrome creates a separate concealed physical Browser.
++  base::WeakPtr<content::WebContents> external_owner_;
+ };
+ class WindowsUpdateFunction : public ExtensionFunction {
+   ~WindowsUpdateFunction() override = default;
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/extensions/api/tabs/tabs_api.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_extension_window.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ 
+@@ -996,6 +997,30 @@
+   return RespondNow(WithArguments(std::move(window_list)));
+ }
+ 
++namespace {
++// windows.create({type: 'popup'}) from an extension of an embedder that
++// presents bound pages itself. Capture the original native owner as
++// WebAuthFlow does: an action popup's owner, never the popup, which closes
++// once its window shows; a worker's focused owner; else the calling page.
++content::WebContents* ExternalExtensionWindowOwner(
++    content::WebContents* sender, const std::string& extension_id,
++    content::BrowserContext* context) {
++  auto* owner = sender;
++  if (auto* action = sender ? ExternalActionOrigin::Get(sender) : nullptr) {
++    if (action->extension_id() != extension_id) return nullptr;
++    owner = action->Owner(sender);
++  } else if (!sender) {
++    owner = ExternalTabFocus::Get(context);
++  }
++  auto* model = owner ? ExternalTabModel::Get(owner) : nullptr;
++  if (!owner || owner->GetBrowserContext() != context || !model ||
++      !model->embedded() || !ExternalTabWindow::Bound(owner)) {
++    return nullptr;
++  }
++  return owner;
++}
++}  // namespace
++
+ WindowsCreateFunction::WindowsCreateFunction() = default;
+ WindowsCreateFunction::~WindowsCreateFunction() = default;
+ 
+@@ -1141,6 +1166,22 @@
+     }
+   }
+ 
++#if !BUILDFLAG(IS_ANDROID)
++  // Publish the ordinary extension creation receipt for a popup window, as
++  // WebAuthFlow does, before the embedder retires an otherwise unrequested
++  // concealed Browser. Ordinary Chrome has no hooks and no bound owner, so it
++  // keeps its original path; so do tab moves, app windows and URL lists.
++  auto& hooks = GetExternalExtensionHooks();
++  if (!extension_id.empty() && urls_.size() == 1 &&
++      !isolated_web_app_url_info_ && !create_data_->tab_id &&
++      hooks.tab_model_created && hooks.tab_created) {
++    if (auto* owner = ExternalExtensionWindowOwner(
++            GetSenderWebContents(), extension_id, window_profile)) {
++      external_owner_ = owner->GetWeakPtr();
++    }
++  }
++#endif
++
+   // Create a new BrowserWindow if possible.
+   if (GetBrowserWindowCreationStatusForProfile(*window_profile) !=
+       BrowserWindowInterface::CreationStatus::kOk) {
+@@ -1196,6 +1237,11 @@
+   }
+ 
+ #if !BUILDFLAG(IS_ANDROID)
++  // Cover both Browser and WebContents attachment with the original native
++  // creation inputs; a null owner leaves Chrome's own path untouched. The
++  // window's page never becomes the owner window's active page.
++  ScopedExternalTabCreation external_creation(external_owner_.get(), nullptr,
++                                              false, -1);
+   BrowserWindowInterface* new_window =
+       CreateBrowserWindow(std::move(create_params));
+   ExtensionFunction::ResponseValue response =
+@@ -1313,15 +1359,40 @@
+   }
+ #endif
+ 
++  base::WeakPtr<content::WebContents> external_page;
+   if (!navigated) {
+     bool is_first_nav = true;
+     for (const GURL& url : urls_) {
+       NavigateParams navigate_params = create_nav_params(url, is_first_nav);
+       is_first_nav = false;
+       Navigate(&navigate_params);
++      if (external_owner_ && navigate_params.navigated_or_inserted_contents) {
++        external_page =
++            navigate_params.navigated_or_inserted_contents->GetWeakPtr();
++      }
+     }
+   }
+ 
++  // The exact page this call created, marked as a window with the bounds the
++  // extension asked for. The receipt lets the embedder adopt it as its own
++  // small window before its deferred unrequested-browser cleanup. Chrome
++  // keeps the Browser, its window id and the API response.
++  if (auto& hooks = GetExternalExtensionHooks();
++      external_page && hooks.tab_model_created && hooks.tab_created) {
++    auto* owner = external_owner_.get();
++    if (owner && !owner->IsBeingDestroyed() &&
++        ExternalTabWindow::Bound(owner)) {
++      ExternalExtensionWindow::Mark(external_page.get(), create_data_->left,
++                                    create_data_->top, create_data_->width,
++                                    create_data_->height);
++      if (hooks.tab_model_created(external_page.get(), owner, nullptr, false,
++                                  -1)) {
++        hooks.tab_created(external_page.get(), nullptr, false, -1,
++                          extension()->id());
++      }
++    }
++  }
++
+   TabListInterface* tab_list = TabListInterface::From(new_window);
+   CHECK(tab_list);
+ 
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -27,6 +27,7 @@
+ #include "cef/libcef/browser/views/external_consent.h"
+ #include "cef/libcef/browser/views/external_print.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_extension_window.h"
+ #include "chrome/browser/extensions/external_identity_flow.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
+ #include "chrome/common/extensions/api/tabs.h"
+@@ -563,8 +564,18 @@
+   auto owner=model && model->owner()?CefBrowserHostBase::GetBrowserForContents(model->owner()):nullptr;
+   value->SetInt("ownerBrowserId",owner?owner->GetIdentifier():0);
+   value->SetInt("ownerVersion",1);
+-  value->SetString("requestedKind", extensions::ExternalIdentityFlow::IsProvider(contents)
+-                                         ? "identity" : "tab");
++  const char* kind = "tab";
++  if (extensions::ExternalIdentityFlow::IsProvider(contents)) {
++    kind = "identity";
++  } else if (auto* window = extensions::ExternalExtensionWindow::Get(contents)) {
++    // windows.create({type: 'popup'}): a window of its own, never a tab.
++    kind = "window";
++    if (window->left()) value->SetInt("requestedLeft", *window->left());
++    if (window->top()) value->SetInt("requestedTop", *window->top());
++    if (window->width()) value->SetInt("requestedWidth", *window->width());
++    if (window->height()) value->SetInt("requestedHeight", *window->height());
++  }
++  value->SetString("requestedKind", kind);
+   handler->OnExtensionTabCreated(browser.get(), value);
+ }
+ }  // namespace

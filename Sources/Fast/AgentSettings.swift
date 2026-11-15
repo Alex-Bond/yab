@@ -75,6 +75,8 @@ struct AIPage: View {
             skills.reload()
             await setup.look()
         }
+        .onAppear { setup.showing("settings.ai", true) }
+        .onDisappear { setup.showing("settings.ai", false) }
     }
 
     /// "Claude and ChatGPT plans, and this Mac", as connected.
@@ -263,6 +265,8 @@ struct AgentsPage: View {
             await setup.look()
             await notify.refresh()
         }
+        .onAppear { setup.showing("settings.agents", true) }
+        .onDisappear { setup.showing("settings.agents", false) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task {
                 await setup.look()
@@ -561,38 +565,87 @@ final class AgentSetupModel: ObservableObject {
 
     private var identityLook = 0
 
-    /// Asked of a fresh login shell, so an agent installed since yab opened
-    /// is seen; whether each is signed in, read from its own files. Looking
-    /// never runs an agent: macOS checks a binary as it runs, and an old
-    /// copy it flags would look like Yab's doing. Only the buttons do.
-    func look(find: () async -> Shell.Found = { await Shell.find(fresh: true) },
+    /// Looked for afresh, so an agent installed since yab opened is seen,
+    /// and whether each is signed in. Looking never runs an agent: macOS
+    /// checks a binary as it runs, and an old copy it flags would look like
+    /// Yab's doing. Only the buttons and tasks do.
+    ///
+    /// Once an agent is connected, in the environment a task on it runs in
+    /// (AgentLaunch.environment: the login shell's PATH, an exported
+    /// CLAUDE_CODE_OAUTH_TOKEN, the key you connected): the very
+    /// Shell.Found the launcher's next task starts from, so "signed in"
+    /// here is "a chat would start" there (#1687). Nothing connected, from
+    /// files alone: nothing unconnected runs the login shell (Cortex).
+    /// Only a person's ask (asked: ⌘J, words in a composer), Settings or
+    /// a task looks; never the launch or a timer of its own.
+    /// `find(login)` stands for Shell.find(fresh:, resolvingLogin: login);
+    /// `fresh` false takes what a task just resolved. `readGemini` is
+    /// Gemini's sign-in in that environment (GeminiAccount, its CLI asked).
+    /// `whereTasksRun` false: a surface that shows by itself, nobody having
+    /// acted (a bot site's notice), looks from files alone and never runs
+    /// the login shell, nor replaces what a look where tasks run found
+    /// (Cortex, fix/cortex-helper-tree e41bac1f).
+    func look(fresh: Bool = true, whereTasksRun: Bool = true,
+              find: ((_ login: Bool) async -> Shell.Found)? = nil,
               readStatus: () async -> AgentSetup.Status = { await AgentSetup.read() },
               plans: PlanAccounts? = nil,
               readIdentity: (PlanAccount, [String: String], Int) async -> (signedIn: Bool, email: String?, plan: String?) = {
                   await PlanAccounts.read($0, env: $1, revision: $2)
-              }) async {
+              },
+              readGemini: ((Shell.Found, ProviderLaunchPermit?) async -> Bool?)? = nil) async {
+        let find = find ?? { await Shell.find(fresh: fresh, resolvingLogin: $0) }
+        let readGemini = readGemini ?? { found, permit in
+            await GeminiAccount.shared.look(permit: permit, find: { _ in found })
+            return GeminiAccount.shared.signedIn
+        }
+        guard whereTasksRun || !lookedInTerminal else { return }
+        lastLook = Date()
         identityLook += 1
         let mine = identityLook
         let readingAttempt = attempt
-        let found = await find()
+        let terminal = whereTasksRun && AgentLaunch.needsTerminal(consent)
+        let found = await find(terminal)
         guard identityLook == mine, attempt == readingAttempt else { return }
         self.found = found
+        lookedInTerminal = terminal
         status = await readStatus()
         guard identityLook == mine, attempt == readingAttempt else { return }
+        await project(found, whereTasksRun: whereTasksRun, mine: mine, readingAttempt: readingAttempt, plans: plans ?? PlanAccounts.shared,
+                      readIdentity: readIdentity, readGemini: readGemini)
+    }
+
+    /// Each CLI's signed-in state from what `found` says, until a newer
+    /// look or attempt begins, which leaves the rest to it.
+    private func project(_ found: Shell.Found, whereTasksRun: Bool, mine: Int, readingAttempt: Int, plans: PlanAccounts,
+                         readIdentity: (PlanAccount, [String: String], Int) async -> (signedIn: Bool, email: String?, plan: String?),
+                         readGemini: (Shell.Found, ProviderLaunchPermit?) async -> Bool?) async {
         // The person chooses one provider; installed tools are not consent to use them.
         for cli in Self.clis {
-            guard let binary = Self.binary(cli, in: found) else { signedIn[cli] = nil; continue }
+            // The copy, account and environment a task would run on
+            // (AgentLaunch.look, the launcher's resolution less secrets):
+            // no copy, no task.
+            guard let launch = AgentLaunch.look(cli, in: found, plans: plans) else { signedIn[cli] = nil; continue }
             if cli == "gemini" {
-                if consent.allows(cli) { await GeminiAccount.shared.look() }
+                // A notice reuses the last verified answer; only a person's
+                // ask can execute the connected provider. Gemini's sign-in
+                // is its CLI's to say, asked in the
+                // environment its turns run in (Agents.launch gives them
+                // this copy and found.env).
+                let permit = whereTasksRun ? consent.permit(cli) : nil
+                let said = permit != nil ? await readGemini(found, permit) : GeminiAccount.shared.signedIn
                 guard identityLook == mine, attempt == readingAttempt else { return }
-                signedIn[cli] = GeminiAccount.shared.signedIn
+                signedIn[cli] = said
             } else if cli == "cursor" {
-                let permit = consent.permit(cli)
-                let who = permit != nil ? await CursorRunner.identify(binary: binary, env: found.env, permit: permit) : CursorRunner.identity(env: found.env)
+                // The launcher's own check (Agents.signedIn for Cursor), on
+                // the same copy and environment; passive or unconnected,
+                // only what it last said, nothing run.
+                let permit = whereTasksRun ? consent.permit(cli) : nil
+                let who = permit != nil ? await CursorRunner.identify(binary: launch.binary, env: launch.env, permit: permit)
+                    : CursorRunner.identity(env: launch.env)
                 guard identityLook == mine, attempt == readingAttempt else { return }
                 if let permit, !permit.valid { continue }
                 signedIn[cli] = who.signedIn
-            } else if !AgentFixture.requested, ProviderConsent.standIns().contains(cli) {
+            } else if !AgentFixture.requested, AgentLaunch.byHarness(cli) {
                 // A probe's stand-in Claude or Codex (YAB_AGENT_CLAUDE) is
                 // signed in by its harness: the Mac running the probe may
                 // have no account of its own (m4 has none, adhd the owner's),
@@ -601,39 +654,111 @@ final class AgentSetupModel: ObservableObject {
                 // the stand-in itself, and Gemini's account hangs on it.
                 signedIn[cli] = true
             } else {
-                let plans = plans ?? PlanAccounts.shared
-                let account = plans.account(cli) ?? PlanAccount(id: cli, cli: cli)
-                let revision = plans.identityRevision(account.id)
-                let who = await readIdentity(account, found.env, revision)
-                guard identityLook == mine, attempt == readingAttempt else { return }
-                guard plans.account(cli) == account, plans.identityRevision(account.id) == revision else { continue }
-                signedIn[cli] = who.signedIn
+                // Every account a task may start on, in the launcher's order,
+                // each read in the environment its task runs in
+                // (PlanAccounts.read applies PlanAccounts.environment, as
+                // the launcher's env does). Dispatch can use an extra account
+                // even when the usual CLI login is signed out (#1687).
+                let accounts = plans.all(cli)
+                let revisions = Dictionary(accounts.map { ($0.id, plans.identityRevision($0.id)) }, uniquingKeysWith: { first, _ in first })
+                var available = false
+                var heard: [(PlanAccount, Bool)] = []
+                for account in accounts {
+                    let who: (signedIn: Bool, email: String?, plan: String?)
+                    if account.keyed {
+                        who = (await AgentKey.hasSecret(account.id), nil, nil)
+                    } else {
+                        who = await readIdentity(account, found.env, revisions[account.id]!)
+                    }
+                    guard identityLook == mine, attempt == readingAttempt else { return }
+                    available = available || who.signedIn
+                    heard.append((account, who.signedIn))
+                }
+                // A logout, removal, or renewal during any of those reads
+                // invalidates the whole projection, including earlier positives.
+                guard plans.all(cli) == accounts,
+                      accounts.allSatisfy({ plans.identityRevision($0.id) == revisions[$0.id] }) else { continue }
+                // The launcher's pick (PlanAccounts.pick) skips an account
+                // signed out: told what was just read, a task starts on the
+                // account this found signed in, not on one it would have to
+                // sign in to first.
+                for (account, yes) in heard { plans.heard(account, signedIn: yes, revision: revisions[account.id]!) }
+                signedIn[cli] = available
             }
         }
     }
 
-    private var lookedForTasks = false
+    /// A verified login can live in an extra config folder.
+    /// Invalidate an older passive negative before it can overwrite it.
+    func didConnect(_ cli: String) {
+        identityLook += 1
+        signedIn[cli] = true
+    }
 
-    /// Whether a task can run on a plan here: one signed in, or, before
-    /// anything asked since Yab opened (Settings › AI looks; an assistant's
-    /// first call is often what comes first after a restart), Claude or
-    /// Codex installed, while a look starts so the next call knows.
+    /// The last look was in the environment a task runs in.
+    private(set) var lookedInTerminal = false
+
+    /// Whether a task can run on a plan here: one signed in, or, before a
+    /// look where tasks run (nothing looks at launch: only a person's ask,
+    /// Settings or a task does), a connected one that files show installed
+    /// or can't rule out (it may be on the login shell's PATH). Until then
+    /// the task itself resolves it (AgentLaunch) and signs in if it must:
+    /// Return never opens Settings for a chat that would run.
     func canRunTasks() -> Bool {
         if Self.clis.contains(where: { consent.allows($0) && signedIn[$0] == true }) { return true }
-        guard Self.clis.contains(where: { consent.allows($0) && signedIn[$0] == nil }) else { return false }
-        if !lookedForTasks { lookedForTasks = true; Task { await look() } }
-        return Self.clis.contains { consent.allows($0) && (Self.binary($0, in: found ?? Shell.cached) != nil) }
+        return Self.clis.contains { cli in
+            guard consent.allows(cli), signedIn[cli] == nil else { return false }
+            if Self.binary(cli, in: found ?? Shell.cached) != nil { return true }
+            return AgentLaunch.terminalCLIs.contains(cli) && !lookedInTerminal
+        }
     }
 
     private var lastLook = Date.distantPast
 
+    /// Where a person is asking or setting up now: a composer with the
+    /// keys, Settings › AI. Only while one is, a "no" is looked at again,
+    /// at most once a minute, so a sign-in in Terminal shows without a
+    /// restart; nothing looks on a timer of its own otherwise.
+    private(set) var showing: Set<String> = []
+
+    func showing(_ surface: String, _ shown: Bool) {
+        if shown { showing.insert(surface) } else { showing.remove(surface) }
+    }
+
+    /// A person asks: ⌘J, or words in a composer. The first look where
+    /// tasks run happens now (not at launch), and a "no" is looked at
+    /// again once a minute at most, so Return knows by the time it comes.
+    func asked() {
+        guard !lookedInTerminal || (!canRunTasks() && Date().timeIntervalSince(lastLook) > relookAfter) else { return }
+        lastLook = Date()
+        Task { await again(fresh: true) }
+    }
+
+    /// How long a "no" stands before an ask or an open surface looks again.
+    var relookAfter: TimeInterval = 60
+    /// What looking again runs; a test gives its own world's look.
+    var lookAgain: ((_ fresh: Bool) async -> Void)?
+
+    private func again(fresh: Bool) async {
+        if let lookAgain { await lookAgain(fresh) } else { await look(fresh: fresh) }
+    }
+
+    /// A task resolved where it runs (Agents.launch): readiness projects
+    /// that same answer if nothing has looked there yet, with no second
+    /// login shell (the task's is cached).
+    func taskResolved() {
+        guard !lookedInTerminal, AgentLaunch.needsTerminal(consent) else { return }
+        lastLook = Date()
+        Task { await again(fresh: false) }
+    }
+
     /// Agents.ready: canRunTasks, with a no looked at again at most once a
-    /// minute, so a sign-in in Terminal shows without a restart.
+    /// minute while a composer or Settings is open.
     func canTakeTasks() -> Bool {
         let can = canRunTasks()
-        if !can, !signedIn.isEmpty || Shell.cached != nil, Date().timeIntervalSince(lastLook) > 60 {
+        if !can, !showing.isEmpty, Date().timeIntervalSince(lastLook) > relookAfter {
             lastLook = Date()
-            Task { await look() }
+            Task { await again(fresh: true) }
         }
         return can
     }
@@ -835,8 +960,8 @@ final class AgentSetupModel: ObservableObject {
             guard current() else { return }
             if Shell.blocked(binary) { return fail(clis, Self.blocked(cli), browser) }
             let now = !plans.signedOut.contains(previous.id)
-            if previous.usual { signedIn[cli] = now }
-            if now { continue }
+            if now { didConnect(cli); continue }
+            if previous.usual { signedIn[cli] = false }
             var candidate = plans.prepareSignIn(cli, replacing: previous.id)
             let env = plans.env(candidate, base: found.env)
             flow = .signingIn(cli)
@@ -876,8 +1001,9 @@ final class AgentSetupModel: ObservableObject {
                 }
                 candidate.email = who.email
                 candidate.plan = who.plan
-                let accepted = plans.acceptSignIn(candidate, replacing: previous.id)
-                if accepted.usual { signedIn[cli] = true }
+                _ = plans.acceptSignIn(candidate, replacing: previous.id)
+                // A verified login in a separate folder is runnable too.
+                didConnect(cli)
             }
         }
         await finishing(clis, found, browser, mine, permits: permits)
@@ -1312,6 +1438,7 @@ final class AgentSetupModel: ObservableObject {
         }()
         return ["flow": flow.map { "\($0)" } ?? "page", "claude": status.claude, "codex": status.codex,
                 "cursor": status.cursor, "gemini": connected("gemini"), "geminiRow": showsGemini, "providers": Self.clis, "selectedProviders": Array(picks).sorted(), "arriving": arriving, "command": status.command, "signedIn": signedIn.mapValues { $0 },
+                "lookedInTerminal": lookedInTerminal,
                 "found": [found?.claude ?? "", found?.codex ?? ""],
                 "page": place, "trouble": trouble?.words ?? "", "renewing": renewing ?? "", "slow": slow,
                 "knowing": knowingNow?.id ?? "", "byHand": installByHand,

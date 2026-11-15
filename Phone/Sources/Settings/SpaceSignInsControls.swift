@@ -131,7 +131,7 @@ final class SpaceSignInsChange {
               foreground(view, in: window), presenter.presentedViewController == nil else { return refuse() }
         if space.ownSignIns == own { return .unchanged }
         let store = app.pages.configurationForPage(in: space).websiteDataStore
-        var next = space; next.ownSignIns = own
+        var next = space; next.ownSignIns = own; next.signInWith = nil
         guard store.isPersistent, store.identifier == profile.websiteStoreID(for: space),
               let nextID = profile.websiteStoreID(for: next) else { return refuse() }
         let request = Request(app: app, profile: profile, view: view, window: window, presenter: presenter,
@@ -196,7 +196,7 @@ final class SpaceSignInsChange {
               app.browser.tab?.url == request.selectedURL,
               app.pages.configurationForPage(in: space).websiteDataStore === request.previousStore,
               request.previousStore.identifier == profile.websiteStoreID(for: space) else { return false }
-        var next = space; next.ownSignIns = request.own
+        var next = space; next.ownSignIns = request.own; next.signInWith = nil
         guard profile.websiteStoreID(for: next) == request.nextStoreID else { return false }
         let path = request.path
         return app.surfaces.settings && SettingsUI.shared.navigation == path && path.last == .space(request.spaceID)

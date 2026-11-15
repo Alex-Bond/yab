@@ -70,4 +70,16 @@ struct PageToneTests {
         invalid["width"] = Double.infinity
         #expect(PageToneReading(invalid, size: CGSize(width: 500, height: 400)) == nil)
     }
+
+    /// A read under a modal's veil or the page's own full screen says so,
+    /// and is no reading of the site's color (register 2669).
+    @Test func aCoveredReadIsSaidSo() throws {
+        var row: [String: Any] = ["href": "https://example.com/", "width": 1000.0, "height": 800.0,
+            "regions": [["x": 0.0, "y": 2.0, "width": 1000.0, "height": 18.0]]]
+        let open = try #require(PageToneReading(row, size: CGSize(width: 1000, height: 800)))
+        #expect(!open.covered)
+        row["covered"] = true
+        let covered = try #require(PageToneReading(row, size: CGSize(width: 1000, height: 800)))
+        #expect(covered.covered)
+    }
 }

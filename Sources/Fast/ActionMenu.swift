@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 // A right-click's menu drawn as ⌘K's list (FieldActionsPanel), Raycast's
@@ -13,6 +14,20 @@ import SwiftUI
 // It hangs from the pointer, down where there is room under it and up where
 // there isn't, and its search stands at the end nearest the pointer: on top
 // as it falls, at its foot as it rises, as ⌘K's does.
+
+/// Optional row content supplied by a menu's own item, kept when searched
+/// or opened as a submenu, without teaching the panel about bookmarks.
+@MainActor
+protocol ActionMenuContent {
+    var menuPlaceholder: String { get }
+    var menuChanges: AnyPublisher<Void, Never> { get }
+}
+
+@MainActor
+protocol ActionMenuItemContent {
+    var menuDetail: String? { get }
+    var menuContext: ((NSPoint) -> Void)? { get }
+}
 
 /// The corridor from the previous pointer point to a submenu's near edge.
 /// It protects diagonal travel only while making progress toward that edge.
@@ -35,21 +50,49 @@ final class ActionMenuList: ObservableObject {
     struct Line: Identifiable {
         let id: Int
         let title: String
-        let image: NSImage?
+        var image: NSImage?
         let keys: String
         let enabled: Bool
         let checked: Bool
         /// The menu it is in, and where, to perform it.
         let menu: NSMenu
-        let index: Int
+        private let sourceItem: NSMenuItem?
+        /// Menus can rebuild while SwiftUI still holds the previous rows.
+        /// Resolve the same item at use time; an old position may now name
+        /// another command, or be outside the menu altogether.
+        @MainActor var index: Int { sourceItem.map { menu.index(of: $0) } ?? -1 }
+        @MainActor var item: NSMenuItem? {
+            guard let sourceItem, sourceItem.menu === menu else { return nil }
+            return sourceItem
+        }
+
+        @MainActor init(id: Int, title: String, image: NSImage? = nil, keys: String,
+                        enabled: Bool, checked: Bool, menu: NSMenu, index: Int,
+                        submenu: NSMenu?, from: String?, boundary: Boundary? = nil, score: Int = 0) {
+            self.id = id
+            self.title = title
+            self.image = image
+            self.keys = keys
+            self.enabled = enabled
+            self.checked = checked
+            self.menu = menu
+            let items = menu.items
+            sourceItem = items.indices.contains(index) ? items[index] : nil
+            self.submenu = submenu
+            self.from = from
+            self.boundary = boundary
+            self.score = score
+        }
         let submenu: NSMenu?
         /// The submenu it was found in by a search, beside its words.
         let from: String?
         /// A space or a line over it, where the menu had a separator.
         var boundary: Boundary?
         var score = 0
+        @MainActor var detail: String? { (item as? ActionMenuItemContent)?.menuDetail }
+        @MainActor var context: ((NSPoint) -> Void)? { (item as? ActionMenuItemContent)?.menuContext }
 
-        static func leadsWithEmoji(_ title: String) -> Bool {
+        @MainActor static func leadsWithEmoji(_ title: String) -> Bool {
             Line(id: 0, title: title, image: nil, keys: "", enabled: true, checked: false, menu: NSMenu(), index: 0,
                  submenu: nil, from: nil).emoji != nil
         }
@@ -71,12 +114,15 @@ final class ActionMenuList: ObservableObject {
     enum Boundary: Equatable { case space, line }
 
     private let root: NSMenu
+    private var contentWatch: AnyCancellable?
+    var placeholder: String { (root as? ActionMenuContent)?.menuPlaceholder ?? (compact ? "Search more actions\u{2026}" : "Search\u{2026}") }
     let compact: Bool
     @Published private(set) var option = false
     @Published var searching = false
-    var searchVisible: Bool { !nested }
+    var searchVisible: Bool { !nested || root is ActionMenuContent }
     /// A submenu uses the shared row treatment and each item's own mark.
-    /// Search belongs to the root panel nearest the opening point.
+    /// Search belongs to the root panel nearest the opening point, unless the
+    /// menu is one of its own content (bookmarks): each of its folders has one.
     let nested: Bool
     private let mark: NSImage?
     @Published private(set) var lines: [Line] = []
@@ -136,6 +182,18 @@ final class ActionMenuList: ObservableObject {
         let measured = Self.lines(of: menu, mark: mark)
         width = Self.widest(measured)
         refresh()
+        contentWatch = (menu as? ActionMenuContent)?.menuChanges.sink { [weak self] in self?.refreshImages() }
+    }
+
+    private func refreshImages() {
+        var next = lines
+        var changed = false
+        for index in next.indices {
+            let line = next[index]
+            let image = line.item?.image
+            if line.image !== image { next[index].image = image; changed = true }
+        }
+        if changed { lines = next }
     }
 
     private static func widest(_ lines: [Line]) -> CGFloat {
@@ -144,7 +202,7 @@ final class ActionMenuList: ObservableObject {
         native.autoenablesItems = false
         native.font = font
         let widest = lines.map { line -> CGFloat in
-            let source = line.menu.item(at: line.index)
+            let source = line.item
             let item = NSMenuItem(title: line.name, action: nil, keyEquivalent: source?.keyEquivalent ?? "")
             item.keyEquivalentModifierMask = source?.keyEquivalentModifierMask ?? []
             item.image = line.image
@@ -160,7 +218,8 @@ final class ActionMenuList: ObservableObject {
             else { tail = ((line.from ?? "") as NSString).size(withAttributes: [.font: font]).width }
             // The rendered columns only: no hidden Option actions or spare width.
             let m = MenuMetrics.self
-            return m.mark + 3 * m.iconGap + words + tail + 2 * m.inset + 2 * m.pad
+            let detail = line.detail.map { ($0 as NSString).size(withAttributes: [.font: font]).width + m.iconGap } ?? 0
+            return m.mark + 3 * m.iconGap + words + detail + tail + 2 * m.inset + 2 * m.pad
         }.max() ?? 0
         return min(ceil(max(widest, native.size.width, MenuMetrics.narrowest)), MenuMetrics.widest)
     }
@@ -221,7 +280,7 @@ final class ActionMenuList: ObservableObject {
                     : line.from == "Move to Space" ? "Space" : line.from ?? ""
                 let identity = name + "\u{0}" + parent
                 guard (!compact || seen.insert(identity).inserted),
-                      let score = Self.score(line.name, query) else { return nil }
+                      let score = Self.score(line.name + (line.detail.map { " " + $0 } ?? ""), query) else { return nil }
                 var found = line
                 found.score = score - (line.from == nil ? 0 : 1)
                 return found
@@ -354,6 +413,48 @@ final class ActionMenuList: ObservableObject {
         return Hotkey.caps(key, flags).joined()
     }
 
+    /// The keystroke an item's key equivalent is, as Hotkey reads a press:
+    /// nil when it has none.
+    static func hotkey(of item: NSMenuItem) -> Hotkey? {
+        let equivalent = item.keyEquivalent
+        guard !equivalent.isEmpty else { return nil }
+        let named: [String: String] = [
+            "\r": "↩", "\t": "⇥", "\u{8}": "⌫", "\u{7f}": "⌫", "\u{1b}": "esc", " ": "space",
+            String(UnicodeScalar(NSLeftArrowFunctionKey)!): "←",
+            String(UnicodeScalar(NSRightArrowFunctionKey)!): "→",
+            String(UnicodeScalar(NSUpArrowFunctionKey)!): "↑",
+            String(UnicodeScalar(NSDownArrowFunctionKey)!): "↓",
+            String(UnicodeScalar(NSDeleteFunctionKey)!): "⌦",
+        ]
+        var flags = item.keyEquivalentModifierMask
+        // A capital is its letter with ⇧, as AppKit reads it.
+        if equivalent != equivalent.lowercased() { flags.insert(.shift) }
+        return Hotkey(named[equivalent] ?? equivalent.lowercased(), flags)
+    }
+
+    /// A key a line shows, pressed with ⌘ or ⌃ while the list is up: that
+    /// line done, as the Mac's own menus do the item whose key is pressed
+    /// while they are open. The panel is the key window, so the key never
+    /// reached the line otherwise: a folder's "Close 2 Tabs ⌘W" sent ⌘W to
+    /// File's Close Tab, which found no browser window in front and closed
+    /// nothing (register 1890).
+    @discardableResult
+    func press(_ event: NSEvent) -> Bool {
+        guard !event.modifierFlags.intersection([.command, .control]).isEmpty else { return false }
+        let readings = Hotkey.readings(event)
+        guard !readings.isEmpty else { return false }
+        let at = active
+        for list in at === self ? [self] : [at, self] {
+            guard let index = list.lines.firstIndex(where: { line in
+                line.enabled && line.submenu == nil
+                    && line.item.flatMap(Self.hotkey(of:)).map(readings.contains) == true
+            }) else { continue }
+            list.take(index)
+            return true
+        }
+        return false
+    }
+
     /// The panel the keys go to: the deepest submenu that has them.
     var active: ActionMenuList {
         if let child, child.focused { return child.active }
@@ -385,7 +486,7 @@ final class ActionMenuList: ObservableObject {
         if spot != index { spot = index }
         focused = true
         parent?.child?.focused = true
-        child?.focused = false
+        if child?.searchVisible != true { child?.focused = false }
         if child != nil, childLine != index, let previous, let point, let childFrame,
            ActionMenuAim.contains(origin: previous, point: point, submenu: childFrame) {
             // A bounded native-menu-style grace while crossing another row
@@ -441,7 +542,7 @@ final class ActionMenuList: ObservableObject {
             showChild(inner, index)
         }
         guard let child else { return }
-        child.focused = keys
+        child.focused = keys || child.searchVisible
         if keys { child.keyboardChoice = true; child.hovered = nil }
         if keys, !child.lines.indices.contains(child.spot) || !child.lines[child.spot].enabled {
             child.spot = child.lines.firstIndex(where: \.enabled) ?? -1
@@ -472,6 +573,9 @@ final class ActionMenuList: ObservableObject {
         }
         dispatch {
             close()
+            // Closing may itself rebuild the menu; check after it returns.
+            guard let item = line.item, item.isEnabled, !item.isHidden,
+                  line.index >= 0 else { return }
             line.menu.performActionForItem(at: line.index)
         }
     }
@@ -479,17 +583,17 @@ final class ActionMenuList: ObservableObject {
     /// → into the lit line's submenu, ← back out of one.
     func side(_ by: Int) {
         if by > 0, lines.indices.contains(spot), lines[spot].submenu != nil { take() }
-        if by < 0, let parent { parent.closeChild() }
+        if by < 0, query.isEmpty, let parent { parent.closeChild() }
     }
 
     /// Escape: out of the submenu the keys are in, the search emptied, or
     /// the panel put away.
     func escape() {
         let at = active
-        if let parent = at.parent {
+        if !at.query.isEmpty {
+            at.query = ""
+        } else if let parent = at.parent {
             parent.closeChild()
-        } else if !query.isEmpty {
-            query = ""
         } else {
             close()
         }
@@ -538,9 +642,7 @@ struct ActionMenuView: View {
 
     private var search: some View {
         // The keys go to the submenu that has them, the words to this list.
-        // A compact tab menu shows only some of its actions; the field says
-        // the rest are a word away (Put Tab to Sleep and the like).
-        PickerSearch(text: $list.query, placeholder: list.compact ? "Search more actions\u{2026}" : "Search\u{2026}",
+        PickerSearch(text: $list.query, placeholder: list.placeholder,
                      move: { list.active.move($0) }, side: { list.active.side($0) },
                      pick: { list.active.take() }, close: { list.escape() }, size: 13, beginsAtEnd: true)
             .frame(height: 20)
@@ -598,6 +700,12 @@ struct ActionMenuView: View {
                     list.wordFrames[line.id] = frame
                 }
             Spacer(minLength: 0)
+            if let detail = line.detail {
+                Text(detail)
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+            }
             // Its own keys; a submenu's line shows where it goes.
             if line.checked {
                 Symbol("checkmark", size: 10, weight: .semibold, side: 14).foregroundStyle(ink)
@@ -809,6 +917,20 @@ enum ActionMenu {
         panel.closes = { close() }
         panel.actionFlags = { list.modifiers($0) }
         panel.actionKey = { key($0) }
+        panel.actionKeyEquivalent = { [weak list] event in list?.press(event) ?? false }
+        panel.actionMouse = { [weak panel] event in
+            guard let panel, event.type == .rightMouseDown || event.type == .leftMouseDown && event.modifierFlags.contains(.control) else { return false }
+            let point = CGPoint(x: event.locationInWindow.x, y: panel.frame.height - event.locationInWindow.y)
+            for list in lists.reversed() {
+                guard let line = list.lines.first(where: { list.frames[$0.id]?.contains(point) == true }),
+                      let context = line.context else { continue }
+                let at = panel.convertPoint(toScreen: event.locationInWindow)
+                close()
+                DispatchQueue.main.async { context(at) }
+                return true
+            }
+            return false
+        }
         list.close = { close() }
         list.dispatch = { [weak window] action in
             let previous = dispatchWindow
@@ -829,7 +951,7 @@ enum ActionMenu {
             frame.origin.x = min(frame.origin.x, screen.maxX - list.width - 8)
             plates[0] = frame
             relayout()
-            DispatchQueue.main.async { if list.searchVisible { panel.focusSearch() } }
+            focusDeepest()
         }
         list.modifiers(NSEvent.modifierFlags)
         window.addChildWindow(panel, ordered: .above)
@@ -867,14 +989,18 @@ enum ActionMenu {
                     lists.removeSubrange((depth + 1)...)
                     plates.removeSubrange((depth + 1)...)
                 }
-                defer { relayout() }
+                defer {
+                    relayout()
+                    focusDeepest()
+                }
                 guard let inner, let panel, let frame = list.frames[line], plates.indices.contains(depth) else { return }
                 let screen = (panel.screen ?? NSScreen.main)?.visibleFrame ?? .infinite
                 let outer = plates[depth]
                 let width = inner.width
                 let tall = ActionMenuView.height(inner)
-                // Align the first child row with the parent row.
+                // Align the first child row with the parent row, its search above.
                 let top = panel.frame.maxY - frame.minY + ActionMenuView.pad
+                    + (inner.searchVisible && inner.falls ? ActionMenuView.search + 1 : 0)
                 var x = outer.maxX + 4
                 if x + width > screen.maxX - 8 { x = outer.minX - 4 - width }
                 let y = min(max(top - tall, screen.minY + 8), screen.maxY - tall - 8)
@@ -883,6 +1009,34 @@ enum ActionMenu {
                 plates.append(childPlate)
                 list.childFrame = childPlate
                 wire(inner, depth: depth + 1)
+                // Its search shortens it from below, as the panel's does.
+                inner.changed = { [weak inner] in
+                    guard let inner, plates.indices.contains(depth + 1) else { return }
+                    var frame = plates[depth + 1]
+                    let height = ActionMenuView.height(inner)
+                    if inner.falls { frame.origin.y = frame.maxY - height }
+                    frame.size.height = height
+                    frame.size.width = inner.width
+                    plates[depth + 1] = frame
+                    relayout()
+                }
+            }
+        }
+    }
+
+    /// The keyboard to the deepest search up; two passes, as a plate's field
+    /// only stands in the window after the layout that follows `relayout`.
+    private static func focusDeepest() {
+        DispatchQueue.main.async {
+            DispatchQueue.main.async {
+                guard let panel, let content = panel.contentView else { return }
+                func fields(_ view: NSView) -> [PickerSearch.Field] {
+                    (view as? PickerSearch.Field).map { [$0] } ?? view.subviews.flatMap(fields)
+                }
+                guard let deepest = lists.last(where: \.searchVisible), let field = fields(content).last(where: {
+                    $0.placeholderString == deepest.placeholder
+                }), !field.isEditing(in: panel) else { return }
+                panel.makeFirstResponder(field)
             }
         }
     }
@@ -896,6 +1050,12 @@ enum ActionMenu {
     }
 
     static var isOpen: Bool { panel != nil }
+
+    /// Whether a point on the screen is on a plate up.
+    static func holds(_ point: NSPoint) -> Bool { plates.contains { $0.insetBy(dx: -6, dy: -6).contains(point) } }
+
+    /// Whether words stand in a search: a menu a person is using stays.
+    static var typed: Bool { lists.contains { !$0.query.isEmpty } }
 
     static func isOpen(in window: NSWindow) -> Bool { panel?.parent === window || dispatchWindow === window }
 
@@ -924,8 +1084,10 @@ enum ActionMenu {
         out["children"] = zip(lists, plates).dropFirst().map { inner, plate -> [String: Any] in
             var one = look(inner, plate: plate, window: panel)
             one["focused"] = inner.focused
+            one["query"] = inner.query
             return one
         }
+        out["keys"] = ((panel.firstResponder as? NSText)?.delegate as? PickerSearch.Field)?.placeholderString ?? ""
         return out
     }
 

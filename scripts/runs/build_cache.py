@@ -123,9 +123,7 @@ def valid_icons(folder, key):
 # 2026-10-09/10 98 of 227 farm builds repeated an app key already built; each
 # held the compiler 10-14 s even when Swift had nothing to do, and waited for
 # it behind other lanes' compiles (up to 800 s on adhd).
-# Every tree Package.swift compiles into the app: YabCoreClient lives under
-# YabCore/Client, and a change there reused a stale app until 2026-11-05.
-APP_TREES = ("Sources", "YabCore/Client/Sources", "Resources", "Icon", "Skills", "DockTile")
+APP_TREES = ("Sources", "Resources", "Icon", "Skills", "DockTile")
 APP_FILES = ("Package.swift", "Package.resolved", "build.sh", "VERSION", "THIRD_PARTY_NOTICES.md")
 APP_CACHE = Path(os.environ.get("YAB_APP_CACHE_DIR") or Path.home() / ".local/state/yab-farm/apps")
 # 40 apps of about 80 MB, 3.2 GB. With ten, m4 kept an app about an hour on

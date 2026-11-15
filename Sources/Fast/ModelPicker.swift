@@ -173,7 +173,9 @@ private struct ModelPicker: View {
         // Identity comes from the agents' files. Usage is read without a
         // model request, including blocked plans reset outside Yab.
         .task {
-            guard let found = Shell.cached else { return }
+            // The environment tasks run in when known (AgentLaunch), so an
+            // account read here is read as its task would be.
+            guard let found = Shell.cachedTerminal ?? Shell.cached else { return }
             if !ModelPicker.looked {
                 ModelPicker.looked = true
                 await accounts.look(found)

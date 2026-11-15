@@ -1,24 +1,21 @@
-// A site's menu at the top of the page moves the window, as in Arc: its
-// words and the room between them (register #454, #714). Dragged, the
-// window goes; pressed and let go, the page gets its click. Never what the
-// page answers a press on: a link, a button, a menu, a field, a player, or
-// a pointer other than the arrow. A held press reaches the page only at
-// the release, too late for menus that open on the press (profile and bell
-// menus on Reddit, Facebook and Google, Mike 10-29).
-//
-// The page can't be asked at the press, which WebKit hands on before any
-// script hears of it, so the answer is kept up to date as the pointer moves
-// over the top band and sent to Yab only when it changes (TopDrag.swift).
+// Only empty header background moves the window. Plain div/span controls
+// with delegated handlers have no discoverable listener in our isolated
+// world, so words, icons and small targets always belong to the page.
+// macOS 15 never holds/replays a page press at all (TopPress).
 (function () {
   if (window.__yabTopDrag || window !== window.top) return;
   window.__yabTopDrag = true;
   var BAND = __YAB_BAND__;
   var said = false, queued = null;
 
-  function say(grab) {
-    if (grab === said) return;
+  function say(grab, x, y) {
+    // Update positive coordinates even between two empty background points.
+    // Native code must never reuse one point's permission at a nearby link.
+    if (!grab && grab === said) return;
     said = grab;
-    try { window.webkit.messageHandlers.yabTopDrag.postMessage({ grab: grab }); } catch (e) {}
+    var message = { grab: grab };
+    if (grab) { message.x = x; message.y = y; }
+    try { window.webkit.messageHandlers.yabTopDrag.postMessage(message); } catch (e) {}
   }
 
   // What the page answers a press on: links, buttons, menus, fields,
@@ -60,27 +57,50 @@
       el = inner;
     }
     if (busy(el)) return false;
-    var cursor = getComputedStyle(el).cursor;
+    var style = getComputedStyle(el);
+    var cursor = style.cursor;
     if (cursor && !CURSORS.test(cursor)) return false;
+    // Only a broad header container's empty background is a handle. Plain
+    // text, avatars, icons and small div/span controls are page content even
+    // without a role, tabindex, inline listener or cursor:pointer. Isolated
+    // worlds cannot inspect the site's addEventListener/delegated listeners.
+    var container = /^(HEADER|NAV|DIV|SECTION|BODY|UL|OL|MENU)$/.test(el.tagName);
+    // A web component can be the header's layout container too. Its empty
+    // background has the same rules as a div; small/custom icon controls do not.
+    var custom = /-/.test(el.localName || el.tagName) && /^(block|flex|grid|flow-root)$/.test(style.display);
+    if (!container && !custom) return false;
+    var rect = el.getBoundingClientRect();
+    if (rect.width < innerWidth / 2 || !el.children.length) return false;
+    for (var node = el.firstChild; node; node = node.nextSibling) {
+      if (node.nodeType === 3 && node.textContent.trim()) return false;
+    }
+    var before = getComputedStyle(el, '::before').content;
+    var after = getComputedStyle(el, '::after').content;
+    if ((before && before !== 'none' && before !== 'normal' && before !== '""') ||
+        (after && after !== 'none' && after !== 'normal' && after !== '""')) return false;
     // A selection that is already there is the page's to drag.
     var sel = getSelection();
     return !(sel && !sel.isCollapsed);
   }
 
+  // Native hover is only a hint. Recheck the current DOM for each actual
+  // down before making it a window gesture: a control can mount at rest.
+  window.__yabTopDragHit = grabs;
+
   function look() {
     var e = queued; queued = null;
-    if (e) say(grabs(e.clientX, e.clientY));
+    if (e) say(grabs(e.clientX, e.clientY), e.clientX, e.clientY);
   }
 
   addEventListener('pointermove', function (e) {
     if (e.pointerType && e.pointerType !== 'mouse') return;
-    if (e.clientY > BAND) { say(false); return; }
+    if (e.clientY > BAND) { queued = null; say(false); return; }
     if (!queued) requestAnimationFrame(look);
     queued = e;
   }, { capture: true, passive: true });
   // What is under a pointer at rest changes with a scroll; the pointer
   // leaving the page or the page leaving ends it too.
-  addEventListener('scroll', function () { say(false); }, { capture: true, passive: true });
-  addEventListener('pointerout', function (e) { if (!e.relatedTarget) say(false); }, true);
-  addEventListener('pagehide', function () { say(false); });
+  addEventListener('scroll', function () { queued = null; say(false); }, { capture: true, passive: true });
+  addEventListener('pointerout', function (e) { if (!e.relatedTarget) { queued = null; say(false); } }, true);
+  addEventListener('pagehide', function () { queued = null; say(false); });
 })();

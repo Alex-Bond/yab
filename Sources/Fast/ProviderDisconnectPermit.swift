@@ -77,7 +77,7 @@ struct ProviderDisconnectPermit: @unchecked Sendable {
                     args[0] == "-c", args[1] == #"exec "$0" "$@""#, args[2] == binary { actual = Array(args.dropFirst(3)) }
             else { return false }
             guard Self.remaining[id]?.remove(actual) != nil else { return false }
-            try process.run()
+            try process.runValidated()
             Self.children[id, default: []].append(process)
             ConsentAudit.record("cli.start.local-disconnect")
             return true

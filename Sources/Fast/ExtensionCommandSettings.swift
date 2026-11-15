@@ -67,7 +67,7 @@ struct ExtensionCommandRow: View {
             ExtensionAliasCell(entry: entry, extensions: extensions)
             ShortcutRecorder(
                 current: entry.keys,
-                clash: { Keymap.shared.clash($0, for: nil, command: command) },
+                clash: { Self.clash($0, entry: entry, command: command) },
                 save: { extensions.setKey($0, extension: entry.extensionID, command: entry.command) },
                 column: 118
             )
@@ -88,6 +88,16 @@ struct ExtensionCommandRow: View {
             Button("Remove Hotkey") { extensions.setKey(nil, extension: entry.extensionID, command: entry.command) }
                 .disabled(entry.keys == nil)
         }
+    }
+
+    /// Who has a key recorded for `entry`. Chrome keeps the keys of one that
+    /// runs in Chromium, and gives a command only the keys
+    /// chrome://extensions/shortcuts can record.
+    static func clash(_ hotkey: Hotkey, entry: Extensions.CommandEntry, command: AnyObject?) -> Keymap.Clash? {
+        if entry.chromium, ChromiumExtensionCommands.stored(hotkey) == nil {
+            return .refused("Chrome doesn't give extension commands this key.")
+        }
+        return Keymap.shared.clash(hotkey, for: nil, command: command, extensionCommand: entry.chromium ? entry.id : nil)
     }
 
     /// WebKit's own, while it is loaded: a clash with itself isn't one.

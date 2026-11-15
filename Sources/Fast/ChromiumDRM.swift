@@ -5,7 +5,7 @@ import Foundation
 enum ChromiumDRM {
     static let domains = ["spotify.com", "netflix.com", "disneyplus.com", "primevideo.com",
                           "tv.apple.com", "music.apple.com", "max.com", "hbomax.com", "hbo.com",
-                          "hulu.com", "peacocktv.com", "paramountplus.com"]
+                          "hulu.com", "peacocktv.com", "paramountplus.com", "crunchyroll.com"]
 
     static func matches(host: String, domain: String) -> Bool {
         let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))

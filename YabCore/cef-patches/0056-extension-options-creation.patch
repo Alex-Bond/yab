@@ -1,0 +1,66 @@
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -53,6 +53,7 @@
+ #define CEF_YAB_DISCARD_VERSION 1
+ #define CEF_YAB_EXTERNAL_ACTION_VERSION 1
+ #define CEF_YAB_NATIVE_TAB_MODEL_VERSION 1
++#define CEF_YAB_OPTIONS_CREATION_VERSION 1
+ #define CEF_YAB_EXTERNAL_TAB_GROUP_VERSION 1
+ #define CEF_YAB_EXTERNAL_PAGE_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -13,12 +13,14 @@
+ #include "base/strings/stringprintf.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
++#include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/tab_list/tab_list_interface.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/navigator/browser_navigator.h"
+ #include "chrome/common/extensions/api/tabs.h"
+ #include "chrome/common/webui_url_constants.h"
+ #include "components/sessions/core/session_id.h"
+@@ -342,6 +344,38 @@
+     browser_to_use = displayer->browser_window_interface();
+   }
+ 
++  // runtime.openOptionsPage does not go through tabs.create. Capture its
++  // native owner and publish the same creation receipt before the embedder
++  // retires an otherwise unrequested concealed browser. Keep ordinary Chrome
++  // on its original singleton path when no externally bound owner exists.
++  auto* owner = ExternalTabFocus::Get(browser_to_use->GetProfile());
++  auto* model = ExternalTabModel::Get(owner);
++  auto& hooks = GetExternalExtensionHooks();
++  if (owner && ExternalTabWindow::Bound(owner) && model && model->embedded() &&
++      hooks.tab_model_created && hooks.tab_created) {
++    // Logical Yab tabs can live in different concealed physical Browsers.
++    // Reuse only this logical window's exact options document (ignoring ref),
++    // never another extension's page or another profile's options.
++    for (auto* candidate : model->tabs()) {
++      if (candidate->GetVisibleURL().GetWithoutRef() == url.GetWithoutRef()) {
++        if (auto* existing = ExternalTabModel::Get(candidate)) existing->Activate();
++        if (hooks.tab_activate_requested) hooks.tab_activate_requested(candidate);
++        return true;
++      }
++    }
++    auto owner_identity = owner->GetWeakPtr();
++    ScopedExternalTabCreation creation(owner, nullptr, true, -1);
++    NavigateParams params(GetSingletonTabNavigateParams(browser_to_use, url));
++    params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++    Navigate(&params);
++    auto* created = params.navigated_or_inserted_contents.get();
++    if (!created || !owner_identity ||
++        !hooks.tab_model_created(created, owner_identity.get(), nullptr, true, -1))
++      return false;
++    hooks.tab_created(created, nullptr, true, -1, extension->id());
++    return true;
++  }
++
+   // We need to respect path differences because we don't want opening the
+   // options page to close a page that might be open to extension content.
+   // However, if the options page opens inside the chrome://extensions page, we

@@ -43,6 +43,24 @@ enum KeptTree {
         return []
     }
 
+    /// The folder holding each kept tab directly, for every tab in one walk:
+    /// what `path(to:in:).last` says of one tab. Asked of `path` for each tab
+    /// in turn, a sync of a space with many kept tabs copied the tree once
+    /// per tab on the main thread (#547).
+    static func holders(_ items: [KeptItem]) -> [Tab.ID: Folder.ID] {
+        var found: [Tab.ID: Folder.ID] = [:]
+        func walk(_ items: [KeptItem]) {
+            for item in items {
+                guard case let .folder(folder) = item else { continue }
+                // Its own tabs before those of the folders in it, as `path` looks.
+                for case let .tab(tab) in folder.items where found[tab.id] == nil { found[tab.id] = folder.id }
+                walk(folder.items)
+            }
+        }
+        walk(items)
+        return found
+    }
+
     static func visible(_ items: [KeptItem], current: Tab.ID?) -> [Tab] {
         items.flatMap { item -> [Tab] in
             switch item {

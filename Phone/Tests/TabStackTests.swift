@@ -56,6 +56,16 @@ final class TabStackTests: XCTestCase {
         XCTAssertEqual(TabRecency.order(of: blankInFront, recent: []).map(\.id), ["blank", "page"])
     }
 
+    func testMobileSwitcherExcludesMacTodayPinsKeptAndOtherSpaces() {
+        var mac = tab("mac"); mac.onMac = true
+        let space = Space(id: "s", name: "S", emoji: "", tint: RGB(1, 2, 3),
+                          pins: [tab("pin", place: .pinned)],
+                          kept: [.tab(tab("kept", place: .kept))],
+                          today: [mac, tab("new"), tab("old")], current: "pin")
+        XCTAssertEqual(TabRecency.mobileTodayOrder(of: space,
+            recent: ["other-space", "mac", "kept", "old", "pin"]).map(\.id), ["pin", "old", "new"], "the page in front keeps its card")
+    }
+
     func testTouchMovesATabToTheFrontOfItsSpaceAndDropLetsAKeptTabGo() {
         var recency = TabRecency()
         recency.touch("a", in: "s")
@@ -315,8 +325,44 @@ final class TabStackTests: XCTestCase {
 
     // MARK: - All Tabs
 
+    func testGalleryCanSwitchToEmptyAndPopulatedSpacesWithoutClosingTabs() async throws {
+        let app = try mira()
+        let empty = app.browser.createSpace(name: "Empty", emoji: "", look: SpaceLook(color: RGB(80, 90, 100)))
+        app.browser.showSpace("work")
+        let before = app.browser.spaces
+        let stack = TabStack.of(app)
+        stack.openGallery()
+        stack.selectGallerySpace("lisbon")
+        XCTAssertEqual(stack.gallery?.space, "lisbon")
+        XCTAssertEqual(Set(stack.gallery?.order ?? []), ["lisbon-wiki", "lisbon-alfama-wiki", "lisbon-flights"])
+        stack.selectGallerySpace(empty)
+        XCTAssertEqual(stack.gallery?.space, empty)
+        XCTAssertEqual(stack.gallery?.order, [])
+        stack.selectGallerySpace("work")
+        XCTAssertEqual(stack.gallery?.space, "work")
+        XCTAssertEqual(app.browser.spaceID, "work")
+        XCTAssertEqual(app.browser.spaces, before)
+        stack.selectGallerySpace(NewTabPager.privatePage)
+        XCTAssertEqual(app.browser.spaceID, "work")
+        stack.chooseFront()
+        XCTAssertNil(stack.gallery)
+        XCTAssertEqual(app.browser.spaces, before, "Done keeps the selected kept page too")
+    }
+
+    func testPhoneGalleryContainsOnlyMobileTodayAndPreservesKeptTabs() async throws {
+        let app = try mira()
+        let stack = TabStack.of(app)
+        await select(app, "work-hn", "work-gh-pr", "work-figma-onb")
+        stack.openGallery()
+        let gallery = try XCTUnwrap(stack.gallery)
+        XCTAssertEqual(gallery.order, ["work-linear-method", "work-lumen", "work-tern-local", "work-hn", "work-gh-pr", "work-figma-onb"],
+                       "every recent tab, as the Mac's Control-Tab row")
+        XCTAssertNotNil(app.browser.tab("work-figma-onb"))
+    }
+
     func testAllTabsHoldsTheOpenTabsOldestFirstAndATappedCardComesInFront() async throws {
         let app = try mira()
+        app.workspace.tabletControls = true // Tablet All Tabs retains opened kept tabs.
         let stack = TabStack.of(app)
         await select(app, "work-hn", "work-gh-pr", "work-figma-onb")
         stack.openGallery()
@@ -335,6 +381,7 @@ final class TabStackTests: XCTestCase {
 
     func testAClosedCardClosesTodaysTabButAKeptOneOnlyLeavesTheOpenTabs() async throws {
         let app = try mira()
+        app.workspace.tabletControls = true // Tablet All Tabs retains opened kept tabs.
         let stack = TabStack.of(app)
         await select(app, "work-hn", "work-figma-onb")
         stack.openGallery()
@@ -357,6 +404,7 @@ final class TabStackTests: XCTestCase {
 
     func testUndoBringsAClosedCardBackInItsPlace() async throws {
         let app = try mira()
+        app.workspace.tabletControls = true // Tablet All Tabs retains opened kept tabs.
         let stack = TabStack.of(app)
         await select(app, "work-hn", "work-gh-pr", "work-figma-onb")
         stack.openGallery()
@@ -371,6 +419,7 @@ final class TabStackTests: XCTestCase {
 
     func testClosingTheCardInFrontBringsTheNewestLeftAndTheLastLeavesTheEmptyPage() async throws {
         let app = try mira()
+        app.workspace.tabletControls = true // Tablet All Tabs retains opened kept tabs.
         app.browser.showSpace("lisbon")
         app.browser.close("lisbon-alfama-wiki")
         let stack = TabStack.of(app)
@@ -391,12 +440,13 @@ final class TabStackTests: XCTestCase {
 
     func testAScrollStaysBetweenTheFirstAndTheLastCardAndAnotherSurfaceTakesTheGalleryAway() async throws {
         let app = try mira()
+        app.workspace.tabletControls = true // Tablet All Tabs retains opened kept tabs.
         let stack = TabStack.of(app)
         await turn()
         stack.openGallery()
         let count = try XCTUnwrap(stack.gallery).order.count
         stack.settleScroll(10_000)
-        XCTAssertEqual(stack.gallery?.focus, CGFloat(count - 1))
+        XCTAssertEqual(try XCTUnwrap(stack.gallery?.focus), CGFloat(count - 1), accuracy: 0.0001)
         stack.settleScroll(-300)
         XCTAssertEqual(stack.gallery?.focus, 0)
         stack.settleScroll(2.4)
@@ -704,6 +754,7 @@ final class TabStackTests: XCTestCase {
     /// Named states hold a moment of the movement.
     func testHeldMomentsOfOpeningAndClosing() async throws {
         let app = try mira()
+        app.workspace.tabletControls = true // The phone's gallery leaves the kept Figma out.
         let stack = TabStack.of(app)
         await select(app, "work-hn", "work-gh-pr", "work-figma-onb")
         stack.openGallery()

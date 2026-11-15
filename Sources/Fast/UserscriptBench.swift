@@ -98,9 +98,9 @@ extension Bench {
                 answer(["values": scripts.values(of: id)])
             case "eval":
                 // In the script's own world: what ran there, its errors.
-                guard let tab = find(request, in: browser), let web = tab.webKitOnly("Native userscript fixtures", build: false) else { answer(missing(request)); return }
+                guard let tab = find(request, in: browser), let web = tab.builtPage else { answer(missing(request)); return }
                 let inPage = (scripts.scripts[id] ?? scripts.offers[tab.id]?.script)?.inPage ?? false
-                do { answer(["value": Bench.plain(try await BoostJavaScript.evaluate(request["js"] as? String ?? "null", on: web, world: scripts.world(id, inPage: inPage)))]) }
+                do { answer(["value": Bench.plain(try await BoostJavaScript.evaluate(request["js"] as? String ?? "null", on: web, world: scripts.pageWorld(id, inPage: inPage)))]) }
                 catch { answer(["error": error.localizedDescription]) }
             case "command":
                 guard let tab = find(request, in: browser) else { answer(missing(request)); return }

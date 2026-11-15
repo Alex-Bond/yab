@@ -260,13 +260,13 @@ final class BrowserFeedbackUITests: XCTestCase {
         app.terminate(); app.launch()
         let join = app.buttons["join.close"]
         let ready = wait(timeout:15) {
-            app.buttons["welcome.start"].exists || app.textFields["field.input"].exists
+            app.buttons["welcome.skip"].exists || app.textFields["field.input"].exists
                 || app.webViews.staticTexts["Owned dialog page"].exists || join.exists
         }
         let identityFile = folder.appendingPathComponent("website-data-store.json")
         let ownedIdentityExists = FileManager.default.fileExists(atPath: identityFile.path)
         let arrival: [String: Any] = ["owned_profile_identity_exists": ownedIdentityExists,
-            "join_visible": join.exists, "welcome_visible": app.buttons["welcome.start"].exists,
+            "join_visible": join.exists, "welcome_visible": app.buttons["welcome.skip"].exists,
             "field_visible": app.textFields["field.input"].exists,
             "owned_page_visible": app.webViews.staticTexts["Owned dialog page"].exists,
             "owned_page_requests": site.count("/page"), "app_state": app.state.rawValue]

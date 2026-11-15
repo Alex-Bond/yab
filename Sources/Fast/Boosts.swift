@@ -141,6 +141,34 @@ final class Boosts: ObservableObject {
         let world = WKContentWorld.world(name: "yab-boost-" + id)
         worlds[id] = world; return world
     }
+    /// The same world through a tab's page, on either engine.
+    nonisolated static func pageWorld(_ id: String) -> PageWorld { .named("yab-boost-" + id) }
+
+    /// A tab told again what its boosts are, on either engine.
+    func arm(_ tab: Tab) {
+        if let chromium = tab.builtPage as? ChromiumPage { chromium.refreshFeatureScripts() }
+        else if let web = tab.webKitOnly("WebKit boost runtime", build: false) { attach(to: web.configuration.userContentController, tab: tab) }
+    }
+
+    /// A Chromium tab's boosts, for every document: a link's navigation asks
+    /// nobody first, so each script keeps to its sites itself (BoostScript).
+    func chromiumScripts(for tab: Tab) -> (scripts: [PageScriptRegistration], relays: [String]) {
+        guard !safeMode, !tab.shy, !tab.isDev else { return ([], []) }
+        let trial = trials[tab.id]
+        let local = records(in: AddonProfiles.of(tab))
+        var scripts: [PageScriptRegistration] = []
+        func add(_ package: BoostPackage) {
+            let made = script(for: package)
+            scripts.append(PageScriptRegistration(source: made.source, world: Self.pageWorld(package.id),
+                                                  atEnd: made.injectionTime == .atDocumentEnd, mainOnly: made.isForMainFrameOnly))
+        }
+        for record in local where record.enabled && record.id != trial?.package.id {
+            if let package = packages[record.id] { add(package) }
+        }
+        if let trial { add(trial.package) }
+        let relays = local.filter(\.enabled).compactMap { packages[$0.id] }.filter { !$0.plugin.permissions.isEmpty }.map(\.id)
+        return (scripts, relays)
+    }
     private var tabs: [Tab] {
         var seen: Set<UUID> = []
         return (BrowserWindows.shared.browsers + [Agents.shared.browser].compactMap { $0 })
@@ -226,8 +254,8 @@ final class Boosts: ObservableObject {
             throw BoostPackage.Invalid("A trial may change only its tab's exact site. Use that host in sites and the manifest.")
         }
         guard !name.isEmpty, name == BoostPackage.slug(name), name.count <= 64 else { throw BoostPackage.Invalid("Use a short lowercase boost name.") }
-        guard let web = tab.webKitOnly("Boost document-start registration") else { throw BoostPackage.Invalid("Boost trials are not available on this engine yet.") }
-        let sensitivity = try await BoostJavaScript.evaluate(BoostScript.sensitive, on: web, world: Self.world(name))
+        let web = tab.page
+        let sensitivity = try await BoostJavaScript.evaluate(BoostScript.sensitive, on: web, world: Self.pageWorld(name))
         guard sensitivity as? Bool == false else {
             throw BoostPackage.Invalid("Boosts are unavailable on sign-in, payment and password pages (page check: \(String(describing: sensitivity))).")
         }
@@ -265,13 +293,13 @@ final class Boosts: ObservableObject {
         try library.write(package.files, to: folder)
         if let old = trials[tab.id] { try? FileManager.default.removeItem(at: library.root.appendingPathComponent(".trial/" + old.id.uuidString)) }
         trials[tab.id] = trial
-        attach(to: web.configuration.userContentController, tab: tab)
+        arm(tab)
         do {
-            let initial = try await BoostJavaScript.evaluate(BoostScript.source(package), on: web, world: Self.world(name))
+            let initial = try await BoostJavaScript.evaluate(BoostScript.source(package), on: web, world: Self.pageWorld(name))
             if let message = (initial as? [String: Any])?["error"] as? String { throw BoostPackage.Invalid(message) }
             try await Task.sleep(for: .milliseconds(120))
             guard tab.address == url, trials[tab.id]?.id == trial.id else { throw BoostPackage.Invalid("The page changed. Recheck the boost before keeping it.") }
-            var report = (try await BoostJavaScript.evaluate(BoostScript.report, on: web, world: Self.world(name))) as? [String: Any] ?? [:]
+            var report = (try await BoostJavaScript.evaluate(BoostScript.report, on: web, world: Self.pageWorld(name))) as? [String: Any] ?? [:]
             report["rung"] = package.rung.rawValue; report["permission"] = package.permission
             report["name"] = name; report["trial"] = trial.id.uuidString
             report["before"] = before; report["after"] = await picture(web)
@@ -310,9 +338,8 @@ final class Boosts: ObservableObject {
         }
     }
 
-    private func picture(_ web: WKWebView) async -> String {
-        let config = WKSnapshotConfiguration(); config.snapshotWidth = 900
-        guard let image = try? await web.takeSnapshot(configuration: config), let tiff = image.tiffRepresentation,
+    private func picture(_ web: any PageHandle) async -> String {
+        guard let image = try? await web.snapshot(PageShot(width: 900)), let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff), let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.65]) else { return "" }
         return data.base64EncodedString()
     }
@@ -355,7 +382,6 @@ final class Boosts: ObservableObject {
               let url = source.address, let host = url.host, ["http", "https"].contains(url.scheme ?? "") else {
             throw BoostPackage.Invalid("Try a boost from a tab of this task's, or the person's tab the chat is about, outside private tabs and Developer Mode.")
         }
-        guard let sourceWeb = source.webKitOnly("Boost preview profile") else { throw BoostPackage.Invalid("Boost previews are not available on this engine yet.") }
         var urls = [url]
         for page in pages {
             guard let other = URL(string: page), other.host == host, ["http", "https"].contains(other.scheme ?? "") else {
@@ -366,7 +392,7 @@ final class Boosts: ObservableObject {
         urls = Array(urls.prefix(3))
         let key = session + ":" + name
         let earlier = rooms[session]
-        let room = Tab(bench: true, configuration: Self.room(sourceWeb.configuration.websiteDataStore), factory: .webKitOnly)
+        let room = Tab(bench: true, configuration: Self.room(source.pageStore), factory: .webKitOnly)
         guard let roomWeb = room.webKitOnly("Boost preview") else { room.close(); throw BoostPackage.Invalid("The preview page is unavailable.") }
         room.agent = session
         Bench.shared.house(room)
@@ -459,7 +485,7 @@ final class Boosts: ObservableObject {
             target = browser.open(fitted.url, foreground: true)
         }
         guard let target else { throw BoostPackage.Invalid("There is no window to show the boost in.") }
-        guard let web = target.webKitOnly("Boost document-start registration") else { throw BoostPackage.Invalid("Boost trials are not available on this engine yet.") }
+        let web = target.page
         let checked = Self.checked(places)
         if let other = trials[target.id], other.package.id != fitted.package.id || other.session != fitted.session {
             throw BoostPackage.Invalid("The person's tab has another boost on trial. Ask them to keep or undo it first; nothing else changed.")
@@ -469,13 +495,13 @@ final class Boosts: ObservableObject {
         trial.signIn = fitted.signIn
         trial.report = fitted.report; trial.ready = true; trial.fitted = true; trial.checked = checked
         try library.write(trial.package.files, to: library.root.appendingPathComponent(".trial/" + trial.id.uuidString))
-        let world = Self.world(trial.package.id)
+        let world = Self.pageWorld(trial.package.id)
         if let old = trials[target.id] {
             try? FileManager.default.removeItem(at: library.root.appendingPathComponent(".trial/" + old.id.uuidString))
             _ = try? await BoostJavaScript.evaluate(BoostScript.remove, on: web, world: world)
         }
         trials[target.id] = trial
-        attach(to: web.configuration.userContentController, tab: target)
+        arm(target)
         if !web.isLoading { _ = try? await BoostJavaScript.evaluate(BoostScript.source(trial.package), on: web, world: world) }
         BoostMetrics.note("shown", trial.package.id, attempts: attempts[fitted.session + ":" + trial.package.id])
         return target
@@ -532,7 +558,6 @@ final class Boosts: ObservableObject {
     /// Only native user controls call these methods. There is no Keep MCP verb.
     func keep(_ trialID: UUID, on tab: Tab, everywhere: Bool = false) async {
         guard let trial = trials[tab.id], trial.id == trialID, trial.ready else { return }
-        guard let web = tab.webKitOnly("Boost document-start registration") else { return }
         // Moved since the trial (a single-page app's own navigation): say
         // so on the card instead of a Keep that does nothing.
         guard tab.address == trial.url else { moved(tab); return }
@@ -561,17 +586,18 @@ final class Boosts: ObservableObject {
             try? FileManager.default.removeItem(at: library.root.appendingPathComponent(".trial/" + trial.id.uuidString))
             reload()
             await refresh(trial.package.id, except: tab.id)
-            attach(to: web.configuration.userContentController, tab: tab)
+            arm(tab)
         } catch { trials[tab.id]?.problem = error.localizedDescription }
     }
 
     func undo(on tab: Tab) async {
-        guard let trial = trials[tab.id], let web = tab.webKitOnly("Boost document-start registration") else { return }
+        guard let trial = trials[tab.id] else { return }
+        let web = tab.page
         trials.removeValue(forKey: tab.id)
         BoostMetrics.note("undo", trial.package.id)
         try? FileManager.default.removeItem(at: library.root.appendingPathComponent(".trial/" + trial.id.uuidString))
-        _ = try? await BoostJavaScript.evaluate(BoostScript.remove, on: web, world: Self.world(trial.package.id))
-        attach(to: web.configuration.userContentController, tab: tab)
+        _ = try? await BoostJavaScript.evaluate(BoostScript.remove, on: web, world: Self.pageWorld(trial.package.id))
+        arm(tab)
         // Arbitrary page code may have changed DOM state. Reload restores the
         // site's own document, and reinstates the saved version if there is one.
         if trial.package.rung != .look { tab.reloadForChange(.plugin) }
@@ -579,7 +605,7 @@ final class Boosts: ObservableObject {
         // for the page's next load, as any code from elsewhere does.
         else if let old = packages[trial.package.id], old.rung != .look { tab.reloadForChange(.plugin) }
         else if let old = packages[trial.package.id], isEnabled(old.id, in: AddonProfiles.of(tab)) {
-            _ = try? await BoostJavaScript.evaluate(BoostScript.source(old), on: web, world: Self.world(old.id))
+            _ = try? await BoostJavaScript.evaluate(BoostScript.source(old), on: web, world: Self.pageWorld(old.id))
         }
     }
 
@@ -659,18 +685,18 @@ final class Boosts: ObservableObject {
         }
         for tab in tabs where tab.id != except {
             if let profile, AddonProfiles.key(AddonProfiles.of(tab)) != profile { continue }
-            guard let web = tab.webKitOnly("WebKit boost runtime", build: false) else { continue }
-            attach(to: web.configuration.userContentController, tab: tab)
-            if tab.address?.host == id + ".boost", !isEnabled(id) { web.loadHTMLString("<h1>This plugin is turned off.</h1>", baseURL: nil) }
+            guard let web = tab.builtPage else { continue }
+            arm(tab)
+            if tab.address?.host == id + ".boost", !isEnabled(id) { web.navigate(html: "<h1>This plugin is turned off.</h1>", base: nil) }
             guard !tab.shy, !tab.isDev, trials[tab.id]?.package.id != id else { continue }
-            _ = try? await BoostJavaScript.evaluate(BoostScript.remove, on: web, world: Self.world(id))
+            _ = try? await BoostJavaScript.evaluate(BoostScript.remove, on: web, world: Self.pageWorld(id))
             if reloadPages || (reloadCode && packages[id]?.rung != .look) {
                 if let url = tab.address, (sites ?? records.first(where: { $0.id == id })?.sites ?? []).contains(where: { $0 == "<all_urls>" || $0 == url.host }) { tab.reloadForChange(.plugin) }
             } else if !safeMode, !tab.shy, let package = packages[id], package.rung == .look, let url = tab.address, package.matches(url),
                       isEnabled(id, in: AddonProfiles.of(tab)) {
                 // Only a look goes on a page as it is: code from another
                 // Mac waits for the page's next load.
-                _ = try? await BoostJavaScript.evaluate(BoostScript.source(package), on: web, world: Self.world(id))
+                _ = try? await BoostJavaScript.evaluate(BoostScript.source(package), on: web, world: Self.pageWorld(id))
             }
         }
     }
@@ -766,8 +792,8 @@ final class Boosts: ObservableObject {
             let url = tab.address
             Task { [weak self, weak tab] in
                 try? await Task.sleep(for: .seconds(1))
-                guard let self, let tab, tab.address == url, let web = tab.webKitOnly("WebKit boost runtime", build: false) else { return }
-                guard let report = try? await BoostJavaScript.evaluate(BoostScript.report, on: web, world: Self.world(record.id)) as? [String: Any],
+                guard let self, let tab, tab.address == url, let web = tab.builtPage else { return }
+                guard let report = try? await BoostJavaScript.evaluate(BoostScript.report, on: web, world: Self.pageWorld(record.id)) as? [String: Any],
                       let checks = report["checks"] as? [[String: Any]], checks.contains(where: { $0["state"] as? String != "skipped" }),
                       let index = self.records.firstIndex(where: { $0.id == record.id && $0.revision == record.revision }) else { return }
                 let failed = checks.contains { $0["state"] as? String == "fail" }

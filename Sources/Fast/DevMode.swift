@@ -86,9 +86,9 @@ extension Tab {
     }
 
     func hearPage() {
-        guard devListening, !isLocal, let web = webKitOnly("WebKit developer document relay", build: false) else { return }
+        guard devListening, !isLocal, let page = builtPage else { return }
         if devLog.heardFrom == nil { devLog.heardFrom = Date() }
-        web.evaluateJavaScript(DevRelay.anywhere, in: nil, in: .page) { _ in }
+        page.run(DevRelay.anywhere, in: .page) { _ in }
     }
 
     /// The port its server listens on, written out even when it is the
@@ -1160,9 +1160,14 @@ extension Browser {
     }
 
     /// The page shares the room with a card of ours, the chat's column or
-    /// the developer tools: in full screen with the tabs away it is a card
-    /// too, in by the same inset, rather than a square edge against theirs.
-    var pageShared: Bool { chatOpen || (devOpen && toolsFront != nil) }
+    /// the developer tools, or with the other half of a pair: in full
+    /// screen with the tabs away it is a card too, in by the same inset,
+    /// rather than a square edge against theirs. Only a page alone has the
+    /// screen edge to edge; two halves keep the space's color round and
+    /// between them, as Chromium's split keeps its inset in full screen
+    /// (MultiContentsView::kSplitViewContentInset) and Arc's does
+    /// (register 2551).
+    var pageShared: Bool { chatOpen || (devOpen && toolsFront != nil) || stagePair != nil }
 }
 
 /// The page card's paper (Paper): the ground, solid white or the dark

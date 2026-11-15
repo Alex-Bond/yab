@@ -32,6 +32,25 @@ final class PrivateLockTests: XCTestCase {
                         privateAuthentication: authentication, privateLockEnabled: { preference.enabled })
     }
 
+    func testExternalLinkArrivingBeforeActiveInPrivateWithoutAuthenticationOpensOnReturn() {
+        let auth = Authentication()
+        let preference = Preference()
+        preference.enabled = false
+        let app = live(auth, preference: preference)
+        app.browser.select("secret")
+        app.privateLock.willResignActive()
+        app.privateLock.didEnterBackground()
+        let requested = URL(string: "http://127.0.0.1/external")!
+
+        app.openLink(requested)
+        XCTAssertEqual(app.browser.tab?.id, "secret", "inactive Private stays covered")
+        app.privateLock.didBecomeActive()
+
+        XCTAssertEqual(app.browser.tab?.navigationURL, requested, "the first link must survive the return to an active scene")
+        XCTAssertTrue(app.browser.tab?.isPrivate == true)
+        XCTAssertEqual(auth.completions.count, 0, "authentication is disabled")
+    }
+
     func testPrivateSelectionWaitsForAuthenticationAndLeavingRetainsItsTabs() {
         let auth = Authentication()
         let app = live(auth)

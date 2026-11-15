@@ -59,32 +59,26 @@ enum ArcBoosts {
 
     /// The ones not here yet.
     @MainActor static func waiting() -> [Found] {
+        let found = all()
+        seen = found
         let here = Set(Boosts.shared.records.map(\.id))
-        return all().filter { !here.contains($0.id) }
+        return found.filter { !here.contains($0.id) }
     }
 
-    /// For the field, which asks on every key (Command.available): what the
-    /// last look found, looked at again off the main thread at most every
-    /// ten seconds. Reading every boost's files, and in a test world first
-    /// finding the stand-in Arc among every Chromium browser's folders,
-    /// took 150-870 ms of a key now and then on the main thread
-    /// (evals/field-typing, row 1165). Until the first look is back there
-    /// are none.
-    @MainActor private static var seen: (at: Date, found: [Found])?
-    @MainActor private static var looking = false
+    /// Counts from the last explicit import preview only. Opening the field
+    /// must not read Arc's scripts, manifests or site list in the background.
+    @MainActor private static var seen: [Found]?
     @MainActor static func waitingSoon() -> [Found] {
-        if seen.map({ Date().timeIntervalSince($0.at) >= 10 }) ?? true, !looking {
-            looking = true
-            Task.detached(priority: .utility) {
-                let found = all()
-                await MainActor.run {
-                    seen = (Date(), found)
-                    looking = false
-                }
-            }
-        }
         let here = Set(Boosts.shared.records.map(\.id))
-        return (seen?.found ?? []).filter { !here.contains($0.id) }
+        return (seen ?? []).filter { !here.contains($0.id) }
+    }
+
+    /// Keep the action discoverable before its first preview, without
+    /// inspecting Arc's data to decide whether the action may be offered.
+    @MainActor static var available: Bool {
+        if seen != nil { return !waitingSoon().isEmpty }
+        if Store.testing { return Chromium.standIns.withLock { $0.contains { $0.bundle == TabImport.arc } } }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: TabImport.arc) != nil
     }
 
     /// One of Arc's folders as a Yab boost, nil when it has nothing that runs.
@@ -204,7 +198,6 @@ enum ArcBoosts {
             guard let package = try? BoostPackage.read(id: one.id, files: one.files, sites: one.sites) else { continue }
             if (try? Boosts.shared.keepSynced(package, author: "Arc", enabled: one.enabled)) != nil { brought += 1 }
         }
-        seen = nil
         return brought
     }
 
@@ -214,9 +207,11 @@ enum ArcBoosts {
     /// browser.
     @MainActor @discardableResult
     static func bringIn(from source: Chromium.Source) -> Int {
-        guard source.bundle == TabImport.arc else { return 0 }
+        guard source.bundle == TabImport.arc, source.credentialAccess else { return 0 }
+        let found = all(in: folder(of: source))
+        seen = found
         let here = Set(Boosts.shared.records.map(\.id))
-        return bring(all(in: folder(of: source)).filter { !here.contains($0.id) })
+        return bring(found.filter { !here.contains($0.id) })
     }
 
     /// "3 boosts", for an import's summary.

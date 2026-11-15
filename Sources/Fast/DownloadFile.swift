@@ -10,6 +10,7 @@ struct DownloadFile: Sendable {
     /// What Finder shows in the destination's folder meanwhile, if anything.
     let partial: DownloadPartial?
     private let activity = Activity()
+    private let replacesExisting: Bool
 
     private final class Activity: @unchecked Sendable {
         private let lock = NSLock()
@@ -21,8 +22,9 @@ struct DownloadFile: Sendable {
         func cancel() { lock.lock(); cancelled = true; lock.unlock() }
     }
 
-    init(destination: URL, root: URL, showsPartial: Bool = false) throws {
+    init(destination: URL, root: URL, showsPartial: Bool = false, replacesExisting: Bool = false) throws {
         self.destination = destination
+        self.replacesExisting = replacesExisting
         // Named with its process: a headless Yab shares this folder with a
         // browser, and `leftovers` must not take a transfer still running.
         let folder = root.appendingPathComponent("\(getpid()).\(UUID().uuidString)", isDirectory: true)
@@ -34,6 +36,7 @@ struct DownloadFile: Sendable {
     /// Media assembly already has an owned temporary workspace.
     init(destination: URL, ownedStaging: URL) {
         self.destination = destination
+        replacesExisting = false
         staging = ownedStaging
         partial = nil
     }
@@ -42,13 +45,13 @@ struct DownloadFile: Sendable {
         try activity.check()
         let values = try staging.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true else { throw URLError(.cannotOpenFile) }
-        // RENAME_EXCL checks ownership atomically. A separate exists check
-        // followed by an ordinary rename can overwrite a competing writer.
+        // Only an explicit save-panel choice authorizes replacement. Automatic
+        // destinations retain RENAME_EXCL, including a competing writer.
         if rename(staging, to: destination) != 0 {
             let failure = errno
             guard failure == EXDEV else { throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO) }
             // Another disk: copy beside the destination under a private
-            // name, then publish that complete file in one exclusive rename.
+            // name, then publish that complete file with the same replacement policy.
             let copied = destination.deletingLastPathComponent().appendingPathComponent(".yab-download-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: copied) }
             try FileManager.default.copyItem(at: staging, to: copied)
@@ -61,7 +64,7 @@ struct DownloadFile: Sendable {
 
     private func rename(_ source: URL, to target: URL) -> Int32 {
         source.path.withCString { from in
-            target.path.withCString { to in renamex_np(from, to, UInt32(RENAME_EXCL)) }
+            target.path.withCString { to in renamex_np(from, to, replacesExisting ? 0 : UInt32(RENAME_EXCL)) }
         }
     }
 

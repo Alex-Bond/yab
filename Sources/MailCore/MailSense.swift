@@ -52,8 +52,8 @@ public enum MailSense {
         let sender = message.from.address.lowercased()
         // An auto-reply answers itself; what it says to do is yours to start.
         if autoReply.firstMatch(in: subject, range: NSRange(subject.startIndex..., in: subject)) != nil { return .other }
-        if MailCodeWords.read(subject: message.subject, text: body, html: message.html, received: message.date) != nil,
-           ["code", "verif", "sign in", "sign-in", "login", "log in"].contains(where: text.contains) { return .code }
+        if ["code", "verif", "sign in", "sign-in", "login", "log in"].contains(where: text.contains),
+           MailCodeWords.read(subject: message.subject, text: body, html: message.html, received: message.date) != nil { return .code }
         if ["invoice", "past due", "payment failed", "card was declined", "receipt"].contains(where: text.contains) { return .invoice }
         if ["invitation:", "updated invitation", "accepted:", "declined:", "calendar"].contains(where: text.contains)
             || sender.contains("calendar") { return .meeting }

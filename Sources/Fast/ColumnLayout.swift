@@ -134,7 +134,17 @@ enum ColumnLayout {
     /// (SideBar.looseSlots): rows gone from the list but for the gap under
     /// them, a row in the hand folded to nothing as SideBar folds it, and a
     /// gap where what is carried would land.
+    struct FolderFormation: Equatable {
+        let target: Tab.ID
+        let held: Tab.ID
+        let nest: Nest
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.target == rhs.target && lhs.held == rhs.held && lhs.nest === rhs.nest
+        }
+    }
+
     struct Shape: Equatable {
+        var forming: FolderFormation?
         /// Folded to nothing, their gap kept: the row carried up into the
         /// pins, the held one of a stack.
         var folded: Set<Tab.ID> = []
@@ -283,6 +293,18 @@ enum ColumnLayout {
         for cell in cells {
             switch cell {
             case .tab(let tab):
+                if let forming = shape.forming {
+                    if tab.id == forming.held { continue }
+                    if tab.id == forming.target, let held = browser.tab(id: forming.held) {
+                        let indent = CGFloat(folders.place(of: tab)?.depth ?? 0) * Folders.indent
+                        let targetMate = browser.partner(of: tab)
+                        let heldMate = browser.partner(of: held)
+                        add(tab.id.uuidString, .nest(forming.nest, count: 2 + (targetMate == nil ? 0 : 1) + (heldMate == nil ? 0 : 1), over: nil), indent: indent)
+                        add("choice child " + tab.id.uuidString, targetMate.map { .pair(tab, $0) } ?? .tab(tab), indent: indent + Folders.indent)
+                        add("choice child " + held.id.uuidString, heldMate.map { .pair(held, $0) } ?? .tab(held), indent: indent + Folders.indent)
+                        continue
+                    }
+                }
                 let place = folders.place(of: tab)
                 for key in place?.heads ?? [] {
                     guard let folder = folders.folder(key) else { continue }

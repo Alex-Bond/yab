@@ -113,7 +113,7 @@ final class AssistantRunner {
     private func spawn(_ assistant: String) -> Child? {
         guard let session = session(for: assistant), let binary = Bundle.main.executablePath else { return nil }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
+        process.executableURL = ProcessLaunch.executableURL(binary)
         process.arguments = ["mcp", "--assistant", assistant, "--session", session, "--socket", Store.file("bench.sock").path]
         let input = Pipe(), output = Pipe()
         process.standardInput = input
@@ -138,7 +138,7 @@ final class AssistantRunner {
                 }
             }
         }
-        do { try process.run() } catch { return nil }
+        do { try process.runValidated() } catch { return nil }
         return child
     }
 

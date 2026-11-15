@@ -127,6 +127,49 @@ struct ColumnDragScrollOwnershipTests {
         try exerciseLargeScroll(folder: folder, cancelled: cancelled)
     }
 
+    // Keep this out of the throwing test closure: Xcode 27.2 miscompiles a
+    // local blur predicates beside #require's expanded throwing code.
+    private func aboveBlur(_ name: NSView, in page: ColumnPage) -> Bool {
+        let order = page.subviews
+        guard let nameIndex = order.firstIndex(where: { $0 === name }) else { return false }
+        let blurIndices = order.indices.filter { type(of: order[$0]) == EdgeBlurView.self }
+        let result = !blurIndices.isEmpty && blurIndices.allSatisfy { $0 < nameIndex }
+        print("NAME_CHECK", nameIndex, blurIndices, result)
+        return result
+    }
+
+    /// #1602: cancelling a tab drag must restore the name above the blur,
+    /// as it was before the drag, rather than merely above the rows.
+    @Test func spaceNameReturnsAboveBlurAfterDragging() throws {
+        try world(folder: false) { browser, page, window, id in
+            let old = browser.prefs.usesSpaces
+            browser.prefs.usesSpaces = true
+            defer { browser.prefs.usesSpaces = old }
+            sync(browser, page)
+            let name = try #require(page.subviews.first { container in
+                container.subviews.contains { ($0 as? ColumnCell)?.kind == .name }
+            })
+            // aboveBlur also requires at least one blur view.
+            let initial = aboveBlur(name, in: page)
+            try #require(initial)
+            let item = try #require(page.items.first { $0.id == id })
+            page.scroll(to: max(0, item.y - 300))
+            sync(browser, page)
+            let start = CGPoint(x: 120, y: try #require(page.rowMiddle(id)))
+            let end = CGPoint(x: 120, y: start.y - 60)
+            try send(.leftMouseDown, start, page: page, window: window)
+            try send(.leftMouseDragged, end, page: page, window: window)
+            try #require(page.hand.dragging != nil)
+            let heldBehind = !aboveBlur(name, in: page)
+            #expect(heldBehind)
+            page.hand.grip.state = .cancelled
+            sync(browser, page)
+            #expect(page.hand.dragging == nil)
+            let restored = aboveBlur(name, in: page)
+            #expect(restored)
+        }
+    }
+
     /// Shared test fixture calls real production objects on both source
     /// revisions. The baseline uses its existing scroll entry; candidate
     /// tests can pass the actual autoscroll entry without a model substitute.

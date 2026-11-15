@@ -1,0 +1,565 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -996,6 +996,7 @@ source_set("libcef_static") {
+     "//components/version_info",
+     "//components/viz/service",
+     "//components/web_cache/renderer",
++    "//components/webauthn/json",
+     "//content/public/app",
+     "//content/public/browser",
+     "//content/public/child",
+@@ -1126,6 +1127,8 @@ source_set("libcef_static") {
+       "libcef/browser/views/external_action_watch.h",
+       "libcef/browser/views/external_consent.cc",
+       "libcef/browser/views/external_consent.h",
++      "libcef/browser/views/external_webauthn.cc",
++      "libcef/browser/views/external_webauthn.h",
+       "libcef/browser/views/external_crx.cc",
+       "libcef/browser/views/external_crx.h",
+       "libcef/browser/views/external_print.cc",
+--- a/cef/include/cef_browser_process_handler.h
++++ b/cef/include/cef_browser_process_handler.h
+@@ -50,6 +50,7 @@
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_EXTENSION_CONSENT_VERSION 1
+ #define CEF_YAB_EXTENSION_ACTION_CHANGED_VERSION 1
++#define CEF_YAB_WEBAUTHN_PROXY_VERSION 1
+ 
+ #if CEF_API_ADDED(CEF_EXPERIMENTAL)
+ ///
+@@ -67,6 +68,32 @@ class CefExtensionConsentCallback : public virtual CefBaseRefCounted {
+   /*--cef()--*/
+   virtual void Respond(bool accept) = 0;
+ };
++
++///
++/// Answers one WebAuthn request (see
++/// CefBrowserProcessHandler::OnWebAuthnRequest). Exactly the first Respond
++/// counts; releasing the callback unanswered fails the request with
++/// NotAllowedError. May be called on any thread.
++///
++/*--cef(source=library,added=experimental)--*/
++class CefWebAuthnCallback : public virtual CefBaseRefCounted {
++ public:
++  ///
++  /// With an empty |error_name|, answers with |response|: JSON of a
++  /// RegistrationResponseJSON for "create", an AuthenticationResponseJSON for
++  /// "get" (WebAuthn Level 3, base64url without padding), or true or false
++  /// for "isUvpaa". A response Chromium can't use fails the request with
++  /// NotAllowedError. Otherwise fails it with the DOMException |error_name|
++  /// (NotAllowedError, InvalidStateError, SecurityError, AbortError,
++  /// NotSupportedError, ConstraintError or UnknownError; any other is
++  /// NotAllowedError) and |error_message|.
++  ///
++  /*--cef(optional_param=response,optional_param=error_name,
++          optional_param=error_message)--*/
++  virtual void Respond(const CefString& response,
++                       const CefString& error_name,
++                       const CefString& error_message) = 0;
++};
+ #endif
+ 
+ ///
+@@ -226,6 +253,40 @@ class CefBrowserProcessHandler : public virtual CefBaseRefCounted {
+   virtual void OnExtensionActionChanged(CefRefPtr<CefBrowser> browser,
+                                         const CefString& extension_id,
+                                         const CefString& profile_path) {}
++
++  ///
++  /// A page, an extension's page or its popup asked for a passkey or a
++  /// security key (navigator.credentials.create or get), or whether a
++  /// platform authenticator is there (isUVPAA), and Chromium's own checks
++  /// passed: the RP ID against the origin, related origins, the iframe's
++  /// publickey-credentials permissions, an extension's host permissions.
++  /// Chromium shows no UI of its own for it. |browser| is the page's browser,
++  /// or null for a page that is none (an extension's action popup). |request|
++  /// has request (a token), kind (create, get or isUvpaa), origin (the
++  /// calling frame's, as Chromium verified it), topOrigin, mainFrame,
++  /// sameOriginWithAncestors, options (JSON of the
++  /// PublicKeyCredentialCreationOptionsJSON or
++  /// PublicKeyCredentialRequestOptionsJSON, raw PRF salts included),
++  /// profilePath, offTheRecord, viewType (tab, popup, appWindow, sidePanel,
++  /// background, offscreen or other) and, for an extension's page,
++  /// extensionId. Conditional and immediate requests never come here; they
++  /// fail as with no authenticator. Return false to fail the request with
++  /// NotAllowedError, or true and answer through |callback|. A request the
++  /// page aborts, or whose frame goes away, is reported by
++  /// OnWebAuthnRequestCanceled and later answers have no effect.
++  ///
++  /*--cef(added=experimental,optional_param=browser)--*/
++  virtual bool OnWebAuthnRequest(CefRefPtr<CefBrowser> browser,
++                                 CefRefPtr<CefDictionaryValue> request,
++                                 CefRefPtr<CefWebAuthnCallback> callback) {
++    return false;
++  }
++
++  ///
++  /// Called after the WebAuthn request with token |request| was cancelled.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnWebAuthnRequestCanceled(const CefString& request) {}
+ #endif
+ };
+ 
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -26,6 +26,7 @@
+ #include "mojo/public/cpp/bindings/receiver.h"
+ #include "cef/libcef/browser/views/external_consent.h"
+ #include "cef/libcef/browser/views/external_print.h"
++#include "cef/libcef/browser/views/external_webauthn.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/extensions/external_extension_window.h"
+ #include "chrome/browser/extensions/external_identity_flow.h"
+@@ -956,6 +957,7 @@ void InstallExtensionHooks() {
+   hooks.side_panel_open = &SidePanelOpen;
+   InstallConsentHooks();
+   InstallPrintHooks();
++  InstallWebAuthnProxy();
+ }
+ 
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index) {
+new file mode 100644
+--- /dev/null
++++ b/cef/libcef/browser/views/external_webauthn.cc
+@@ -0,0 +1,299 @@
++#include "cef/libcef/browser/views/external_webauthn.h"
++
++#include <atomic>
++#include <map>
++#include <optional>
++#include <string>
++#include <utility>
++#include <variant>
++
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "cef/include/cef_browser_process_handler.h"
++#include "cef/include/cef_values.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/browser/thread_util.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "cef/libcef/common/app_manager.h"
++#include "components/webauthn/json/value_conversions.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/global_routing_id.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_authentication_request_proxy.h"
++#include "content/public/browser/web_contents.h"
++#include "extensions/browser/view_type_utils.h"
++#include "extensions/common/constants.h"
++#include "extensions/common/mojom/view_type.mojom.h"
++#include "third_party/blink/public/mojom/webauthn/authenticator.mojom.h"
++#include "url/gurl.h"
++#include "url/origin.h"
++
++namespace cef::external_host {
++namespace {
++
++using content::WebAuthenticationRequestProxy;
++using RequestId = WebAuthenticationRequestProxy::RequestId;
++using Pending = std::variant<WebAuthenticationRequestProxy::CreateCallback,
++                             WebAuthenticationRequestProxy::GetCallback,
++                             WebAuthenticationRequestProxy::IsUvpaaCallback>;
++
++constexpr char kNotAllowed[] = "NotAllowedError";
++constexpr char kNotAllowedMessage[] =
++    "The operation either timed out or was not allowed. See: "
++    "https://www.w3.org/TR/webauthn-2/#sctn-privacy-considerations-client.";
++
++void Answer(RequestId id,
++            std::string response,
++            std::string error_name,
++            std::string error_message);
++
++// Answers one request. The first Respond counts; a callback released
++// unanswered fails its request with NotAllowedError. Any thread; the answer
++// always reaches Chromium on a later UI task, never from inside
++// Signal*Request, which sets the request's pending id only once it returns.
++class WebAuthnCallback : public CefWebAuthnCallback {
++ public:
++  explicit WebAuthnCallback(RequestId id) : id_(id) {}
++  ~WebAuthnCallback() override { Finish("", kNotAllowed, kNotAllowedMessage); }
++  void Respond(const CefString& response,
++               const CefString& error_name,
++               const CefString& error_message) override {
++    Finish(response.ToString(), error_name.ToString(),
++           error_message.ToString());
++  }
++
++ private:
++  void Finish(std::string response, std::string name, std::string message) {
++    if (answered_.exchange(true)) {
++      return;
++    }
++    CEF_POST_TASK(CEF_UIT,
++                  base::BindOnce(&Answer, id_, std::move(response),
++                                 std::move(name), std::move(message)));
++  }
++  const RequestId id_;
++  std::atomic<bool> answered_{false};
++  IMPLEMENT_REFCOUNTING(WebAuthnCallback);
++};
++
++CefRefPtr<CefBrowserProcessHandler> Handler() {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
++    return nullptr;
++  }
++  auto app = CefAppManager::Get()->GetApplication();
++  return app ? app->GetBrowserProcessHandler() : nullptr;
++}
++
++const char* ViewTypeName(content::WebContents* contents) {
++  switch (extensions::GetViewType(contents)) {
++    case extensions::mojom::ViewType::kTabContents:
++      return "tab";
++    case extensions::mojom::ViewType::kExtensionPopup:
++      return "popup";
++    case extensions::mojom::ViewType::kAppWindow:
++      return "appWindow";
++    case extensions::mojom::ViewType::kExtensionSidePanel:
++      return "sidePanel";
++    case extensions::mojom::ViewType::kExtensionBackgroundPage:
++      return "background";
++    case extensions::mojom::ViewType::kOffscreenDocument:
++      return "offscreen";
++    default:
++      return "other";
++  }
++}
++
++// Only the DOMException names WebAuthn rejects with; anything else a client
++// names is NotAllowedError, as an unexplained failure is to a site.
++bool KnownErrorName(const std::string& name) {
++  return name == kNotAllowed || name == "InvalidStateError" ||
++         name == "SecurityError" || name == "AbortError" ||
++         name == "NotSupportedError" || name == "ConstraintError" ||
++         name == "UnknownError";
++}
++
++blink::mojom::WebAuthnDOMExceptionDetailsPtr Details(std::string name,
++                                                     std::string message) {
++  if (!KnownErrorName(name)) {
++    name = kNotAllowed;
++    message = kNotAllowedMessage;
++  }
++  return blink::mojom::WebAuthnDOMExceptionDetails::New(std::move(name),
++                                                        std::move(message));
++}
++
++class Proxy : public WebAuthenticationRequestProxy {
++ public:
++  bool IsActive(const url::Origin& caller_origin) override { return true; }
++
++  void SetRequestFrame(content::RenderFrameHost* frame) override {
++    frame_ = frame ? frame->GetGlobalId() : content::GlobalRenderFrameHostId();
++  }
++
++  RequestId SignalCreateRequest(
++      const blink::mojom::PublicKeyCredentialCreationOptionsPtr& options,
++      CreateCallback callback) override {
++    return Start("create", webauthn::ToValue(options),
++                 options->remote_desktop_client_override.get(),
++                 Pending(std::move(callback)));
++  }
++
++  RequestId SignalGetRequest(
++      const blink::mojom::PublicKeyCredentialRequestOptionsPtr& options,
++      GetCallback callback) override {
++    return Start("get", webauthn::ToValue(options),
++                 options->extensions->remote_desktop_client_override.get(),
++                 Pending(std::move(callback)));
++  }
++
++  RequestId SignalIsUvpaaRequest(IsUvpaaCallback callback) override {
++    return Start("isUvpaa", base::Value(base::Value::Type::DICT), nullptr,
++                 Pending(std::move(callback)));
++  }
++
++  void CancelRequest(RequestId id) override {
++    if (!pending_.erase(id)) {
++      return;
++    }
++    if (auto handler = Handler()) {
++      handler->OnWebAuthnRequestCanceled(base::NumberToString(id));
++    }
++  }
++
++  void Finish(RequestId id,
++              const std::string& response,
++              std::string name,
++              std::string message) {
++    auto node = pending_.extract(id);
++    if (node.empty()) {
++      return;  // Cancelled meanwhile: Chromium has answered the page.
++    }
++    Pending callback = std::move(node.mapped());
++    if (auto* uvpaa = std::get_if<IsUvpaaCallback>(&callback)) {
++      std::move(*uvpaa).Run(name.empty() && response == "true");
++      return;
++    }
++    std::optional<base::Value> value;
++    if (name.empty()) {
++      value = base::JSONReader::Read(response, base::JSON_PARSE_RFC);
++    }
++    if (auto* create = std::get_if<CreateCallback>(&callback)) {
++      if (value) {
++        auto [made, why] = webauthn::MakeCredentialResponseFromValue(*value);
++        if (made) {
++          std::move(*create).Run(id, nullptr, std::move(made));
++          return;
++        }
++        LOG(WARNING) << "Yab WebAuthn: unusable create answer: " << why;
++      }
++      std::move(*create).Run(id, Details(std::move(name), std::move(message)),
++                             nullptr);
++      return;
++    }
++    auto& get = std::get<GetCallback>(callback);
++    if (value) {
++      auto [got, why] = webauthn::GetAssertionResponseFromValue(*value);
++      if (got) {
++        std::move(get).Run(id, nullptr, std::move(got));
++        return;
++      }
++      LOG(WARNING) << "Yab WebAuthn: unusable get answer: " << why;
++    }
++    std::move(get).Run(id, Details(std::move(name), std::move(message)),
++                       nullptr);
++  }
++
++ private:
++  RequestId Start(const char* kind,
++                  base::Value options,
++                  const blink::mojom::RemoteDesktopClientOverride* caller,
++                  Pending callback) {
++    const RequestId id = ++next_id_;
++    const content::GlobalRenderFrameHostId frame =
++        std::exchange(frame_, content::GlobalRenderFrameHostId());
++    pending_.emplace(id, std::move(callback));
++    CefRefPtr<WebAuthnCallback> answer = new WebAuthnCallback(id);
++
++    auto* rfh = content::RenderFrameHost::FromID(frame);
++    auto* contents = rfh ? content::WebContents::FromRenderFrameHost(rfh)
++                         : nullptr;
++    auto handler = Handler();
++    if (!contents || !handler) {
++      // Nobody to ask: refused, as Chromium's own UI would stand in a
++      // window nobody sees. The callback's release answers.
++      return id;
++    }
++
++    // The extension the request was rewritten for is Chromium's business;
++    // the client gets the caller's origin separately.
++    if (base::DictValue* dict = options.GetIfDict()) {
++      if (base::DictValue* extensions = dict->FindDict("extensions")) {
++        extensions->Remove("remoteDesktopClientOverride");
++        if (extensions->empty()) {
++          dict->Remove("extensions");
++        }
++      }
++    }
++
++    content::RenderFrameHost* top = rfh->GetOutermostMainFrame();
++    const url::Origin top_origin = top->GetLastCommittedOrigin();
++    auto request = CefDictionaryValue::Create();
++    request->SetString("request", base::NumberToString(id));
++    request->SetString("kind", kind);
++    // The origin Chromium verified the request against (rpId, iframe
++    // permissions, related origins), never one the page states.
++    request->SetString("origin", caller ? caller->origin.Serialize()
++                                        : rfh->GetLastCommittedOrigin()
++                                              .Serialize());
++    request->SetBool("sameOriginWithAncestors",
++                     caller ? caller->same_origin_with_ancestors : true);
++    request->SetString("topOrigin", top_origin.Serialize());
++    request->SetBool("mainFrame", rfh == top);
++    request->SetString("options",
++                       base::WriteJson(options).value_or(std::string("{}")));
++    content::BrowserContext* context = contents->GetBrowserContext();
++    request->SetString("profilePath", context->GetPath().value());
++    request->SetBool("offTheRecord", context->IsOffTheRecord());
++    request->SetString("viewType", ViewTypeName(contents));
++    const GURL top_url = top->GetLastCommittedURL();
++    if (top_url.SchemeIs(extensions::kExtensionScheme)) {
++      request->SetString("extensionId", top_url.GetHost());
++    }
++
++    CefRefPtr<CefBrowser> browser =
++        CefBrowserHostBase::GetBrowserForContents(contents).get();
++    if (!handler->OnWebAuthnRequest(browser, request, answer.get())) {
++      answer->Respond(CefString(), kNotAllowed, kNotAllowedMessage);
++    }
++    return id;
++  }
++
++  std::map<RequestId, Pending> pending_;
++  RequestId next_id_ = 0;
++  content::GlobalRenderFrameHostId frame_;
++};
++
++Proxy& GetProxy() {
++  static base::NoDestructor<Proxy> proxy;
++  return *proxy;
++}
++
++void Answer(RequestId id,
++            std::string response,
++            std::string error_name,
++            std::string error_message) {
++  GetProxy().Finish(id, response, std::move(error_name),
++                    std::move(error_message));
++}
++
++}  // namespace
++
++void InstallWebAuthnProxy() {
++  content::SetEmbedderWebAuthenticationRequestProxy(&GetProxy());
++}
++
++}  // namespace cef::external_host
+new file mode 100644
+--- /dev/null
++++ b/cef/libcef/browser/views/external_webauthn.h
+@@ -0,0 +1,16 @@
++// Chromium's WebAuthn requests, once Chromium's own checks pass, answered by
++// the embedder with UI of its own instead of Chromium's authenticator dialog.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_WEBAUTHN_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_WEBAUTHN_H_
++#pragma once
++
++namespace cef::external_host {
++// Sets content's embedder WebAuthn request proxy (idempotent). Every create,
++// get and isUVPAA request of every profile then reaches
++// CefBrowserProcessHandler::OnWebAuthnRequest; with no handler, or one that
++// declines, it fails with NotAllowedError. Chromium's own authenticator UI
++// never shows. UI thread.
++void InstallWebAuthnProxy();
++}  // namespace cef::external_host
++
++#endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_WEBAUTHN_H_
+--- a/content/browser/webauth/authenticator_common_impl.cc
++++ b/content/browser/webauth/authenticator_common_impl.cc
+@@ -127,6 +127,19 @@
+ 
+ namespace content {
+ 
++namespace {
++WebAuthenticationRequestProxy* g_embedder_request_proxy = nullptr;
++}  // namespace
++
++void SetEmbedderWebAuthenticationRequestProxy(
++    WebAuthenticationRequestProxy* proxy) {
++  g_embedder_request_proxy = proxy;
++}
++
++WebAuthenticationRequestProxy* GetEmbedderWebAuthenticationRequestProxy() {
++  return g_embedder_request_proxy;
++}
++
+ // RequestExtension is a type of extension in a WebAuthn request that might
+ // yield an extension output in the response.
+ enum class RequestExtension {
+@@ -1793,6 +1806,15 @@ void AuthenticatorCommonImpl::GetPasswordOnlyCredential(
+     return;
+   }
+ 
++  // Yab: an embedder that answers WebAuthn itself has no password-only
++  // sheet of Chromium's to show either.
++  if (GetEmbedderWebAuthenticationRequestProxy()) {
++    req_state_->request_outcome = GetAssertionOutcome::kOtherFailure;
++    CompleteGetAssertionRequest(
++        blink::mojom::AuthenticatorStatus::NOT_ALLOWED_ERROR);
++    return;
++  }
++
+   req_state_->request_delegate = MaybeCreateRequestDelegate();
+   if (!req_state_->request_delegate) {
+     req_state_->request_outcome = GetAssertionOutcome::kOtherFailure;
+@@ -1953,7 +1975,10 @@ void AuthenticatorCommonImpl::ContinueGetAssertionAfterRpIdCheck(
+   WebAuthenticationRequestProxy* proxy =
+       GetWebAuthnRequestProxyIfActive(caller_origin);
+   if (proxy) {
++    // Yab: nor an immediate one, which must not show UI when nothing is
++    // there to offer; the proxy can't tell.
+     if (options->mediation == Mediation::CONDITIONAL ||
++        options->mediation == Mediation::IMMEDIATE ||
+         public_key_options->extensions->remote_desktop_client_override ||
+         public_key_options->extensions->remote_client_data_json) {
+       // Don't allow proxying of an already proxied or conditional request.
+@@ -3051,8 +3076,11 @@ void AuthenticatorCommonImpl::CancelWithStatus(
+   }
+   if (req_state_->pending_proxied_request_id) {
+     WebAuthenticationRequestProxy* proxy =
+-        GetWebAuthenticationDelegate()->MaybeGetRequestProxy(
+-            GetBrowserContext(), req_state_->caller_origin);
++        GetEmbedderWebAuthenticationRequestProxy();
++    if (!proxy) {
++      proxy = GetWebAuthenticationDelegate()->MaybeGetRequestProxy(
++          GetBrowserContext(), req_state_->caller_origin);
++    }
+     // As long as `req_state_->pending_proxied_request_id` is set, there should
+     // be an active request proxy. Deactivation of the proxy would have invoked
+     // `OnMakeCredentialProxyResponse()` or `OnGetAssertionProxyResponse()`, and
+@@ -3555,6 +3583,13 @@ AuthenticatorCommonImpl::GetWebAuthnRequestProxyIfActive(
+   if (!enable_request_proxy_api_ || virtual_authenticator_active) {
+     return nullptr;
+   }
++  // Yab: the embedder's own proxy takes every request it is active for.
++  if (WebAuthenticationRequestProxy* embedder =
++          GetEmbedderWebAuthenticationRequestProxy();
++      embedder && embedder->IsActive(caller_origin)) {
++    embedder->SetRequestFrame(GetRenderFrameHost());
++    return embedder;
++  }
+   return GetWebAuthenticationDelegate()->MaybeGetRequestProxy(
+       GetBrowserContext(), caller_origin);
+ }
+--- a/content/public/browser/web_authentication_request_proxy.h
++++ b/content/public/browser/web_authentication_request_proxy.h
+@@ -6,6 +6,7 @@
+ #define CONTENT_PUBLIC_BROWSER_WEB_AUTHENTICATION_REQUEST_PROXY_H_
+ 
+ #include "base/functional/callback_forward.h"
++#include "content/common/content_export.h"
+ #include "third_party/blink/public/mojom/webauthn/authenticator.mojom-forward.h"
+ 
+ namespace url {
+@@ -14,6 +15,8 @@ class Origin;
+ 
+ namespace content {
+ 
++class RenderFrameHost;
++
+ // WebAuthentcationRequestProxy allows the embedder to intercept and handle Web
+ // Authentication API requests.
+ class WebAuthenticationRequestProxy {
+@@ -68,8 +71,24 @@ class WebAuthenticationRequestProxy {
+   // CancelRequest cancels processing of the request with the
+   // given `request_id`.
+   virtual void CancelRequest(RequestId request_id) = 0;
++
++  // Yab: the frame whose request the next SignalCreateRequest,
++  // SignalGetRequest or SignalIsUvpaaRequest call carries, given right before
++  // that call, on the same task. A proxy that answers with UI of its own needs
++  // to know which page asked; others ignore it.
++  virtual void SetRequestFrame(RenderFrameHost* frame) {}
+ };
+ 
++// Yab: a proxy the embedder sets for every frame of every profile, consulted
++// ahead of WebAuthenticationDelegate::MaybeGetRequestProxy, for an embedder
++// that answers WebAuthn with its own UI after Chromium's own checks (origin,
++// RP ID, iframe permissions, related origins, extensions). Set once on the UI
++// thread, before any request, and kept for the life of the process.
++CONTENT_EXPORT void SetEmbedderWebAuthenticationRequestProxy(
++    WebAuthenticationRequestProxy* proxy);
++CONTENT_EXPORT WebAuthenticationRequestProxy*
++GetEmbedderWebAuthenticationRequestProxy();
++
+ }  // namespace content
+ 
+ #endif  // CONTENT_PUBLIC_BROWSER_WEB_AUTHENTICATION_REQUEST_PROXY_H_

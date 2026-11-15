@@ -243,19 +243,41 @@ final class PlanAccounts: ObservableObject {
     /// any folder's sign-in, so another account never gets them.
     func env(_ account: PlanAccount?, base: [String: String]) -> [String: String] {
         guard let account else { return base }
-        var env = base
-        if account.cli == "cursor" { return CursorRunner.environment(base) }
-        if account.cli == "claude", !account.usual {
-            env[Shell.claudeToken] = nil
-            env[AgentKey.anthropic] = account.keyed ? AgentKey.secret(account.id) : nil
-        } else if account.cli == "claude", let given = env[AgentKey.anthropic],
-                  extras.contains(where: { $0.keyed && AgentKey.secret($0.id) == given }) {
+        var env = Self.environment(account, base: base, secret: AgentKey.secret)
+        if account.cli == "claude", account.usual, let given = env[AgentKey.anthropic],
+           extras.contains(where: { $0.keyed && AgentKey.secret($0.id) == given }) {
             // Back to the usual account from a key's: its own key, if any.
             env[AgentKey.anthropic] = AgentKey.claude()
+        }
+        return env
+    }
+
+    /// The one rule for an account's environment, for the task that runs
+    /// on it (env) and for a look at whether it is signed in (read): its
+    /// own folder, and your token and key for the usual account only.
+    /// `secret` gives a keyed account's key; nil while only looking, which
+    /// never loads one.
+    static func environment(_ account: PlanAccount, base: [String: String],
+                            secret: ((String) -> String?)?) -> [String: String] {
+        if account.cli == "cursor" { return CursorRunner.environment(base) }
+        var env = base
+        if account.cli == "claude", !account.usual {
+            env[Shell.claudeToken] = nil
+            env[AgentKey.anthropic] = account.keyed ? secret?(account.id) : nil
         }
         guard let home = account.home else { return env }
         env[account.cli == "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"] = home
         return env
+    }
+
+    /// A look's read of whether this account is signed in, kept as the
+    /// launcher's pick reads it: a task then starts on the account the look
+    /// found signed in. Dropped when the account changed since the read.
+    func heard(_ account: PlanAccount, signedIn: Bool, revision: Int) {
+        guard self.account(account.id) == account, identityRevision(account.id) == revision,
+              signedOut.contains(account.id) == signedIn else { return }
+        if signedIn { signedOut.remove(account.id) } else { signedOut.insert(account.id) }
+        save()
     }
 
     func moveFirst(_ id: String, _ cli: String) {
@@ -857,13 +879,8 @@ final class PlanAccounts: ObservableObject {
     /// It never loads API-key secrets just to construct a subprocess env.
     static func read(_ account: PlanAccount, env: [String: String], revision: Int = 0,
                      keychain: @escaping @Sendable (String) -> Bool = PlanAccounts.inKeychain) async -> (signedIn: Bool, email: String?, plan: String?) {
-        var env = env
-        if account.cli == "claude", !account.usual {
-            env[Shell.claudeToken] = nil
-            env[AgentKey.anthropic] = nil
-        }
-        if let home = account.home { env[account.cli == "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"] = home }
-        return await read(account.cli, env: env, revision: revision, keychain: keychain)
+        // The environment its task would run in, as the launcher makes it.
+        await read(account.cli, env: environment(account, base: env, secret: nil), revision: revision, keychain: keychain)
     }
 
     /// A JWT's middle part, its public claims.
@@ -1054,6 +1071,7 @@ final class PlanAccounts: ObservableObject {
             order = ids + order.filter { !$0.hasPrefix(cli) }
             save()
             authority.grant(cli)
+            if self === PlanAccounts.shared { AgentSetupModel.shared.didConnect(cli) }
         }
     }
 

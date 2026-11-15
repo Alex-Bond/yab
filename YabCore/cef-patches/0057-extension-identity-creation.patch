@@ -1,0 +1,127 @@
+--- a/chrome/browser/extensions/api/identity/web_auth_flow.h
++++ b/chrome/browser/extensions/api/identity/web_auth_flow.h
+@@ -129,6 +129,13 @@
+   void SetClockForTesting(const base::TickClock* clock,
+                           scoped_refptr<base::SequencedTaskRunner> task_runner);
+ 
++#if BUILDFLAG(ENABLE_EXTENSIONS)
++  // Capture the native extension caller before the action popup can close.
++  // This receipt does not implement OAuth: Chromium still owns the flow.
++  void SetExternalExtensionOwner(const std::string& extension_id,
++                                 content::WebContents* sender);
++#endif
++
+   // Starts the flow.
+   virtual void Start();
+ 
+@@ -177,6 +184,11 @@
+   void DisplayInfoBar();
+   void CloseInfoBar();
+ 
++#if BUILDFLAG(ENABLE_EXTENSIONS)
++  base::WeakPtr<content::WebContents> external_owner_;
++  std::string external_extension_id_;
++#endif
++
+   raw_ptr<Delegate> delegate_ = nullptr;
+   raw_ptr<Profile> profile_;
+   const GURL provider_url_;
+--- a/chrome/browser/extensions/api/identity/web_auth_flow.cc
++++ b/chrome/browser/extensions/api/identity/web_auth_flow.cc
+@@ -49,6 +49,8 @@
+ #include "url/url_constants.h"
+ 
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
++#include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_tab_model.h"
+ #include "chrome/browser/ui/browser_window.h"
+ #include "chrome/browser/ui/tabs/tab_enums.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+@@ -280,6 +282,28 @@
+ }
+ #endif
+ 
++#if BUILDFLAG(ENABLE_EXTENSIONS)
++void WebAuthFlow::SetExternalExtensionOwner(
++    const std::string& extension_id, content::WebContents* sender) {
++  // A real action popup has an original native owner. Do not retain the
++  // popup itself: showing the provider will dismiss that popup. Workers
++  // have no sender document; capture this profile's native focused owner
++  // once, before loading the provider, and never retarget a pending flow.
++  auto* owner = sender;
++  if (auto* action = sender ? ExternalActionOrigin::Get(sender) : nullptr) {
++    if (action->extension_id() != extension_id) return;
++    owner = action->Owner(sender);
++  } else if (!sender) {
++    owner = ExternalTabFocus::Get(profile_);
++  }
++  auto* model = owner ? ExternalTabModel::Get(owner) : nullptr;
++  if (!owner || owner->GetBrowserContext() != profile_ || !model ||
++      !model->embedded() || !ExternalTabWindow::Bound(owner)) return;
++  external_owner_ = owner->GetWeakPtr();
++  external_extension_id_ = extension_id;
++}
++#endif
++
+ bool WebAuthFlow::DisplayAuthPageInPopupWindow() {
+   if (GetBrowserWindowCreationStatusForProfile(*profile_) !=
+       BrowserWindowInterface::CreationStatus::kOk) {
+@@ -287,6 +311,20 @@
+   }
+ 
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
++  auto& hooks = GetExternalExtensionHooks();
++  const bool external = !external_extension_id_.empty();
++  auto* owner = external_owner_.get();
++  if (external && (!owner || owner->IsBeingDestroyed() ||
++                   owner->GetBrowserContext() != profile_ ||
++                   !ExternalTabWindow::Bound(owner) ||
++                   !hooks.tab_model_created || !hooks.tab_created)) {
++    return false;
++  }
++  // Cover both Browser and WebContents attachment with the original native
++  // creation inputs. The default client must not infer authority from a URL,
++  // a recent launch, or an arbitrary unrequested popup in the same profile.
++  ScopedExternalTabCreation creation(external ? owner : nullptr, nullptr,
++                                     true, -1);
+   BrowserWindowCreateParams browser_params(BrowserWindowInterface::TYPE_POPUP,
+                                            profile_, user_gesture_);
+   browser_params.omit_from_session_restore = true;
+@@ -297,11 +335,25 @@
+ 
+   BrowserWindowInterface* browser =
+       CreateBrowserWindow(std::move(browser_params));
++  auto* auth_contents = web_contents_.get();
+   browser->GetTabStripModel()->AddWebContents(
+       std::move(web_contents_), /*index=*/0,
+       ui::PageTransition::PAGE_TRANSITION_AUTO_TOPLEVEL,
+       AddTabTypes::ADD_ACTIVE);
+ 
++  if (external) {
++    // This is the exact WebContents observed by WebAuthFlow. Publishing the
++    // ordinary extension creation receipt lets Yab adopt it before its
++    // deferred unrequested-browser cleanup. Keep redirect validation, API
++    // callback/Promise, cancellation and worker keepalive in Chromium.
++    owner = external_owner_.get();
++    if (!owner || !hooks.tab_model_created(auth_contents, owner, nullptr,
++                                           true, -1)) {
++      return false;
++    }
++    hooks.tab_created(auth_contents, nullptr, true, -1,
++                      external_extension_id_);
++  }
+   browser->GetWindow()->Show();
+ #else
+   static_assert(BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS));
+--- a/chrome/browser/extensions/api/identity/identity_launch_web_auth_flow_function.cc
++++ b/chrome/browser/extensions/api/identity/identity_launch_web_auth_flow_function.cc
+@@ -217,6 +217,9 @@
+   // to attribute displayed URL to the extension.
+   auth_flow_->SetShouldShowInfoBar(extension()->name());
+ 
++#if BUILDFLAG(ENABLE_EXTENSIONS)
++  auth_flow_->SetExternalExtensionOwner(extension_id(), GetSenderWebContents());
++#endif
+   auth_flow_->Start();
+ }
+ 

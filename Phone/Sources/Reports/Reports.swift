@@ -84,12 +84,13 @@ final class DiagnosticsWatcher: NSObject, MXMetricManagerSubscriber {
         guard !payloads.isEmpty else { return }
         var reports: [CrashReport] = [], hangs: [[String: Any]] = []
         for payload in payloads {
-            let json = payload.jsonRepresentation()
-            reports += DiagnosticReports.crashes(inPayload: json, bundle: bundle)
+            // Parsed once, from a copy of its own (DiagnosticReports.payload, #1537).
+            guard let json = DiagnosticReports.payload(payload.jsonRepresentation()) else { continue }
+            reports += DiagnosticReports.crashes(in: json, bundle: bundle)
             let durations = (payload.hangDiagnostics ?? []).map {
                 Int($0.hangDuration.converted(to: .milliseconds).value.rounded())
             }
-            let found = DiagnosticReports.hangs(inPayload: json, bundle: bundle, durations: durations)
+            let found = DiagnosticReports.hangs(in: json, bundle: bundle, durations: durations)
             reports += found.reports
             hangs += found.stacks
         }

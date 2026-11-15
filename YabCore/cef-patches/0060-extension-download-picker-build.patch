@@ -1,0 +1,30 @@
+--- a/chrome/browser/download/BUILD.gn
++++ b/chrome/browser/download/BUILD.gn
+@@ -3,6 +3,7 @@
+ # found in the LICENSE file.
+ 
+ import("//build/config/ui.gni")
++import("//cef/libcef/features/features.gni")
+ import("//components/enterprise/buildflags/buildflags.gni")
+ import("//components/offline_pages/buildflags/features.gni")
+ import("//components/safe_browsing/buildflags.gni")
+@@ -186,6 +187,7 @@
+   ]
+ 
+   deps = [
+     ":status_text_builder_utils",
++    "//cef/libcef/features:buildflags",
+     "//chrome/browser:browser_process",
+     "//chrome/browser:primitives",
+@@ -236,6 +238,11 @@
+     "//url",
+   ]
+ 
++  if (enable_cef) {
++    configs += [ "//cef/libcef/features:config" ]
++    deps += [ "//cef/libcef/features:deps" ]
++  }
++
+   if (is_android) {
+     sources += [
+       "android/dangerous_download_dialog_bridge.cc",

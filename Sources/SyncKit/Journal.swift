@@ -40,6 +40,15 @@ public final class Journal: @unchecked Sendable {
             """,
             "CREATE INDEX IF NOT EXISTS records_dirty ON records(dirty) WHERE dirty = 1",
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            // What this device's own files last said of a record, for the
+            // collections reconciled with `shown` (reconcile): the base a
+            // difference is measured from, so a file that hasn't taken in
+            // what came from elsewhere yet is no edit made here.
+            """
+            CREATE TABLE IF NOT EXISTS shown (
+              collection TEXT NOT NULL, id TEXT NOT NULL, fields BLOB NOT NULL,
+              PRIMARY KEY (collection, id))
+            """,
         ] {
             try Journal.exec(db, sql)
         }
@@ -114,12 +123,29 @@ public final class Journal: @unchecked Sendable {
     /// and only they can be removed for missing; the rest of the collection
     /// isn't even decoded (one chat's steps, `chat/…`, among every chat's).
     /// An id in `now` outside them is read on its own.
+    ///
+    /// `shown`: a three-way reconcile, as Chromium's sync takes only what the
+    /// person did as a local change, never a difference from the merged
+    /// state. Each record's fields as these files last said them are kept
+    /// (`shown` table); a field goes up only when the files changed it since,
+    /// and a record missing from them is removed only when they had it.
+    /// Files that haven't taken in what came from elsewhere (a catch-up
+    /// page whose rows aren't drawn yet, a relaunch between a page and its
+    /// rows, a Mac back after weeks) are then no edit, and their old values
+    /// can't win by a stamp of now (register 2589). Until a collection was
+    /// once reconciled this way, the journal stands in for what was shown.
+    /// `orphaned`: records missing from `now` removed though the files never
+    /// held them.
     @discardableResult
     public func reconcile(_ collection: String, _ now: [String: [String: Value]], within: ((Record) -> Bool)? = nil,
-                          under: Set<String>? = nil, blank: Bool = false) throws -> [Record.Key] {
+                          under: Set<String>? = nil, blank: Bool = false, shown: Bool = false,
+                          orphaned: ((Record) -> Bool)? = nil) throws -> [Record.Key] {
         try queue.sync {
             let kind = Kind.of(collection)
             var changed: [Record.Key] = []
+            let startedKey = "shown." + collection
+            let started = shown && Journal.meta(db, startedKey) != nil
+            let base = started ? loadShown(collection) : [:]
             try transaction {
                 var have: [String: (Record, Int64)] = [:]
                 func read(_ sql: String, _ values: [Any]) {
@@ -142,12 +168,25 @@ public final class Journal: @unchecked Sendable {
                 }
                 for (id, fields) in now {
                     var record = have[id]?.0 ?? Record(collection: collection, id: id)
-                    if record.update(to: fields, clock: clock, kind: kind) {
+                    var want = fields
+                    if started, let had = have[id]?.0, let was = base[id] {
+                        // Only what the files changed since they last said
+                        // `was`, over the record as it stands.
+                        let edits = Journal.edits(fields, since: was)
+                        if edits.isEmpty { continue }
+                        want = had.visible
+                        for (name, value) in edits { want[name] = value }
+                    }
+                    if record.update(to: want, clock: clock, kind: kind) {
                         try save(record, dirty: true, version: have[id]?.1)
                         changed.append(record.key)
                     }
                 }
                 for (id, (record, version)) in have where now[id] == nil && record.alive(kind) && (within?(record) ?? true) {
+                    // Never in these files: nothing here took it out.
+                    // Unless what it was in is gone (`orphaned`: its space
+                    // removed), which takes it whoever held it.
+                    if started && base[id] == nil && !(orphaned?(record) ?? false) { continue }
                     var gone = record
                     let stamp = clock.tick()
                     if blank {
@@ -157,9 +196,69 @@ public final class Journal: @unchecked Sendable {
                     try save(gone, dirty: true, version: version)
                     changed.append(gone.key)
                 }
+                if shown {
+                    // What the files say now is the next base. One they no
+                    // longer hold leaves it, but not one kept out of their
+                    // reach (`within`): another device's, a space not come.
+                    for (id, fields) in now where base[id] != fields {
+                        try run("INSERT INTO shown (collection, id, fields) VALUES (?, ?, ?) ON CONFLICT (collection, id) DO UPDATE SET fields = excluded.fields",
+                                [collection, id, try JSONEncoder().encode(fields)])
+                    }
+                    for id in base.keys where now[id] == nil && (have[id].map { within?($0.0) ?? true } ?? true) {
+                        try run("DELETE FROM shown WHERE collection = ? AND id = ?", [collection, id])
+                    }
+                    if !started { setMeta(startedKey, "1") }
+                }
                 persistClock()
             }
             return changed.sorted()
+        }
+    }
+
+    /// The fields the files changed since they said `was`: a new value, or
+    /// null for one they no longer have.
+    static func edits(_ now: [String: Value], since was: [String: Value]) -> [String: Value] {
+        var out: [String: Value] = [:]
+        for name in Set(now.keys).union(was.keys) {
+            let a = now[name] ?? .null, b = was[name] ?? .null
+            if a != b { out[name] = a }
+        }
+        return out
+    }
+
+    /// Each record of `collection` as this device's files last said it
+    /// (reconcile's `shown`), by id.
+    public func shown(_ collection: String) -> [String: [String: Value]] {
+        queue.sync { loadShown(collection) }
+    }
+
+    private func loadShown(_ collection: String) -> [String: [String: Value]] {
+        var out: [String: [String: Value]] = [:]
+        for row in rows("SELECT id, fields FROM shown WHERE collection = ?", [collection]) {
+            guard let id = row[0] as? String, let data = row[1] as? Data,
+                  let fields = try? JSONDecoder().decode([String: Value].self, from: data) else { continue }
+            out[id] = fields
+        }
+        return out
+    }
+
+    /// Records the files haven't drawn as the journal has them: one there
+    /// they never held, one removed they still hold, or one whose place or
+    /// pin moved since. Empty until the collection is reconciled with
+    /// `shown`. A relaunch between a page and its rows leaves such records,
+    /// and no delivery names them again (the server's copy is the same).
+    public func unshown(_ collection: String) -> [Record] {
+        queue.sync {
+            guard Journal.meta(db, "shown." + collection) != nil else { return [] }
+            let kind = Kind.of(collection)
+            let base = loadShown(collection)
+            let watched = Set(kind.groups.joined()).union(["pin", "folder"])
+            return rows("SELECT body FROM records WHERE collection = ? ORDER BY id", [collection]).compactMap { decode($0[0]) }.filter { record in
+                guard let was = base[record.id] else { return record.alive(kind) }
+                guard record.alive(kind) else { return true }
+                let visible = record.visible
+                return watched.contains { (visible[$0] ?? .null) != (was[$0] ?? .null) }
+            }
         }
     }
 

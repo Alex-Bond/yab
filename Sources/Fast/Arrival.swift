@@ -1,5 +1,6 @@
 import AppKit
 import Security
+import YabUpdate
 
 // How yab gets to where it lives.
 //
@@ -79,6 +80,7 @@ enum Arrival {
         guard !Headless.on, let destination = moveTarget else { return }
         let files = FileManager.default
         let here = Bundle.main.bundleURL
+        LaunchJournal.record("arrival.relocate", target: destination)
         let staging = destination.deletingLastPathComponent()
             .appendingPathComponent(".yab-move-\(UUID().uuidString)", isDirectory: true)
         do {
@@ -91,6 +93,9 @@ enum Arrival {
         } catch {
             return
         }
+        // Start the helper from the installed, sealed bundle before removing
+        // this copy. A helper launch failure leaves this process usable.
+        do { try Relaunch.start(bundle: destination) } catch { return }
         // The copy left behind goes to the Trash when it can be told where it
         // is, not from a disk image, not from the place macOS runs a
         // downloaded app from before it has been moved.
@@ -98,15 +103,7 @@ enum Arrival {
            (try? here.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly == false {
             try? files.trashItem(at: here, resultingItemURL: nil)
         }
-        // Opened once this process has gone, so it's a fresh launch and not
-        // this one brought forward.
-        let waiter = Process()
-        waiter.executableURL = URL(fileURLWithPath: "/bin/sh")
-        waiter.arguments = [
-            "-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec /usr/bin/open \"$2\"",
-            "sh", String(ProcessInfo.processInfo.processIdentifier), destination.path,
-        ]
-        guard (try? waiter.run()) != nil else { return }
+        LaunchJournal.record("arrival.exit", target: destination)
         exit(0)
     }()
 

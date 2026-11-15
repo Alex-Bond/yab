@@ -21,6 +21,8 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     private(set) var panel: NSPanel?
     private var chromiumChild: Tab?
     var showing: Bool { web != nil || chromiumChild != nil }
+    /// The window's own page on Chromium, for the bench.
+    var chromiumPage: ChromiumPage? { chromiumChild?.builtPage as? ChromiumPage }
 
     private var request: URL?
     private var bootstrapping = false
@@ -28,6 +30,9 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     private var released = false
     private var epoch = 0
     private var returnButton: NSTitlebarAccessoryViewController?
+    /// What the page asked for. Only Chrome's window knows it, and it comes
+    /// once, before or after the panel is up.
+    private var askedSize: NSSize?
 
     private func trace(_ event: String, extra: [String: Any] = [:], caller: Bool = false) {
         guard Self.tracing else { return }
@@ -177,13 +182,19 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
 
     /// Adopt the actual native PiP child. The helper's native disposition
     /// authenticates its type; an about:blank URL never authorizes a panel.
+    ///
+    /// Calls and known players are not refused here as `open` refuses them on
+    /// WebKit. There the API is Yab's own script, withheld from those sites so
+    /// they keep their fallbacks. Chromium's is always there and has already
+    /// handed the page its window: refusing closes it under the page, which
+    /// is how Meet's floating window died 30 ms after it opened.
     func openChromium(_ event: YabCoreEvent, source: Tab, browser: Browser) -> Bool {
         trace("chromium_open_attempt", extra: [
             "receipt": String(describing: event.params), "showing": showing,
             "source_url": source.builtPage?.url?.absoluteString ?? "",
         ])
-        guard !showing, !source.gone, !source.asleep, !source.floating, !source.onCall,
-              !Self.excluded(source.address), let parent = source.builtPage as? ChromiumPage,
+        guard !showing, !source.gone, !source.asleep, !source.floating,
+              let parent = source.builtPage as? ChromiumPage,
               let id = event.tab, let parentID = parent.remoteID, event.params["opener"] == .string(parentID),
               event.params["creationPurpose"] == .string("popup"),
               event.params["profile"] == .string(parent.profile),
@@ -203,8 +214,10 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
         page.stateEvents = nil
         self.source = source; self.browser = browser
         released = false; closing = false; epoch += 1
+        askedSize = nil
         chromiumChild = child
         page.onDocumentClosed = { [weak self] in self?.didClose() }
+        page.onDocumentSize = { [weak self] size in self?.asked(size) }
         page.autoresizingMask = [.width, .height]
         page.adoptRemote(id)
         // attach() drains early native events, including a child that closed
@@ -216,8 +229,23 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
         }
         trace("chromium_open_accepted", extra: ["native_child": id])
         present(page, source: source, title: origin.host ?? "Local document",
-                width: size("width", fallback: 480), height: size("height", fallback: 320), preferences: [:])
+                width: askedSize?.width ?? size("width", fallback: 480),
+                height: askedSize?.height ?? size("height", fallback: 320), preferences: [:])
         return true
+    }
+
+    /// Takes the size from the bottom right corner it opened at. A window the
+    /// person has placed stays as they left it.
+    private func asked(_ size: NSSize) {
+        askedSize = size
+        guard let panel, let source, Self.placements[source.id] == nil else { return }
+        let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let corner = NSPoint(x: panel.frame.maxX, y: panel.frame.minY)
+        panel.setContentSize(clamped(size, in: visible))
+        var frame = panel.frame
+        frame.origin = NSPoint(x: corner.x - frame.width, y: corner.y)
+        panel.setFrame(Self.fitted(frame, in: visible), display: true)
     }
 
     static func sameOrigin(_ first: URL, _ second: URL) -> Bool {
@@ -298,12 +326,13 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
         let child = chromiumChild
         chromiumChild = nil
         (child?.builtPage as? ChromiumPage)?.onDocumentClosed = nil
+        (child?.builtPage as? ChromiumPage)?.onDocumentSize = nil
         child?.close()
         let page = web
         web = nil
         page?.configuration.userContentController.removeScriptMessageHandler(forName: Self.resizeHandler, contentWorld: Web.world)
         page?.configuration.userContentController.removeAllUserScripts()
-        page?.setAllMediaPlaybackSuspended(true, completionHandler: nil)
+        page?.setAllMediaPlaybackSuspended(true, completionHandler: {})
         page?.stopLoading()
         page?.navigationDelegate = nil
         page?.uiDelegate = nil
@@ -481,7 +510,7 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     }
 
     private func installReturnButton(on window: NSWindow) {
-        let button = NSButton(title: "Back to Tab", target: self, action: #selector(returnToSource))
+        let button = FirstPressButton(title: "Back to Tab", target: self, action: #selector(returnToSource))
         button.bezelStyle = .rounded
         button.keyTip("Return to the tab that opened this window")
         button.sizeToFit()
@@ -553,7 +582,13 @@ final class DocumentPiP: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     """
 }
 
-private final class DocumentPiPPanel: NSPanel {
+final class DocumentPiPPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+}
+
+/// A window that floats is usually not the key one, and its button still works
+/// on the first press.
+private final class FirstPressButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

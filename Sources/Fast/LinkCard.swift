@@ -131,13 +131,13 @@ final class LinkCard {
             self.dismiss(); self.clearWarm()
         }.store(in: &watching)
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .flagsChanged, .scrollWheel, .keyDown, .leftMouseDown, .leftMouseDragged, .rightMouseDown]) { [weak self] event in
-            MainActor.assumeIsolated { self?.event(event) }
+            AppKitMainThread.sync { self?.event(event) }
             return event
         } as Any)
         for name in [NSApplication.didResignActiveNotification, NSWindow.willCloseNotification,
                      NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didResignKeyNotification] {
             notes.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
-                MainActor.assumeIsolated {
+                AppKitMainThread.sync {
                     guard let self, !self.sharingUp else { return }
                     if name == NSApplication.didResignActiveNotification || (note.object as? NSWindow) === self.pointed?.source.builtPage?.window {
                         self.dismiss()

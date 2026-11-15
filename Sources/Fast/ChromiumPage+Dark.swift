@@ -34,7 +34,7 @@ extension ChromiumPage {
     }
 
     /// The window's key state or the first responder changed.
-    func focusChanged() { syncRemoteFocus(); scripts.appearanceChanged() }
+    func focusChanged() { restoreSurfaceAttachment(); syncRemoteFocus(); scripts.appearanceChanged() }
 
     /// What the view wears now, as CSS reads it.
     var colorScheme: String {
@@ -54,6 +54,9 @@ extension ChromiumScripts {
         guard let page, !page.privateMode, !Self.readProfiles.contains(page.profile) else { return }
         let profile = page.profile
         if let pending = Self.readingProfiles[profile] { await pending.value; return }
+        // Chrome lists them only from its own page, with a renderer of its own,
+        // ahead of the first document. A profile with none has nothing to wait for.
+        if ChromiumExtensions.noneInstalled(profile: profile) { Self.readProfiles.insert(profile); return }
         let extensions = page.extensions
         let task = Task { @MainActor in
             do {

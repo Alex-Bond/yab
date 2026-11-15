@@ -1,0 +1,185 @@
+diff --git a/cef/include/cef_request_context.h b/cef/include/cef_request_context.h
+index b82d867..1a3da85 100644
+--- a/cef/include/cef_request_context.h
++++ b/cef/include/cef_request_context.h
+@@ -50,6 +50,9 @@
+ 
+ class CefBrowser;
+ #define CEF_YAB_VERIFIED_CRX_VERSION 1
++// CefRequestContext::CreateOffTheRecordContext: a private context that is
++// the off-the-record side of a disk profile, as Chrome's incognito is.
++#define CEF_YAB_OFF_THE_RECORD_CONTEXT_VERSION 1
+ 
+ #if CEF_API_ADDED(CEF_EXPERIMENTAL)
+ ///
+@@ -388,6 +391,21 @@ class CefRequestContext : public CefPreferenceManager {
+   virtual cef_color_variant_t GetChromeColorSchemeVariant() = 0;
+ 
+ #if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Creates a new in-memory context that is a fresh off-the-record profile
++  /// of this context's disk profile, the way Chrome's incognito profile is
++  /// of its regular one: nothing it does is written to disk or to this
++  /// profile (cookies, storage, history, cache), and each call makes another
++  /// such profile, isolated from every other. Unlike a context made with an
++  /// empty cache_path, which is off the record of the default profile, it
++  /// sees this profile's extensions: those allowed in incognito run in it
++  /// (spanning or split, as each manifest says). Returns nullptr unless this
++  /// context is initialized and on disk. UI thread only.
++  ///
++  /*--cef(added=experimental,optional_param=handler)--*/
++  virtual CefRefPtr<CefRequestContext> CreateOffTheRecordContext(
++      CefRefPtr<CefRequestContextHandler> handler) = 0;
++
+   ///
+   /// Starts Chrome's CRX3 verification/installer for this context and the
+   /// originating |browser|. Requires an absolute original CRX path, expected
+diff --git a/cef/libcef/browser/chrome/chrome_browser_context.cc b/cef/libcef/browser/chrome/chrome_browser_context.cc
+index 93653ac..07bcad5 100644
+--- a/cef/libcef/browser/chrome/chrome_browser_context.cc
++++ b/cef/libcef/browser/chrome/chrome_browser_context.cc
+@@ -85,6 +85,14 @@ void ChromeBrowserContext::StoreOrTriggerInitCallback(
+   }
+ }
+ 
++void ChromeBrowserContext::SetOffTheRecordParent(Profile* parent) {
++  CHECK(parent);
++  CHECK(!parent->IsOffTheRecord());
++  CHECK(!profile_);
++  CHECK(cache_path_.empty());
++  otr_parent_ = parent;
++}
++
+ void ChromeBrowserContext::InitializeAsync(base::OnceClosure initialized_cb) {
+   init_callbacks_.emplace_back(std::move(initialized_cb));
+ 
+@@ -135,8 +143,10 @@ void ChromeBrowserContext::Shutdown() {
+       net_service::ProxyURLLoaderFactory::ClearProxiesForBrowserContextAsync(
+           profile_);
+ 
+-      GetPrimaryUserProfile()->DestroyOffTheRecordProfile(
+-          profile_.ExtractAsDangling());
++      Profile* parent =
++          otr_parent_ ? otr_parent_.get() : GetPrimaryUserProfile();
++      otr_parent_ = nullptr;
++      parent->DestroyOffTheRecordProfile(profile_.ExtractAsDangling());
+     } else if (profile_) {
+       OnProfileWillBeDestroyed(profile_);
+     }
+@@ -159,7 +169,10 @@ void ChromeBrowserContext::ProfileCreated(CreateStatus status,
+     // Creation of a disk-based profile failed for some reason. Create a
+     // new/unique OffTheRecord profile instead.
+     const auto& profile_id = Profile::OTRProfileID::CreateUniqueForCEF();
+-    parent_profile = GetPrimaryUserProfile();
++    // Yab: the off-the-record side of a given disk profile, which sees
++    // that profile's extensions, else the primary user profile's.
++    parent_profile = otr_parent_ ? otr_parent_.get() : GetPrimaryUserProfile();
++    otr_parent_ = parent_profile;
+     profile_ = parent_profile->GetOffTheRecordProfile(
+         profile_id, /*create_if_needed=*/true);
+     otr_profile = static_cast<OffTheRecordProfileImpl*>(profile_);
+diff --git a/cef/libcef/browser/chrome/chrome_browser_context.h b/cef/libcef/browser/chrome/chrome_browser_context.h
+index e4f693b..fdb0098 100644
+--- a/cef/libcef/browser/chrome/chrome_browser_context.h
++++ b/cef/libcef/browser/chrome/chrome_browser_context.h
+@@ -28,6 +28,11 @@ class ChromeBrowserContext : public CefBrowserContext, public ProfileObserver {
+ 
+   void InitializeAsync(base::OnceClosure initialized_cb);
+ 
++  // Before InitializeAsync, with an empty cache path: the new off-the-record
++  // profile is |parent|'s instead of the primary user profile's. |parent|
++  // must be a regular profile; its off-the-record profile keeps it alive.
++  void SetOffTheRecordParent(Profile* parent);
++
+   // CefBrowserContext overrides.
+   content::BrowserContext* AsBrowserContext() override;
+   Profile* AsProfile() override;
+@@ -55,6 +60,9 @@ class ChromeBrowserContext : public CefBrowserContext, public ProfileObserver {
+   base::OnceClosure initialized_cb_;
+   raw_ptr<Profile> profile_ = nullptr;
+   bool should_destroy_ = false;
++  // The regular profile that owns |profile_| when |should_destroy_|: the
++  // one given to SetOffTheRecordParent, else the primary user profile.
++  raw_ptr<Profile> otr_parent_ = nullptr;
+ 
+   bool destroyed_ = false;
+   std::unique_ptr<ScopedProfileKeepAlive> profile_keep_alive_;
+diff --git a/cef/libcef/browser/request_context_impl.cc b/cef/libcef/browser/request_context_impl.cc
+index cdc9862..6891f31 100644
+--- a/cef/libcef/browser/request_context_impl.cc
++++ b/cef/libcef/browser/request_context_impl.cc
+@@ -13,6 +13,7 @@
+ #include "base/logging.h"
+ #include "base/strings/stringprintf.h"
+ #include "cef/libcef/browser/browser_context.h"
++#include "cef/libcef/browser/chrome/chrome_browser_context.h"
+ #include "cef/libcef/browser/context.h"
+ #include "cef/libcef/browser/prefs/pref_helper.h"
+ #include "cef/libcef/browser/setting_helper.h"
+@@ -305,6 +306,25 @@ void CefRequestContextImpl::GetBrowserContext(
+       std::move(callback)));
+ }
+ 
++CefRefPtr<CefRequestContext> CefRequestContextImpl::CreateOffTheRecordContext(
++    CefRefPtr<CefRequestContextHandler> handler) {
++  CEF_REQUIRE_UIT_RETURN(nullptr);
++  auto* parent_context = browser_context();
++  if (!parent_context || !parent_context->IsInitialized()) {
++    return nullptr;
++  }
++  Profile* parent = parent_context->AsProfile();
++  if (!parent || parent->IsOffTheRecord()) {
++    return nullptr;
++  }
++  Config config;
++  config.handler = handler;
++  config.unique_id = g_next_id.GetNext();
++  config.off_the_record_parent = parent;
++  // On the UI thread this initializes at once, while |parent| is alive.
++  return GetOrCreateRequestContext(std::move(config));
++}
++
+ bool CefRequestContextImpl::InstallVerifiedExtensionCrx(CefRefPtr<CefBrowser> browser,
+     const CefString& path, const CefString& expected_extension_id,
+     CefRefPtr<CefExtensionInstallCallback> callback) {
+@@ -819,7 +839,15 @@ void CefRequestContextImpl::Initialize() {
+   auto initialized_cb =
+       base::BindOnce(&CefRequestContextImpl::BrowserContextInitialized, this);
+ 
+-  if (!browser_context_) {
++  if (!browser_context_ && config_.off_the_record_parent) {
++    // A new off-the-record profile of the parent disk profile, with no
++    // cache path of its own (CreateOffTheRecordContext).
++    auto* context = new ChromeBrowserContext(config_.settings);
++    context->SetOffTheRecordParent(config_.off_the_record_parent);
++    config_.off_the_record_parent = nullptr;
++    context->InitializeAsync(std::move(initialized_cb));
++    browser_context_ = context;
++  } else if (!browser_context_) {
+     // Create a new CefBrowserContext instance. If the cache path is non-
+     // empty then this new instance will become the globally registered
+     // CefBrowserContext for that path. Otherwise, this new instance will
+diff --git a/cef/libcef/browser/request_context_impl.h b/cef/libcef/browser/request_context_impl.h
+index 4ce0d04..eb7f1be 100644
+--- a/cef/libcef/browser/request_context_impl.h
++++ b/cef/libcef/browser/request_context_impl.h
+@@ -102,6 +102,8 @@ class CefRequestContextImpl : public CefRequestContext {
+       CefRefPtr<CefPreferenceObserver> observer) override;
+ 
+   // CefRequestContext methods.
++  CefRefPtr<CefRequestContext> CreateOffTheRecordContext(
++      CefRefPtr<CefRequestContextHandler> handler) override;
+   bool InstallVerifiedExtensionCrx(CefRefPtr<CefBrowser> browser,
+       const CefString& path, const CefString& expected_extension_id,
+       CefRefPtr<CefExtensionInstallCallback> callback) override;
+@@ -182,6 +184,10 @@ class CefRequestContextImpl : public CefRequestContext {
+     // Optionally use this handler.
+     CefRefPtr<CefRequestContextHandler> handler;
+ 
++    // The disk profile whose new off-the-record profile this context is
++    // (CreateOffTheRecordContext). Used once, during Initialize.
++    raw_ptr<Profile> off_the_record_parent = nullptr;
++
+     // Used to uniquely identify CefRequestContext objects before an associated
+     // CefBrowserContext has been created. Should be set when creating a new
+     // CefRequestContext via the API.

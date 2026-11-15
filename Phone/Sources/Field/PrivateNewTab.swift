@@ -180,7 +180,7 @@ struct PrivateNewTab: View {
                     } label: {
                         WordRowView(row: WordRow(action: .tab(id: tab.id), icon: .favicon(key: tab.icon, host: tab.host),
                                                  title: tab.short, subtitle: tab.addressHost, key: .go, group: .tabs),
-                                    best: false, dark: true)
+                                    best: false, dark: true, isPrivate: true)
                             .padding(.horizontal, SpacePagesCard.side)
                             .contentShape(Rectangle())
                     }

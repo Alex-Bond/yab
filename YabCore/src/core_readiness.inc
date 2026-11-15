@@ -41,6 +41,15 @@ static void Readiness(Tab& tab, NSDictionary* params, NSString* request) {
     if (!frameID.length || frame[@"parentId"] || ![frameURL isEqual:url]) { unready(@"Main frame changed"); return; }
     int context = 0;
     for (auto& [candidate, owner] : t->drmFrames) if (owner == Key(frameID)) { context = candidate; break; }
+    // Reload, Back and Forward forget the contexts as they are asked for, and
+    // the document may stay: the person chose Stay at a leave question, or Back
+    // moved within the document. Runtime's own table still has its context.
+    if (!context && !t->browser->IsLoading()) {
+      for (auto& [key, known] : t->scripts.contexts) {
+        if (known.session.length || !known.isDefault || ![known.frame isEqual:frameID]) continue;
+        context = known.id; t->drmFrames[context] = Key(frameID); break;
+      }
+    }
     if (!context) { unready(@"Main world unavailable"); return; }
     Eval(*t, @"({live:document.nodeType===9&&!!document.documentElement,url:document.URL,state:document.readyState})", context,
       [request, url, frameID, context, valid, unready](NSDictionary* result, NSString* error) {

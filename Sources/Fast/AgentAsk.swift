@@ -706,6 +706,8 @@ final class AgentNotices: NSObject, UNUserNotificationCenterDelegate {
     struct Hand: Equatable {
         let id: String
         let cause: Cause
+        let askOrder = DispatchTime.now().uptimeNanoseconds
+        static func == (left: Hand, right: Hand) -> Bool { left.id == right.id && left.cause == right.cause }
     }
     private final class Member {
         weak var tab: Tab?
@@ -1075,6 +1077,18 @@ final class AgentNotices: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// Mail sends have request identities, not tab notification identities.
+    /// The banner only opens Yab; sending is still approved on the full card.
+    func mailAnswered(_ id: String) { release("agent.mailAsk." + id) }
+
+    func mailAsked(_ id: String, _ permit: AgentPermit) {
+        let root = Agents.shared.session(permit.session)
+        let content = Self.possible || Store.testing
+            ? Self.question(title: "\(root?.planName ?? "An agent") needs you", body: permit.question,
+                            thread: permit.session, info: ["mailAsk": id]) : nil
+        hold("agent.mailAsk." + id, content, quiet: NSApp.isActive)
+    }
+
     /// A click on a chat's question: Yab in front, the question's card on
     /// screen. Yab's own chat comes out in the column beside the page, the
     /// card in its field; another app's agent's, or any with no page in
@@ -1185,6 +1199,15 @@ final class AgentNotices: NSObject, UNUserNotificationCenterDelegate {
     /// carries: from the Mac, or from a test world's bench (agent-notice-click).
     nonisolated func respond(_ action: String, _ info: [AnyHashable: Any]) async {
         nonisolated(unsafe) let info = info
+        if let mail = info["mailAsk"] as? String {
+            guard action == UNNotificationDefaultActionIdentifier else { return }
+            await MainActor.run {
+                guard Agents.shared.mailRequest(mail) != nil else { return }
+                AssistantApprovals.shared.seen(.mail(mail))
+                _ = self.come(holding: nil)
+            }
+            return
+        }
         if let hand = info["hand"] as? String {
             guard action == UNNotificationDefaultActionIdentifier else { return }
             await MainActor.run {

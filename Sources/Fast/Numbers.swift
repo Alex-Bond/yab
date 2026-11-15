@@ -19,6 +19,13 @@ final class KeyNumbers: ObservableObject {
     private let now: () -> TimeInterval
     private let keyPresses: () -> UInt32
     private let commandAlone: () -> Bool
+    private let pointer: () -> CGPoint
+    /// Where the pointer was when ⌘ went down.
+    private var from: CGPoint = .zero
+
+    /// How far the pointer goes with ⌘ held before the hold reads as
+    /// aiming a ⌘-click rather than counting tabs.
+    static let aim: CGFloat = 8
 
     /// Long enough that a chord typed at speed never reaches it.
     private static let delay: TimeInterval = 0.45
@@ -29,8 +36,10 @@ final class KeyNumbers: ObservableObject {
          },
          commandAlone: @escaping () -> Bool = {
              CGEventSource.flagsState(.combinedSessionState).intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]) == .maskCommand
-         }) {
+         },
+         pointer: @escaping () -> CGPoint = { NSEvent.mouseLocation }) {
         self.now = now
+        self.pointer = pointer
         self.keyPresses = keyPresses
         self.commandAlone = commandAlone
     }
@@ -75,6 +84,7 @@ final class KeyNumbers: ObservableObject {
         guard !chord, began == nil else { return }
         began = now()
         presses = keyPresses()
+        from = pointer()
         pollSoon()
     }
 
@@ -83,7 +93,12 @@ final class KeyNumbers: ObservableObject {
     /// even a swallowed ⌘Space cancels the hint for this whole ⌘ hold.
     func checkHold() {
         guard let began else { return }
-        guard commandAlone(), keyPresses() == presses else {
+        // ⌘ held while the pointer travels is a ⌘-click being aimed at a
+        // link: the numbers flashed in place of the icons on the way to
+        // it (feedback #1898). Moved, nothing more for this hold.
+        let at = pointer()
+        guard commandAlone(), keyPresses() == presses,
+              hypot(at.x - from.x, at.y - from.y) <= Self.aim else {
             chord = true
             drop()
             return

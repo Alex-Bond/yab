@@ -51,17 +51,38 @@ func eventually(_ description: String, seconds: Double = 15, _ body: () async th
             }
         }
         func pixels(_ tab: String, _ token: String, _ color: String, width: Double = 800, height: Double = 600) async throws {
-            try await eventually("layer \(token)") { await log.find("layer.changed", tab: tab)?.params["contextId"]?.number ?? 0 > 0 }
-            guard let event = await log.find("layer.changed", tab: tab), let cid = event.params["contextId"]?.number else { throw Failure(description: "No context") }
-            let value: [String: Any] = ["contextId": cid, "width": width, "height": height, "token": token]
-            try JSONSerialization.data(withJSONObject: value).write(to: out.appendingPathComponent("host-state.json"), options: .atomic)
-            let resultURL = out.appendingPathComponent(token + ".json")
-            try await eventually("host pixels \(token)") { FileManager.default.fileExists(atPath: resultURL.path) }
-            let result = try JSONSerialization.jsonObject(with: Data(contentsOf: resultURL)) as! [String: Any]
-            let total = (result["total"] as? Double) ?? 0
-            let count = (result[color] as? Double) ?? 0
-            try require(total > 100 && count / total > 0.65, "Hosted \(token) is blank or wrong color: \(result)")
-            pass("pixels-\(token)")
+            // DOM/script readiness precedes compositor presentation after a
+            // renderer restart. Request fresh real captures within a deadline;
+            // keep every attempt so a black first frame remains diagnosable.
+            let deadline = Date().addingTimeInterval(15)
+            var attempt = 0
+            var lastResult: [String: Any] = [:]
+            repeat {
+                attempt += 1
+                let captureToken = "\(token)-frame-\(attempt)"
+                try await eventually("layer \(token)") { await log.find("layer.changed", tab: tab)?.params["contextId"]?.number ?? 0 > 0 }
+                guard let event = await log.find("layer.changed", tab: tab), let cid = event.params["contextId"]?.number else { throw Failure(description: "No context") }
+                let value: [String: Any] = ["contextId": cid, "width": width, "height": height, "token": captureToken]
+                try JSONSerialization.data(withJSONObject: value).write(to: out.appendingPathComponent("host-state.json"), options: .atomic)
+                let resultURL = out.appendingPathComponent(captureToken + ".json")
+                try await eventually("host pixels \(captureToken)") { FileManager.default.fileExists(atPath: resultURL.path) }
+                lastResult = try JSONSerialization.jsonObject(with: Data(contentsOf: resultURL)) as! [String: Any]
+                let total = (lastResult["total"] as? Double) ?? 0
+                let count = (lastResult[color] as? Double) ?? 0
+                if total > 100 && count / total > 0.65 {
+                    // Canonical evidence is an unmodified successful capture;
+                    // failed attempts retain their own files alongside it.
+                    for suffix in [".json", ".png", ".capture.png", ".capture.json", ".capture.occlusion.json"] {
+                        let source = out.appendingPathComponent(captureToken + suffix)
+                        if FileManager.default.fileExists(atPath: source.path) {
+                            try Data(contentsOf: source).write(to: out.appendingPathComponent(token + suffix), options: .atomic)
+                        }
+                    }
+                    pass("pixels-\(token)")
+                    return
+                }
+            } while Date() < deadline
+            throw Failure(description: "Hosted \(token) stayed blank or wrong color after \(attempt) real frames: \(lastResult)")
         }
         if args.count == 6 {
             var persistentTab: String?

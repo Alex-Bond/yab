@@ -324,17 +324,15 @@ final class Noticing {
 
     /// Counted again off the main thread, once a day: habits are made of
     /// the days before today, which don't change, and what is opened today
-    /// is followed as it happens (`opened`). One count copies the Chromium
-    /// browsers' History files (APFS clones them) and reads 35 days of
-    /// visits: on the author's Mac, 9,101 visits and a 380 MB Dia history,
-    /// about 160 ms to read and 60 ms of arithmetic in a debug build.
+    /// is followed as it happens (`opened`). Read Yab's diary only;
+    /// startup must not open another browser's History.
     func countHabits(now: Date) {
         guard !counting else { return }
         counting = true
         habitsAt = now
         let given = visits
         Task.detached(priority: .utility) {
-            let visits = given ?? AgentHistory.visits(days: Habits.history)
+            let visits = given ?? AgentHistory.visits(days: Habits.history, includingOtherBrowsers: false)
             let found = Habits.find(visits: visits, now: now, calendar: .current)
             await MainActor.run {
                 self.counting = false

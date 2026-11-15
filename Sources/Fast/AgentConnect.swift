@@ -38,6 +38,13 @@ struct AgentsIntro: View {
             .animation(Motion.glide, value: setup.flow)
         }
         .task { await setup.look() }
+        // Back in Yab, as Settings › Agents and Models look: a CLI installed
+        // in Terminal meanwhile ("Not set up" until Yab was reopened, #2038).
+        // Not while Connect runs: its own steps look for what they need.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard setup.flow == nil else { return }
+            Task { await setup.look() }
+        }
     }
 
     private var way: some View {
@@ -45,7 +52,8 @@ struct AgentsIntro: View {
                               anyInstalled: anyInstalled, chosen: chosen, toInstall: toInstall, trouble: setup.trouble,
                               keyFor: setup.flow == nil ? setup.keyFor : setup.keying, keyBlank: blank,
                               geminiTasksGoTo: chosen == ["gemini"] ? ModelDefaults.geminiTasksGoTo : nil,
-                              geminiIdentity: GeminiAccount.shared.identity, geminiChoice: GeminiAccount.shared.choice)
+                              geminiIdentity: GeminiAccount.shared.identity, geminiChoice: GeminiAccount.shared.choice,
+                              geminiPageOpen: gemini.pageOpen || gemini.waiting != .signingIn)
         return VStack(spacing: 0) {
             marks(ring: said.ring, tick: said.tick)
             Text(geminiSigningIn && gemini.submittingCode ? "Connecting Gemini"
@@ -266,7 +274,7 @@ struct AgentsIntro: View {
                       slow: Bool = false, anyInstalled: Bool = true, chosen: [String] = ["claude"], toInstall: String = "claude",
                       trouble: AgentSetupModel.Trouble? = nil, keyFor: String? = nil, keyBlank: Bool = true,
                       geminiTasksGoTo: String? = nil, geminiIdentity: GeminiIdentity? = nil,
-                      geminiChoice: GeminiChoice? = nil) -> Words {
+                      geminiChoice: GeminiChoice? = nil, geminiPageOpen: Bool = true) -> Words {
         switch flow {
         case .preparing(let clis) where keyFor != nil:
             return Words(title: "Connecting \(names(clis))", detail: "Checking the key with \(AgentKey.provider(clis.first ?? "claude"))…",
@@ -298,6 +306,9 @@ struct AgentsIntro: View {
                          detail: slow ? "Still downloading. A slow connection can take a few minutes."
                              : "A minute or so, from \((AgentPlan.of(cli) ?? .claude).maker). Then you sign in, and that's all.",
                          button: "Setting Up…", cancel: true, ring: true)
+        case .signingIn("gemini") where !geminiPageOpen:
+            return Words(title: "Allow Gemini in Google", detail: "Opening Google's sign-in…",
+                         button: "Show Sign-In", enabled: true, shows: true, cancel: true, ring: true)
         case .signingIn("gemini"):
             let detail = geminiChoice?.email.map { "A tab in \(geminiChoice?.place ?? "Yab") is asking. You're signed in there as \($0), so it's one Allow." }
                 ?? "A private Yab tab is asking. Sign in to the Google account you want, then Allow."

@@ -28,6 +28,54 @@ struct KeptBoundaryTests {
         })
     }
 
+    @Test func dragFolderUsesTodaysTargetAcrossBoundary() {
+        let (browser, _, tabs, done) = world(); defer { done() }
+        browser.newFolder(with: [tabs[2], tabs[0]], today: !tabs[2].kept, around: tabs[2])
+        #expect(tabs[0].nest === tabs[2].nest)
+        #expect(tabs[2].nest?.today == true)
+        #expect(!tabs[0].kept && !tabs[2].kept)
+        #expect(browser.tabs.first === tabs[1])
+    }
+
+    @Test func dragFolderUsesKeptTargetAcrossBoundary() {
+        let (browser, _, tabs, done) = world(); defer { done() }
+        browser.newFolder(with: [tabs[0], tabs[1]], today: !tabs[0].kept, around: tabs[0])
+        #expect(tabs[0].nest === tabs[1].nest)
+        #expect(tabs[0].nest?.today == false)
+        #expect(tabs[0].kept && tabs[1].kept)
+    }
+
+    @Test func folderChoicePreviewDoesNotMutateTabs() {
+        let (browser, folders, tabs, done) = world(); defer { done() }
+        let nest = Nest(name: "New Folder")
+        nest.fleeting = true
+        var shape = ColumnLayout.Shape()
+        shape.forming = .init(target: tabs[1].id, held: tabs[2].id, nest: nest)
+        let rows = ColumnLayout.live(browser, folders: folders, shape: shape)
+        let header = rows.firstIndex { $0.id == tabs[1].id.uuidString }!
+        if case .nest(let shown, let count, _) = rows[header].kind {
+            #expect(shown === nest && count == 2)
+        } else { Issue.record("Expected the preview folder header") }
+        #expect(rows[header + 1].id == "choice child " + tabs[1].id.uuidString)
+        #expect(rows[header + 2].id == "choice child " + tabs[2].id.uuidString)
+        #expect(rows[header + 1].indent == rows[header].indent + Folders.indent)
+        #expect(rows.allSatisfy { $0.id != tabs[2].id.uuidString })
+        #expect(browser.tabs.map(\.id) == tabs.map(\.id))
+        #expect(tabs.allSatisfy { $0.nest == nil })
+        let restored = ColumnLayout.live(browser, folders: folders)
+        #expect(restored.contains { $0.id == tabs[2].id.uuidString })
+        #expect(!restored.contains { $0.id.hasPrefix("choice child ") })
+    }
+
+    @Test func todaysFolderTakesBothHalvesOfTargetPair() {
+        let (browser, _, tabs, done) = world(); defer { done() }
+        browser.pairs = [Pair(first: tabs[1].id, second: tabs[2].id)]
+        browser.newFolder(with: [tabs[1], tabs[0]], today: true, around: tabs[1])
+        #expect(tabs[1].nest != nil)
+        #expect(tabs.allSatisfy { $0.nest === tabs[1].nest && !$0.kept })
+        #expect(browser.pairs.count == 1)
+    }
+
     @Test func newFolderWithPickedTabsStaysOnItsSideOfTheLine() {
         let (browser, _, tabs, done) = world(); defer { done() }
         browser.newFolder(picked: [tabs[1], tabs[2]])

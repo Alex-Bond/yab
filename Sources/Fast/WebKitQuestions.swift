@@ -54,16 +54,42 @@ enum WebKitQuestions {
         switch challenge.protectionSpace.authenticationMethod {
         case NSURLAuthenticationMethodServerTrust:
             trust(view, challenge, listener: listener, done: done)
+        case NSURLAuthenticationMethodClientCertificate:
+            let space = challenge.protectionSpace
+            let url = view.url
+            ClientCertificates.choose(in: view, host: space.host, port: space.port,
+                                      issuers: space.distinguishedNames ?? []) { [weak view] identity in
+                guard let view, view.url == url, let identity else {
+                    done(.cancelAuthenticationChallenge, nil); return
+                }
+                done(.useCredential, URLCredential(identity: identity, certificates: nil, persistence: .forSession))
+            }
         case NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest, NSURLAuthenticationMethodNTLM:
-            if let page = view as? PageView {
-                listener.page(page, authenticate: PageAuthentication(challenge), reply: finish)
-            } else if let browser = listener as? Browser {
-                // Separate legacy WebKit surfaces retain the system sheet.
-                browser.signIn(view, PageAuthentication(challenge), finish)
+            if challenge.protectionSpace.isProxy() {
+                let space = challenge.protectionSpace
+                ProxyAuthentication.shared.authenticate(
+                    scope: "webkit:" + String(describing: ObjectIdentifier(view.configuration.websiteDataStore)),
+                    host: space.host, port: space.port, realm: space.realm, method: space.authenticationMethod,
+                    configuration: String(ExtensionProxy.authenticationRevision), reply: finish) { answer in
+                        password(view, challenge, listener: listener, finish: answer)
+                    }
             } else {
-                finish(.performDefaultHandling)
+                password(view, challenge, listener: listener, finish: finish)
             }
         default: finish(.performDefaultHandling)
+        }
+    }
+
+    private static func password(_ view: WKWebView, _ challenge: URLAuthenticationChallenge,
+                                 listener: any PageEvents,
+                                 finish: @escaping @MainActor (PageAuthenticationReply) -> Void) {
+        if let page = view as? PageView {
+            listener.page(page, authenticate: PageAuthentication(challenge), reply: finish)
+        } else if let browser = listener as? Browser {
+            // Separate legacy WebKit surfaces retain the system sheet.
+            browser.signIn(view, PageAuthentication(challenge), finish)
+        } else {
+            finish(.performDefaultHandling)
         }
     }
 
@@ -115,6 +141,7 @@ enum WebKitQuestions {
     }
 
     static func closed(_ view: WKWebView, listener: (any PageEvents)?) {
+        ClientCertificates.cancel(in: view)
         if Leaving.closed(view) { return }
         if let document = DocumentPiP.owning(page: view) { document.didClose(); return }
         if let link = LinkWindow.owning(page: view) { link.close(); return }
@@ -202,6 +229,19 @@ extension WebKitPageEvents {
         let reply = WebKitQuestions.once(decisionHandler)
         guard let page = webView as? PageView, let listener else { reply(false); return }
         listener.page(page, notify: PageOrigin(origin), reply: reply)
+    }
+
+    /// A page's requestPointerLock(), a game's or a 3D viewer's. WebKit lets
+    /// the pointer go to the page only when its UI delegate says yes here;
+    /// with nobody answering, every request ended in pointerlockerror
+    /// (#1921). It is the question a Chromium page asks (SitePermission
+    /// .pointer), kept for the site the same way.
+    @objc(_webViewDidRequestPointerLock:completionHandler:)
+    func requestPointerLock(_ webView: WKWebView, completionHandler: @escaping (Bool) -> Void) {
+        let reply = WebKitQuestions.once(completionHandler)
+        guard let page = webView as? PageView, let listener, let url = webView.url,
+              let scheme = url.scheme, let host = url.host(), !host.isEmpty else { reply(false); return }
+        listener.page(page, permission: .pointer, origin: PageOrigin(scheme: scheme, host: host, port: url.port ?? 0), reply: reply)
     }
 }
 

@@ -94,12 +94,6 @@ extension Share {
         return browser.shareSpot == .row && (hovering || tab.id == browser.activeID || paused(tab))
     }
 
-    /// The tab in front offers to take a standing share over, there being
-    /// no chip to offer it.
-    func offersInRow(_ session: Session, _ tab: Tab) -> Bool {
-        session.paused && session.browser?.shareSpot == .row && tab.id == session.browser?.activeID
-    }
-
     /// The words' state of this share.
     func fold(_ status: ShareStatus) -> ShareFold {
         status.session.flatMap { sessions[$0]?.fold } ?? systemFold

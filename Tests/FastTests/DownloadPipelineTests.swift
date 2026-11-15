@@ -8,6 +8,8 @@ struct DownloadPipelineTests {
         let downloadID = UUID()
         let originalRequest: URLRequest? = URLRequest(url: URL(string: "https://download.invalid/same.bin")!)
         let isUserInitiated = true
+        var isExtensionDownload = false
+        var publication: ((URL) async throws -> Void)?
         let progress = Progress(totalUnitCount: 10)
         var page: (any PageHandle)? { nil }
         let view: NSView
@@ -24,6 +26,7 @@ struct DownloadPipelineTests {
             if view == nil { SiteDownloads.committed(self.view) }
         }
         func cancelDownload(_ done: @escaping @MainActor (Data?) -> Void) { done(nil) }
+        func didPublish(to file: URL) async throws { try await publication?(file) }
         func restartDownload(from resumeData: Data?, fallback: (any PageHandle)?,
                              done: @escaping @MainActor ((any PageDownload)?) -> Void) {
             retries += 1; done(replacement)
@@ -75,6 +78,25 @@ struct DownloadPipelineTests {
         #expect(browser.completedDownloadIDs.contains(download.downloadID) || browser.failedDownloadIDs.contains(download.downloadID))
     }
 
+    @Test func explicitSavePanelReplacementPublishesCompleteBytes() async throws {
+        let world = try World(); defer { world.close() }
+        let target = world.root.appendingPathComponent("existing.bin")
+        try Data("old".utf8).write(to: target)
+        world.browser.prefs.asksWhereToSave = true
+        world.browser.chooseDownloadLocation = { _, _, done in done(target) }
+        let download = Download()
+        world.browser.keep(download)
+        let staging = try await destination(download, world.browser)
+        try Data("replacement".utf8).write(to: staging)
+        // The existing file survives the entire transfer until completion.
+        #expect(try Data(contentsOf: target) == Data("old".utf8))
+        world.browser.downloadDidFinish(download)
+        try await settle(world.browser, download)
+        #expect(world.browser.completedDownloadIDs.contains(download.downloadID))
+        #expect(!world.browser.failedDownloadIDs.contains(download.downloadID))
+        #expect(try Data(contentsOf: target) == Data("replacement".utf8))
+    }
+
     @Test func simultaneousSameURLDownloadsReserveDifferentNamesBeforeAnyFileExists() async throws {
         let world = try World(); defer { world.close() }
         let first = Download(), second = Download()
@@ -104,6 +126,51 @@ struct DownloadPipelineTests {
         #expect(world.browser.downloadFiles[ObjectIdentifier(first)]?.lastPathComponent == "first.png")
         #expect(world.browser.downloadFiles[ObjectIdentifier(second)]?.lastPathComponent == "second.png")
         #expect(world.browser.downloadNames.isEmpty)
+    }
+
+    @Test func completionWaitsForTheNativeJournalAndKeepsPublishedBytesOnRejection() async throws {
+        let world = try World(); defer { world.close() }
+        let download = Download(); download.isExtensionDownload = true
+        var acknowledge: CheckedContinuation<Void, any Error>?
+        var published: URL?
+        download.publication = { file in
+            published = file
+            try await withCheckedThrowingContinuation { acknowledge = $0 }
+        }
+        world.browser.keep(download)
+        let staging = try await destination(download, world.browser, suggested: "Pictures/original.bin")
+        let bytes = Data("complete original file".utf8)
+        try bytes.write(to: staging)
+        world.browser.downloadDidFinish(download)
+        for _ in 0..<600 where acknowledge == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let file = try #require(published)
+        #expect(file == world.root.appendingPathComponent("Pictures/original.bin"))
+        #expect(try Data(contentsOf: file) == bytes)
+        #expect(!world.browser.completedDownloadIDs.contains(download.downloadID))
+        acknowledge?.resume(throwing: CocoaError(.fileWriteUnknown))
+        try await settle(world.browser, download)
+        #expect(world.browser.failedDownloadIDs.contains(download.downloadID))
+        #expect(!world.browser.completedDownloadIDs.contains(download.downloadID))
+        #expect(try Data(contentsOf: file) == bytes)
+    }
+
+    @Test func nativePublicationAcknowledgmentPrecedesCompletedDownload() async throws {
+        let world = try World(); defer { world.close() }
+        let download = Download()
+        var acknowledge: CheckedContinuation<Void, any Error>?
+        download.publication = { file in
+            #expect(FileManager.default.fileExists(atPath: file.path))
+            try await withCheckedThrowingContinuation { acknowledge = $0 }
+        }
+        world.browser.keep(download)
+        let staging = try await destination(download, world.browser)
+        try Data("complete".utf8).write(to: staging)
+        world.browser.downloadDidFinish(download)
+        for _ in 0..<600 where acknowledge == nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(!world.browser.completedDownloadIDs.contains(download.downloadID))
+        try #require(acknowledge).resume()
+        try await settle(world.browser, download)
+        #expect(world.browser.completedDownloadIDs.contains(download.downloadID))
     }
 
     @Test(arguments: [401, 403, 404, 500])

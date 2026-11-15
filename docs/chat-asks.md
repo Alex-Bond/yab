@@ -32,7 +32,8 @@ says where, by kind:
 |---|---|---|---|
 | `.chat` | `mailRead`, `mailChange`, `mailSite` | macOS notification with buttons; the chat's field while the column shows that chat | the root chat (`mailReading`, `mailChanges`, `mailSites`) |
 | `.page` | `use`, `press`, `upload`, `signIn`, `address`, `unlockManager` | the foot of the tab the agent works in | `tab.approved`, once |
-| `.send` | `press` that pays or has an amount, `sendMail`, `sendMails`, `sendMessage`, `messages`, `saveSkill` | in Yab: the pay sheet with Touch ID, the mail page, the chat's field; a notification only opens Yab | as before |
+| `.send` | `sendMail`, `sendMails` | the app-owned FIFO in the window's corner; a notification only opens Yab | the outgoing operation and its joined callers |
+| `.send` | `press` that pays or has an amount, `sendMessage`, `messages`, `saveSkill` | in Yab: the pay sheet with Touch ID or the chat's field; a notification only opens Yab | as before |
 | `.mac` | `computer`, `folder`, `native` | over Yab; a notification only opens Yab | as before |
 
 Only `.chat` questions get buttons in a notification: each is a yes for the
@@ -40,7 +41,7 @@ rest of one chat and can be taken back. Only a `.page` question makes the tab
 a guest (`Agents.ask`), so a send or Mac question asked on one of the
 person's tabs puts no face on it.
 
-`mail_send`, `send_message`, `ask`/`choose`, `computer_access` and
+`send_message`, `ask`/`choose`, `computer_access` and
 `FolderAccess` pick their tab with `Agents.askTab`: the task's own latest
 tab; else the tab of yours its question, its last yes or no, or its send is
 on, so the call that comes again finds the answer whatever is in front by
@@ -54,6 +55,28 @@ but no face, no unread mark and no answer. `Tab.askedBy` (worker, permit or
 asker) is who the card, the dock, the column and `handoff-wait` speak for.
 `handBack` takes the asker for a question already gone from the tab, so the
 task leaves `waiting`.
+
+## Concurrent mail sends
+
+`Agents.queueMail` keeps each immutable outgoing operation in `MailSendAsk`
+([MailApprovalQueue.swift](../Sources/Fast/MailApprovalQueue.swift)). Each
+has its own request id and monotonic arrival order. Identical outgoing
+requests join it across sessions; different requests cannot own the same
+draft simultaneously. The exact consent key includes recipient roles,
+sender, schedule, content and attachment identities.
+
+The app executes the approved snapshot once. The existing draft and account
+are checked again before dispatch, and a changed draft requires another
+review. A session ending detaches its receipt; the pending operation remains
+answerable even with no caller left. Not Now declines that operation for all
+joined callers. The existing Undo / Send Later operation retains its send
+claim, so another CLI cannot schedule the held draft again.
+
+`Mcp.patient` follows `mailAsk` in `handoff-wait`, then receives the stored
+result. An assistant returning after approval finds its original tool-call
+receipt before resolving a draft that may already have been renamed or
+sent. These questions and their Sync records use the operation identity,
+without occupying `Tab.permit` or a chat's read-consent permit.
 
 ## A chat's question
 
@@ -260,8 +283,13 @@ the Mac's sizes (picked 2026-10-22, claude.ai/artifact/AR1ksAvCJAozRoQo5rgoLh):
 - **Answered elsewhere, or stopped:** the buttons give way to what
   happened ("Allowed on iPhone", "Claude stopped") for 1.2 s before the
   card goes (`AskStand.said`), so a card never vanishes without a word.
-- **Several at once:** the oldest in front, the rest under it as a plate
-  of its size with its top edge 10 pt over it (`Agents.corneredAll`).
+- **Several at once:** monotonic request arrival order, oldest in front,
+  the rest indicated by the existing plate and counter (`Agents.corneredAll`).
+  The answered card folds and leaves from its own anchor; animation completion
+  mounts the next question. The question's space is retained during this
+  handover, with Undo toasts above it. A toast has a separate layout identity,
+  so a full card never moves to a new list index. Only the mounted head whose
+  entrance has finished accepts approval clicks or keyboard confirmation.
 - **The agent's own tab:** while it is in front, its question stands at
   the bottom right too (`Agents.inCorner`, `inFront`), and the working
   dock at its foot steps aside while it does, so every question is in one

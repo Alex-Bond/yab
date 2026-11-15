@@ -578,10 +578,18 @@ enum MailAgent {
         /// What the yes is for: the account, the mail's place, everyone it
         /// goes to, its subject and its words. Another of any of them asks again.
         var key: String {
-            let parts = [engine.account, MailDesk.place(of: draft.id, thread: draft.thread) ?? draft.id,
-                         (draft.to + draft.cc + draft.bcc).map { $0.address.lowercased() }.joined(separator: ","),
-                         draft.subject, draft.body, draft.files.map(\.name).joined(separator: ",")]
-            return SHA256.hash(data: Data(parts.joined(separator: "\u{1F}").utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
+            // Keep recipient roles, sender, schedule and attachment identity:
+            // two sessions may join only the very same outgoing operation.
+            let parts: [[String]] = [
+                [engine.account, MailDesk.place(of: draft.id, thread: draft.thread) ?? draft.id,
+                 draft.from, draft.subject, draft.body, draft.html, draft.quote, draft.forwarded,
+                 draft.inReplyTo, draft.references, at.map { String($0.timeIntervalSince1970) } ?? "", rsvp?.ics ?? ""],
+                draft.to.map(\.header), draft.cc.map(\.header), draft.bcc.map(\.header),
+            ] + draft.files.map { [$0.id, $0.name, $0.mime, String($0.size), $0.message, $0.part] }
+            // Encoding arrays of strings is total; no delimiter in mail text
+            // can make two different messages share an approval.
+            let encoded = try! JSONEncoder().encode(parts)
+            return SHA256.hash(data: encoded).prefix(12).map { String(format: "%02x", $0) }.joined()
         }
     }
 

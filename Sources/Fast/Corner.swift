@@ -115,7 +115,7 @@ struct MarkCorners: ViewModifier {
         if tab.onCall {
             content.modifier(CallCorners(tab: tab, count: count, dotInset: dotInset, room: room, lift: lift))
         } else if tab.pin != nil || tab.kept, MailPage.isMail(tab.address) {
-            content.modifier(MailCorners(dot: dot, dotInset: dotInset, room: room, lift: lift))
+            content.modifier(MailCorners(tab: tab, dot: dot, dotInset: dotInset, room: room, lift: lift))
         } else {
             content.modifier(Cuts(corner: meeting ?? count, dot: dot, dotInset: dotInset, room: room, lift: lift))
         }
@@ -130,10 +130,18 @@ struct MarkCorners: ViewModifier {
 extension Tab {
     /// The count its mark shows: a pin's or a kept tab's, on a site whose
     /// count is on.
-    var countCorner: Corner? {
-        guard pin != nil || kept, let count, Counts.shows(address) else { return nil }
+    var countCorner: Corner? { showsOwnCount ? unadornedCountCorner : nil }
+
+    /// Also used to remove the title's duplicate number, and by rows with
+    /// no icon at all (LooseCount), where there is nothing to double-badge.
+    var unadornedCountCorner: Corner? {
+        guard countsTitle, let count else { return nil }
         return .count(count)
     }
+
+    /// Once this row uses unread counts, a stale title number cannot return
+    /// merely because the API cleared its badge or favicon ownership hid it.
+    var countsTitle: Bool { (pin != nil || kept) && Counts.shows(address) }
 }
 
 /// A row with no mark, letters rather than icons: the count stands on its
@@ -143,7 +151,7 @@ struct LooseCount: View {
     @ObservedObject private var choices = CountSites.shared
 
     var body: some View {
-        if let corner = tab.countCorner { CornerPlate(corner: corner) }
+        if let corner = tab.unadornedCountCorner { CornerPlate(corner: corner) }
     }
 }
 
@@ -170,6 +178,7 @@ private struct CallCorners: ViewModifier {
 /// The mail pin: the number Settings › Mail's Count says (MailCenter.counted),
 /// at its mark's corner as a site's count is. Only this mark hears mail's count.
 private struct MailCorners: ViewModifier {
+    @ObservedObject var tab: Tab
     @ObservedObject var center = MailCenter.shared
     let dot: Bool
     let dotInset: CGFloat
@@ -177,7 +186,8 @@ private struct MailCorners: ViewModifier {
     let lift: CGFloat
 
     func body(content: Content) -> some View {
-        content.modifier(Cuts(corner: center.connected ? .count(center.counted) : nil,
+        content.modifier(Cuts(corner: tab.appBadgeCount.flatMap(Corner.count) ??
+                              (center.connected && tab.showsOwnCount && tab.appBadgeCount == nil ? .count(center.counted) : nil),
                               dot: dot, dotInset: dotInset, room: room, lift: lift))
     }
 }
@@ -330,6 +340,40 @@ final class CountSites: ObservableObject {
     private init() {
         on = Set(store.stringArray(forKey: "counts.on") ?? [])
         off = Set(store.stringArray(forKey: "counts.off") ?? [])
+    }
+}
+
+/// Evidence belongs to one document, not a host or favicon cache entry.
+/// A new icon invalidates it even when the count has not changed yet.
+struct CountIconProof {
+    private var previous: (count: Int?, icon: String)?
+    private var iconChangedSinceCount = false
+    private var followsCount = false
+    private(set) var unchanged = false
+
+    var icon: String? { previous?.icon }
+
+    mutating func observe(count: Int?, icon: String) {
+        if let previous {
+            if previous.icon != icon {
+                unchanged = false
+                iconChangedSinceCount = true
+            }
+            if let before = previous.count, let count, before != count {
+                // Compare the whole interval between count transitions, not
+                // just the last snapshot: a page may update its icon first
+                // and its title in a separate mutation delivery.
+                if iconChangedSinceCount {
+                    // This document has demonstrated a count-dependent
+                    // icon. Later title-only changes cannot establish that
+                    // its existing pixels stopped carrying that number.
+                    followsCount = true
+                }
+                unchanged = !iconChangedSinceCount && !followsCount
+                iconChangedSinceCount = false
+            }
+        }
+        previous = (count, icon)
     }
 }
 

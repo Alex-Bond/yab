@@ -33,7 +33,7 @@ extension Browser {
 
     /// When you last clicked or pressed a key in any page of this window.
     private var lastPageInput: TimeInterval? {
-        (tabs + outside).compactMap { $0.built?.lastInput }.max()
+        (tabs + outside).compactMap { $0.builtPage?.lastInput }.max()
     }
 
     /// Whether a page WebKit asks to bring forward comes to the front: a

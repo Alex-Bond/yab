@@ -1,0 +1,43 @@
+diff --git a/chrome/browser/extensions/external_action_origin.h b/chrome/browser/extensions/external_action_origin.h
+index 7957e1a..c68211d 100644
+--- a/chrome/browser/extensions/external_action_origin.h
++++ b/chrome/browser/extensions/external_action_origin.h
+@@ -8,6 +8,7 @@
+ #include "base/memory/weak_ptr.h"
+ #include "base/supports_user_data.h"
+ #include "base/unguessable_token.h"
++#include "chrome/browser/profiles/profile.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents.h"
+@@ -92,10 +93,20 @@ inline ExternalExtensionHooks& GetExternalExtensionHooks() {
+ // Neither a window title nor the currently active tab can recreate this owner.
+ class ExternalActionOrigin : public base::SupportsUserData::Data {
+  public:
++  // A popup's profile is its owner's, or, for an extension spanning a
++  // private page (incognito "spanning"), the page profile's original: Chrome
++  // hosts that popup in the extension's own profile. Two unrelated private
++  // profiles are never the same.
++  static bool SameProfile(content::WebContents* popup, content::WebContents* owner) {
++    auto* a = Profile::FromBrowserContext(popup->GetBrowserContext());
++    auto* b = Profile::FromBrowserContext(owner->GetBrowserContext());
++    return a == b || (a && b && b->IsOffTheRecord() && !a->IsOffTheRecord() &&
++                      b->GetOriginalProfile() == a);
++  }
+   static bool Attach(content::WebContents* popup, content::WebContents* owner,
+                      const std::string& extension_id, bool external = false) {
+     if (!popup || !owner || popup == owner || extension_id.empty() ||
+-        popup->GetBrowserContext() != owner->GetBrowserContext() ||
++        !SameProfile(popup, owner) ||
+         !owner->GetPrimaryMainFrame() || owner->IsBeingDestroyed()) return false;
+     popup->SetUserData(&kKey, std::unique_ptr<ExternalActionOrigin>(
+         new ExternalActionOrigin(*popup, *owner, extension_id, external)));
+@@ -110,7 +121,7 @@ class ExternalActionOrigin : public base::SupportsUserData::Data {
+     if (!popup || popup != popup_.get() || popup->IsBeingDestroyed() ||
+         !owner_ || owner_->IsBeingDestroyed() || !document ||
+         owner_->GetPrimaryMainFrame() != document ||
+-        owner_->GetBrowserContext() != popup->GetBrowserContext()) return nullptr;
++        !SameProfile(popup, owner_.get())) return nullptr;
+     return owner_.get();
+   }
+   // Only for a final invalidation event, never input or new frames.

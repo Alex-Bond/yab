@@ -147,10 +147,20 @@ final class Clips: ObservableObject {
         // A test run may look far more often, YAB_CLIPS_EVERY seconds, so a
         // look meets a page's copy (evals/clipboard/copy_crash.sh).
         let every = Store.testing ? ProcessInfo.processInfo.environment["YAB_CLIPS_EVERY"].flatMap(Double.init) ?? 1 : 1
-        timer = Timer.scheduledTimer(withTimeInterval: max(0.005, every), repeats: true) { _ in
-            MainActor.assumeIsolated { Clips.shared.look() }
+        timer = Self.makeTimer(every: every) { Clips.shared.look() }
+    }
+
+    /// Keep the real Foundation callback testable without starting clipboard
+    /// reads or creating a browser. This is a synchronous main-run-loop entry,
+    /// not a Swift task; executor lookup itself crashed in report #1073.
+    static func makeTimer(every: TimeInterval, look: @escaping @MainActor () -> Void) -> Timer {
+        let timer = Timer.scheduledTimer(withTimeInterval: max(0.005, every), repeats: true) { _ in
+            // Crash #906 faults in executor lookup before look() runs.
+            // Foundation delivers this scheduled timer on the main run loop.
+            AppKitMainThread.sync { look() }
         }
-        timer?.tolerance = 0.3
+        timer.tolerance = 0.3
+        return timer
     }
 
     /// Whether the clipboard has changed, and if so, what came.

@@ -71,17 +71,42 @@ public struct MailPurchase: Equatable, Hashable, Sendable, Codable {
     }
 }
 
+/// A mail that may be a purchase, without its words: enough to tell whether
+/// it was read before (MailStore.purchaseHeads).
+public struct MailPurchaseHead: Equatable, Sendable {
+    public var id: String
+    public var labels: Set<String>
+    /// The snippet's length, and whether its words and its HTML are kept.
+    public var snippet: Int
+    public var body: Bool
+    public var html: Bool
+
+    public init(id: String, labels: Set<String> = [], snippet: Int = 0, body: Bool = false, html: Bool = false) {
+        self.id = id
+        self.labels = labels
+        self.snippet = snippet
+        self.body = body
+        self.html = html
+    }
+}
+
 public enum MailPurchases {
+    /// Which rules read the mail. What a mail read as is kept for good
+    /// (Purchases.Known), so raise this when a change here would read
+    /// any mail differently, and only then: tying it to the build meant
+    /// every update read all 400 days again.
+    public static let rules = 1
+
+
     // MARK: - one mail
 
     /// One mail read as a purchase, or nil. Its words are its plain body,
     /// else its HTML as text, else its snippet: old mail has only that.
     public static func read(_ message: MailMessage, now: Date) -> MailPurchase? {
         if !message.labels.isDisjoint(with: ["SENT", "SPAM", "TRASH", "DRAFT"]) { return nil }
-        if MailSense.kind(message, bulk: message.listUnsubscribe) == .code { return nil }
         guard robot(message) else { return nil }
         // Only then its HTML made text: a person's mail is never read.
-        let body = message.text ?? message.html.map(HTMLText.plain) ?? message.snippet
+        let body = clipped(message.text ?? message.html.map(HTMLText.plain) ?? message.snippet)
         let text = message.subject + "\n" + body
 
         // The carrier is often named only by who sent it: "FedEx <TrackingUpdates@fedex.com>".
@@ -111,6 +136,9 @@ public enum MailPurchases {
         } else {
             return nil
         }
+        // Last: looking for a code walks the mail's HTML, the dearest thing
+        // here, so only mail that would be a purchase pays for it.
+        if MailSense.kind(message, bulk: message.listUnsubscribe) == .code { return nil }
 
         let (merchant, host, appTitle) = seller(message, text: text, body: body, kind: kind)
         var purchase = MailPurchase(kind: kind, message: message.id, thread: message.thread, date: message.date,
@@ -147,6 +175,16 @@ public enum MailPurchases {
         }
         _ = now
         return purchase
+    }
+
+    /// The words read of a very long mail: its start and its end, where a
+    /// receipt says who and how much. A receipt is never this long; what is
+    /// (a digest, a statement) shouldn't cost a pass seconds.
+    static func clipped(_ body: String, head: Int = 40_000, tail: Int = 20_000) -> String {
+        let units = body.utf16
+        guard units.count > head + tail else { return body }
+        return String(body[..<units.index(units.startIndex, offsetBy: head)]) + "\n"
+            + String(body[units.index(units.endIndex, offsetBy: -tail)...])
     }
 
     /// Mail no person writes: a no-reply, billing or orders box, or a
@@ -233,8 +271,11 @@ public enum MailPurchases {
         return nil
     }
 
+    // Possessive blanks here and in `lastFour`: nothing after them can begin
+    // with a blank, and greedy runs in a row try every way to split a long
+    // run of blanks, as plain mail has after "Order" in a table: cubic in it.
     private static let orderNumberRe = re(
-        #"(?:\border|заказ\w*|bestellung)\s*(?:number|no\.?|nummer|id|#|№)?\s*[:#№]?\s*#?\s*([A-Z0-9][A-Z0-9-]{4,})"#)
+        #"(?:\border|заказ\w*|bestellung)\s*+(?:number|no\.?|nummer|id|#|№)?\s*+[:#№]?\s*+#?\s*+([A-Z0-9][A-Z0-9-]{4,})"#)
 
     static func orderNumber(in text: String) -> String? {
         for match in orderNumberRe.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
@@ -356,7 +397,7 @@ public enum MailPurchases {
     private static let brandFirst = re(
         #"\b(visa|mastercard|master card|amex|american express|discover|maestro|jcb|unionpay|mir|мир)\b[^\d\n]{0,25}?(?<!\d)(\d{4})(?!\d)"#)
     private static let lastFour = re(
-        #"(?:ending in|ending with|ends in|ending|card|карт[аы]|karte)\s*(?:number\s*)?[:#]?\s*[•*·x.]*\s*(?<!\d)(\d{4})(?!\d)|(?:[•*]{2,}|x{4})\s?(\d{4})(?!\d)"#)
+        #"(?:ending in|ending with|ends in|ending|card|карт[аы]|karte)\s*+(?:number\s*+)?[:#]?\s*+[•*·x.]*+\s*+(?<!\d)(\d{4})(?!\d)|(?:[•*]{2,}|x{4})\s?(\d{4})(?!\d)"#)
     private static let brandWords = re(#"\b(visa|mastercard|master card|amex|american express|discover|maestro|jcb|unionpay|mir|мир)\b"#)
     private static let brands = ["visa": "Visa", "mastercard": "Mastercard", "master card": "Mastercard", "amex": "Amex",
                                  "american express": "Amex", "discover": "Discover", "maestro": "Maestro", "jcb": "JCB",

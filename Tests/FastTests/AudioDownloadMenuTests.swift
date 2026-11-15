@@ -128,10 +128,10 @@ struct AudioDownloadMenuTests {
         page.mediaHere(menu, since: ProcessInfo.processInfo.systemUptime, document: nil)
         let index = try #require(menu.items.firstIndex { $0.identifier?.rawValue == "YabDownloadMedia" })
         #expect(index == 3)
-        #expect(menu.items[index].title == "Download Video")
+        #expect(menu.items[index].title == "Download Video (No Direct File)")
     }
 
-    @Test func webKitsDownloadRowStillUsesTheAppWithoutReadingThePage() {
+    @Test func webKitsUnknownDownloadRowExplainsItsUnavailability() {
         let page = page()
         defer { page.stopLoading(); Tab.end(page) }
         page.onMedia = { _ in true }
@@ -141,10 +141,37 @@ struct AudioDownloadMenuTests {
         let item = menu.items[0]
         item.isEnabled = false
         page.mediaHere(menu, since: ProcessInfo.processInfo.systemUptime, document: nil)
-        #expect(reads == 0)
+        #expect(reads == 1)
         #expect(item.target === page)
         #expect(item.action == NSSelectorFromString("mediaRow:"))
-        #expect(item.isEnabled)
+        #expect(!item.isEnabled)
+        #expect(item.title == "Media Download Unavailable")
         #expect(menu.items.count == 1)
     }
+    @Test func anUnresolvedNativeDownloadDoesNotSilentlyFallBack() {
+        let page = page()
+        defer { page.stopLoading(); Tab.end(page) }
+        page.onMedia = { _ in false }
+        let menu = menu(["DownloadMedia"])
+        page.mediaHere(menu, since: ProcessInfo.processInfo.systemUptime, document: nil)
+        menu.performActionForItem(at: 0)
+        #expect(menu.items[0].title == "Media Download Unavailable")
+        #expect(!menu.items[0].isEnabled)
+    }
+
+    @Test func aLateNativeMediaReceiptUpdatesTheOpenRow() async throws {
+        let page = page()
+        defer { page.stopLoading(); Tab.end(page) }
+        page.onMedia = { _ in true }
+        var heard: PointedMedia?
+        page.mediaHeard = { _ in heard }
+        let menu = menu(["DownloadMedia"])
+        page.mediaHere(menu, since: ProcessInfo.processInfo.systemUptime, document: nil)
+        #expect(!menu.items[0].isEnabled)
+        heard = PointedMedia(src: "blob:https://x.com/stream")
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(menu.items[0].title == "Download Video (No Direct File)")
+        #expect(menu.items[0].isEnabled)
+    }
+
 }

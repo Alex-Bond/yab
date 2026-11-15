@@ -1,0 +1,132 @@
+diff --git a/chrome/browser/mac/code_sign_clone_manager.h b/chrome/browser/mac/code_sign_clone_manager.h
+index 75a7052..a5430e3 100644
+--- a/chrome/browser/mac/code_sign_clone_manager.h
++++ b/chrome/browser/mac/code_sign_clone_manager.h
+@@ -44,7 +44,13 @@ BASE_DECLARE_FEATURE(kMacAppCodeSignCloneRenameAsBundle);
+ //   * a non-root filesystem (because the clone is built in
+ //   `/private/var/folders/...`, which is on the root filesystem)
+ //
+-// Upon destruction, the temporary directory hosting the clone will be deleted.
++// Once the clone is made, a helper process is started that waits for this
++// process to exit and then deletes the temporary directory hosting the clone,
++// whichever way this process ends: a normal shutdown, a crash, `_exit` or
++// SIGKILL. A helper started only from the destructor runs on a normal
++// shutdown alone, and every other exit left a whole copy of the app behind
++// until the next restart. If the helper cannot be started then, the
++// destructor starts it as before.
+ //
+ // Clone creation and deletion will take place in the background and will not
+ // block. Background clone creation will take place in the calling process on a
+@@ -131,6 +137,9 @@ class CodeSignCloneManager {
+   base::RepeatingTimer clone_exists_timer_;
+   scoped_refptr<base::SequencedTaskRunner> task_runner_;
+   bool needs_cleanup_ = false;
++  // The cleanup helper was started as the clone was made, and is waiting
++  // for this process to exit, however it exits.
++  bool cleanup_helper_started_ = false;
+ };
+ 
+ namespace internal {
+diff --git a/chrome/browser/mac/code_sign_clone_manager.mm b/chrome/browser/mac/code_sign_clone_manager.mm
+index 97abe94..74a51dc 100644
+--- a/chrome/browser/mac/code_sign_clone_manager.mm
++++ b/chrome/browser/mac/code_sign_clone_manager.mm
+@@ -11,6 +11,7 @@
+ #include <stdint.h>
+ #include <sys/attr.h>
+ #include <sys/clonefile.h>
++#include <sys/event.h>
+ #include <sys/fcntl.h>
+ #include <sys/ioccom.h>
+ #include <sys/stat.h>
+@@ -345,12 +346,12 @@ bool CloneApp(const base::FilePath& source_path,
+ // Launch the code-sign-clone-cleanup helper process passing the unique suffix
+ // of the temporary directory as an argument. The full path will be
+ // reconstructed and validated in the helper process.
+-void DeleteUniqueTempDirRecursivelyFromHelperProcess(
++bool DeleteUniqueTempDirRecursivelyFromHelperProcess(
+     const std::string& unique_suffix) {
+   base::FilePath child_path;
+   if (!base::PathService::Get(content::CHILD_PROCESS_EXE, &child_path)) {
+     DLOG(ERROR) << "No CHILD_PROCESS_EXE";
+-    return;
++    return false;
+   }
+ 
+   std::vector<std::string> code_sign_clone_cleanup_args{
+@@ -369,15 +370,16 @@ void DeleteUniqueTempDirRecursivelyFromHelperProcess(
+   base::ScopedFD null_fd(HANDLE_EINTR(open(_PATH_DEVNULL, O_WRONLY)));
+   if (!null_fd.is_valid()) {
+     DPLOG(ERROR) << "open " << std::quoted(_PATH_DEVNULL);
+-    return;
++    return false;
+   }
+   options.fds_to_remap.emplace_back(null_fd.get(), STDOUT_FILENO);
+   options.fds_to_remap.emplace_back(null_fd.get(), STDERR_FILENO);
+ 
+   if (!base::LaunchProcess(code_sign_clone_cleanup_args, options).IsValid()) {
+     DLOG(ERROR) << "base::LaunchProcess failed";
+-    return;
++    return false;
+   }
++  return true;
+ }
+ 
+ // Example of an expected unique_temp_dir_suffix: tKdILk
+@@ -548,7 +550,7 @@ CodeSignCloneManager::CodeSignCloneManager(
+ }
+ 
+ CodeSignCloneManager::~CodeSignCloneManager() {
+-  if (!needs_cleanup_) {
++  if (!needs_cleanup_ || cleanup_helper_started_) {
+     return;
+   }
+ 
+@@ -636,6 +638,14 @@ void CodeSignCloneManager::Clone(const base::FilePath& src_path,
+   // overlap, it is safe to set `needs_cleanup_` from this task.
+   needs_cleanup_ = true;
+ 
++  // Start the cleanup helper now. It waits for this process to exit, which
++  // a crash, `_exit` or SIGKILL is as much as a normal shutdown; started
++  // from `~CodeSignCloneManager` only, it ran on a normal shutdown alone.
++  // `Clone` and `~CodeSignCloneManager` never overlap (see above), so the
++  // flag needs no synchronization either.
++  cleanup_helper_started_ =
++      DeleteUniqueTempDirRecursivelyFromHelperProcess(unique_temp_dir_suffix_);
++
+   // Record a baseline metric.
+   RecordCloneExists(MacCloneExists::kExists);
+ 
+@@ -750,13 +760,27 @@ int ChromeCodeSignCloneCleanupMain(
+     return 1;
+   }
+ 
+-  // The "--type=clone-cleanup" helper process is launched during from the
+-  // browser process during shutdown. Wait until the parent browser process dies
+-  // to ensure the clone is not being used.
+-  // There is no rush to clean up the temporary clone. Prefer polling the ppid
+-  // over more responsive but complex options.
++  // The "--type=clone-cleanup" helper process is launched from the browser
++  // process as soon as the clone exists, and lives as long as the browser
++  // does. Wait until the parent browser process dies to ensure the clone is
++  // not being used. A kqueue exit event costs no wakeups over a whole browser
++  // session, as a once-a-second poll of the ppid would; the poll remains for
++  // a parent that died before the event was registered (ESRCH) and for a
++  // kqueue that could not be made.
+   if (!main_parameters.command_line->HasSwitch(
+           "no-wait-for-parent-exit-for-testing")) {
++    const pid_t parent = getppid();
++    base::ScopedFD queue(kqueue());
++    struct kevent change;
++    EV_SET(&change, parent, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0,
++           nullptr);
++    if (parent != 1 && queue.is_valid() &&
++        kevent(queue.get(), &change, 1, nullptr, 0, nullptr) == 0) {
++      struct kevent event;
++      while (HANDLE_EINTR(kevent(queue.get(), nullptr, 0, &event, 1,
++                                 nullptr)) != 1) {
++      }
++    }
+     while (getppid() != 1) {
+       sleep(1);
+     }

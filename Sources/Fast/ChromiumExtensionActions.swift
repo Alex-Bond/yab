@@ -23,6 +23,8 @@ final class ChromiumColumn: ObservableObject {
         var popup = false
         /// A dynamic icon the extension set, PNG; nil keeps its own.
         var icon: Data?
+        /// That icon is for every tab, not this one's own.
+        var iconEverywhere = false
         var nativeTab: Int?
         var error: String?
 
@@ -43,13 +45,19 @@ final class ChromiumColumn: ObservableObject {
             if let url = row["icon"].string, url.hasPrefix("data:image/png;base64,"), url.count < 220_000 {
                 value.icon = Data(base64Encoded: String(url.dropFirst("data:image/png;base64,".count)))
             }
+            value.iconEverywhere = row["iconEverywhere"] == .bool(true)
             return value
         }
     }
 
     /// By page (its YabCore tab) and extension.
     @Published private(set) var states: [String: [String: Native]] = [:]
-    private struct Watched { weak var tab: Tab?; let profile: String }
+    private struct Watched {
+        weak var tab: Tab?
+        let profile: String
+        /// Requested actions, independent of the results Chrome returned.
+        let actions: [String]
+    }
     private var watched: [String: Watched] = [:]
     private var reading: [String: Task<Void, Never>] = [:]
     /// The last failed read by page, for the bench (a page that cannot be read keeps the extension's own icon).
@@ -58,22 +66,68 @@ final class ChromiumColumn: ObservableObject {
     private var lists: [String: AnyCancellable] = [:]
     private var listedAt: [String: Date] = [:]
     private var listing: Set<String> = []
+    /// The last failed list read by profile, for the bench.
+    private var listErrors: [String: String] = [:]
     private var images: [Data: NSImage] = [:]
+    /// The icon each extension last set for every tab, by profile. Chrome
+    /// keeps it past the worker's sleep and has no getter for it, and the
+    /// worker's record goes with the worker, so a read after that finds none.
+    private var everywhereIcons: [String: [String: Data]] = [:]
+
+    /// The profile's extensions a Chromium tab's column draws: its page's,
+    /// or, while the tab has no page (asleep, or brought back from last
+    /// time and not looked at yet), the same profile's, found without
+    /// building a page or reading anything. Nil for a WebKit tab. A private
+    /// tab's is its space's, when "Allow in private tabs" is on and its page
+    /// is that space profile's private side (ChromiumPrivateProfiles); its
+    /// buttons are only the extensions Chrome lets run there.
+    func native(for tab: Tab) -> ChromiumExtensions? {
+        guard tab.engineKind == .chromium else { return nil }
+        if Self.isPrivate(tab) {
+            guard ChromiumPrivateProfiles.extensionsAllowed, let page = tab.builtPage as? ChromiumPage,
+                  let space = ChromiumPrivateProfiles.space(of: page.profile) else { return nil }
+            return ChromiumExtensions.shared(profile: space.profile, store: space.store)
+        }
+        if let page = tab.builtPage as? ChromiumPage { return page.extensions }
+        guard tab.builtPage == nil else { return nil }
+        return ChromiumExtensions.existing(in: tab.pageStore, profile: tab.siteEngineProfile)
+    }
+
+    static func isPrivate(_ tab: Tab) -> Bool { tab.shy || !tab.pageStore.isPersistent }
+
+    /// The list's rows a tab can use: in a private tab, those allowed there.
+    func items(_ native: ChromiumExtensions, for tab: Tab) -> [ChromiumExtensions.Item] {
+        Self.isPrivate(tab) ? native.items.filter(\.incognito) : native.items
+    }
+
+    /// Which buttons a profile's list makes: its pins in pin order, then
+    /// with `all` every other one that is on. Whatever a page has or hasn't
+    /// said yet changes none of them; only how each looks.
+    static func members(_ items: [ChromiumExtensions.Item], pinnedIDs: [String], all: Bool) -> (pinned: [ChromiumExtensions.Item], rest: [ChromiumExtensions.Item]) {
+        let shown = { (item: ChromiumExtensions.Item) in item.enabled || ApplePasswordExtensionRoute.offersButton(item.id) }
+        let byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let pinned = pinnedIDs.compactMap { byID[$0] }.filter(shown)
+        let pins = Set(pinnedIDs)
+        return (pinned, all ? items.filter { shown($0) && !pins.contains($0.id) } : [])
+    }
 
     /// The tab's pinned buttons, in pin order; with `all`, then every other
     /// enabled one (Site Controls' list). Nothing for a WebKit tab.
+    /// Which buttons, and in what order, is the profile's: the same before
+    /// the tab's page has its native tab, or a page at all, as after. Only
+    /// the icon, badge, title and whether it is on here wait for the page.
     @available(macOS 15.4, *)
     func buttons(for tab: Tab, all: Bool = false) -> [Extensions.Button] {
-        guard tab.engineKind == .chromium, !tab.shy, let page = tab.builtPage as? ChromiumPage,
-              let remote = page.remoteID, let core = ChromiumProcess.shared.connectedClient else { return [] }
-        let native = page.extensions
+        guard let native = native(for: tab) else { return [] }
         follow(native)
-        refresh(native, connectedTo: core)
-        let items = Dictionary(native.items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let pinned = native.pinnedIDs.compactMap { items[$0] }.filter(\.enabled)
-        let rest = all ? native.items.filter { $0.enabled && !native.pinnedIDs.contains($0.id) } : []
-        watch(tab, remote: remote, profile: native.profile, pinned: pinned.map(\.id))
-        let here = states[remote] ?? [:]
+        let (pinned, rest) = Self.members(items(native, for: tab), pinnedIDs: native.pinnedIDs, all: all)
+        var here: [String: Native] = [:]
+        if let page = tab.builtPage as? ChromiumPage, let remote = page.remoteID,
+           let core = ChromiumProcess.shared.connectedClient {
+            refresh(native, connectedTo: core)
+            watch(tab, remote: remote, profile: native.profile, actions: Self.actionIDs(items(native, for: tab), pinnedIDs: native.pinnedIDs))
+            here = states[remote] ?? [:]
+        }
         let pins = Set(pinned.map(\.id))
         return (pinned + rest).map { item in
             let state = here[item.id]
@@ -82,38 +136,55 @@ final class ChromiumColumn: ObservableObject {
                 id: item.id, name: item.name,
                 label: ExtensionTip.label(action: title.isEmpty ? item.name : title, name: item.name, displayName: item.name, shortName: ""),
                 icon: ExtensionIconShape.rounded(image(state?.icon ?? item.iconData)),
-                badge: state?.badge ?? "", enabled: state?.enabled ?? true, pinned: pins.contains(item.id))
+                badge: state?.badge ?? "", enabled: ApplePasswordExtensionRoute.offersButton(item.id) || (state?.enabled ?? true), pinned: pins.contains(item.id),
+                // The key Chrome gave its button's command, for its tip, as a WebKit button's.
+                keys: item.commands.first { $0.action && !ExtensionCommands.off(item.id, $0.name) }?.hotkey
+                    .flatMap { ExtensionCommands.routes($0) ? $0.text : nil })
         }
     }
 
-    /// The cached pin identity/order, without building a page or reading the helper.
+    /// The pins `buttons` draws, without building a page or reading the
+    /// helper: the room the column keeps for them is always the row's own.
     /// A parked plate must carry different equal-height native pin sets too.
     func pinnedIDs(for tab: Tab) -> [String] {
-        guard tab.engineKind == .chromium, !tab.shy, let page = tab.builtPage as? ChromiumPage else { return [] }
-        let enabled = Set(page.extensions.items.filter(\.enabled).map(\.id))
-        return page.extensions.pinnedIDs.filter(enabled.contains)
+        guard let native = native(for: tab) else { return [] }
+        return Self.members(items(native, for: tab), pinnedIDs: native.pinnedIDs, all: false).pinned.map(\.id)
     }
 
     /// How many the column keeps room for, without reading anything.
     func pinnedCount(for tab: Tab) -> Int { pinnedIDs(for: tab).count }
 
     /// Open the extension's own action popup for this native page window.
-    func press(_ id: String, tab: Tab) {
-        guard tab.engineKind == .chromium, let page = tab.builtPage as? ChromiumPage,
-              let item = page.extensions.items.first(where: { $0.id == id }) else { return }
-        guard let remote = page.remoteID else { return }
-        if ChromiumPopupHost.shared.toggleClosed(page: page, extensionID: id) { return }
-        let hasPopup = states[remote]?[id]?.popup ?? false
+    /// `list`: the sliders' list it was pressed in, for its popup to take over.
+    func press(_ id: String, tab: Tab, list: NSPopover? = nil) {
+        if ApplePasswordExtensionRoute.matches(id) {
+            list?.close()
+            ApplePasswordExtensionRoute.intercept(id, browser: tab.delegate as? Browser)
+            return
+        }
+        guard tab.engineKind == .chromium, let page = tab.builtPage as? ChromiumPage, let native = native(for: tab),
+              let item = items(native, for: tab).first(where: { $0.id == id }) else { return }
+        popupTrace("press \(id.prefix(6))")
+        if ChromiumPopupHost.shared.toggleClosed(page: page, extensionID: id) { list?.close(); return }
+        let pressedInList = list != nil
+        // The button is drawn before the page has its native tab; until it
+        // has, nothing is known of a popup.
+        let knownPopup = page.remoteID.flatMap { states[$0]?[id]?.popup }
+        ChromiumPopupHost.shared.expect(id, page: page, list: list, knownPopup: knownPopup)
         Task { @MainActor in
-            // No popup on this page: its side panel, when it asked for its
-            // button to open one (Chrome would show it in a window Yab hides).
-            if !hasPopup, #available(macOS 15.4, *), await ChromiumSidePanel.shared.press(id, from: tab) { return }
             // Chrome's own action click on this exact page: a popup, or
             // onClicked with activeTab granted for this tab, as in Chromium.
-            if await page.openExtensionAction(id) { return }
+            // First, since asking about a side panel builds a page for it.
+            // It waits for the page's native tab.
+            if await page.openExtensionAction(id) { popupTrace("action taken \(id.prefix(6))"); return }
+            if pressedInList { ChromiumPopupHost.shared.dropList() }
+            // Chrome leaves a side panel to its button's owner, and would
+            // show it in a window Yab hides.
+            if #available(macOS 15.4, *), await ChromiumSidePanel.shared.press(id, from: tab) { return }
+            guard let remote = page.remoteID else { return }
             do {
-                _ = try await ChromiumDRMExtensionSession.of(tab).request("ext.actions.openPopup", ["page": remote, "extension": id])
-            } catch { page.extensions.failure = "\(item.name): \(error.localizedDescription)" }
+                _ = try await ChromiumDRMExtensionSession.actions(of: tab).request("ext.actions.openPopup", ["page": remote, "extension": id])
+            } catch { native.failure = "\(item.name): \(error.localizedDescription)" }
         }
     }
 
@@ -145,23 +216,31 @@ final class ChromiumColumn: ObservableObject {
         listedAt[key] = Date()
         Task { @MainActor [weak self] in
             // A passive read must not wake a helper after its page crashed.
-            _ = try? await native.list(connectedTo: core)
+            do { _ = try await native.list(connectedTo: core); self?.listErrors[key] = nil }
+            catch { self?.listErrors[key] = String(describing: error) }
             self?.listing.remove(key)
         }
     }
 
-    private func watch(_ tab: Tab, remote: String, profile: String, pinned: [String]) {
-        let fresh = watched[remote] == nil
-        watched[remote] = Watched(tab: tab, profile: profile)
-        let known = Set((states[remote] ?? [:]).keys)
-        guard fresh || !Set(pinned).isSubset(of: known) || watched.count > 8 else { return }
-        // Drawn now; read after this pass of the column.
+    /// Native toolbar routes (Apple Passwords) are drawn alongside Chromium
+    /// actions, but have no extension worker or action state to read.
+    static func actionIDs(_ items: [ChromiumExtensions.Item], pinnedIDs: [String]) -> [String] {
+        let native = Set(items.filter { $0.enabled && !ApplePasswordExtensionRoute.matches($0.id) }.map(\.id))
+        return pinnedIDs.filter(native.contains)
+    }
+
+    private func watch(_ tab: Tab, remote: String, profile: String, actions: [String]) {
+        let changed = watched[remote]?.actions != actions
+        watched[remote] = Watched(tab: tab, profile: profile, actions: actions)
+        guard changed || watched.count > 8 else { return }
+        // A read belongs to a changed request, not to missing result rows.
+        // Chrome may return no action for an extension; an empty answer is
+        // still an answer. Drawing it must not schedule the same read again.
         DispatchQueue.main.async {
-            // Only the last few pages shown are kept current.
             for (key, value) in self.watched where value.tab == nil || value.tab?.gone == true {
                 self.watched[key] = nil; self.states[key] = nil
             }
-            if fresh || !Set(pinned).isSubset(of: known) { self.read(remote) }
+            if changed { self.read(remote) }
         }
     }
 
@@ -173,8 +252,8 @@ final class ChromiumColumn: ObservableObject {
             watched[remote] = nil; states[remote] = nil; return
         }
         if reading[remote] != nil { again.insert(remote); return }
-        let items = Set(page.extensions.items.filter(\.enabled).map(\.id))
-        let ids = page.extensions.pinnedIDs.filter(items.contains)
+        guard let native = native(for: tab) else { states[remote] = [:]; return }
+        let ids = Self.actionIDs(items(native, for: tab), pinnedIDs: native.pinnedIDs)
         guard !ids.isEmpty else { states[remote] = [:]; return }
         reading[remote] = Task { @MainActor [weak self] in
             defer {
@@ -182,10 +261,15 @@ final class ChromiumColumn: ObservableObject {
                 if self?.again.remove(remote) != nil { self?.read(remote) }
             }
             do {
-                let result = try await ChromiumDRMExtensionSession.of(tab).request("ext.actions.state", ["page": remote, "extensions": ids], connectedTo: core)
+                let result = try await ChromiumDRMExtensionSession.actions(of: tab).request("ext.actions.state", ["page": remote, "extensions": ids], connectedTo: core)
                 guard case .array(let rows) = result["actions"] else { self?.failures[remote] = "No actions array in the answer"; return }
                 var next: [String: Native] = [:]
-                for id in ids { if let row = rows.first(where: { $0["id"].string == id }), let state = Native.parse(row, id: id) { next[id] = state } }
+                for id in ids {
+                    guard let row = rows.first(where: { $0["id"].string == id }), var state = Native.parse(row, id: id) else { continue }
+                    if state.iconEverywhere { self?.everywhereIcons[entry.profile, default: [:]][id] = state.icon }
+                    else if state.icon == nil { state.icon = self?.everywhereIcons[entry.profile]?[id] }
+                    next[id] = state
+                }
                 self?.failures[remote] = nil
                 if self?.states[remote] != next { self?.states[remote] = next }
             } catch {
@@ -206,7 +290,7 @@ final class ChromiumColumn: ObservableObject {
         // sets its badge; read again once it has had a moment.
         let restarted = event.params["reason"]?.string == "worker"
         for (remote, entry) in column.watched where entry.profile == profile {
-            guard let page = entry.tab?.builtPage as? ChromiumPage, page.extensions.pinnedIDs.contains(id) else { continue }
+            guard let tab = entry.tab, tab.builtPage is ChromiumPage, column.native(for: tab)?.pinnedIDs.contains(id) == true else { continue }
             column.read(remote)
             if restarted { DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { column.read(remote) } }
         }
@@ -219,6 +303,10 @@ extension ChromiumExtensions {
     /// Pin or unpin in the column; kept beside the import's pin order.
     func setPinned(_ id: String, _ pinned: Bool) throws {
         guard Self.validID(id) else { throw YabCoreError.remote("A Chrome extension ID is required") }
+        if #available(macOS 15.4, *), let list = oneList, list.installed.contains(where: { $0.id == id }) {
+            list.setPinned(id, pinned)
+            return
+        }
         var state = try migration()
         state.pins.removeAll { $0 == id }
         if pinned { state.pins.append(id) }
@@ -227,6 +315,7 @@ extension ChromiumExtensions {
 
     /// A password manager comes in pinned, the first time, as on WebKit.
     func pinOnArrival(_ id: String) {
+        if #available(macOS 15.4, *), oneList != nil { return }
         guard var state = try? migration(), Extensions.passwordManagers.contains(id),
               !(state.arrived ?? []).contains(id) else { return }
         state.arrived = (state.arrived ?? []).union([id])
@@ -242,10 +331,17 @@ struct ChromiumPinActions: View {
     let name: String
     let tab: Tab
 
-    private var native: ChromiumExtensions? { (tab.builtPage as? ChromiumPage)?.extensions }
+    private var native: ChromiumExtensions? { ChromiumColumn.shared.native(for: tab) }
 
     var body: some View {
         if let native {
+            // The extension's own rows first, as under its name in Chrome's
+            // menu (CEF patch 0124; read ahead, ChromiumActionMenu).
+            let own = ChromiumActionMenu.shared.rows(id, tab: tab)
+            if !own.isEmpty {
+                ChromiumActionMenuRows(id: id, tab: tab, rows: own)
+                Divider()
+            }
             let pinned = native.pinnedIDs.contains(id)
             SwiftUI.Button(pinned ? "Unpin" : "Pin", mark: "pin") { try? native.setPinned(id, !pinned) }
             if let url = native.items.first(where: { $0.id == id })?.optionsURL {
@@ -271,30 +367,36 @@ extension ChromiumColumn {
     @available(macOS 15.4, *)
     static func benchState(tab: Tab, page: ChromiumPage, pin: String?, pinned: Bool, read: Bool) -> [String: Any] {
         var failure: String?
-        if let pin {
-            do { try page.extensions.setPinned(pin, pinned) } catch { failure = error.localizedDescription }
-        }
         let column = shared
+        // A private tab's list is its space's (native(for:)), when it has one.
+        let list = column.native(for: tab) ?? page.extensions
+        if let pin {
+            do { try list.setPinned(pin, pinned) } catch { failure = error.localizedDescription }
+        }
         let buttons = column.buttons(for: tab)
         if read, let remote = page.remoteID { column.read(remote) }
         let states = page.remoteID.flatMap { column.states[$0] } ?? [:]
         var out: [String: Any] = [
-            "pins": page.extensions.pinnedIDs,
-            "items": page.extensions.items.map { ["id": $0.id, "name": $0.name, "state": $0.state] },
+            "pins": list.pinnedIDs,
+            "items": list.items.map { ["id": $0.id, "name": $0.name, "state": $0.state, "incognito": $0.incognito] },
+            "private": isPrivate(tab),
+            "space": ChromiumPrivateProfiles.space(of: page.profile)?.profile ?? "",
             "buttons": buttons.map { button -> [String: Any] in
                 ["id": button.id, "label": button.label, "badge": button.badge, "enabled": button.enabled,
-                 "icon": button.icon.map { [$0.size.width, $0.size.height] } ?? []]
+                 "icon": button.icon.map { [$0.size.width, $0.size.height] } ?? [], "tint": ExtensionOneList.tint(button.icon)]
             },
             "native": states.mapValues { state -> [String: Any] in
                 ["title": state.title, "badge": state.badge, "countHidden": state.countHidden, "enabled": state.enabled,
-                 "popup": state.popup, "dynamicIcon": state.icon?.count ?? 0, "nativeTab": state.nativeTab ?? -1,
+                 "popup": state.popup, "dynamicIcon": state.icon?.count ?? 0, "iconTint": ExtensionOneList.tint(state.icon.flatMap(NSImage.init(data:))),
+                 "nativeTab": state.nativeTab ?? -1,
                  "error": state.error ?? ""]
             },
             "reading": page.remoteID.map { column.reading[$0] != nil } ?? false,
             "readFailure": page.remoteID.flatMap { column.failures[$0] } ?? "",
             "watching": page.remoteID.map { column.watched[$0] != nil } ?? false,
-            "enabledItems": page.extensions.items.filter(\.enabled).map(\.id),
-            "failure": page.extensions.failure ?? "",
+            "enabledItems": list.items.filter(\.enabled).map(\.id),
+            "failure": list.failure ?? "",
+            "listError": column.listErrors[(list.privateMode ? "private:" : "regular:") + list.profile] ?? "",
         ]
         // What the store install shows: the corner offer and Yab's question.
         if let up = Questions.shared.current {

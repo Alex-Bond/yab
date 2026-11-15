@@ -114,6 +114,18 @@ extension Browser {
     func showPageFiles(_ webView: NSView, parameters: PageFilePicker,
                        completionHandler: @escaping ([URL]?) -> Void) {
         guard parameters.lifetime?.isActive != false else { return }
+        if let name = parameters.saveName {
+            guard let window = Dialogs.window(for: webView) else { completionHandler(nil); return }
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = name
+            panel.canCreateDirectories = true
+            parameters.lifetime?.whenCancelled { [weak panel] in panel?.cancel(nil) }
+            panel.beginSheetModal(for: window) { response in
+                guard parameters.lifetime?.isActive != false else { return }
+                completionHandler(response == .OK ? panel.url.map { [$0] } : nil)
+            }
+            return
+        }
         // Files an agent was allowed to give this page: handed over, no
         // picker.
         if let tab = tabs.first(where: { $0.builtPage === webView }), let given = tab.uploading, given.until > Date() {
@@ -295,6 +307,17 @@ extension Browser {
         // the question about it is moot (Deaf.swift).
         tab.deaf = nil
         if tab.asks.first?.kind == .stuck { dismissAsk(tab) }
+        // Chrome's SadTabHelper owns renderer termination in a Chrome-style
+        // CEF view. Keep its sad tab visible until the person reloads. The
+        // WebKit recovery policy below must not navigate that view away.
+        if page.engine == .chromium {
+            stuck.ending.remove(tab.id)
+            stuck.outgrown.remove(tab.id)
+            stuck.halting.remove(tab.id)
+            tab.stale = false
+            tab.staleReason = nil
+            return
+        }
         // Ended by the browser itself, for being stuck or too big: loaded
         // again at once, wherever the tab is, and not counted as a crash.
         if stuck.ending.remove(tab.id) != nil {

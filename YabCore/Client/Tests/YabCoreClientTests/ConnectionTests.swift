@@ -48,9 +48,11 @@ private final class Stub: @unchecked Sendable {
                 input.append(contentsOf: buffer.prefix(n))
                 while let newline = input.firstIndex(of: 10) {
                     let data = Data(input[..<newline]); input.removeSubrange(...newline)
-                    guard let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let id = request["id"] as? String else { return }
+                    let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    if object?["flow"] != nil { continue } // event credit: the wire's own frame
+                    guard let request = object, let id = request["id"] as? String else { return }
                     if request["method"] as? String == "hello" {
-                        send(["v": 1, "id": id, "result": ["version": 1]])
+                        send(["v": 1, "id": id, "result": ["version": 1, "eventFlow": 1]])
                     } else if mode.hasPrefix("readiness") {
                         let params = request["params"] as! [String: Any]
                         send(["v": 1, "id": id, "result": ["ready": true, "devToolsReady": true,
@@ -58,6 +60,12 @@ private final class Stub: @unchecked Sendable {
                             "context": 1, "generation": 2,
                             "profile": mode == "readiness-mismatch" ? "foreign" : params["profile"]!,
                             "url": params["url"] ?? "about:blank"]])
+                    } else if mode == "envelope" {
+                        send(["v": 1, "id": id, "result": request["timeout"] ?? NSNull()])
+                    } else if mode == "big" {
+                        // A page's picture: megabytes in one frame, then a small one.
+                        let size = (request["params"] as? [String: Any])?["size"] as? Int ?? 1
+                        send(["v": 1, "id": id, "result": String(repeating: "a", count: size)])
                     } else if mode == "disconnect" { return }
                     else if mode == "timeout" { continue }
                     else if mode == "reorder" {
@@ -75,6 +83,46 @@ private final class Stub: @unchecked Sendable {
     deinit { Darwin.close(listener); unlink(path) }
 }
 final class ConnectionTests: XCTestCase {
+    func testWheelSubmissionDoesNotWaitForThePreviousNativeReply() async throws {
+        // This server deliberately withholds the first reply until the second
+        // request arrives. Waiting for the first reply would deadlock input.
+        let stub = try Stub(mode: "reorder")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        let submitted = expectation(description: "First wheel queued")
+        let first = Task { try await client.sendInput(["kind": .string("wheel"), "deltaY": .number(1)],
+                                                     submitted: { submitted.fulfill() }) }
+        await fulfillment(of: [submitted], timeout: 2)
+        let second = Task { try await client.sendInput(["kind": .string("wheel"), "deltaY": .number(2)], submitted: {}) }
+        let a = try await first.value, b = try await second.value
+        XCTAssertEqual(a, .string("first"))
+        XCTAssertEqual(b, .string("input.send"))
+        await client.disconnect()
+    }
+
+    func testInputSubmissionUnblocksOnPreflightFailure() async throws {
+        let stub = try Stub(mode: "timeout")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        await client.disconnect()
+        let submitted = expectation(description: "Failed submission released")
+        do {
+            _ = try await client.sendInput(["kind": .string("wheel")], submitted: { submitted.fulfill() })
+            XCTFail("Disconnected input succeeded")
+        } catch { }
+        await fulfillment(of: [submitted], timeout: 2)
+    }
+
+    func testSubmittedInputRemainsCancellableWithoutASecondSubmissionCallback() async throws {
+        let stub = try Stub(mode: "timeout")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        let submitted = expectation(description: "Input queued once")
+        submitted.assertForOverFulfill = true
+        let task = Task { try await client.sendInput(["kind": .string("wheel")], submitted: { submitted.fulfill() }) }
+        await fulfillment(of: [submitted], timeout: 2)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancelled input succeeded") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        await client.disconnect()
+    }
     func testVerifiedDocumentDoesNotWaitForStaleCEFHasDocument() async throws {
         let stub = try Stub(mode: "readiness")
         let client = try await YabCoreClient.connect(path: stub.path)
@@ -113,6 +161,67 @@ final class ConnectionTests: XCTestCase {
         let event = await iterator.next()
         XCTAssertEqual(event?.params["title"], .string("日本語"))
         await client.disconnect()
+    }
+    /// A frame of megabytes read in many pieces arrives whole, and the frames
+    /// around it in order: the newline is looked for only in what is new.
+    func testMegabyteFramesArriveWholeAcrossManyReads() async throws {
+        let stub = try Stub(mode: "big")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        for size in [3_000_000, 5, 1_500_000, 1] {
+            let value = try await client.request("big", params: ["size": .number(Double(size))], timeout: 30)
+            XCTAssertEqual(value.string?.count, size)
+            XCTAssertEqual(value.string?.allSatisfy { $0 == "a" }, true)
+        }
+        await client.disconnect()
+    }
+    func testRequestsPastTheLimitWaitTheirTurn() async throws {
+        let stub = try Stub(mode: "timeout")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        let said = await withTaskGroup(of: String.self) { group in
+            for _ in 0..<300 {
+                group.addTask {
+                    do { _ = try await client.request("held", timeout: 0.1); return "answered" }
+                    catch { return String(describing: error) }
+                }
+            }
+            return await group.reduce(into: Set<String>()) { $0.insert($1) }
+        }
+        XCTAssertEqual(said, ["YabCore request timed out"])
+        await client.disconnect()
+    }
+    func testDisconnectReleasesRequestsWaitingTheirTurn() async throws {
+        let stub = try Stub(mode: "timeout")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        let tasks = (0..<200).map { _ in Task { try await client.request("held", timeout: 30) } }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await client.disconnect()
+        for task in tasks {
+            do { _ = try await task.value; XCTFail("Disconnect was swallowed") }
+            catch { XCTAssertTrue(error is YabCoreError) }
+        }
+    }
+    /// R2256 (code 4): a page's load waited 20 s on a busy helper and failed. What a
+    /// load waits on now waits as long as the helper takes, and says so.
+    func testPageLoadRequestsTellTheHelperTheirAllowance() async throws {
+        let stub = try Stub(mode: "envelope")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        let navigate = try await client.request("tab.navigate", params: ["tab": .string("t")])
+        XCTAssertEqual(navigate, .number(YabCoreClient.loadAllowance))
+        let other = try await client.request("page.snapshot")
+        XCTAssertEqual(other, .null, "other requests keep the helper's own 20 s")
+        await client.disconnect()
+    }
+    func testSlowHelperDoesNotFailAPageLoad() async throws {
+        let stub = try Stub(mode: "timeout")
+        let client = try await YabCoreClient.connect(path: stub.path)
+        let load = Task { try await client.request("tab.create", params: [:], timeout: 0.1) }
+        let other = Task { try await client.request("page.snapshot", params: [:], timeout: 0.1) }
+        do { _ = try await other.value; XCTFail("Unanswered request answered") }
+        catch { XCTAssertEqual(String(describing: error), "YabCore request timed out") }
+        try await Task.sleep(nanoseconds: 400_000_000)
+        await client.disconnect()
+        do { _ = try await load.value; XCTFail("Unanswered load answered") }
+        catch { XCTAssertEqual(String(describing: error), "YabCore disconnected", "only the helper's end ends a load's wait") }
     }
     func testDisconnectFailsPendingCall() async throws {
         let stub = try Stub(mode: "disconnect")

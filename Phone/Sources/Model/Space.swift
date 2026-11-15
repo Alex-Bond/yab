@@ -15,6 +15,7 @@ struct Space: Identifiable, Codable, Hashable, Sendable {
     /// The complete Mac look; nil keeps the earlier iPhone appearance.
     var look: SpaceLook?
     /// Metadata only until this iPhone has per-space website stores.
+    var signInWith: String? = nil
     var ownSignIns: Bool
     var pins: [Pin]
     var kept: [KeptItem]
@@ -28,13 +29,14 @@ struct Space: Identifiable, Codable, Hashable, Sendable {
 
     init(id: ID, name: String, emoji: String, tint: RGB, pins: [Pin] = [], kept: [KeptItem] = [], today: [Tab] = [],
          current: Tab.ID? = nil, pinsOpen: Bool = false, isPrivate: Bool = false,
-         look: SpaceLook? = nil, ownSignIns: Bool = false) {
+         look: SpaceLook? = nil, ownSignIns: Bool = false, signInWith: String? = nil) {
         self.id = id
         self.name = name
         self.emoji = emoji
         self.tint = tint
         self.look = look
         self.ownSignIns = ownSignIns
+        self.signInWith = signInWith
         self.pins = pins
         self.kept = kept
         self.today = today
@@ -45,7 +47,7 @@ struct Space: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, emoji, tint, pins, kept, today, current, pinsOpen, look, ownSignIns
+        case id, name, emoji, tint, pins, kept, today, current, pinsOpen, look, ownSignIns, signInWith
         case isPrivate = "private"
     }
 
@@ -56,6 +58,7 @@ struct Space: Identifiable, Codable, Hashable, Sendable {
         emoji = try c.decodeIfPresent(String.self, forKey: .emoji) ?? ""
         tint = try c.decode(RGB.self, forKey: .tint)
         look = try c.decodeIfPresent(SpaceLook.self, forKey: .look)
+        signInWith = try c.decodeIfPresent(String.self, forKey: .signInWith)
         ownSignIns = try c.decodeIfPresent(Bool.self, forKey: .ownSignIns) ?? false
         pins = try c.decodeIfPresent([Pin].self, forKey: .pins) ?? []
         kept = try c.decodeIfPresent([KeptItem].self, forKey: .kept) ?? []

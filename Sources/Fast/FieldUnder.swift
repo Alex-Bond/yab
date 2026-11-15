@@ -97,7 +97,7 @@ final class FieldUnder: ObservableObject {
 
     /// Whether a match of this kind is looked for.
     func wants(_ offer: Suggestion) -> Bool {
-        if offer.tab != nil || offer.kind == .open { return tabs }
+        if offer.opensHere || offer.tab != nil || offer.kind == .open { return tabs }
         if offer.menuTargetID != nil { return commands }
         switch offer.kind {
         case .visited: return pages

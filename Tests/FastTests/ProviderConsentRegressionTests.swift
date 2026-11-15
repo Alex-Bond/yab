@@ -20,7 +20,7 @@ struct ProviderConsentRegressionTests {
         let found = Shell.Found(claude: home.appendingPathComponent("claude-fixture").path,
                                 env: ["HOME": home.path, "CLAUDE_CONFIG_DIR": home.path,
                                       "ANTHROPIC_API_KEY": "fixture-key"])
-        await setup.look(find: { found }, readStatus: { status }, plans: plans)
+        await setup.look(find: { _ in found }, readStatus: { status }, plans: plans)
         #expect(setup.signedIn["claude"] == true, "The real passive reader must see the synthetic login")
         #expect(!setup.connected("claude"), "No Connect was pressed in this profile")
         #expect(!setup.canRunTasks(), "A CLI signed in outside Yab must not make task dispatch ready")

@@ -70,9 +70,7 @@ private final class ChromeRootView: UIView {
         guard surface.chromeOpacity > 0.5 else { return nil }
         let folded = app.chrome.folded
         let hasNow = app.nowItem != nil
-        let geometry = BottomToolbarGeometry(size: bounds.size, folded: folded, hasNow: hasNow, words: app.plateWordsWidth,
-                                             emptyPlus: app.browser.tab == nil, verticalControls: app.workspace.verticalControls,
-                                             leadingRail: app.workspace.leadingRail)
+        let geometry = BottomToolbarGeometry(size: bounds.size, folded: folded, hasNow: hasNow, words: app.plateWordsWidth, verticalControls: app.workspace.verticalControls, leadingRail: app.workspace.leadingRail)
         let plateHeight = max(Metrics.touch, geometry.plate.height)
         let plateTouch = CGRect(x: geometry.plate.minX, y: geometry.plate.midY - plateHeight / 2,
                                 width: geometry.plate.width, height: plateHeight)
@@ -300,10 +298,6 @@ struct ChromeGeometry {
     /// The plate's words, measured at the folded size (wordsWidth): folded
     /// alone, the capsule hugs them. nil, the widest capsule.
     var words: CGFloat? = nil
-    /// Nothing in front: the plate is New Tab's own + capsule, the same one
-    /// the screen with no tabs at all wears (Tabs/TabGalleryLayout.plus), so
-    /// the two empty feet are the same foot.
-    var emptyPlus = false
     var verticalControls: Bool? = nil
     var leadingRail = false
     /// What the system reserves at this surface's left and right edges (a
@@ -448,8 +442,7 @@ struct ChromeGeometry {
         guard folded else {
             // Centered between the system's columns, past the buttons at both ends.
             let span = size.width - rowSides.left - rowSides.right
-            let full = min(C.plateWidth(screen: span), Metrics.Workspace.maximumPlate)
-            let width = min(span, max(Metrics.touch, emptyPlus ? Metrics.TabGallery.plusWidth : full))
+            let width = min(span, max(Metrics.touch, min(C.plateWidth(screen: span), Metrics.Workspace.maximumPlate)))
             return CGRect(x: rowSides.left + (span - width) / 2, y: rowMid - C.height / 2, width: width, height: C.height)
         }
         if hasNow {
@@ -532,7 +525,5 @@ extension AnyTransition {
 
 extension AppModel {
     /// The plate's words measured folded: the capsule hugs them (ChromeGeometry.words).
-    /// Nothing in front: the plate says nothing, it is the + alone, so the
-    /// folded capsule hugs no word either (ToolbarPlateControl).
-    var plateWordsWidth: CGFloat { ChromeGeometry.wordsWidth(browser.tab.map(PlateLabel.address) ?? "") }
+    var plateWordsWidth: CGFloat { ChromeGeometry.wordsWidth(browser.tab.map(PlateLabel.address) ?? "New Tab") }
 }

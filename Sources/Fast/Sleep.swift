@@ -62,10 +62,10 @@ import WebKit
 // has gone, the one left longest ago first, before macOS starts ending
 // processes itself (feedback #44).
 //
-// Saving power, Low Power Mode, or a battery nearly out and not charging,
-// the four hours are one. Chrome's Energy Saver throttles background pages
-// and puts none to sleep; Yab shortens the wait to an hour to save
-// battery, a page asleep being one that spends nothing at all.
+// Saving power (Settings › Tabs › Energy Saver, when the person turned it
+// on and it holds), the four hours are one. Chrome's Energy Saver throttles
+// background pages and puts none to sleep; Yab shortens the wait to an hour
+// as well, a page asleep being one that spends nothing at all.
 
 extension Browser {
     /// How long a tab has to go without being looked at: four hours, one
@@ -352,8 +352,14 @@ extension Browser {
         // #78).
         if tab.pin != nil, !waiving.contains("pinned") { return "pinned" }
         // A kept row is a pin with its title (Kept.swift), and the Arc
-        // import puts Arc's pinned tabs there: kept the same way.
-        if tab.kept, !waiving.contains("kept") { return "kept" }
+        // import puts Arc's pinned tabs there: kept the same way. Not a
+        // live folder's own row (Tab.placedByFolder): the folder put it
+        // there asleep, nobody chose to keep it, and once opened and left
+        // it goes as today's tabs go (the timer, grown heavy, memory out).
+        // Kept, every pull request opened from the folder stayed loaded for
+        // the whole session, whatever it grew to and however short memory
+        // was.
+        if tab.kept, !tab.placedByFolder, !waiving.contains("kept") { return "kept" }
         if !waiving.contains("a site kept awake"), AwakeSites.shared.keeps(tab.address) { return "a site kept awake" }
         // A site that may send notifications: in any space, since a space
         // out of sight is exactly where they matter.
@@ -385,6 +391,7 @@ extension Browser {
         let page = tab.builtPage.flatMap { $0.engine == .chromium ? $0 : nil }
         let revision = tab.engineNavigationRevision
         let requestedVisit = byHand && activeID == tab.id ? tab.visits : nil
+        let visitsAtRequest = tab.visits
         let keeps = { [weak self] (tab: Tab) -> String? in
             guard let self else { return "page changed" }
             if let owner = tab.delegate as? Browser, owner !== self { return "page changed" }
@@ -393,7 +400,11 @@ extension Browser {
             }
             var skipped = waiving
             if let requestedVisit, tab.visits == requestedVisit { skipped.insert("on screen") }
-            return self.awake(because: tab, waiving: skipped)
+            if let reason = self.awake(because: tab, waiving: skipped) { return reason }
+            // An automatic decision belongs to this visit. Draft and picture
+            // replies from before a return cannot put the document just used down.
+            if !byHand, tab.visits != visitsAtRequest { return "visited while checking sleep" }
+            return nil
         }
         if let reason = keeps(tab) {
             done?(reason)
@@ -489,27 +500,26 @@ enum Pressure {
     }
 }
 
-/// Saving power: macOS's Low Power Mode, or running on a battery at a fifth
-/// or less. Chrome's Energy Saver starts at the same fifth, and throttles
-/// pages rather than putting them to sleep.
+/// Saving power: Settings › Tabs › Energy Saver holding now, below 20%
+/// on battery or unplugged, as the person picked (off unless they did).
+/// Chromium's Energy Saver is the same choice and the same rule
+/// (EnergySaver), so both engines start and stop saving together.
+/// macOS Low Power Mode alone starts neither, as in Chromium.
 @MainActor
 enum Thrift {
     private(set) static var on = false
-    /// For the bench: saving power whatever the battery says.
+    /// For the bench: saving power whatever the setting and the battery say.
     static var forced = false {
-        didSet { look() }
+        didSet {
+            look()
+            ChromiumEnergySaver.tell()
+        }
     }
     private static var changed: ((Bool) -> Void)?
-    private static var lowPower: NSObjectProtocol?
     private static var battery: CFRunLoopSource?
 
     static func watch(_ changed: @escaping (Bool) -> Void) {
         self.changed = changed
-        lowPower = NotificationCenter.default.addObserver(
-            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
-        ) { _ in
-            MainActor.assumeIsolated { look() }
-        }
         // Every change to any power source, a percent gone, a cable in or
         // out, delivered on the main run loop.
         if let source = IOPSNotificationCreateRunLoopSource({ _ in
@@ -522,25 +532,36 @@ enum Thrift {
     }
 
     static func look() {
-        let now = forced || ProcessInfo.processInfo.isLowPowerModeEnabled || batteryLow()
+        let choice = EnergySaver.current
+        var now = forced
+        // The power source is read only for a choice that weighs it.
+        if !now, choice != .off {
+            let power = Power.now()
+            now = choice.saves(onBattery: power.onBattery, percent: power.percent)
+        }
         guard now != on else { return }
         on = now
         changed?(now)
     }
+}
 
-    private static func batteryLow() -> Bool {
+/// Where the Mac's power comes from and how full its battery is, as
+/// Chromium reads them: the providing source, and the first battery's
+/// current capacity over its full one, in whole percent.
+enum Power {
+    static func now() -> (onBattery: Bool, percent: Int?) {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let from = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String?,
-              from == kIOPMBatteryPowerKey,
-              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef]
-        else { return false }
+              let from = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String?
+        else { return (false, nil) }
+        let onBattery = from == kIOPMBatteryPowerKey
+        guard let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return (onBattery, nil) }
         for source in list {
             guard let about = IOPSGetPowerSourceDescription(info, source)?.takeUnretainedValue() as? [String: Any],
                   let left = about[kIOPSCurrentCapacityKey] as? Int,
                   let full = about[kIOPSMaxCapacityKey] as? Int, full > 0
             else { continue }
-            return left * 5 <= full
+            return (onBattery, left * 100 / full)
         }
-        return false
+        return (onBattery, nil)
     }
 }

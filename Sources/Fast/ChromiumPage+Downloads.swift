@@ -11,6 +11,11 @@ final class ChromiumDownload: PageDownload {
     // True only for a download Yab itself started from a row of its own
     // (a page menu's Download Linked File or Download Image), never a page's.
     let isUserInitiated: Bool
+    let isExtensionDownload: Bool
+    private let profile: String
+    private let nativeID: Int?
+    let publishesNativePath: Bool
+    private var completedNativePath: String?
     let progress = Progress(totalUnitCount: -1)
     weak var page: (any PageHandle)?
     var sourceView: NSView? { page }
@@ -26,10 +31,15 @@ final class ChromiumDownload: PageDownload {
     /// Downloads Yab asked a page for, by page and address, for a few seconds.
     private static var asked: [String: TimeInterval] = [:]
 
-    init(page: ChromiumPage, id: String, tab: String, source: URL? = nil, userInitiated: Bool = false) {
+    init(page: ChromiumPage, id: String, tab: String, source: URL? = nil, userInitiated: Bool = false,
+         nativeID: Int? = nil, extensionDownload: Bool = false, publishesNativePath: Bool = false) {
         self.page = page; remoteID = id; tabID = tab
         originalRequest = source.map { URLRequest(url: $0) }
         isUserInitiated = userInitiated
+        isExtensionDownload = extensionDownload
+        profile = page.profile
+        self.nativeID = nativeID
+        self.publishesNativePath = publishesNativePath
         pageURL = page.committedURL; pageTitle = page.title
         progress.kind = .file
         progress.fileOperationKind = .downloading
@@ -38,6 +48,11 @@ final class ChromiumDownload: PageDownload {
         guard let number = value?.number, number.isFinite, number >= 0,
               number < Double(Int64.max) else { return unknown }
         return Int64(number)
+    }
+    static func nativeIdentifier(_ value: JSONValue?) -> Int? {
+        guard let number = value?.number, number.isFinite, number >= 1,
+              number <= Double(UInt32.max), number.rounded(.towardZero) == number else { return nil }
+        return Int(number)
     }
     private func send(_ method: String, _ fields: [String: JSONValue] = [:]) async throws {
         let core = try await ChromiumProcess.shared.connection()
@@ -57,8 +72,20 @@ final class ChromiumDownload: PageDownload {
         asked = asked.filter { now - $0.value < 10 }
         asked["\(ObjectIdentifier(page))|\(url.absoluteString)"] = now
     }
+    /// How long after a press a file that starts is that press's. Long enough for a link's redirects.
+    static let pressReach: TimeInterval = 10
+
+    /// Save Video Frame As pressed: the next blob or data file of this page is that press's.
+    static func askFrame(on page: ChromiumPage) {
+        let now = ProcessInfo.processInfo.systemUptime
+        asked = asked.filter { now - $0.value < 10 }
+        asked["\(ObjectIdentifier(page))|frame"] = now
+    }
+
     static func wasAsked(_ urls: [URL], on page: ChromiumPage) -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
+        if urls.contains(where: { ["blob", "data"].contains($0.scheme?.lowercased() ?? "") }),
+           let at = asked.removeValue(forKey: "\(ObjectIdentifier(page))|frame"), now - at < pressReach { return true }
         for url in urls {
             let key = "\(ObjectIdentifier(page))|\(url.absoluteString)"
             if let at = asked.removeValue(forKey: key), now - at < 10 { return true }
@@ -71,7 +98,10 @@ final class ChromiumDownload: PageDownload {
         progress.completedUnitCount = Self.byteCount(p["received"], unknown: 0)
         if p["complete"] == .bool(true) {
             ended = true
-            if let path = p["path"]?.string, !path.isEmpty { progress.fileURL = URL(fileURLWithPath: path) }
+            if let path = p["path"]?.string, !path.isEmpty {
+                completedNativePath = path
+                progress.fileURL = URL(fileURLWithPath: path)
+            }
             downloadEvents?.downloadDidFinish(self)
         } else if p["canceled"] == .bool(true) {
             fail(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
@@ -80,6 +110,21 @@ final class ChromiumDownload: PageDownload {
             fail(NSError(domain: "ChromiumDownload", code: Int(p["reason"]?.number ?? 0),
                          userInfo: [NSLocalizedDescriptionKey: "The download was interrupted"]))
         }
+    }
+    func didPublish(to file: URL) async throws {
+        // OnDownloadUpdated already confirmed the transfer; Browser has now
+        // atomically published its bytes. Older SDKs have no journal relocation
+        // API. Their completed file must not become a failed download because
+        // of an unsupported metadata operation. Advertised APIs still must ack.
+        guard publishesNativePath else { return }
+        guard let nativeID, let previous = completedNativePath else {
+            throw NSError(domain: "ChromiumDownload", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "The native download has no publication identity"])
+        }
+        let core = try await ChromiumProcess.shared.connection()
+        _ = try await core.request("download.published", params: ["profile": .string(profile),
+            "nativeId": .number(Double(nativeID)), "previousPath": .string(previous), "path": .string(file.path)])
+        completedNativePath = file.path
     }
     func fail(_ error: Error) {
         guard !ended else { return }
@@ -101,7 +146,7 @@ final class ChromiumDownload: PageDownload {
         guard resumeData == Self.resumeMark, resumable, let page = page as? ChromiumPage else { done(nil); return }
         resumable = false
         let next = ChromiumDownload(page: page, id: remoteID, tab: tabID, source: originalRequest?.url,
-                                    userInitiated: isUserInitiated)
+                                    userInitiated: isUserInitiated, nativeID: nativeID, extensionDownload: isExtensionDownload, publishesNativePath: publishesNativePath)
         next.progress.totalUnitCount = progress.totalUnitCount
         next.progress.completedUnitCount = progress.completedUnitCount
         next.progress.fileURL = progress.fileURL
@@ -116,16 +161,32 @@ final class ChromiumDownload: PageDownload {
 }
 
 extension ChromiumPage {
+    /// Opened only to fetch a file: nothing to go back or forward to, and no
+    /// document but the blank one or the file's own address.
+    func onlyFetched(_ fetching: [URL?]) -> Bool {
+        guard !canGoBack, !canGoForward else { return false }
+        guard let shown = committedURL, shown.scheme != "about" else { return true }
+        return fetching.contains { $0 == shown }
+    }
+
     func receiveDownload(_ p: [String: JSONValue]) {
         guard let id = p["download"]?.string, let tabID = remoteID,
               let url = p["url"]?.string.flatMap(URL.init(string:)) else { return }
         let original = p["originalURL"]?.string.flatMap(URL.init(string:))
+        // A person's click is what makes a file theirs, as WKDownload says of
+        // it. Chromium knows: the request carries the page's user activation.
+        let clicked = p["provenance"]?.string == "native" && p["userGesture"] == .bool(true)
         let download = ChromiumDownload(page: self, id: id, tab: tabID, source: original ?? url,
-                                        userInitiated: ChromiumDownload.wasAsked([url, original].compactMap { $0 }, on: self))
+                                        userInitiated: clicked || ChromiumDownload.wasAsked([url, original].compactMap { $0 }, on: self),
+                                        nativeID: ChromiumDownload.nativeIdentifier(p["nativeId"]),
+                                        extensionDownload: p["initiator"]?.string.flatMap(URL.init(string:))?.scheme == "chrome-extension",
+                                        publishesNativePath: p["publication"] == .bool(true))
         ChromiumProcess.shared.keepDownload(download)
         SiteDownloads.became(download, in: self, url: committedURL)
         guard let events else { download.destination(nil); return }
-        events.page(self, became: download, isMainFrame: false)
+        // No document of its own yet: a tab or a window opened only to fetch this,
+        // which steps aside and goes as WebKit's does.
+        events.page(self, became: download, isMainFrame: committedURL == nil || committedURL?.scheme == "about")
         let response = URLResponse(url: url, mimeType: p["mime"]?.string,
                                    expectedContentLength: Int(ChromiumDownload.byteCount(p["total"], unknown: -1)), textEncodingName: nil)
         guard let listener = download.downloadEvents else { download.destination(nil); return }

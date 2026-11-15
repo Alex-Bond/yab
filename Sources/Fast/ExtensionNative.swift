@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import WebKit
 
 // Chrome's native messaging, for the extensions that talk to an app on this
@@ -48,6 +49,7 @@ enum ExtensionNative {
             support.appendingPathComponent("Microsoft Edge Canary/NativeMessagingHosts"),
             support.appendingPathComponent("BraveSoftware/Brave-Browser-Beta/NativeMessagingHosts"),
             URL(fileURLWithPath: "/Library/Google/Chrome/NativeMessagingHosts"),
+            URL(fileURLWithPath: "/System/Cryptexes/App/Library/Google/Chrome/NativeMessagingHosts"),
             URL(fileURLWithPath: "/Library/Application Support/Chromium/NativeMessagingHosts"),
             URL(fileURLWithPath: "/Library/Microsoft/Edge/NativeMessagingHosts"),
         ]
@@ -111,15 +113,44 @@ enum ExtensionNative {
 
     /// `runtime.sendNativeMessage`: run, send one, read one, stop.
     /// `killed` hears that macOS killed the host as it started.
+    @MainActor
     static func send(_ message: Any, to name: String, from extensionID: String,
+                     owner: WKWebExtensionContext? = nil,
                      killed: (@Sendable () -> Void)? = nil) async throws -> Any? {
         let program = try host(name, for: extensionID)
-        let pipe = HostPipe(program: program, origin: "chrome-extension://\(extensionID)/")
+        let pipe = HostPipe(program: program, origin: "chrome-extension://\(extensionID)/", buffersReplies: true)
         pipe.killedAtLaunch = { bar(name); killed?() }
+        return try await send(message, using: pipe, owner: owner.map(ObjectIdentifier.init))
+    }
+
+    /// A one-shot call owns its host until reply, context unload, cancellation,
+    /// or its 30-second response budget. This is not an idle port timeout:
+    /// connectNative sessions can remain open for user authentication.
+    @MainActor
+    static func send(_ message: Any, using pipe: HostPipe, owner: ObjectIdentifier? = nil,
+                     timeout: Duration = .seconds(30)) async throws -> Any? {
         try pipe.start()
-        defer { pipe.stop() }
-        try pipe.write(message)
-        return try await pipe.readOne()
+        let id = ObjectIdentifier(pipe)
+        Live.requests[id] = (pipe, owner)
+        defer { Live.requests[id] = nil; pipe.stop(); Live.unwatchIfEmpty() }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try pipe.write(message)
+            return try await pipe.readOne(until: .now.advanced(by: timeout),
+                                          otherwise: Refused(why: "Native host has exited."))
+        } onCancel: { pipe.stop() }
+    }
+
+    @MainActor
+    static func stop(owner: WKWebExtensionContext) {
+        stop(owner: ObjectIdentifier(owner))
+    }
+
+    @MainActor
+    static func stop(owner: ObjectIdentifier) {
+        for entry in Array(Live.requests.values) where entry.owner == owner { entry.pipe.stop() }
+        for entry in Array(Live.pipes.values) where entry.owner == owner { entry.pipe.stop() }
+        Live.unwatchIfEmpty()
     }
 
     /// What a host said last before it stopped.
@@ -155,6 +186,7 @@ enum ExtensionNative {
     /// ended, `killed` that macOS killed it as it started.
     @MainActor
     static func connect(_ port: WKWebExtension.MessagePort, from extensionID: String,
+                        owner: WKWebExtensionContext? = nil,
                         heard said: ((Any) -> Void)? = nil, killed: (@Sendable () -> Void)? = nil,
                         ended: ((Ending) -> Void)? = nil) throws {
         guard let name = port.applicationIdentifier else { throw Refused(why: "No host named") }
@@ -183,9 +215,14 @@ enum ExtensionNative {
                 if Extensions.refusal(message) { heard.refused = true }
             }
         }
+        var beating: Timer?
         // Held until it has ended (onExit is let go of then).
         pipe.onExit = {
             DispatchQueue.main.async {
+                beating?.invalidate()
+                beating = nil
+                port.messageHandler = nil
+                port.disconnectHandler = nil
                 if !port.isDisconnected { port.disconnect() }
             }
             // How the process ended, read once it surely has.
@@ -193,7 +230,6 @@ enum ExtensionNative {
                 ended?(Ending(last: heard.last, after: Date().timeIntervalSince(started), byItself: pipe.exitedByItself))
             }
         }
-        var beating: Timer?
         var lastHeard = SuspendingClock.now
         port.messageHandler = { message, _ in
             guard let message else { return }
@@ -238,7 +274,7 @@ enum ExtensionNative {
             try? pipe.write(message)
         }
         port.disconnectHandler = { _ in beating?.invalidate(); pipe.stop() }
-        Live.keep(pipe, for: port)
+        Live.keep(pipe, for: port, owner: owner.map(ObjectIdentifier.init))
     }
 
     /// Sleeping does not count as a worker missing its heartbeat.
@@ -256,18 +292,35 @@ enum ExtensionNative {
     /// connected keeps its own.
     @MainActor
     static func stopOrphans() {
-        for (pipe, port) in Live.pipes.values where port.isDisconnected { pipe.stop() }
+        for entry in Array(Live.pipes.values) where entry.port.isDisconnected { entry.pipe.stop() }
+        Live.unwatchIfEmpty()
     }
 
     /// Hosts that are connected, held until they end.
-    private enum Live {
-        nonisolated(unsafe) static var pipes: [ObjectIdentifier: (pipe: HostPipe, port: WKWebExtension.MessagePort)] = [:]
-        static func keep(_ pipe: HostPipe, for port: WKWebExtension.MessagePort) {
-            pipes[ObjectIdentifier(pipe)] = (pipe, port)
+    @MainActor private enum Live {
+        static var pipes: [ObjectIdentifier: (pipe: HostPipe, port: WKWebExtension.MessagePort, owner: ObjectIdentifier?)] = [:]
+        static var requests: [ObjectIdentifier: (pipe: HostPipe, owner: ObjectIdentifier?)] = [:]
+        static var watcher: Timer?
+        static func watch() {
+            guard watcher == nil else { return }
+            // WebKit sometimes updates isDisconnected without delivering
+            // disconnectHandler. Observe that state even if no new host opens.
+            watcher = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                Task { @MainActor in stopOrphans() }
+            }
+        }
+        static func unwatchIfEmpty() {
+            if pipes.isEmpty && requests.isEmpty {
+                watcher?.invalidate(); watcher = nil
+            }
+        }
+        static func keep(_ pipe: HostPipe, for port: WKWebExtension.MessagePort, owner: ObjectIdentifier?) {
+            pipes[ObjectIdentifier(pipe)] = (pipe, port, owner)
+            watch()
             let previous = pipe.onExit
             pipe.onExit = {
                 previous?()
-                DispatchQueue.main.async { pipes[ObjectIdentifier(pipe)] = nil }
+                DispatchQueue.main.async { pipes[ObjectIdentifier(pipe)] = nil; unwatchIfEmpty() }
             }
         }
     }
@@ -279,10 +332,19 @@ final class HostPipe: @unchecked Sendable {
     private let process = Process()
     /// Identifies this helper's windows without their titles or contents.
     var processIdentifier: Int32 { process.processIdentifier }
-    private let input = Pipe()
-    private let output = Pipe()
+    /// The host's stdin and stdout. nil when pipe(2) failed: a process
+    /// out of descriptors (crashes #853, #1501). Foundation's Pipe() then
+    /// hands back nil although Swift sees it as non-optional, and the first
+    /// write went to a nil handle: _NSFileHandleIsClosed read 0x64.
+    private let input: HostChannel?
+    private let output: HostChannel?
+    /// Why the pipes couldn't be made, said by start.
+    private let openFailure: String?
     private var buffer = Data()
     private let lock = NSLock()
+    /// Serialize reading with closing. Neither callback waits on the host:
+    /// the read descriptor is nonblocking.
+    private let outputLock = NSLock()
     private var waiters: [(id: UUID, reader: CheckedContinuation<Any?, Error>)] = []
     private var replies: [Any] = []
     private let buffersReplies: Bool
@@ -320,30 +382,39 @@ final class HostPipe: @unchecked Sendable {
         }
     }
 
-    init(program: URL, origin: String, buffersReplies: Bool = false) {
+    /// `open` makes each pipe; tests hand in one that fails.
+    init(program: URL, origin: String, buffersReplies: Bool = false, input: Pipe? = nil, output: Pipe? = nil,
+         open: () throws -> HostChannel = HostChannel.open) {
         self.buffersReplies = buffersReplies
+        var failure: String?
+        func channel(_ given: Pipe?) -> HostChannel? {
+            if let given { return HostChannel(given) }
+            do { return try open() } catch { failure = failure ?? error.localizedDescription; return nil }
+        }
+        let input = channel(input), output = channel(output)
+        self.input = input
+        self.output = output
+        openFailure = failure
         process.executableURL = program
         process.arguments = [origin]
-        process.standardInput = input
-        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
+        guard let input, let output else { return }
+        process.standardInput = input.forReading
+        process.standardOutput = output.forWriting
         // A host that is already gone, refused to run or killed as it
         // started, would take the browser with it: writing to its closed
         // pipe raises SIGPIPE. Refused, the write only fails.
-        _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        _ = fcntl(input.forWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
 
     func start() throws {
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let chunk = handle.availableData
-            guard let self else { return }
-            if chunk.isEmpty {
-                handle.readabilityHandler = nil
-                self.finish()
-                return
-            }
-            self.take(chunk)
+        guard let input, let output else {
+            finish()
+            throw ExtensionNative.Refused(why: "Couldn't open a pipe to the native host: \(openFailure ?? "no descriptors left").")
         }
+        let fd = output.forReading.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        output.forReading.readabilityHandler = { [weak self] _ in self?.drain() }
         process.terminationHandler = { [weak self] process in
             guard let self else { return }
             let (stopped, began) = self.lock.withLock { (self.stoppedByYab, self.started) }
@@ -351,16 +422,28 @@ final class HostPipe: @unchecked Sendable {
                                   after: Date().timeIntervalSince(began), stoppedByYab: stopped) {
                 self.killedAtLaunch?()
             }
+            // A final reply can be waiting on stdout when termination is
+            // delivered before the readability callback. Drain it first.
+            self.drain()
             self.finish()
         }
         lock.withLock { started = Date() }
-        try process.run()
+        do {
+            try process.runValidated()
+            // Only the child reads stdin and writes stdout. Keeping copies
+            // here prevents EOF when either side of the connection goes.
+            try? input.forReading.close()
+            try? output.forWriting.close()
+        } catch {
+            finish()
+            throw error
+        }
     }
 
     /// It ended by itself, rather than by Yab's terminate: its exit, not a
     /// signal. Still running, it hasn't.
     var exitedByItself: Bool {
-        !process.isRunning && process.terminationReason == .exit
+        !lock.withLock({ stoppedByYab }) && !process.isRunning && process.terminationReason == .exit
     }
 
     /// How a host macOS wouldn't let run ends: SIGKILL, before it has done
@@ -375,9 +458,20 @@ final class HostPipe: @unchecked Sendable {
     var stoppedByUs: Bool { lock.withLock { stoppedByYab } }
 
     func stop() {
-        output.fileHandleForReading.readabilityHandler = nil
         lock.withLock { stoppedByYab = true }
-        if process.isRunning { process.terminate() }
+        finish()
+        // EOF is the native messaging host's normal way out. Foundation
+        // reaps the child; a host that ignores EOF gets a bounded grace.
+        let process = self.process
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            if process.isRunning { process.terminate() }
+        }
+        // A native host can ignore EOF and SIGTERM. Chromium bounds its
+        // process shutdown with SIGKILL too; a closed connection must not
+        // leave an unowned child behind.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
     }
 
     func write(_ message: Any) throws {
@@ -386,7 +480,8 @@ final class HostPipe: @unchecked Sendable {
         var length = UInt32(json.count).littleEndian
         var frame = Data(bytes: &length, count: 4)
         frame.append(json)
-        try input.fileHandleForWriting.write(contentsOf: frame)
+        guard let input, !lock.withLock({ finished }) else { throw ExtensionNative.Refused(why: "Native host has exited.") }
+        try input.forWriting.write(contentsOf: frame)
     }
 
     func readOne() async throws -> Any? {
@@ -437,8 +532,29 @@ final class HostPipe: @unchecked Sendable {
         waiter?.reader.resume(throwing: late)
     }
 
+    private func drain() {
+        var ended = false
+        outputLock.lock()
+        if let output, !lock.withLock({ finished }) {
+            let fd = output.forReading.fileDescriptor
+            let capacity = 64 * 1024
+            var bytes = [UInt8](repeating: 0, count: capacity)
+            while true {
+                let count = Darwin.read(fd, &bytes, capacity)
+                if count > 0 { take(Data(bytes.prefix(count))); continue }
+                if count == 0 { ended = true; break }
+                if errno == EINTR { continue }
+                ended = errno != EAGAIN && errno != EWOULDBLOCK
+                break
+            }
+        }
+        outputLock.unlock()
+        if ended { finish() }
+    }
+
     private func take(_ chunk: Data) {
         lock.lock()
+        guard !finished else { lock.unlock(); return }
         buffer.append(chunk)
         var messages: [Any] = []
         while buffer.count >= 4 {
@@ -471,13 +587,50 @@ final class HostPipe: @unchecked Sendable {
     /// Comes twice, once from each end, often at the same moment.
     func finish() {
         lock.lock()
+        guard !finished else { lock.unlock(); return }
         finished = true
         let pending = waiters
         waiters = []
+        buffer = Data()
+        heard = nil
         let exit = exited
         exited = nil
         lock.unlock()
+        output?.forReading.readabilityHandler = nil
+        outputLock.lock()
+        try? input?.forWriting.close()
+        try? output?.forReading.close()
+        try? input?.forReading.close()
+        try? output?.forWriting.close()
+        outputLock.unlock()
         pending.forEach { $0.reader.resume(throwing: ExtensionNative.Refused(why: "Native host has exited.")) }
         exit?()
+    }
+}
+
+/// Both ends of one pipe(2), opened so that a failure is an error. Pipe()
+/// can't say it failed: -[NSPipe init] answers nil when pipe(2) does, and
+/// Swift takes that nil as a Pipe.
+struct HostChannel {
+    let forReading: FileHandle
+    let forWriting: FileHandle
+
+    init(_ pipe: Pipe) {
+        forReading = pipe.fileHandleForReading
+        forWriting = pipe.fileHandleForWriting
+    }
+
+    private init(reading: Int32, writing: Int32) {
+        forReading = FileHandle(fileDescriptor: reading, closeOnDealloc: true)
+        forWriting = FileHandle(fileDescriptor: writing, closeOnDealloc: true)
+    }
+
+    static func open() throws -> HostChannel {
+        var ends: [Int32] = [-1, -1]
+        guard Darwin.pipe(&ends) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EMFILE) }
+        // Other programs Yab starts don't inherit the host's pipes; the
+        // host gets its ends as stdin and stdout, which exec keeps.
+        for fd in ends { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        return HostChannel(reading: ends[0], writing: ends[1])
     }
 }

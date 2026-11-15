@@ -5,12 +5,13 @@ import Observation
 import SyncKit
 #endif
 
-/// The current account's Mac custom-icon records. The journal already
+/// The current account's custom artwork and public site icons. The journal already
 /// persists their bytes, so hydration needs no second files or website cache.
 @MainActor
 @Observable
 final class SyncFolderArtwork {
     private(set) var account: String?
+    private var sites: [String: String] = [:]
     private var sources: [String: Data] = [:]
     @ObservationIgnored private let decoded: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
@@ -24,10 +25,13 @@ final class SyncFolderArtwork {
         self.account = account
         for (id, old) in sources where next[id] != old { decoded.removeObject(forKey: id as NSString) }
         sources = next
+        sites = Dictionary(icons.compactMap { icon in icon.origin.map { ($0.absoluteString, icon.id) } }, uniquingKeysWith: { _, last in last })
     }
 
     func apply(account: String, id: String, icon: SyncIcon?) {
         guard self.account == account else { return }
+        sites = sites.filter { $0.value != id }
+        if let icon, icon.id == id, let origin = icon.origin { sites[origin.absoluteString] = id }
         let next = icon?.id == id ? icon?.data : nil
         guard sources[id] != next else { return }
         sources[id] = next
@@ -35,7 +39,12 @@ final class SyncFolderArtwork {
     }
 
     func reset() {
-        sources = [:]; account = nil; decoded.removeAllObjects()
+        sources = [:]; sites = [:]; account = nil; decoded.removeAllObjects()
+    }
+
+    func siteImage(for page: URL?, isPrivate: Bool = false) -> UIImage? {
+        guard !isPrivate, let page, let origin = SyncIcon.siteOrigin(page), let id = sites[origin.absoluteString] else { return nil }
+        return image("image:" + id)
     }
 
     func image(_ mark: String, isPrivate: Bool = false) -> UIImage? {
@@ -54,7 +63,7 @@ final class SyncFolderArtwork {
               width.intValue > 0, height.intValue > 0, width.intValue <= 512, height.intValue <= 512,
               let pixels = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: 128,
+                kCGImageSourceThumbnailMaxPixelSize: 256,
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceShouldCacheImmediately: true
               ] as CFDictionary) else { return nil }

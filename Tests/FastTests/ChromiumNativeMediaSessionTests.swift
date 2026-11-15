@@ -74,6 +74,51 @@ struct ChromiumNativeMediaSessionTests {
         #expect(page.remoteID == nil)
     }
 
+    @Test func nativeArtworkUsesLargestDeclaredSize() throws {
+        var value = snapshot()
+        value["artwork"] = .array([96, 1280, 512].map { side in
+            .object(["src": .string("https://fixture.test/\(side).png"),
+                     "sizes": .array([.object(["width": .number(Double(side)), "height": .number(Double(side))])])])
+        })
+        let session = try #require(ChromiumNativeMediaSession(value, profile: "fixture-profile"))
+        #expect(session.artwork.first?.lastPathComponent == "1280.png")
+    }
+
+    /// Row 3105: a google.com search's muted previews and a page's idle
+    /// MediaSession showed Paused and Play, and took macOS Now Playing.
+    @Test func onlyAHeardDocumentHasSomethingToPlay() {
+        _ = NSApplication.shared
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab, profile: "fixture-profile")
+        defer { page.retire(call: false, pictureInPicture: false); tab.close() }
+        var muted = ChromiumMediaReport()
+        muted.playing = true
+        muted.media = .init(time: 2, duration: 10, paused: false, muted: true, video: true)
+        page.receiveNativeAudible(muted)
+        #expect(!page.media.report.heard)
+        var idle = snapshot(); idle["playback"] = .string("paused")
+        page.receiveNativeMediaSession(idle)
+        #expect(page.media.report.session != nil && !page.media.report.heard)
+        var loud = muted; loud.audible = true; loud.media?.muted = false
+        page.receiveNativeAudible(loud)
+        #expect(page.media.report.heard)
+        // Paused afterwards: still something to play again.
+        var paused = loud; paused.audible = false; paused.playing = false; paused.media?.paused = true
+        page.receiveNativeAudible(paused)
+        #expect(page.media.report.heard)
+        // Another document of the tab starts unheard.
+        var next = snapshot(); next["document"] = .string("next-document"); next["playback"] = .string("paused")
+        page.receiveNativeMediaSession(next)
+        #expect(!page.media.report.heard)
+        // So does one with no media and no session left.
+        page.receiveNativeAudible(loud)
+        #expect(page.media.report.heard)
+        var revoked = snapshot(); revoked["available"] = .bool(false)
+        page.receiveNativeMediaSession(revoked)
+        page.receiveNativeAudible(ChromiumMediaReport())
+        #expect(!page.media.report.heard)
+    }
+
     @Test func nativeArtworkIsBoundedAndNeverFallsBackAcrossPrivacy() throws {
         var value = snapshot()
         let unsafe = ["file:///private/secret.png", "https://user:password@fixture.test/art.png"]

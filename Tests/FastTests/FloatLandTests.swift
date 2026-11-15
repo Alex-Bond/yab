@@ -247,6 +247,35 @@ struct FloatLandTests {
         }
     }
 
+    @MainActor @Test(arguments: ["entry", "returned"])
+    func chromiumAutomaticPiPCannotOutliveAFullscreenTransition(phase: String) throws {
+        let context = try page()
+        context.evaluateScript("""
+            var answer;
+            window.__yabFloat.pip(1, true).then(function (a) { answer = a; });
+            document.fullscreenElement = video;
+            mediaEvent('fullscreenchange', document);
+            \(phase == "returned" ? "document.fullscreenElement = null; mediaEvent('fullscreenchange', document);" : "")
+            """)
+        #expect(context.evaluateScript("answer")?.toString() == "none")
+        #expect(context.evaluateScript("pipRequests")?.toInt32() == 0)
+        #expect(context.exception == nil)
+    }
+
+    @MainActor @Test(arguments: ["manual", "webkit"])
+    func fullscreenDiscoveryCancellationKeepsExistingPiPRoutes(route: String) throws {
+        let context = try page()
+        context.evaluateScript("""
+            var answer;
+            window.__yabFloat.pip(\(route == "manual" ? "0, true" : "1")).then(function (a) { answer = a; });
+            document.fullscreenElement = video;
+            mediaEvent('fullscreenchange', document);
+            """)
+        #expect(context.evaluateScript("answer")?.toString() == "pip")
+        #expect(context.evaluateScript("pipRequests")?.toInt32() == 1)
+        #expect(context.exception == nil)
+    }
+
     @MainActor @Test func automaticSelectionSkipsALargerPreview() throws {
         let context = try page()
         context.evaluateScript("""
@@ -292,7 +321,7 @@ struct FloatLandTests {
               requests.push([data.verb, data.argument]);
               Promise.resolve().then(function () {
                 floatMessage({ data: { yabFloat: data.yabFloat, reply: true, id: data.id,
-                  value: data.verb === 'size' ? 640 * 360 : ['floating', 640, 360] },
+                  value: data.verb === 'size' ? 640 * 360 : data.verb === 'pip' ? 'pip' : ['floating', 640, 360] },
                   stopImmediatePropagation: function () {} });
               });
             } };
@@ -300,7 +329,9 @@ struct FloatLandTests {
             var answer;
             window.__yabFloat.\(verb)(\(policy)).then(function (a) { answer = a; });
             """)
-        #expect(context.evaluateScript("JSON.stringify(requests.filter(function (r) { return r[0] === 'size' || r[0] === 'on'; }))")?.toString() == (verb == "on" ? "[[\"size\",\(policy)],[\"on\",\(policy)]]" : "[[\"size\",\(policy)]]"))
+        let expected = verb == "size" ? "[[\"size\",\(policy)]]" : "[[\"size\",\(policy)],[\"\(verb)\",\(policy)]]"
+        #expect(context.evaluateScript("JSON.stringify(requests)")?.toString() == expected)
+        if verb == "pip" { #expect(context.evaluateScript("answer")?.toString() == "pip") }
         #expect(context.evaluateScript("answer != null")?.toBool() == true)
         #expect(context.exception == nil)
     }

@@ -1339,6 +1339,14 @@ struct WindowFloorLayout: Layout {
         for view in subviews { view.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size)) }
     }
 
+    /// A measurement must leave the layout pass even on the main thread:
+    /// writing Observable Browser state here invalidates the graph SwiftUI
+    /// is evaluating (crashes #651/#849). The queue also handles background
+    /// layout without consulting Swift's current-executor bookkeeping.
+    nonisolated static func onMain(_ work: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.async { AppKitMainThread.sync { work() } }
+    }
+
     /// The browser's size, including its least size, belongs to AppKit and
     /// Browser.applyWindowFloor. Even intrinsic sizing is unnecessary here.
     @MainActor
@@ -1353,7 +1361,7 @@ extension View {
     /// The window's root, its least size given by Yab (WindowFloorLayout).
     func windowFloor(_ browser: Browser) -> some View {
         WindowFloorLayout(measured: { [weak browser] size in
-            MainActor.assumeIsolated { browser?.noteContentFloor(size) }
+            WindowFloorLayout.onMain { browser?.noteContentFloor(size) }
         }) { self }
         // Keep the root's proposal stable too, including the first window
         // hosted by SwiftUI. The fullscreen title bar overlays our content.

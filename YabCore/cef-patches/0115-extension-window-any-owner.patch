@@ -1,0 +1,36 @@
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -1012,12 +1012,27 @@ content::WebContents* ExternalExtensionWindowOwner(
+   } else if (!sender) {
+     owner = ExternalTabFocus::Get(context);
+   }
+-  auto* model = owner ? ExternalTabModel::Get(owner) : nullptr;
+-  if (!owner || owner->GetBrowserContext() != context || !model ||
+-      !model->embedded() || !ExternalTabWindow::Bound(owner)) {
+-    return nullptr;
+-  }
+-  return owner;
++  auto usable = [context](content::WebContents* page) {
++    auto* model = page ? ExternalTabModel::Get(page) : nullptr;
++    return page && page->GetBrowserContext() == context && model &&
++           model->embedded() && ExternalTabWindow::Bound(page);
++  };
++  if (usable(owner)) return owner;
++  // Yab: a worker's window with no page focused yet, or from a page of the
++  // extension's that is no tab (Bitwarden's passkey prompt comes from its
++  // service worker). Chrome makes such a window with no tab at all; the
++  // embedder only needs a page of this profile to place it by. The active
++  // page of an embedder's window first, else any of its pages.
++  content::WebContents* any = nullptr;
++  for (WindowController* candidate : *WindowControllerList::GetInstance()) {
++    auto* browser = candidate->GetBrowserWindowInterface();
++    auto* page = browser ? browser->GetTabStripModel()->GetActiveWebContents()
++                         : nullptr;
++    if (!usable(page)) continue;
++    if (ExternalTabModel::Get(page)->active()) return page;
++    if (!any) any = page;
++  }
++  return any;
+ }
+ }  // namespace
+ 

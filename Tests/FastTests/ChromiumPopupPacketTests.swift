@@ -90,6 +90,22 @@ struct ChromiumPopupPacketTests {
         #expect(page.remoteID == nil)
     }
 
+    @Test func replacementRetiresPreviousPopupBeforeItsFirstFrame() throws {
+        _ = NSApplication.shared
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab, profile: profile)
+        defer { page.retire(call: false, pictureInPicture: false); tab.close() }
+        page.receivePopup(packet("shown"))
+        let previous = try #require(page.extensionPopup)
+        page.receivePopup(packet("shown", token: "replacement-popup"))
+        let replacement = try #require(page.extensionPopup)
+        #expect(previous.closed)
+        #expect(replacement !== previous && !replacement.closed)
+        #expect(replacement.contextID == 0)
+        page.receivePopup(packet("closed"))
+        #expect(page.extensionPopup === replacement && !replacement.closed)
+    }
+
     @Test func extensionCreationIndexAndEndpointNeverUseTrappingOrForeignFallbacks() throws {
         var value: [String: JSONValue] = ["tab": .string("original-child"), "extensionId": .string(id),
                                        "active": .bool(true), "openerTab": .string("original-owner")]

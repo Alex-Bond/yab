@@ -32,6 +32,109 @@ struct FieldPlacePriorityTests {
         try body(browser)
     }
 
+    @Test func pickedDestinationAndCategoryReturnOnNextCommandT() throws {
+        try withBrowser { browser in
+            let destinations = FieldPlace.allCases.filter { $0 != .selection && $0 != .files }
+            let views = destinations.flatMap { place in
+                (place == .autofill ? [2, 3] : [0]).map { (place, $0) }
+            }
+            for (place, filter) in views {
+                browser.openFresh()
+                browser.enterPlace(place)
+                browser.query.placeFilter = filter
+                // A pick closes the field through close(); only destination
+                // state may survive, never the page form or revealed value.
+                browser.close()
+                #expect(browser.query.form == nil)
+                browser.pressNewTab()
+                #expect(browser.query.place == place)
+                #expect(browser.query.placeFilter == filter)
+                browser.pressNewTab()
+                #expect(browser.query.place == nil)
+                #expect(browser.query.returnPlace == nil)
+            }
+        }
+    }
+
+    @Test func escapeReturnsToDefaultAndForgetsDestination() throws {
+        try withBrowser { browser in
+            browser.enterPlace(.autofill)
+            browser.query.placeFilter = 3
+            browser.close()
+            browser.pressNewTab()
+            #expect(browser.query.place == .autofill)
+            #expect(browser.leavePlace())
+            #expect(browser.query.place == nil)
+            #expect(browser.query.returnPlace == nil)
+            browser.close()
+            browser.pressNewTab()
+            #expect(browser.query.place == nil)
+        }
+    }
+
+    @Test func directDestinationsNeverBecomeTheCommandTReturnPlace() throws {
+        try withBrowser { browser in
+            for place in FieldPlace.allCases where place != .selection && place != .files {
+                for dismiss in [false, true] {
+                    // Start with a remembered destination to prove a direct
+                    // entry replaces its provenance, rather than retaining it.
+                    browser.openFresh()
+                    browser.enterPlace(.history)
+                    browser.close()
+                    browser.openPlace(place)
+                    #expect(browser.query.place == place)
+                    if dismiss { browser.dismiss() } else { browser.close() }
+                    browser.newTab()
+                    #expect(browser.query.place == nil, "Direct \(place), dismiss=\(dismiss)")
+                    #expect(browser.query.returnPlace == nil)
+                    browser.close()
+                }
+            }
+        }
+    }
+
+    @Test func directActionWhileAFieldPlaceIsOpenDoesNotInheritItsOrigin() throws {
+        try withBrowser { browser in
+            browser.enterPlace(.history)
+            browser.openPlace(.emoji)
+            browser.close()
+            browser.newTab()
+            #expect(browser.query.place == nil)
+            browser.enterPlace(.history)
+            // A direct action on the same destination toggles it closed.
+            browser.openPlace(.history)
+            browser.newTab()
+            #expect(browser.query.place == nil)
+        }
+    }
+
+    @Test func directSearchInTheFieldStillBelongsToThatField() throws {
+        try withBrowser { browser in
+            browser.replaceTyped("fixture")
+            #expect(browser.takeOwn(Suggestion(key: "History", title: "", url: nil, kind: .within(.history))))
+            browser.close()
+            browser.newTab()
+            #expect(browser.query.place == .history)
+            #expect(browser.typed.isEmpty)
+        }
+    }
+
+    @Test func destinationCommandsChosenInTheFieldKeepTheirOrigin() throws {
+        try withBrowser { browser in
+            for (command, place) in [(Command.history, FieldPlace.history), (.downloads, .downloads),
+                                      (.bookmarks, .bookmarks), (.passwords, .passwords),
+                                      (.autofill, .autofill), (.boostStore, .store)] {
+                browser.openFresh()
+                browser.take(Suggestion(key: command.title, title: "", url: nil, kind: .command(command)))
+                #expect(browser.query.place == place)
+                browser.close()
+                browser.newTab()
+                #expect(browser.query.place == place)
+                browser.close()
+            }
+        }
+    }
+
     @Test func namedPlacesLeadForNamesAliasesAndLongPrefixes() throws {
         try withBrowser { browser in
             for place in [FieldPlace.clipboard, .emoji, .downloads, .passwords, .autofill,
@@ -42,8 +145,15 @@ struct FieldPlacePriorityTests {
                         // "boo" also begins Bookmarks; "boos" names Store.
                         if place == .store, words == "boo" { continue }
                         browser.replaceTyped(words)
-                        #expect(browser.offers.first?.kind == .place(place), "\(words) should lead to \(place)")
-                        #expect(browser.query.lead == 0, "\(words)")
+                        if place == .autofill, words == "add" {
+                            // The exact Add action is discoverable above the
+                            // Addresses prefix; Return still chooses Addresses.
+                            #expect(browser.offers.first?.kind == .command(.addExtension))
+                            #expect(browser.offers[browser.query.lead ?? 0].kind == .place(place))
+                        } else {
+                            #expect(browser.offers.first?.kind == .place(place), "\(words) should lead to \(place)")
+                            #expect(browser.query.lead == 0, "\(words)")
+                        }
                         #expect(browser.offers.filter { $0.kind == .place(place) }.count == 1)
                     }
                 }

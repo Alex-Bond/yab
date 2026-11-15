@@ -103,9 +103,13 @@ final class BrowserProfile {
     /// No persistent store opens until this identity is safely recorded.
     let dataStoreID: UUID?
     private(set) var snapshot: Snapshot
+    /// Counts changes to the visits Recent and Frequent come from: New Tab's
+    /// content keys on it (NewTabContent.Inputs).
+    private(set) var visitsRevision = 0
     private(set) var lastWriteError: String?
     @ObservationIgnored private let writer: Writer
     @ObservationIgnored private var revision = 0
+    @ObservationIgnored private var captured: Captured?
     @ObservationIgnored private var privateTabIDs = Set<Tab.ID>()
     /// Tabs a link from another app opened: their visits are that app's errand.
     @ObservationIgnored var outsideTabIDs = Set<Tab.ID>()
@@ -205,7 +209,7 @@ final class BrowserProfile {
         var input = Data("yab-space-website-store:v1\0".utf8)
         input.append(Data(base.uuidString.lowercased().utf8))
         input.append(0)
-        input.append(Data(space.id.utf8))
+        input.append(Data((space.signInWith ?? space.id).utf8))
         let digest = SHA256.hash(data: input)
         var bytes = Array(digest.prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x50
@@ -232,6 +236,14 @@ final class BrowserProfile {
     }
 
     func capture(_ browser: BrowserStore) {
+        // Pages call this on every navigation and Yab as it goes to the
+        // background, where filtering and comparing every tab again on the
+        // main thread got Yab ended by iOS (#1482). The spaces reach the
+        // snapshot only through here, so an unchanged revision of the same
+        // store means the snapshot already holds them.
+        let mark = Captured(store: ObjectIdentifier(browser), revision: browser.revision)
+        guard captured != mark else { return }
+        captured = mark
         privateTabIDs = Set(browser.spaces.flatMap { space in
             space.allTabs.filter { space.isPrivate || $0.isPrivate }.map(\.id)
         })
@@ -239,9 +251,17 @@ final class BrowserProfile {
         next.spaces = browser.spaces
         next.spaceID = browser.spaceID
         next = next.excludingPrivate()
-        guard next != snapshot else { return }
+        // Visits and the rest are the snapshot's own, and navigation only
+        // loses closed tabs' entries: comparing them all again finds nothing.
+        guard next.spaces != snapshot.spaces || next.spaceID != snapshot.spaceID
+                || next.navigation.count != snapshot.navigation.count else { return }
         snapshot = next
         save()
+    }
+
+    private struct Captured: Equatable {
+        var store: ObjectIdentifier
+        var revision: Int
     }
 
     func navigationChanged(_ id: Tab.ID, _ state: BrowserNavigation) {
@@ -272,6 +292,7 @@ final class BrowserProfile {
         snapshot.visits.insert(visit, at: 0)
         // A bounded history keeps profile loading and Recent fast.
         if snapshot.visits.count > 2_000 { snapshot.visits.removeLast(snapshot.visits.count - 2_000) }
+        visitsRevision &+= 1
         save()
     }
 
@@ -280,6 +301,7 @@ final class BrowserProfile {
     /// down to the page it shows. The tabs themselves stay.
     func clearHistory() {
         snapshot.visits = []
+        visitsRevision &+= 1
         for (id, var state) in snapshot.navigation {
             guard state.entries.indices.contains(state.index) else { snapshot.navigation[id] = nil; continue }
             state.entries = [state.entries[state.index]]
@@ -294,7 +316,10 @@ final class BrowserProfile {
     func forgetVisits(_ urls: Set<String>) {
         let before = snapshot.visits.count
         snapshot.visits.removeAll { urls.contains($0.url) }
-        if snapshot.visits.count != before { save() }
+        if snapshot.visits.count != before {
+            visitsRevision &+= 1
+            save()
+        }
     }
 
     func setHistoryForgetting(_ value: HistoryForgetting) {
@@ -306,7 +331,8 @@ final class BrowserProfile {
     private func save() {
         revision += 1
         let revision = revision
-        let saved = snapshot.excludingPrivate()
+        // Filtered and encoded by the writer, off the main thread.
+        let saved = snapshot
         Task { [weak self, writer] in
             do {
                 try await writer.write(saved, revision: revision)
@@ -322,7 +348,7 @@ final class BrowserProfile {
     func flush() async {
         revision += 1
         do {
-            try await writer.write(snapshot.excludingPrivate(), revision: revision)
+            try await writer.write(snapshot, revision: revision)
             lastWriteError = identityError
         } catch {
             lastWriteError = String(describing: error)
@@ -348,7 +374,9 @@ final class BrowserProfile {
                 try FileManager.default.copyItem(at: file, to: folder.appendingPathComponent("unreadable-\(UUID().uuidString).json"))
                 preserveExisting = false
             }
-            let data = try JSONEncoder().encode(snapshot)
+            // Filter at the disk boundary, whoever changed a tab; here, so
+            // the main thread only hands over its copy.
+            let data = try JSONEncoder().encode(snapshot.excludingPrivate())
             try data.write(to: file, options: .atomic)
             writtenRevision = revision
         }

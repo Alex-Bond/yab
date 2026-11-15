@@ -20,6 +20,8 @@ final class ColumnCell: NSHostingView<AnyView> {
         let look: ColumnPages.Look
         /// The tab the column lights: none while New tab's row is lit.
         let liveID: Tab.ID?
+        /// The row the pointer is on, by its item's id (ColumnPage.point).
+        var pointedID: String? = nil
     }
 
     /// What a hand on the column does to a row (SideBar's drag state as the
@@ -36,6 +38,8 @@ final class ColumnCell: NSHostingView<AnyView> {
         /// would make, how far, and whether it is made.
         var turn: CGFloat?
         var made = false
+        var compact = false
+        var choice: TabDropChoice?
     }
 
     /// What the row shows: drawn again only when it changes (TabCell.Look).
@@ -57,6 +61,7 @@ final class ColumnCell: NSHostingView<AnyView> {
         let over: FacePose?
         let folder: Folders.Folder?
         let space: Space?
+        let pointed: Bool
         let hold: Hold
         let look: ColumnPages.Look
     }
@@ -71,6 +76,18 @@ final class ColumnCell: NSHostingView<AnyView> {
     /// asks which row is under the pointer by where it is drawn, as the
     /// strip across the top does (YabApp's middle-click watcher).
     private(set) weak var rowTab: Tab?
+    /// A single tab drawn in this cell, including a pin or its home row.
+    /// Closing follows the hit cell even when its preview uses folder hover.
+    private weak var hitTab: Tab?
+
+    func tabUnderPointer(hovered: Tab?) -> Tab.ID? {
+        if let hitTab { return hitTab.id }
+        // A pair still needs the half under the pointer, validated against
+        // the cell that actually drew it. A stale hover names nothing else.
+        guard kind == .pin || kind == .pair, let hovered, let look = current,
+              look.tab == ObjectIdentifier(hovered) || look.other == ObjectIdentifier(hovered) else { return nil }
+        return hovered.id
+    }
     /// Its row's identity to SwiftUI: a new one for another row, so none of
     /// the last row's state (the pointer on it, a shake) comes along, but
     /// kept for a row scrolled into sight in a cell another scrolled out of,
@@ -227,10 +244,12 @@ final class ColumnCell: NSHostingView<AnyView> {
         var live = false, picked = false, editing = false, refusals = 0, joint: Joint?, staged = false, lit = false
         var tab: ObjectIdentifier?, other: ObjectIdentifier?, count = 0, open = false, over: FacePose?, folder: Folders.Folder?, space: Space?
         rowTab = nil
+        hitTab = nil
         switch item.kind {
         case .tab(let row):
             tab = ObjectIdentifier(row)
             rowTab = row
+            hitTab = row
             live = row.id == context.liveID
             picked = browser.isPicked(row)
             editing = browser.editingTab == row.id
@@ -256,12 +275,14 @@ final class ColumnCell: NSHostingView<AnyView> {
             tab = ObjectIdentifier(pin)
             // A pinned pair's square is lit with either half in front.
             let mate = browser.pinMate(of: pin)
+            if mate == nil { hitTab = pin }
             other = mate.map(ObjectIdentifier.init)
             live = pin.id == context.liveID || (mate != nil && mate?.id == context.liveID)
             picked = browser.isPicked(pin)
             editing = browser.editingPin == pin.id
         case .home(let pin):
             tab = ObjectIdentifier(pin)
+            hitTab = pin
         case .name(let shown):
             space = shown
         case .privateName, .line, .gap, .lineComing, .pinGap:
@@ -269,7 +290,7 @@ final class ColumnCell: NSHostingView<AnyView> {
         }
         let look = Look(id: item.id, tab: tab, other: other, live: live, picked: picked, editing: editing, refusals: refusals, joint: joint,
                         staged: staged, glyph: browser.prefs.glyph, lit: lit, size: size, count: count, open: open, over: over,
-                        folder: folder, space: space, hold: hold, look: context.look)
+                        folder: folder, space: space, pointed: context.pointedID == item.id, hold: hold, look: context.look)
         guard force || look != current else { return }
         SwitchMeter.note({
             guard let was = current else { return "bind new" }
@@ -292,8 +313,12 @@ final class ColumnCell: NSHostingView<AnyView> {
         binds += 1
         ColumnCell.bound += 1
         let root = AnyView(Self.row(item, browser: browser, live: live, picked: picked, hold: hold, look: context.look, size: size,
-                                    generation: generation))
-        if same, let animation {
+                                    generation: generation, pointed: look.pointed))
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, hold.choice != nil || hold.compact {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { rootView = root }
+        } else if same, let animation {
             withAnimation(animation) { rootView = root }
         } else {
             rootView = root
@@ -346,7 +371,7 @@ final class ColumnCell: NSHostingView<AnyView> {
 
     /// The row as SideBar draws it, in the column's words.
     private static func row(_ item: ColumnItem, browser: Browser, live: Bool, picked: Bool, hold: Hold, look: ColumnPages.Look, size: CGSize,
-                            generation: Int) -> some View {
+                            generation: Int, pointed: Bool) -> some View {
         let prefs = browser.prefs
         return Group {
             switch item.kind {
@@ -354,16 +379,36 @@ final class ColumnCell: NSHostingView<AnyView> {
                 SideRow(browser: browser, prefs: prefs, tab: tab, live: live, picked: picked, lifted: hold.lifted)
                     // Stayed over by a held row: it turns into the folder
                     // the two would make, drawn in its place.
-                    .opacity(hold.turn == nil ? 1 : 0)
+                    .opacity(hold.turn == nil && !hold.compact ? 1 : 0)
+                    .overlay(alignment: .leading) {
+                        if hold.compact {
+                            Mark(icon: tab.displayIcon, letter: tab.monogram, size: 16)
+                                .frame(width: 28, height: 28)
+                                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: Radius.control))
+                        }
+                    }
                     .overlay {
-                        if let turn = hold.turn {
+                        if let choice = hold.choice {
+                            TabDropChoices(choice: choice, iconsOnly: SideBar.row < 36)
+                        } else if let turn = hold.turn {
                             FolderToBe(tab: tab, turn: turn, made: hold.made, live: live, prefs: prefs)
                         }
                     }
             case .pair(let first, let second):
                 PairRow(browser: browser, prefs: prefs, first: first, second: second, lifted: hold.lifted, shown: browser.newTabLit ? false : nil)
+                    .opacity(hold.choice == nil && !hold.compact ? 1 : 0)
+                    .overlay(alignment: .leading) {
+                        if hold.compact {
+                            Mark(icon: first.displayIcon, letter: first.monogram, size: 16)
+                                .frame(width: 28, height: 28)
+                                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: Radius.control))
+                        }
+                    }
+                    .overlay { if let choice = hold.choice { TabDropChoices(choice: choice, iconsOnly: SideBar.row < 36) } }
             case .nest(let nest, let count, let over):
                 NestRow(browser: browser, nest: nest, count: count, aimed: hold.aimed, lifted: hold.lifted, over: over)
+                    .opacity(hold.choice == nil ? 1 : 0)
+                    .overlay { if let choice = hold.choice { TabDropChoices(choice: choice) } }
             case .task(let folder, let open):
                 FolderRow(browser: browser, folder: folder, open: open)
             case .more(let folder, let count):
@@ -401,9 +446,19 @@ final class ColumnCell: NSHostingView<AnyView> {
         .frame(width: item.isPin ? size.width : nil, height: size.height, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .environment(\.columnHosted, true)
+        .environment(\.columnPointed, Self.pointable(item) ? pointed : nil)
         .environment(\.tabTitleSize, look.titleSize)
         .environment(\.colorScheme, look.scheme)
         .toned(look.tone)
+    }
+
+    /// The rows whose hover the column says (ColumnPage.point): a tab's,
+    /// a pair's, a folder of yours.
+    static func pointable(_ item: ColumnItem) -> Bool {
+        switch item.kind {
+        case .tab, .pair, .nest: return true
+        default: return false
+        }
     }
 
     /// Rows handed to SwiftUI by every page, for the bench.

@@ -30,6 +30,9 @@ final class WebKitDownloadEvents: NSObject, WKDownloadDelegate {
 }
 
 extension WKDownload: PageDownload {
+    var isExtensionDownload: Bool {
+        ExtensionDownloads.byExtension(self) || eventAdapter.originURL?.scheme == Extensions.scheme
+    }
     var page: (any PageHandle)? { (webView ?? eventAdapter.origin) as? any PageHandle }
     var sourceView: NSView? { webView ?? eventAdapter.origin }
     var pageURL: URL? { eventAdapter.originURL }
@@ -98,6 +101,7 @@ extension Browser {
 
 extension PageHandle {
     func webKitOnlyFetched(_ fetching: [URL?]) -> Bool {
+        if let chromium = self as? ChromiumPage { return chromium.onlyFetched(fetching) }
         guard let webKit else { return false }
         let list = webKit.backForwardList
         guard list.backItem == nil, list.forwardItem == nil else { return false }
@@ -105,7 +109,9 @@ extension PageHandle {
            !fetching.contains(where: { $0 == shown }) { return false }
         return true
     }
-    func webKitClose(in browser: Browser) { if let webKit { browser.webViewDidClose(webKit) } }
+    func webKitClose(in browser: Browser) {
+        if let webKit { browser.webViewDidClose(webKit) } else { browser.pageClosed(self) }
+    }
 }
 
 /// The WebKit extension system still identifies native downloads. Ordinary

@@ -51,6 +51,9 @@ const chromium=navigator.userAgent.includes('Chrome/');
 document.querySelector('#engine').textContent=chromium?'Chromium before EME failure':'WebKit after EME failure';
 function requestProtected(){setTimeout(()=>navigator.requestMediaKeySystemAccess('com.widevine.alpha',
 [{initDataTypes:['cenc'],audioCapabilities:[{contentType:'audio/mp4; codecs="mp4a.40.2"'}]}]).catch(()=>{}),500)}
+function askCapabilities(){setTimeout(()=>navigator.mediaCapabilities.decodingInfo({type:'media-source',
+audio:{contentType:'audio/mp4; codecs="mp4a.40.2"',channels:'2',bitrate:96000,samplerate:44100},
+keySystemConfiguration:{keySystem:'com.widevine.alpha'}}),500)}
 </script>'''
             mime = 'text/html; charset=utf-8'
         self.send_response(200)
@@ -144,6 +147,15 @@ def run(app, out, site, cookies=True, extensions=True):
         report['states']['media'] = media
         checks['clear_media_playing'] = not media['paused'] and media['error'] is None and media['time'] > t0 + .2
         capture(tab, '02-webkit-playing')
+        # Shaka asks MediaCapabilities, which answers rather than refuses.
+        asking = ask(do='usage-open', url=site + '/capabilities')['id']
+        wait_for(lambda: (lambda s: s if s['title'] == 'DRM fixture' and not s['loading'] else None)(state(asking)), 'Capabilities fixture not ready')
+        checks['capabilities_page_starts_on_chromium'] = state(asking)['engine'] == 'chromium'
+        script(asking, 'askCapabilities(); return true')
+        moved = wait_for(lambda: (lambda s: s if s['engine'] == 'webKit' and not s['loading'] else None)(state(asking)), 'MediaCapabilities refusal did not load WebKit')
+        checks['capabilities_refusal_moves_the_tab'] = moved['url'] == site + '/capabilities'
+        ask(do='usage-close', id=asking)
+        ask(do='select', id=tab)
         if cookies:
             cookie_checks = ask(do='chromium-drm', id=tab, op='cookies')['checks']
             checks.update(cookie_checks)

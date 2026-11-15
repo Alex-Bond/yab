@@ -18,6 +18,8 @@ struct SearchPage: View {
     /// The site whose alias is to have the keys next, Tab's or the
     /// bench's: its row puts its field in and hands it the keys.
     @State private var wanted: String?
+    /// Chrome's Keyboard shortcut for site search: Space or Tab, or Tab.
+    @AppStorage(Scopes.spaceKey, store: Store.settings) private var spaceStarts = true
 
     var body: some View {
         let _ = tick
@@ -58,6 +60,15 @@ struct SearchPage: View {
         FieldPageSettings()
         QuickActionSettings()
         Section {
+            // Chrome's, above its list of sites: what starts a site's
+            // search after its alias, Space or Tab (its default) or Tab.
+            FieldLine("Keyboard shortcut", detail: "After a site's alias in the field", mark: { FieldLineMark(symbol: "keyboard") },
+                      status: { EmptyView() }, end: {
+                DropMenu("Keyboard shortcut", options: [DropOption(title: "Space or Tab", value: true), DropOption(title: "Tab", value: false)],
+                         selection: $spaceStarts)
+                    .fixedSize()
+            })
+            .settingsAnchor("site-search-space")
             ForEach(shown) { scope in
                 SiteRow(scope: scope, on: Scopes.isOn(scope), pointed: card.pointed == scope.id,
                         wanted: wanted == scope.id, typing: $typing, want: { wanted = $0 },
@@ -114,7 +125,7 @@ struct SearchPage: View {
         let needle = filter.trimmingCharacters(in: .whitespaces).lowercased()
         guard !needle.isEmpty else { return Scopes.all }
         return Scopes.all.filter { scope in
-            scope.name.lowercased().contains(needle) || scope.id.contains(needle)
+            scope.name.lowercased().contains(needle) || scope.host.contains(needle)
                 || scope.aliases.contains { $0.hasPrefix(needle) }
         }
     }
@@ -178,9 +189,9 @@ private struct SiteRow: View {
             savedWord = word
             if scope.icon == nil { for host in scope.allHosts { Favicons.shared.fetch(host: host) } }
         }
-        // Replacing a custom site keeps its host identity, so this row's
-        // state survives. Follow the saved alias without erasing a draft
-        // that is still being edited inline.
+        // Adding the same search again replaces it under its identity, so
+        // this row's state survives. Follow the saved alias without erasing
+        // a draft that is still being edited inline.
         .onChange(of: scope.aliases) { _, aliases in
             if !focused { word = aliases.first ?? ""; savedWord = word }
         }
@@ -355,10 +366,8 @@ private struct SiteCard: View {
     private var clean: String { template.trimmingCharacters(in: .whitespaces) }
     private var valid: Bool { Engine.accepts(clean) && keywordProblem == nil }
     private var keywordProblem: String? {
-        guard adding, Engine.accepts(clean),
-              let host = URLComponents(string: clean.replacingOccurrences(of: "%s", with: "a"))?.host?.lowercased() else { return nil }
-        let id = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
-        return Scopes.aliasProblem(keyword, for: Scope(id: id, name: name.isEmpty ? id : name, template: clean, own: true))
+        guard adding, let scope = Scopes.draft(name: name, template: clean) else { return nil }
+        return Scopes.aliasProblem(keyword, for: scope)
     }
     private var preset: Scope? { draft.scope.flatMap { scope in Scopes.preset.first { $0.id == scope.id } } }
 

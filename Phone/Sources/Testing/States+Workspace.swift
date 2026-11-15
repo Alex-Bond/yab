@@ -34,11 +34,11 @@ extension StateCatalog {
             _ = app.pages.view(for: current)
             _ = app.pages.activate(other)
         },
-        NamedState("workspace.sides", "Reserved right column", "80 points reserved at the right, as a foldable's status column: page content and controls stay clear of it.") { app in
+        NamedState("workspace.sides", "Reserved right column", "80 points reserved at the right, as a foldable's status column: the page runs under it, controls and the scroll bar stay clear of it.") { app in
             ChromeGeometry.extraSides = .init(left: 0, right: 80)
             app.workspace.reservations.statusBarHeight = 22
         },
-        NamedState("duo.column.right", "Right status column", "Synthetic 84-point column; page and foot inside the safe area.") { app in
+        NamedState("duo.column.right", "Right status column", "Synthetic 84-point column; the page runs under it, the foot inside the safe area.") { app in
             await StateCatalog.turn(.landscapeRight)
             StateCatalog.duoColumn(app, left: false)
         },
@@ -219,6 +219,9 @@ private final class DuoRetirementProbe: NSObject {
                 "viewX": Double(frame.minX), "viewY": Double(frame.minY),
                 "viewWidth": Double(frame.width), "viewHeight": Double(frame.height),
                 "leftInset": Double(page.obscuredContentInsets.left), "rightInset": Double(page.obscuredContentInsets.right),
+                "leftIndicator": Double(page.scrollView.verticalScrollIndicatorInsets.left),
+                "rightIndicator": Double(page.scrollView.verticalScrollIndicatorInsets.right),
+                "indicatorsAdjusted": page.scrollView.automaticallyAdjustsScrollIndicatorInsets,
                 "liveProfile": !app.pages.fixturesEnabled, "retiringWidth": Double(self.portraitSize.width),
             ]
             if let folder = StateProbe.readyDirectory,

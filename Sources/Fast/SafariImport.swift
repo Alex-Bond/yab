@@ -55,7 +55,7 @@ enum SafariImport {
         let ditto = Process()
         ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         ditto.arguments = ["-x", "-k", zip.path, folder.path]
-        do { try ditto.run() } catch { return nil }
+        do { try ditto.runValidated() } catch { return nil }
         ditto.waitUntilExit()
         guard ditto.terminationStatus == 0 else {
             try? FileManager.default.removeItem(at: folder)
@@ -201,7 +201,7 @@ enum SafariImport {
         let pipe = Pipe()
         list.standardOutput = pipe
         list.standardError = FileHandle.nullDevice
-        do { try list.run() } catch { return false }
+        do { try list.runValidated() } catch { return false }
         let names = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).lowercased()
         list.waitUntilExit()
         // Its names are localized; the kinds of file are not.

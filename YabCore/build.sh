@@ -15,20 +15,6 @@ if [ "${YABCORE_BUILD_LOCK_HELD:-}" != 1 ]; then
   exec lockf -k -s "${YAB_BUILD_LOCK:-/tmp/yab-build.lock}" lockf -k "$WORK/build.lock" \
     env YABCORE_BUILD_LOCK_HELD=1 bash "$0" "$@"
 fi
-# A build folder CMake configured under another Xcode keeps that Xcode's SDK
-# and links against it: main's, set up under Xcode 27.2 on 11-02, failed every
-# link under the farm's 26.4.1 ("unknown architecture arm64e.x1"). A different
-# SDK means a fresh configure; the old folder is kept beside it.
-# Paths are compared resolved: CMake records MacOSX.sdk, xcrun the
-# versioned folder it points to.
-SDK="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
-if [ -n "$SDK" ] && [ -f "$WORK/build/CMakeCache.txt" ]; then
-  CACHED="$(sed -n 's/^CMAKE_OSX_SYSROOT:PATH=//p' "$WORK/build/CMakeCache.txt" | head -1)"
-  if [ -n "$CACHED" ] && [ "$(realpath "$CACHED" 2>/dev/null || echo "$CACHED")" != "$(realpath "$SDK")" ]; then
-    echo "YabCore: build folder made with another SDK ($CACHED); configuring afresh for $SDK" >&2
-    mv "$WORK/build" "$WORK/build.other-sdk.$(date +%Y%m%d%H%M%S)"
-  fi
-fi
 CEF_ROOT="${YAB_CEF_DIR:-$(bash scripts/cef/fetch.sh)}"
 CMAKE="$(command -v cmake || true)"
 if [ -z "$CMAKE" ]; then
@@ -54,7 +40,7 @@ if [ ! -f "$WORK/source/.times-written" ]; then
   touch "$WORK/source/.times-written"
 fi
 YABCORE_CMAKE_ARGS=(-S "$WORK/source" -B "$WORK/build" -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release
-  -DPROJECT_ARCH=arm64 -DUSE_SANDBOX=OFF -DCEF_ROOT="$CEF_ROOT")
+  -DPROJECT_ARCH=arm64 -DUSE_SANDBOX=ON -DCEF_ROOT="$CEF_ROOT")
 if [ -n "${YAB_CEF_API_VERSION:-}" ]; then
   if [ "$YAB_CEF_API_VERSION" = 999999 ]; then
     # The pinned SDK selects experimental API by default. Its api_version

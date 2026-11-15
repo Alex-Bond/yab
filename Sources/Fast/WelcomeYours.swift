@@ -121,9 +121,9 @@ enum WelcomeYours: WelcomeChapter {
             case .arc: return [sample("arc")]
             }
         }
-        return stage.bringing.sources.filter {
-            offers(stage.bringing.counts[$0.id] ?? Bringing.Counts(), used: stage.bringing.used[$0.id])
-        }.map { found($0, stage.bringing) }
+        // Discovery is enough to offer Bring In; inspecting credentials to
+        // decide whether a browser deserves a button is not permitted.
+        return stage.bringing.sources.map { found($0, stage.bringing) }
     }
 
     /// An abandoned data directory alone isn't a browser to bring from.
@@ -157,7 +157,9 @@ enum WelcomeYours: WelcomeChapter {
 
     /// Keep its spaces is offered: several places, and spaces off here.
     private static func offersKeep(_ stage: WelcomeStage, _ found: Found) -> Bool {
-        found.places > 1 && (pretending(stage) || stage.browser?.prefs.usesSpaces != true)
+        // Unknown counts must not hide the person's import choice.
+        (found.places > 1 || (found.source != nil && !stage.brought))
+            && (pretending(stage) || stage.browser?.prefs.usesSpaces != true)
     }
 
     /// Where Color's paint comes from: nothing brought, its colors, or its spaces'.
@@ -401,8 +403,13 @@ enum WelcomeYours: WelcomeChapter {
                 stage.refresh()
                 return false
             case .allowed:
+                // Counts and extensions become known during this import,
+                // not when its button was drawn. Use those fresh facts.
+                let imported = chosen(stage) ?? from
+                // Decide ahead only for a blocker choice that was actually
+                // shown before this press. Newly found blockers ask later.
                 settle(from, stage)
-                tick(from, stage)
+                tick(imported, stage)
                 return true
             }
         }

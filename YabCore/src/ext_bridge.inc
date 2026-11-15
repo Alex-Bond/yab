@@ -24,6 +24,22 @@ static NSMutableDictionary* extensionCatalogs = [NSMutableDictionary new];
 static int extensionSequence = 0, virtualSequence = 1000000;
 static std::map<std::string, int> extensionTabNumbers;
 static NSMutableDictionary* extensionRoots = [NSMutableDictionary new];
+// A closed profile's bridge state goes with it: every private window is a
+// profile of its own, so these grew by one each all day.
+static void ExtensionProfileClosed(const std::string& profile) {
+  const std::string prefix = profile + ":";
+  auto mine = [&](const std::string& key) { return key.rfind(prefix, 0) == 0; };
+  for (auto i = extensionWorkerStates.begin(); i != extensionWorkerStates.end();) i = mine(i->first) ? extensionWorkerStates.erase(i) : std::next(i);
+  for (auto i = extensionTabNumbers.begin(); i != extensionTabNumbers.end();) i = mine(i->first) ? extensionTabNumbers.erase(i) : std::next(i);
+  for (auto i = extensionVirtuals.begin(); i != extensionVirtuals.end();) i = i->second.profile == profile ? extensionVirtuals.erase(i) : std::next(i);
+  [extensionCatalogs removeObjectForKey:@(profile.c_str())];
+  [extensionRoots removeObjectForKey:@(profile.c_str())];
+}
+// Frames of one WebKit tab's documents (ext.bridge.register): no count across
+// tabs, and within one, as WebKit gives no word when a frame goes, the oldest
+// subframe makes way past this many instead of the newest being refused.
+// ChromiumDRMExtensions keeps the same number of documents per tab.
+static constexpr size_t kVirtualFramesPerTab = 2048;
 static bool ExtensionMatch(NSString* pattern, NSString* address) {
   NSURL* url = [NSURL URLWithString:address];
   if (![@[@"http", @"https"] containsObject:url.scheme.lowercaseString]) return false;
@@ -97,6 +113,8 @@ static void ExtensionFindWorker(std::string tab, std::string key, NSString* exte
       ExtensionWorker worker{tab,Key(extension),Key(session)};extensionWorkers[key]=worker;
       ExtensionNested(t->second,session,@"Runtime.enable",@{},[worker,action,fail](NSDictionary*,NSString* error){
         auto t=tabs.find(worker.tab);if(error||t==tabs.end()){fail(nil,error?:@"Control tab closed");return;}
+        // The worker's isolate captures no stacks for us either (StackCaptureOff).
+        if(!StackCaptureKept())ExtensionNested(t->second,@(worker.session.c_str()),StackCaptureOff().first,StackCaptureOff().second,Ignore);
         ExtensionNested(t->second,@(worker.session.c_str()),@"Runtime.addBinding",@{@"name":@"__yabExtensionBridge"},[worker,action,fail](NSDictionary*,NSString* error){
           if(error){fail(nil,error);return;}ExtensionEvaluate(worker,ExtensionWorkerShim,[worker,action,fail](NSDictionary*,NSString* error){if(error)fail(nil,error);else action(worker);});
         });
@@ -133,7 +151,22 @@ static NSString* ExtensionRead(NSString* root, NSString* relative) {
   NSDictionary* attributes=[NSFileManager.defaultManager attributesOfItemAtPath:file error:nil];if([attributes fileSize]>2*1024*1024)return nil;
   return [NSString stringWithContentsOfFile:file encoding:NSUTF8StringEncoding error:nil];
 }
+// Worker session -> a release in flight (1), another owed after it (2).
+static std::map<std::string, int> extensionConsoleRelease;
+static void ExtensionConsoleReleaseSend(std::string control, std::string session) {
+  auto t=tabs.find(control);if(t==tabs.end()){extensionConsoleRelease.erase(session);return;}
+  ExtensionNested(t->second,@(session.c_str()),@"Runtime.releaseObjectGroup",@{@"objectGroup":@"console"},[control,session](NSDictionary*,NSString* error){
+    auto state=extensionConsoleRelease.find(session);if(state==extensionConsoleRelease.end())return;
+    if(state->second==2&&!error){state->second=1;ExtensionConsoleReleaseSend(control,session);}else extensionConsoleRelease.erase(state);
+  });
+}
+static void ExtensionConsoleRelease(Tab& control, const std::string& session) {
+  int& state=extensionConsoleRelease[session];
+  if(state){state=2;return;}
+  state=1;ExtensionConsoleReleaseSend(control.id,session);
+}
 static void ExtensionForgetSession(std::string session, NSString* reason) {
+  extensionConsoleRelease.erase(session);
   for(auto i=extensionWorkers.begin();i!=extensionWorkers.end();)if(i->second.session==session)i=extensionWorkers.erase(i);else ++i;
   std::vector<Completion> callbacks;for(auto i=extensionCalls.begin();i!=extensionCalls.end();)if(i->second.session==session){callbacks.push_back(i->second.done);i=extensionCalls.erase(i);}else ++i;
   for(auto& done:callbacks)done(nil,reason);
@@ -162,7 +195,20 @@ static bool ExtensionBridgeEvent(Tab& tab, NSString* method, NSDictionary* p) {
   if(!worker)return true;
   NSString* message=S(p,@"message");NSDictionary* r=Decode(message.UTF8String,[message lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
   if([r[@"method"] isEqual:@"Inspector.detached"]){ExtensionForgetSession(session,@"Extension worker inspector detached");return true;}
-  if(r[@"id"]){auto i=extensionCalls.find([r[@"id"] intValue]);if(i!=extensionCalls.end()&&i->second.session==session){auto c=i->second.done;extensionCalls.erase(i);c(r[@"result"],r[@"error"]?JSON(r[@"error"]):nil);}return true;}
+  // The worker's session has Runtime enabled too: its console arguments and
+  // exceptions are released as they come, as ConsoleRelease does for pages.
+  if([r[@"method"] isEqual:@"Runtime.consoleAPICalled"]||[r[@"method"] isEqual:@"Runtime.exceptionThrown"]){ExtensionConsoleRelease(tab,session);return true;}
+  if(r[@"id"]){
+    Completion done;
+    auto i=extensionCalls.find([r[@"id"] intValue]);
+    if(i!=extensionCalls.end()&&i->second.session==session){done=i->second.done;extensionCalls.erase(i);}
+    // Worker evaluation errors have the same strong handles as page errors.
+    // ExtensionNested queues the releases outside this observer notification.
+    for(NSString* object in ScriptResultObjects(r[@"result"], !done))
+      ExtensionNested(tab,@(session.c_str()),@"Runtime.releaseObject",@{@"objectId":object},Ignore);
+    if(done)done(r[@"result"],r[@"error"]?JSON(r[@"error"]):nil);
+    return true;
+  }
   if([r[@"method"] isEqual:@"Runtime.bindingCalled"]&&[r[@"params"][@"name"] isEqual:@"__yabExtensionBridge"]){
     NSString* payload=S(r[@"params"],@"payload");NSDictionary* value=Decode(payload.UTF8String,[payload lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
     if(ExtensionActionBinding(tab,worker->extension,value))return true;
@@ -209,8 +255,17 @@ static bool ExtensionBridgeCommand(Tab& tab, NSString* method, NSDictionary* p, 
   }
   if([method isEqual:@"ext.bridge.register"]){
     NSString* identity=S(p,@"virtual"),*document=S(p,@"document"),*url=S(p,@"url");int frame=[p[@"frame"] intValue];
-    if(!identity.length||!document.length||![@[@"http",@"https"] containsObject:[NSURL URLWithString:url].scheme]||extensionVirtuals.size()>=4096){Reply(request,nil,@"Invalid virtual frame");return true;}
+    if(!identity.length||!document.length||![@[@"http",@"https"] containsObject:[NSURL URLWithString:url].scheme]){Reply(request,nil,@"Invalid virtual frame");return true;}
     std::string key=profile+":"+Key(identity)+":"+std::to_string(frame);
+    if(!extensionVirtuals.count(key)){
+      // Frame numbers only grow within a tab's document set, so the lowest
+      // subframe is the oldest; the main frame (0) stays.
+      std::string prefix=profile+":"+Key(identity)+":";size_t held=0;auto oldest=extensionVirtuals.end();
+      for(auto i=extensionVirtuals.lower_bound(prefix);i!=extensionVirtuals.end()&&i->first.rfind(prefix,0)==0;++i){
+        ++held;if(i->second.frame>0&&(oldest==extensionVirtuals.end()||i->second.frame<oldest->second.frame))oldest=i;
+      }
+      if(held>=kVirtualFramesPerTab&&oldest!=extensionVirtuals.end())extensionVirtuals.erase(oldest);
+    }
     std::string tabKey=profile+":"+Key(identity);int number=extensionTabNumbers[tabKey];
     if(!number)number=extensionTabNumbers[tabKey]=++virtualSequence;
     NSString* topURL=S(p,@"topURL");if(!topURL.length)topURL=url;

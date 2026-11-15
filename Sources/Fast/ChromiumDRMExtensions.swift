@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import WebKit
 import YabCoreClient
 
@@ -21,6 +22,19 @@ final class ChromiumDRMExtensionSession {
         if let session = all[tab.chromiumProfile] { return session }
         let made = ChromiumDRMExtensionSession(profile: tab.chromiumProfile, privateMode: tab.shy || !tab.pageStore.isPersistent, store: tab.pageStore)
         all[tab.chromiumProfile] = made
+        return made
+    }
+    /// The session whose control tab reads and presses a tab's extension
+    /// actions: its own profile's, or, for a private tab made as its
+    /// space's off-the-record side, that space's (YabCore lets a space's
+    /// control tab serve its private side's pages).
+    static func actions(of tab: Tab) throws -> ChromiumDRMExtensionSession {
+        guard ChromiumColumn.isPrivate(tab), let page = tab.builtPage as? ChromiumPage,
+              let space = ChromiumPrivateProfiles.space(of: page.profile) else { return try of(tab) }
+        try ChromiumPersistentProfiles.authorize(space.profile, store: space.store)
+        if let session = all[space.profile] { return session }
+        let made = ChromiumDRMExtensionSession(profile: space.profile, privateMode: false, store: space.store)
+        all[space.profile] = made
         return made
     }
     static func retirePrivate(_ profile: String) {
@@ -57,7 +71,7 @@ final class ChromiumDRMExtensionSession {
             for page in pages.values { page.value?.helperReplaced() }
         }
         let task = Task { @MainActor in
-            try await current.openProfile(profile, privateMode: privateMode)
+            try await ChromiumPrivateProfiles.open(profile, privateMode: privateMode, core: current)
             guard !retired, !Task.isCancelled else { throw CancellationError() }
             let id = try await current.createTab(profile: profile, url: "chrome://extensions/")
             do {
@@ -79,10 +93,24 @@ final class ChromiumDRMExtensionSession {
         return try await task.value
     }
     func request(_ method: String, _ params: [String: Any] = [:], connectedTo expected: YabCoreClient? = nil) async throws -> JSONValue {
+        var params = try JSONDecoder().decode([String: JSONValue].self, from: Self.json(params))
         let (core, id) = try await endpoint(connectedTo: expected)
-        var params = try JSONDecoder().decode([String: JSONValue].self, from: JSONSerialization.data(withJSONObject: params))
         params["tab"] = .string(id)
         return try await core.request(method, params: params)
+    }
+    /// Values a WebKit page handed over (a message's arguments, an answer) as
+    /// JSON for the helper, or a Swift error. WebKit passes what JSON has no
+    /// form for, a Date, NaN, Infinity, and JSONSerialization raises an
+    /// Objective-C exception on those, which Swift's `try` does not catch. In
+    /// 0.46.18 one unwound through the task running this and left the main
+    /// actor's executor record pointing into a dead stack: the next isolation
+    /// check anywhere (SwiftUI hit testing, WebKit, the cookie observer)
+    /// crashed Yab, a minute after every launch.
+    nonisolated static func json(_ value: Any) throws -> Data {
+        guard JSONSerialization.isValidJSONObject(value) else {
+            throw YabCoreError.remote("Extension message is not JSON-serializable")
+        }
+        return try JSONSerialization.data(withJSONObject: value)
     }
     func catalog() async throws -> [[String: Any]] {
         let result = try await request("ext.bridge.catalog")
@@ -120,9 +148,16 @@ final class ChromiumDRMExtensionSession {
             } catch let failure { error = String(describing: failure) }
             var reply: [String: Any] = ["extension": extensionID, "session": payload["session"] ?? "", "call": call["id"] ?? "", "value": value]
             if let error { reply["error"] = error }
+            // A page's answer JSON has no form for (a Date, NaN) fails the
+            // call, as an unserializable result does in Chrome, rather than
+            // raising out of this task (json(_:)).
+            if !JSONSerialization.isValidJSONObject(reply) {
+                reply["value"] = NSNull()
+                reply["error"] = "Extension answer is not JSON-serializable"
+            }
             // A reply belongs to the originating transport even if a helper
             // replacement happens while WebKit is executing the operation.
-            guard let data = try? JSONSerialization.data(withJSONObject: reply),
+            guard let data = try? ChromiumDRMExtensionSession.json(reply),
                   var params = try? JSONDecoder().decode([String: JSONValue].self, from: data) else { return }
             params["tab"] = .string(id)
             _ = try? await activeCore.request("ext.bridge.reply", params: params)
@@ -146,6 +181,13 @@ final class ChromiumDRMExtensions {
     private var nextFrame = 0
     private var rules: [String: WKContentRuleList] = [:]
     private(set) var number: Int?
+    /// The catalog these scripts were made from: the same one serves the next
+    /// document as it is. Remade every navigation, megabytes of extension
+    /// scripts crossed to every web process on each hop of a sign-in.
+    private var installed: String?
+    /// The most one answer or one change carries into a WebKit page.
+    static let answerLimit = 8 * 1024 * 1024
+    static let changeLimit = 256 * 1024
     private struct Document { let id: String; let nonce: String; let frame: Int; let info: WKFrameInfo; let url: URL; let epoch: String }
     final class Handler: NSObject, WKScriptMessageHandlerWithReply {
         weak var owner: ChromiumDRMExtensions?
@@ -167,17 +209,32 @@ final class ChromiumDRMExtensions {
     }
     func prepare(_ url: URL) async throws {
         guard let tab, let web, tab.chromiumProfile == session.profile else { throw CancellationError() }
-        let catalog = try await session.catalog()
+        var catalog = try await session.catalog()
+        if #available(macOS 15.4, *) {
+            let folders = ExtensionOneList.webKitFolders(Extensions.of(store: tab.pageStore).installed)
+            catalog.removeAll { ($0["id"] as? String).map(folders.contains) == true }
+        }
         guard !tab.gone, tab.chromiumProfile == session.profile else { throw CancellationError() }
         _ = try await session.request("ext.bridge.unregister", ["virtual": tab.id.uuidString])
-        epoch = UUID().uuidString; documents = [:]; nextFrame = 0
+        documents = [:]; nextFrame = 0
         let controller = web.configuration.userContentController
+        let revision = Self.revision(catalog)
+        if revision == installed, scripts.allSatisfy({ mine in controller.userScripts.contains { $0 === mine } }) {
+            // Rules come once per extension a site is granted to, then by dnr.changed.
+            for (id, entry) in entries where rules[id] == nil
+                && (entry["grants"] as? [String] ?? []).contains(where: { ChromiumDRMExtensionScripts.matches($0, url: url) }) {
+                do { try await refreshRules(id) }
+                catch { NSLog("DRM extension DNR %@ unavailable: %@", id, String(describing: error)) }
+            }
+            return
+        }
+        installed = nil
+        epoch = UUID().uuidString
         // A previous navigation's grant or enabled-rule snapshot cannot keep
         // filtering after this catalog revokes it or conversion is refused.
         for rule in rules.values { controller.remove(rule) }
         rules = [:]
-        let retained = controller.userScripts.filter { old in !scripts.contains(where: { $0 === old }) && !old.source.hasPrefix("/*yab-chromium-extension*/") }
-        controller.removeAllUserScripts(); retained.forEach(controller.addUserScript)
+        Self.removeScripts(scripts, from: controller, removingMarked: true)
         scripts = []
         for id in handlers.keys { controller.removeScriptMessageHandler(forName: "yabChromiumExtension", contentWorld: world(id)) }
         handlers = [:]; entries = [:]
@@ -223,6 +280,38 @@ final class ChromiumDRMExtensions {
             }
         }
         for (id, rule) in rules where entries[id] == nil { controller.remove(rule); rules[id] = nil }
+        installed = revision
+    }
+    /// Retain an application-script snapshot across a clear. The release line
+    /// also uses this helper to verify WebKit's sticky native registrations.
+    static func restore(_ retained: [WKUserScript], on controller: WKUserContentController) {
+        let snapshot = retained.map { $0 }
+        controller.removeAllUserScripts()
+        var kept = Set(controller.userScripts.map(ObjectIdentifier.init))
+        for script in snapshot where kept.insert(ObjectIdentifier(script)).inserted {
+            controller.addUserScript(script)
+        }
+    }
+
+    /// Clear only this bridge's application scripts. WebKit's extension scripts
+    /// survive removeAllUserScripts; re-adding that retained list doubles them
+    /// on each catalog rebuild (and detach), eventually overflowing Mach IPC.
+    /// Native sources are never read: only application scripts removed by the
+    /// clear need the legacy marker check during a catalog rebuild.
+    static func removeScripts(_ scripts: [WKUserScript], from controller: WKUserContentController, removingMarked: Bool = false) {
+        let owned = Set(scripts.map(ObjectIdentifier.init))
+        let retained = controller.userScripts.filter { !owned.contains(ObjectIdentifier($0)) }.map { $0 }
+        controller.removeAllUserScripts()
+        var surviving = Set(controller.userScripts.map(ObjectIdentifier.init))
+        for script in retained where surviving.insert(ObjectIdentifier(script)).inserted {
+            if removingMarked && script.source.hasPrefix("/*yab-chromium-extension*/") { continue }
+            controller.addUserScript(script)
+        }
+    }
+
+    private static func revision(_ catalog: [[String: Any]]) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: catalog, options: [.sortedKeys])) ?? Data(UUID().uuidString.utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
     private func add(_ source: String, time: WKUserScriptInjectionTime, main: Bool, world: WKContentWorld, controller: WKUserContentController) {
         let script = WKUserScript(source: "/*yab-chromium-extension*/" + source, injectionTime: time, forMainFrameOnly: main, in: world)
@@ -241,7 +330,14 @@ final class ChromiumDRMExtensions {
               (url.port ?? (url.scheme == "https" ? 443 : 80)) == (message.frameInfo.securityOrigin.port == 0 ? (url.scheme == "https" ? 443 : 80) : message.frameInfo.securityOrigin.port) else { throw YabCoreError.remote("Extension document permission or identity expired") }
         let key = id + ":" + nonce
         if body["op"] as? String == "hello" {
-            guard documents.count < 2048 else { throw YabCoreError.remote("Too many extension documents") }
+            // WebKit says nothing when a frame goes, so a page open all day
+            // with frames coming and going passed a fixed 2048 and its new
+            // frames lost their extensions. The oldest subframe makes way, as
+            // the helper does for the same tab (ext_bridge.inc).
+            if documents.count >= 2048,
+               let oldest = documents.filter({ $0.value.frame > 0 }).min(by: { $0.value.frame < $1.value.frame })?.key {
+                documents[oldest] = nil
+            }
             let frame: Int
             if message.frameInfo.isMainFrame { frame = 0 } else { nextFrame += 1; frame = nextFrame }
             let document = Document(id: message.frameInfo.isMainFrame ? epoch : UUID().uuidString, nonce: nonce, frame: frame, info: message.frameInfo, url: url, epoch: epoch)
@@ -263,7 +359,10 @@ final class ChromiumDRMExtensions {
         guard op.hasPrefix("runtime.") || op.hasPrefix("storage.") || op.hasPrefix("i18n.") || op.hasPrefix("port.") else { throw YabCoreError.remote("Unsupported extension API") }
         let result = try await session.request("ext.bridge.invoke", ["virtual": tab.id.uuidString, "document": document.id, "frame": document.frame, "extension": id, "op": op, "args": body["args"] ?? []])
         guard document.epoch == epoch else { throw CancellationError() }
-        return try JSONSerialization.jsonObject(with: JSONEncoder().encode(result), options: .fragmentsAllowed)
+        let encoded = try JSONEncoder().encode(result)
+        // A whole storage.get(null) of a password manager goes into the page in one IPC message.
+        guard encoded.count <= Self.answerLimit else { throw YabCoreError.remote("Extension answer too large for a WebKit page") }
+        return try JSONSerialization.jsonObject(with: encoded, options: .fragmentsAllowed)
     }
     func reverse(_ id: String, _ call: [String: Any]) async throws -> Any {
         guard let web, let tab, !tab.gone, tab.chromiumProfile == session.profile,
@@ -308,7 +407,14 @@ final class ChromiumDRMExtensions {
         return NSNull()
     }
     func broadcast(_ id: String, _ call: [String: Any]) async {
-        guard let web else { return }
+        guard web != nil else { return }
+        var call = call
+        // Every frame of every tab gets this: a large change says which keys
+        // changed, and the listener reads what it needs.
+        if let size = try? JSONSerialization.data(withJSONObject: call).count, size > Self.changeLimit,
+           let changes = call["changes"] as? [String: Any] {
+            call["changes"] = changes.mapValues { _ in [String: Any]() }
+        }
         for (key, doc) in documents where key.hasPrefix(id + ":") && doc.epoch == epoch && allowed(id, doc.url) {
             _ = try? await javascript("return await globalThis.__yabWK.receive('storage.changed',args)", arguments: ["args": call], in: doc.info, in: world(id))
         }
@@ -331,11 +437,14 @@ final class ChromiumDRMExtensions {
         if let list { rules[id] = list; web.configuration.userContentController.add(list) }
     }
     func helperReplaced() {
+        // The scripts in place carry the old epoch: the next document makes them again.
+        installed = nil
         epoch = UUID().uuidString
         documents = [:]
         number = nil
     }
     func detach() {
+        installed = nil
         epoch = UUID().uuidString; documents = [:]
         if let tab {
             session.pages[tab.id] = nil
@@ -345,10 +454,15 @@ final class ChromiumDRMExtensions {
         guard let web else { return }
         let controller = web.configuration.userContentController
         for id in handlers.keys { controller.removeScriptMessageHandler(forName: "yabChromiumExtension", contentWorld: world(id)) }
-        let retained = controller.userScripts.filter { !scripts.contains($0) }
-        controller.removeAllUserScripts(); retained.forEach(controller.addUserScript)
+        Self.removeScripts(scripts, from: controller)
         for rule in rules.values { controller.remove(rule) }
         handlers = [:]; rules = [:]; scripts = []
+    }
+    func scriptStateForTesting() throws -> [String: Any] {
+        guard Store.testing, let web else { throw CancellationError() }
+        let all = web.configuration.userContentController.userScripts.map { ObjectIdentifier($0) }
+        return ["scripts": all.count, "duplicateIdentities": all.count - Set(all).count,
+                "prepared": installed != nil, "extensions": entries.count, "bridgeScripts": scripts.count]
     }
     func installForTesting(path: String) async throws -> Any {
         guard Store.testing else { throw CancellationError() }

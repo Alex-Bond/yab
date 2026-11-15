@@ -117,6 +117,16 @@ enum KeptCookies {
         RunLoop.main.add(later, forMode: .common)
     }
 
+    /// A session cookie was just taken out (the engine bridge carried a
+    /// sign-out): the keychain follows now. Half a minute on, a crash in
+    /// between would put the ended sign-in back at the next launch.
+    static func keepSoon() {
+        guard usesKeychain else { return }
+        gather { jars, at, whole in
+            if whole { keeper.keepLater(jars, at: at) }
+        }
+    }
+
     private static let restoration = SignInReadiness()
 
     /// What the last run kept, back in the stores, once per launch. Pages
@@ -301,7 +311,10 @@ final class CookieKeeper: @unchecked Sendable {
 /// A change in a watched store's jar (KeptCookies.watch); WebKit calls it
 /// on the main thread.
 private final class KeptCookiesObserver: NSObject, WKHTTPCookieStoreObserver {
-    func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
-        MainActor.assumeIsolated { KeptCookies.changed() }
+    nonisolated func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
+        // WebKit enters from a native callback, without a Swift executor
+        // guarantee. A fresh hop establishes one; checking the caller's
+        // executor here crashed before changed() in #1318 and #1321.
+        Task { @MainActor in KeptCookies.changed() }
     }
 }

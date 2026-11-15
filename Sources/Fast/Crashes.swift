@@ -43,54 +43,121 @@ enum Crashes {
     /// Automatic sending is off unless you turned it on in Settings › About.
     static var sends: Bool { Store.settings.object(forKey: key) as? Bool ?? false }
 
-    /// A little after launch, off the main thread: the window comes first.
+    @MainActor private static var watcher: CrashReportWatch?
+    @MainActor private static var sending = false
+    @MainActor private static var scanAgain = false
+    @MainActor private static var promptAgain = false
+
+    /// Watch from launch onward, including reports made while the browser
+    /// survives a renderer crash. The initial consent question stays at launch.
     @MainActor
     static func sendAfterLaunch() {
-        guard let site = Updater.site, !Store.testing || ProcessInfo.processInfo.environment["YAB_FEED"] != nil else { return }
+        guard Updater.site != nil, !Store.testing || ProcessInfo.processInfo.environment["YAB_FEED"] != nil else { return }
         let defaults = Store.settings
-        guard let last = defaults.object(forKey: since) as? Date else {
-            defaults.set(Date(), forKey: since)
+        if defaults.object(forKey: since) == nil { defaults.set(Date(), forKey: since) }
+        if watcher == nil {
+            let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/DiagnosticReports")
+            watcher = CrashReportWatch(folder: folder, after: defaults.object(forKey: since) as? Date ?? Date()) {
+                Task { @MainActor in await sendPending(allowPrompt: false) }
+            }
+        }
+        Task { @MainActor in
+            // A crash loop can end the next run before the delayed IPS scan.
+            // Send already-authorized evidence as soon as startup yields.
+            await sendPending(allowPrompt: false)
+            try? await Task.sleep(for: .seconds(20))
+            await sendPending(allowPrompt: true)
+        }
+    }
+
+    /// One serialized sender: file events during an upload request another
+    /// scan, never a second simultaneous upload or consent question.
+    @MainActor
+    static func sendPending(allowPrompt: Bool) async {
+        guard let site = Updater.site, !Store.testing || ProcessInfo.processInfo.environment["YAB_FEED"] != nil else { return }
+        if sending {
+            scanAgain = true; promptAgain = promptAgain || allowPrompt
             return
         }
-        let endpoint = site.appendingPathComponent("api/crash")
-        let version = Updater.version, build = Updater.build, system = Updater.system
+        sending = true
+        defer { sending = false }
+        var prompt = allowPrompt
+        repeat {
+            scanAgain = false; promptAgain = false
+            await sendBatch(endpoint: site.appendingPathComponent("api/crash"), allowPrompt: prompt)
+            prompt = promptAgain
+        } while scanAgain
+    }
+
+    @MainActor
+    private static func sendBatch(endpoint: URL, allowPrompt: Bool) async {
+        // Saved session evidence must not wait behind IPS settling or a
+        // consent question for a different report.
+        await sendUnclean(to: endpoint)
+        let defaults = Store.settings
+        let last = defaults.object(forKey: since) as? Date ?? Date()
+        let system = Updater.system
         let bundle = Bundle.main.bundleIdentifier ?? ""
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let log = Store.file("crash.log")
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(for: .seconds(20))
-            let found = reports(after: last, bundle: bundle)
-            guard let latest = found.last?.1 else { return }
-            let allowed = await consent(through: latest, defaults: defaults) { await ask() }
-            guard allowed else { return }
-            let stalls = await MainActor.run { Watchdog.recent() ?? "" }
-            // The hangs' stacks MetricKit gave (FieldHangs): with the first
-            // report that goes, then forgotten.
-            var hangs = FieldHangs.stacks()
-            let hadHangs = !hangs.isEmpty
-            let sent = await send(found, after: last, home: home, thrown: thrown(inLog: tail(of: log))) { report in
-                var request = URLRequest(url: endpoint)
-                request.httpMethod = "POST"
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                // The Yab that crashed, which may be older than the one sending.
-                let made = madeBy(report.text)
-                var fields: [String: Any] = [
-                    "version": made?.version ?? version, "build": made?.build ?? build, "os": system,
-                    "report": String(report.text.prefix(500_000)),
-                    "stalls": stalls, "bytes": report.bytes,
-                ]
-                if let parse = report.parse { fields["parse"] = parse }
-                if let exception = report.exception { fields["exception"] = exception }
-                if !hangs.isEmpty { fields["hangs"] = hangs }
-                request.httpBody = try? JSONSerialization.data(withJSONObject: fields)
-                guard let (_, response) = try? await URLSession.shared.data(for: request),
-                      (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
-                hangs = []
-                return true
-            }
-            if hadHangs, hangs.isEmpty { FieldHangs.forgetStacks() }
-            await MainActor.run { if sent > last { defaults.set(sent, forKey: since) } }
+        let thrownLog = Store.file("crash.log")
+        let found = await Task.detached(priority: .utility) { reports(after: last, bundle: bundle) }.value
+        var allowed = sends
+        if !allowed, allowPrompt, let latest = found.last?.1 {
+            allowed = await consent(through: latest, defaults: defaults) { await ask() }
         }
+        if allowed, !found.isEmpty {
+            let stalls = Watchdog.recent() ?? ""
+            let sent = await Task.detached(priority: .utility) {
+                var hangs = FieldHangs.stacks()
+                let hadHangs = !hangs.isEmpty
+                let sent = await send(found, after: last, home: home, thrown: thrown(inLog: tail(of: thrownLog))) { report in
+                    let accepted = await post(report, to: endpoint, system: system, stalls: stalls, hangs: hangs)
+                    if accepted { hangs = [] }
+                    return accepted
+                }
+                if hadHangs, hangs.isEmpty { FieldHangs.forgetStacks() }
+                return sent
+            }.value
+            if sent > last { defaults.set(sent, forKey: since) }
+            if sent > last, found.count > 5 { scanAgain = true }
+        }
+    }
+
+    @MainActor
+    private static func sendUnclean(to endpoint: URL) async {
+        // An unclean exit is not a macOS crash report. Do not misdescribe it
+        // in the existing consent question or broaden a one-time IPS consent.
+        // It follows the existing explicit automatic-reporting preference.
+        guard sends else { return }
+        let ledger = CrashSessions.ledger
+        do {
+            let pending = try await Task.detached(priority: .utility) { try ledger.pending() }.value
+            for run in pending.prefix(5) {
+                let report = try await Task.detached(priority: .utility) {
+                    try CrashExitLogs.report(run, logs: CrashExitLogs.read(run))
+                }.value
+                guard sends else { return }
+                guard await post(report, to: endpoint, system: run.os, stalls: Watchdog.recent() ?? "", hangs: []) else { return }
+                try ledger.acknowledge(run)
+            }
+            if pending.count > 5 { scanAgain = true }
+        } catch { log.error("Unclean-exit report remains pending: \(String(describing: error), privacy: .public)") }
+    }
+
+    private static func post(_ report: Report, to endpoint: URL, system: String, stalls: String,
+                             hangs: [[String: Any]]) async -> Bool {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let made = uploadIdentity(report.text)
+        var fields: [String: Any] = ["version": made.version, "build": made.build, "os": system,
+                                     "report": String(report.text.prefix(500_000)), "stalls": stalls, "bytes": report.bytes]
+        if let parse = report.parse { fields["parse"] = parse }
+        if let exception = report.exception { fields["exception"] = exception }
+        if !hangs.isEmpty { fields["hangs"] = hangs }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: fields)
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
+        return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
     /// A response applies to these reports, never changes automatic sending.
@@ -237,7 +304,7 @@ enum Crashes {
     static func prepared(_ report: String, home: String, bytes: Int, age: TimeInterval, name: String = "") -> Outcome {
         let lines = report.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let head = String(lines.first ?? "")
-        let body = lines.count > 1 ? String(lines[1]) : ""
+        let body = document(lines.count > 1 ? String(lines[1]) : "")
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             log.error("\(name, privacy: .public): \(bytes) bytes, no body")
             return age < patience ? .wait : .skip
@@ -267,6 +334,14 @@ enum Crashes {
               let version = fields["app_version"] as? String, !version.isEmpty,
               let build = fields["build_version"] as? String, !build.isEmpty else { return nil }
         return (version, build)
+    }
+
+    /// Standalone YabCore reports have no bundle version. They can predate
+    /// the update that uploads them (#1306–1311); the uploader's version is
+    /// not evidence about the crashed image. Keep its UUID in the report and
+    /// send an unknown build (the server stores zero as NULL).
+    static func uploadIdentity(_ report: String) -> (version: String, build: String) {
+        madeBy(report) ?? (version: "unknown", build: "0")
     }
 
     /// What of the body finding a crash needs; the rest stays on this Mac.
@@ -409,6 +484,38 @@ enum Crashes {
         return String(out)
     }
 
+    /// The body's JSON document alone, without what macOS 27.2 can write
+    /// after it: a "System Profile:" appendix in plain text (the Mac's
+    /// model, memory, Wi-Fi and Bluetooth). With it the whole body wasn't
+    /// JSON, the report went raw and untrimmed, and the site, reading the
+    /// body as one document, named the crash by its first line (#758,
+    /// #978, #1134, #1455, #1545). A body that isn't one document from its
+    /// start, or is cut short, is left as it is.
+    static func document(_ body: String) -> String {
+        let scalars = body.unicodeScalars
+        guard let start = scalars.firstIndex(where: { !CharacterSet.whitespacesAndNewlines.contains($0) }),
+              scalars[start] == "{" else { return body }
+        var depth = 0, inString = false, escaped = false
+        var index = start
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            if inString {
+                if escaped { escaped = false } else if scalar == "\\" { escaped = true } else if scalar == "\"" { inString = false }
+            } else {
+                switch scalar {
+                case "\"": inString = true
+                case "{", "[": depth += 1
+                case "}", "]":
+                    depth -= 1
+                    if depth == 0 { return String(body[..<scalars.index(after: index)]) }
+                default: break
+                }
+            }
+            index = scalars.index(after: index)
+        }
+        return body
+    }
+
     /// Whether every brace and bracket the body opens it also closes, and no
     /// string is left open: false for a report cut short.
     static func whole(_ body: String) -> Bool {
@@ -497,10 +604,17 @@ enum Crashes {
               let line = header.split(separator: "\n", maxSplits: 1).first,
               let info = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
         else { return false }
-        return info["bundleID"] as? String == bundle && info["bug_type"] as? String == "309"
+        guard info["bug_type"] as? String == "309" else { return false }
+        // The Chromium helper's processes are Yab too. Its browser process
+        // lies in the app's Contents/MacOS, and macOS names no bundle for it.
+        guard let reported = info["bundleID"] as? String else {
+            return (info["app_name"] as? String)?.hasPrefix("YabCore") == true
+        }
+        return reported == bundle || reported.hasPrefix(bundle + ".helper")
     }
 
-    /// yab's own crash reports written after `date`, oldest first, in the
+    /// yab's own crash reports, its helper's too (YabCore, YabCore Helper),
+    /// written after `date`, oldest first, in the
     /// folder and in its Retired, where macOS moves the ones it has handled.
     /// Saved reports can predate an update; finding one says nothing about
     /// the most recent quit or the currently running build.
@@ -511,7 +625,7 @@ enum Crashes {
             (try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         }
         return files.compactMap { file -> (URL, Date)? in
-            guard file.pathExtension == "ips", file.lastPathComponent.hasPrefix("yab"),
+            guard file.pathExtension == "ips", file.lastPathComponent.lowercased().hasPrefix("yab"),
                   seen.insert(file.lastPathComponent).inserted,
                   let written = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
                   written > date,

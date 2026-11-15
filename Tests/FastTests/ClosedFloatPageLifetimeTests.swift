@@ -81,7 +81,7 @@ struct ClosedFloatPageLifetimeTests {
             try #require(Store.testing, "The existing callback delay is available only in a disposable test world")
             browser.activeID = source.id
             let started = Date()
-            browser.leavingSpace()
+            browser.benchLiftPage(source, quietly: true)
             let called = try await Loaded.until(8) { try await self.count(source, "on") == 1 }
             try #require(called, "The native Isolate.run on callback must actually execute")
             try await Task.sleep(for: .milliseconds(100))
@@ -247,7 +247,7 @@ struct ClosedFloatPageLifetimeTests {
         let source = try await fixture.page("valid-source")
         let same = Witness(source)
         fixture.browser.activeID = source.id
-        fixture.browser.float(source)
+        fixture.browser.benchLiftPage(source, quietly: false)
         let lifted = try await Loaded.until(8) {
             fixture.browser.floating == source.id && fixture.browser.floater.showing
         }
@@ -353,7 +353,7 @@ struct ClosedFloatPageLifetimeTests {
                 // call-kind ownership control, not a meeting/provider test.
                 fixture.browser.putOut(source, web: web)
             } else {
-                fixture.browser.float(source)
+                fixture.browser.benchLiftPage(source, quietly: false)
             }
             let lifted = try await Loaded.until(8) {
                 fixture.browser.floating == source.id && fixture.browser.floater.showing

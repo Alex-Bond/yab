@@ -101,7 +101,7 @@ struct SelectedURLStoredIntentTests {
         anchor.identifier = NSUserInterfaceItemIdentifier("WKMenuItemIdentifierSearchWeb")
         menu.addItem(anchor)
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            requireNativeWebKitFixture(source, "SelectedURLStoredIntentTests").readBeforeMenu(menu) { done.resume() }
+            requireNativeWebKitFixture(source, "SelectedURLStoredIntentTests").readBeforeMenu(menu) { _ in done.resume() }
         }
         // This is the actual existing native menu-open receipt. No KVC,
         // selector replacement or new production test API is used.

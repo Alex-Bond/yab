@@ -25,6 +25,7 @@ struct AutomaticPiPEntryTests {
         let savedMaster = Store.settings.object(forKey: "float.leave")
         let initialMaster: Bool
         let wasAllowed = AutomaticPiPSites.shared.allows(URL(string: "https://youtube.com/"))
+        var nativeWindow: NSWindow?
 
         init() {
             _ = NSApplication.shared
@@ -38,6 +39,8 @@ struct AutomaticPiPEntryTests {
 
         func close() {
             browser.land()
+            nativeWindow?.contentView = nil
+            nativeWindow?.close()
             browser.letGo()
             browser.dozing?.invalidate(); browser.stuck.timer?.invalidate(); browser.pressure?.cancel()
             sites.setAllowed(wasAllowed, for: URL(string: "https://youtube.com/"))
@@ -78,7 +81,7 @@ struct AutomaticPiPEntryTests {
                     __policy.pipPolicy = automatic;
                     if (automatic) __policy.automaticPiP++;
                     if (__policy.hold === 'pip') return await new Promise(r => __policy.resolve = r);
-                    return 'fallback';
+                    return 'pip';
                   },
                   off: async function() { __policy.off++; return 'off'; }
                 };
@@ -98,6 +101,29 @@ struct AutomaticPiPEntryTests {
 
         func settled() async throws { try await Task.sleep(for: .milliseconds(250)) }
         func deny(_ tab: Tab) { sites.setAllowed(false, for: tab.address) }
+
+        /// Inject only the native handoff, after the real request. This suite
+        /// proves policy and ownership; FloatPiPTests proves actual playback.
+        func picture(_ tab: Tab) throws -> SitePiP.Picture {
+            let web = try #require(tab.built)
+            nativeWindow?.contentView = nil
+            nativeWindow?.close()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                                  styleMask: .titled, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = web
+            nativeWindow = window
+            let rect = web.convert(web.bounds, to: nil)
+            let picture = try #require(SitePiP.benchPicture(view: NSView(frame: rect), window: window, rect: rect))
+            return picture
+        }
+
+        func present(_ tab: Tab) throws {
+            let picture = try picture(tab)
+            let web = try #require(tab.built)
+            browser.webView(web, hasVideoInPictureInPictureDidChange: true)
+            try #require(browser.take(picture))
+        }
     }
 
     /// Guard before any Fixture property initializer can touch Store or
@@ -105,6 +131,29 @@ struct AutomaticPiPEntryTests {
     private func requireWorld() throws {
         try #require(Store.testing && Store.world != nil && Store.settings !== UserDefaults.standard,
                      "Use the existing native AppKit runner in a disposable world, never a user profile")
+    }
+
+    @Test func returningBeforeTheNativeHandoffRejectsItButAllowsANewManualRequest() async throws {
+        try requireWorld()
+        let f = Fixture(); defer { f.close() }
+        let source = try await f.page("return-before-pip")
+        let sibling = try await f.page("return-before-pip-sibling", host: "quiet.example")
+        sibling.noisy = false
+        f.browser.activeID = source.id
+        try await f.js(source, "__policy.hold='pip'")
+        f.browser.select(sibling)
+        try #require(try await Loaded.until(8) { try await f.count(source, "pip") == 1 })
+        f.browser.select(source)
+        let late = try f.picture(source)
+        #expect(!f.browser.take(late))
+        #expect(late.rejectedAutomaticDeparture)
+        #expect(f.browser.floating == nil && !f.browser.floater.showing && !source.floating)
+        try await f.js(source, "__policy.resolve('pip');__policy.hold=''")
+        try #require(try await Loaded.until(8) { f.browser.pendingVideoRequestsForBench == 0 })
+        f.browser.toggleFloat()
+        try #require(try await Loaded.until(8) { try await f.count(source, "pip") == 2 })
+        try f.present(source)
+        #expect(f.browser.floating == source.id && !source.floating)
     }
 
     @Test(arguments: ["tab", "app"])
@@ -117,7 +166,7 @@ struct AutomaticPiPEntryTests {
         f.browser.activeID = source.id
         let verb: String
         if departure == "tab" {
-            verb = "on"
+            verb = "pip"
             f.browser.leavingSpace()
             f.browser.activeID = sibling.id
         } else {
@@ -140,7 +189,43 @@ struct AutomaticPiPEntryTests {
         if departure == "tab" { f.browser.leavingSpace() }
         else { f.browser.leftNow() }
         try await f.settled()
-        #expect(try await f.count(source, departure == "tab" ? "on" : "pip") == 1)
+        #expect(try await f.count(source, "pip") == 1)
+        #expect(try await f.count(source, "on") == 0)
+    }
+
+    /// The desktop changes with Yab still the app in front (a three-finger
+    /// swipe to an empty desktop, another Yab window going full screen):
+    /// macOS posts no didResignActive, so only the desktop change can bring
+    /// the film along. Back on its desktop, it goes home (feedback #1837).
+    @Test func aDesktopLeftWithYabInFrontBringsTheFilmAlongAndHome() async throws {
+        try requireWorld()
+        let f = Fixture(); defer { f.close() }
+        let source = try await f.page("desktop-left")
+        f.browser.activeID = source.id
+        // Yab really in front, as on the swipe: the page's answer is read
+        // against NSApp.isActive, which an inactive test host never showed.
+        NSApp.activate(ignoringOtherApps: true)
+        defer { NSApp.deactivate() }
+        // A change that leaves the window on screen asks nothing.
+        f.browser.sightChanged(active: true, shown: true)
+        // Yab behind: appLeft's own watch has it, not this.
+        f.browser.sightChanged(active: false, shown: false)
+        try await f.settled()
+        #expect(try await f.count(source, "pip") == 0)
+        f.browser.sightChanged(active: true, shown: false)
+        try #require(try await Loaded.until(8) { try await f.count(source, "pip") == 1 })
+        try f.present(source)
+        let out = try await Loaded.until(8) { f.browser.floating == source.id && f.browser.floater.showing }
+        #expect(out)
+        #expect(try await f.count(source, "automaticPiP") == 1)
+        // Heard again, or Yab then leaving too: still the one request.
+        f.browser.sightChanged(active: true, shown: false)
+        f.browser.appLeft()
+        try await Task.sleep(for: .milliseconds(900))
+        #expect(try await f.count(source, "pip") == 1)
+        f.browser.sightChanged(active: true, shown: true)
+        let home = try await Loaded.until(8) { f.browser.floating == nil && !f.browser.floater.showing }
+        #expect(home && !source.floating)
     }
 
     @Test func anExceptionStopsRealTabAndSpaceDepartureBeforeThePageIsAsked() async throws {
@@ -173,10 +258,12 @@ struct AutomaticPiPEntryTests {
         #expect(try await f.count(source, "on") == 0)
         f.browser.prefs.floatsOnLeave = false
         f.browser.toggleFloat()
+        try #require(try await Loaded.until(8) { try await f.count(source, "pip") == 1 })
+        try f.present(source)
         let manual = try await Loaded.until(8) { f.browser.floating == source.id && f.browser.floater.showing }
-        #expect(manual && source.floating)
+        #expect(manual && !source.floating)
         #expect(try await f.count(source, "pip") == 1)
-        #expect(try await f.count(source, "on") == 1)
+        #expect(try await f.count(source, "on") == 0)
         #expect(try await f.count(source, "automaticPiP") == 0)
         #expect(try await f.count(source, "automaticOn") == 0)
     }
@@ -218,10 +305,12 @@ struct AutomaticPiPEntryTests {
         f.sites.setAllowed(true, for: source.address)
         f.browser.leavingSpace()
         f.browser.activeID = sibling.id
+        try #require(try await Loaded.until(8) { try await f.count(source, "pip") == 1 })
+        try f.present(source)
         let lifted = try await Loaded.until(8) { f.browser.floating == source.id && f.browser.floater.showing }
-        #expect(lifted && source.floating)
-        #expect(try await f.count(source, "on") == 1)
-        #expect(try await f.count(source, "automaticOn") == 1)
+        #expect(lifted && !source.floating)
+        #expect(try await f.count(source, "on") == 0)
+        #expect(try await f.count(source, "automaticPiP") == 1)
     }
 
     @Test func denyingDuringTheRealIsolateAnswerCleansTheOwnedPageWithoutInstallingAWindow() async throws {
@@ -229,16 +318,17 @@ struct AutomaticPiPEntryTests {
         let f = Fixture(); defer { f.close() }
         let source = try await f.page("pending-native-source")
         let sibling = try await f.page("pending-native-sibling")
-        try await f.js(source, "__policy.hold = 'on'")
+        try await f.js(source, "__policy.hold = 'pip'")
         f.browser.activeID = source.id
         f.browser.leavingSpace()
         f.browser.activeID = sibling.id
-        let pending = try await Loaded.until(8) { try await f.count(source, "on") == 1 }
+        let pending = try await Loaded.until(8) { try await f.count(source, "pip") == 1 }
         try #require(pending, "The real automatic request must be in flight before changing the site")
         f.deny(source)
-        try await f.js(source, "__policy.resolve(['floating', 640, 360])")
-        let cleaned = try await Loaded.until(8) { try await f.count(source, "off") == 1 }
-        #expect(cleaned, "Rejected late native lift must undo its own page isolation")
+        try await f.js(source, "__policy.resolve('refused:NotSupportedError')")
+        try await f.settled()
+        #expect(try await f.count(source, "on") == 0)
+        #expect(try await f.count(source, "off") == 0, "A refusal never isolated the document")
         #expect(!source.floating && f.browser.floating == nil && !f.browser.floater.showing)
         #expect(try await f.count(sibling, "off") == 0)
     }
@@ -277,11 +367,11 @@ struct AutomaticPiPEntryTests {
             window.contentView = nil
             window.close()
         }
-        try await f.js(source, "__policy.hold = 'on'")
+        try await f.js(source, "__policy.hold = 'pip'")
         f.browser.activeID = source.id
         f.browser.leavingSpace()
         f.browser.activeID = sibling.id
-        let pending = try await Loaded.until(8) { try await f.count(source, "on") == 1 }
+        let pending = try await Loaded.until(8) { try await f.count(source, "pip") == 1 }
         try #require(pending)
         if kind == "browser-flag" { f.browser.fullScreen = true }
         else {
@@ -289,10 +379,11 @@ struct AutomaticPiPEntryTests {
             #expect(requireNativeWebKitFixture(source, "AutomaticPiPEntryTests").window === window && window.styleMask.contains(.fullScreen))
             #expect(!f.browser.fullScreen, "Exercise the NSWindow guard independently of the browser flag")
         }
-        try await f.js(source, "__policy.resolve(['floating', 640, 360])")
+        try f.present(source)
+        try await f.js(source, "__policy.resolve('pip')")
         // Only the player's own full screen turns the answer down.
         let out = try await Loaded.until(8) { f.browser.floating == source.id && f.browser.floater.showing }
-        #expect(out && source.floating)
+        #expect(out && !source.floating)
         #expect(try await f.count(sibling, "off") == 0)
     }
 }

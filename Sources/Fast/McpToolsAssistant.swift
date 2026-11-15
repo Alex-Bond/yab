@@ -158,7 +158,8 @@ extension Mcp {
     /// an assistant at once: what is waiting, and how to follow it.
     static func needsUser(_ got: [String: Any], _ request: [String: Any]) -> [String: Any] {
         var asked: [String: Any] = ["do": "agent-approval"]
-        if let tab = got["tab"] ?? request["id"] { asked["id"] = tab }
+        if let mail = got["mailAsk"] { asked["mailAsk"] = mail }
+        else if let tab = got["tab"] ?? request["id"] { asked["id"] = tab }
         let approval = ask(asked)
         guard let id = approval["approval"] as? String else {
             return ["error": "status: needs_user\nsays: Waiting for the user's answer in Yab on their Mac. Make the same call again in a minute."]

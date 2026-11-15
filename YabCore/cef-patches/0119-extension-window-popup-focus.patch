@@ -1,0 +1,122 @@
+diff --git a/cef/libcef/browser/views/external_host_mac.mm b/cef/libcef/browser/views/external_host_mac.mm
+index 1c76db5..0b1a95a 100644
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -889,6 +889,17 @@ void TabActivateRequested(content::WebContents* contents) {
+   handler->OnExtensionTabCreated(browser.get(), value);
+ }
+ 
++// chrome.windows.update({focused: true}) on a window the client presents,
++// named by one of its pages: the client brings that window to the front.
++void WindowFocusRequested(content::WebContents* contents) {
++  CefRefPtr<CefBrowserHostBase> browser;
++  auto handler = DisplayHandlerFor(contents, &browser);
++  if (!handler) return;
++  auto value = CefDictionaryValue::Create();
++  value->SetString("requestedKind", "focus");
++  handler->OnExtensionTabCreated(browser.get(), value);
++}
++
+ // chrome.sidePanel.open() for a page the client presents: the client shows
+ // the extension's panel for that page, as with "activate" above, on the
+ // page's own browser. Without a display handler Chrome keeps its own path.
+@@ -954,6 +965,7 @@ void InstallExtensionHooks() {
+   hooks.tab_created = &TabCreated;
+   hooks.tab_model_created = &BindNativeTabModel;
+   hooks.tab_activate_requested = &TabActivateRequested;
++  hooks.window_focus_requested = &WindowFocusRequested;
+   hooks.side_panel_open = &SidePanelOpen;
+   InstallConsentHooks();
+   InstallPrintHooks();
+diff --git a/chrome/browser/extensions/api/tabs/tabs_api.cc b/chrome/browser/extensions/api/tabs/tabs_api.cc
+index 54fc2f7..bf08d00 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -941,6 +941,21 @@ ExtensionFunction::ResponseAction WindowsGetLastFocusedFunction::Run() {
+       extractor(params);
+ 
+   BrowserWindowInterface* last_focused_browser = nullptr;
++  // Yab: the embedder focuses its windows without activating concealed
++  // producers; the page it last focused names the last focused window (an
++  // extension's own window while it has the focus), as windows.getCurrent
++  // and tabs.query({lastFocusedWindow}) answer (0026).
++  if (auto* focused = ExternalTabFocus::Get(browser_context())) {
++    auto* tab = ::tabs::TabInterface::MaybeGetFromContents(focused);
++    auto* window = tab ? tab->GetBrowserWindowInterface() : nullptr;
++    if (window && !window->IsDeleteScheduled() &&
++        windows_util::CanOperateOnWindow(
++            this, BrowserExtensionWindowController::From(window),
++            extractor.type_filters())) {
++      last_focused_browser = window;
++    }
++  }
++  if (!last_focused_browser)
+   ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+       [&](BrowserWindowInterface* browser) {
+         if (windows_util::CanOperateOnWindow(
+@@ -1793,7 +1808,20 @@ void WindowsUpdateFunction::UpdateWindowState(
+     browser_window->SetBounds(window_bounds);
+   }
+ 
+-  if (params.update_info.focused) {
++  // Yab: an embedder's window (its pages in concealed producers) is the
++  // embedder's to bring forward; activating the concealed producer would
++  // show nothing. Unfocusing one is left to the person, as the embedder's
++  // windows are.
++  content::WebContents* external_page = window_controller->GetActiveTab();
++  auto* external_model = ExternalTabModel::Get(external_page);
++  if (params.update_info.focused && external_model &&
++      external_model->embedded()) {
++    if (*params.update_info.focused) {
++      if (auto focus = GetExternalExtensionHooks().window_focus_requested) {
++        focus(external_page);
++      }
++    }
++  } else if (params.update_info.focused) {
+     if (*params.update_info.focused) {
+       browser_window->Activate();
+     } else {
+diff --git a/chrome/browser/extensions/browser_extension_window_controller.cc b/chrome/browser/extensions/browser_extension_window_controller.cc
+index 37fb2ff..e9b7ffd 100644
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -12,6 +12,7 @@
+ #include "base/notimplemented.h"
+ #include "base/strings/stringprintf.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/external_extension_window.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
+@@ -140,8 +141,15 @@ int BrowserExtensionWindowController::GetWindowId() const {
+ }
+ 
+ std::string BrowserExtensionWindowController::GetWindowTypeText() const {
+-  if (ExternalTabWindow::Bound(GetActiveTab()))
+-    return api::tabs::ToString(api::tabs::WindowType::kNormal);
++  // Yab: a window the embedder shows is "normal" whatever its concealed
++  // producer, except one an extension's windows.create({type: "popup"}) made
++  // (ExternalExtensionWindow), which is a "popup" as in Chrome: wallets look
++  // for their notification window by that type to focus it again.
++  if (ExternalTabWindow::Bound(GetActiveTab())) {
++    return api::tabs::ToString(ExternalExtensionWindow::Get(GetActiveTab())
++                                   ? api::tabs::WindowType::kPopup
++                                   : api::tabs::WindowType::kNormal);
++  }
+   return api::tabs::ToString(window_type_);
+ }
+ 
+diff --git a/chrome/browser/extensions/external_action_origin.h b/chrome/browser/extensions/external_action_origin.h
+index c68211d..aa0a69c 100644
+--- a/chrome/browser/extensions/external_action_origin.h
++++ b/chrome/browser/extensions/external_action_origin.h
+@@ -35,6 +35,9 @@ struct ExternalExtensionHooks {
+   void (*popup_closed)(content::WebContents* popup) = nullptr;
+   // chrome.tabs.update({active: true}) on a page of an embedder's window.
+   void (*tab_activate_requested)(content::WebContents*) = nullptr;
++  // Yab: chrome.windows.update({focused: true}) on an embedder's window, named
++  // by one of its pages: the embedder brings that window to the front.
++  void (*window_focus_requested)(content::WebContents*) = nullptr;
+   // Conceal an externally presented original action widget before Show().
+   // False cancels showing. Ordinary Chrome popup paths never call this.
+   bool (*popup_before_show)(content::WebContents*, views::Widget*) = nullptr;

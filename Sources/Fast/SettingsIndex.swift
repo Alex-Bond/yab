@@ -48,7 +48,7 @@ struct SettingsItem: Identifiable, Hashable {
 
     private static let fixed: [SettingsItem] = [
         SettingsItem(id: "peek-click", page: .tabs, title: "Peek links with", words: "shift option click modifier preview split"),
-        SettingsItem(id: "peek-address", page: .tabs, title: "Show address bar in Peek", words: "peek preview url site address bar toolbar link"),
+        SettingsItem(id: "peek-address", page: .appearance, title: "Show address bar in Peek", words: "peek preview url site address bar toolbar link"),
         SettingsItem(id: "link-routes-default", page: .spaces, title: "Default Space", words: "air traffic control recent fallback external links"),
         SettingsItem(id: "shield-lists", page: .privacy, title: "Filter lists", words: "ad blocker easylist privacy custom subscription update"),
         SettingsItem(id: "experimental-mail", page: .experimental, title: "Mail (Experimental)",
@@ -83,6 +83,8 @@ struct SettingsItem: Identifiable, Hashable {
                      within: "search-engine", shown: { $0.engine != .custom }),
         SettingsItem(id: "site-search", page: .search, title: "Sites",
                      words: "tab site search youtube github wikipedia chatgpt keyword alias shortcut opensearch arc scope add"),
+        SettingsItem(id: "site-search-space", page: .search, title: "Keyboard shortcut",
+                     words: "space or tab site search alias keyword shortcut start activate trigger chrome search engines"),
         SettingsItem(id: "quick-action:new-document", page: .search, title: "New document",
                      words: "quick action alias doc notion google docs create page shortcut"),
         SettingsItem(id: "quick-action:new-meeting", page: .search, title: "New meeting",
@@ -309,6 +311,9 @@ struct SettingsItem: Identifiable, Hashable {
                      shown: { $0.usesSpaces }),
         SettingsItem(id: "awake-sites", page: .tabs, title: "Always keep these sites awake",
                      words: "keep active never sleep suspend hibernate exceptions whatsapp slack discord gmail spotify memory saver reload discard ram"),
+        // Chrome's Settings › Performance › Energy Saver (EnergySaver).
+        SettingsItem(id: "energy-saver", page: .tabs, title: "Energy Saver",
+                     words: "battery saver power saving low power mode energy battery life unplugged 20% frame rate fps smooth scrolling video performance chrome"),
         SettingsItem(id: "page-kept", page: .search, title: "On a Page",
                      words: "this page over a page field keep kept remove copy URL markdown link duplicate tab always actions float video translate reading mode mute actual size PDF fill sign tracking extensions buttons commands userscripts developer errors inspect element reload cache localhost developer mode hidden show add row priority order reorder"),
         SettingsItem(id: "field-fallbacks", page: .search, title: "While You Type",

@@ -7,7 +7,9 @@ import WebKit
 // field's own is: the way back at its head, YouTube's mark and name at its
 // foot, its edge in the site's color, and Return asks
 // YouTube instead of the engine. ⌫ in the empty field, or Escape, gives the
-// field back as it was.
+// field back as it was. A site's alias and a space does the same, as in
+// Chrome, while Settings › Field › Sites › Keyboard shortcut is Space or Tab
+// (Chrome's default); at Tab only Tab does (`spaced`, register 2668).
 //
 // A few dozen sites are known from the start. Any other site that says how
 // it is searched (an OpenSearch description, the thing Chrome reads for the
@@ -15,8 +17,17 @@ import WebKit
 // Tab once you type its name.
 
 struct Scope: Codable, Hashable, Identifiable {
-    /// The site, as the field writes it: youtube.com.
+    /// Which search this is: what its keyword, address, on or off and
+    /// what was asked of it are kept under. The site's host for the app's
+    /// own and the learned, one search a site. A search of your own is
+    /// known by the address it was added with, so one host can have many,
+    /// as internal tools under one host on different paths do, the way
+    /// Chrome keeps a search engine per keyword, not per host (#2027).
     var id: String
+    /// The site a search of your own is on, as the field writes it:
+    /// tools.example.com. Nil when the id is the site, as it is for the
+    /// app's own, the learned, and those of your own kept before #2027.
+    var site: String?
     var name: String
     /// The results page, `%s` where the words go.
     var template: String
@@ -39,10 +50,13 @@ struct Scope: Codable, Hashable, Identifiable {
     /// One that can be removed: learned or added, not the app's own.
     var removable: Bool { learned || own == true }
 
-    /// Every host that is this site.
-    var allHosts: [String] { [id] + hosts }
+    /// The site, as the field writes it: youtube.com.
+    var host: String { site ?? id }
 
-    var home: URL? { extensionID == nil ? URL(string: "https://" + id + "/") : nil }
+    /// Every host that is this site.
+    var allHosts: [String] { [host] + hosts }
+
+    var home: URL? { extensionID == nil ? URL(string: "https://" + host + "/") : nil }
 
     func url(for words: String) -> URL? { Engine.url(for: words, template: template) }
 
@@ -212,7 +226,7 @@ enum Scopes {
         if word.contains(where: { !($0.isLetter || $0.isNumber || $0 == "-" || $0 == ".") }) {
             return "Only letters, digits, - and ."
         }
-        if let other = all.first(where: { $0.id != scope.id && ($0.aliases.contains(word) || $0.name.lowercased() == word || $0.id == word) }) {
+        if let other = all.first(where: { $0.id != scope.id && ($0.aliases.contains(word) || $0.name.lowercased() == word || $0.host == word) }) {
             return "Already \(other.name)"
         }
         if let action = QuickActions.shared.actions.first(where: { $0.enabled && $0.alias == word }) {
@@ -232,25 +246,49 @@ enum Scopes {
         changed()
     }
 
+    /// The search Add Site would make of these fields, before it is kept:
+    /// what the card checks its keyword against. Nil for an address that
+    /// can't be one.
+    static func draft(name: String, template: String) -> Scope? {
+        guard Engine.accepts(template),
+              let raw = URLComponents(string: template.replacingOccurrences(of: "%s", with: "a"))?.host?.lowercased()
+        else { return nil }
+        let host = raw.hasPrefix("www.") ? String(raw.dropFirst(4)) : raw
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return Scope(id: identity(for: template), site: host, name: trimmed.isEmpty ? host : trimmed,
+                     template: template, own: true)
+    }
+
+    /// Who a new search of your own is: the one already sending words to
+    /// this very address, which it then replaces, as a second Add of the
+    /// same search changes its name and keyword; otherwise the address it
+    /// is added with, made unique if an edited search still holds it. Never
+    /// the host: one host has many searches (#2027).
+    private static func identity(for template: String) -> String {
+        let current = all
+        if let same = current.first(where: { $0.removable && $0.extensionID == nil && $0.template == template }) {
+            return same.id
+        }
+        let taken = Set(current.map(\.id))
+        var id = template, n = 2
+        while taken.contains(id) { id = template + "#\(n)"; n += 1 }
+        return id
+    }
+
     /// A site of your own, from Settings › Search › Add Site.
     static func add(name: String, template: String, keyword: String) -> Scope? {
-        guard Engine.accepts(template),
-              let host = URLComponents(string: template.replacingOccurrences(of: "%s", with: "a"))?.host?.lowercased()
-        else { return nil }
-        let id = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        let scope = Scope(id: id, name: trimmed.isEmpty ? id : trimmed, template: template, own: true)
-        guard aliasProblem(keyword, for: scope) == nil else { return nil }
-        memory.learned.removeAll { $0.id == id }
+        guard let scope = draft(name: name, template: template),
+              aliasProblem(keyword, for: scope) == nil else { return nil }
+        memory.learned.removeAll { $0.id == scope.id }
         memory.learned.append(scope)
         save()
         changed()
         // Add Site's fields are the whole new draft, including a blank
         // keyword. An earlier address edit must not override this template
-        // after the same-host custom row has been replaced.
+        // after the same search has been replaced.
         setTemplate(template, for: scope)
         setKeyword(keyword, for: scope)
-        if fixtureSettings == nil { Favicons.shared.fetch(host: id) }
+        if fixtureSettings == nil { Favicons.shared.fetch(host: scope.host) }
         return scope
     }
 
@@ -310,8 +348,57 @@ enum Scopes {
         return sites.first { scope in
             let least = scope.learned ? 3 : 2
             guard text.count >= least else { return false }
-            return key(scope.name).hasPrefix(text) || keyword(scope).hasPrefix(text) || scope.id.hasPrefix(text)
+            return key(scope.name).hasPrefix(text) || keyword(scope).hasPrefix(text) || scope.host.hasPrefix(text)
         }
+    }
+
+    // MARK: - Space, as well as Tab
+
+    /// Settings › Field › Sites › Keyboard shortcut: "Space or
+    /// Tab" (on, the default) or "Tab" (off), whether a space after a
+    /// site's alias starts that site's search as Tab does
+    /// (omnibox.keyword_space_triggering_enabled).
+    static let spaceKey = "field.keywordSpace"
+    static var spaceStarts: Bool { settings.object(forKey: spaceKey) as? Bool ?? true }
+
+    /// The site a space just typed starts, and the words its field begins
+    /// with, decided as Chromium's omnibox decides it
+    /// (OmniboxEditModel::ShouldAcceptKeywordAfterInsertingSpaceAtEnd and
+    /// ShouldAcceptKeywordAfterInsertingSpaceInMiddle): the whole of an
+    /// alias and then a space at the end ("yt " → YouTube, nothing in its
+    /// field yet), or a space put in right after an alias that begins the
+    /// words, the rest of them as they were ("yt|cats" → YouTube, "cats").
+    /// Only an alias, the keyword in Sites' table or an extension's: a
+    /// site's name or host, which Tab also takes, stays words ("youtube
+    /// cats"), as Chromium enters on a keyword alone; so does a part of an
+    /// alias ("st " for "so"). `caret` is where the caret is after the
+    /// space, in the editor's UTF-16 count. A paste is never this, and is
+    /// left out by the caller, as Chromium leaves it out.
+    static func spaced(from old: String, to new: String, caret: Int) -> (scope: Scope, words: String)? {
+        let text = new as NSString
+        guard spaceStarts, old != new, caret >= 2, caret <= text.length,
+              ["\u{20}", "\u{3000}"].contains(text.substring(with: NSRange(location: caret - 1, length: 1))) else { return nil }
+        // One word before the space and nothing before it: "yt", not
+        // " yt", "yt  " or "go yt".
+        let head = text.substring(to: caret - 1)
+        guard !head.contains(where: \.isWhitespace) else { return nil }
+        let rest = text.substring(from: caret)
+        // In the middle, only a space put in: the words before it as they were.
+        if !rest.isEmpty {
+            let was = old as NSString
+            guard was.length >= caret, was.substring(to: caret - 1) == head else { return nil }
+        }
+        guard let scope = aliased(head) else { return nil }
+        return (scope, rest)
+    }
+
+    /// The site this word is the alias of: the keyword in Sites' table of
+    /// one that is on, or an extension's keyword.
+    static func aliased(_ word: String) -> Scope? {
+        let word = word.lowercased()
+        guard !word.isEmpty else { return nil }
+        if let keyword = ExtensionOmnibox.shared.scope(for: word) { return keyword }
+        return on.first { $0.aliases.contains(word) }
     }
 
     /// A name as it would be typed: lowercased, without spaces.
@@ -321,8 +408,8 @@ enum Scopes {
 
     /// The site's name without its ending: habr for habr.com.
     static func keyword(_ scope: Scope) -> String {
-        let parts = scope.id.split(separator: ".")
-        return parts.count > 1 ? parts.dropLast().joined(separator: ".") : scope.id
+        let parts = scope.host.split(separator: ".")
+        return parts.count > 1 ? parts.dropLast().joined(separator: ".") : scope.host
     }
 
     // MARK: - what was asked
@@ -428,7 +515,7 @@ enum Scopes {
         var name = reader.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty || name.count > 30 { name = title.isEmpty || title.count > 30 ? host : title }
         let scope = Scope(id: host, name: name, template: template, color: color, learned: true)
-        guard !all.contains(where: { $0.id == host }) else { return }
+        guard !all.contains(where: { $0.id == host || $0.host == host }) else { return }
         memory.learned.append(scope)
         if memory.learned.count > 200 { memory.learned.removeFirst(memory.learned.count - 200) }
         changed()
@@ -511,19 +598,78 @@ enum Scopes {
     private static var memory: Memory = read()
 
     /// The file again, as sync wrote it from another Mac (SyncCenter).
-    static func reload() { memory = read() }
+    static func reload() {
+        memory = read()
+        changed()
+    }
 
     private static func read() -> Memory {
-        guard var data = try? Data(contentsOf: file) else { return Memory() }
+        guard let data = try? Data(contentsOf: file) else { return Memory() }
+        guard let decoded = decode(data) else {
+            Store.quarantine(file)
+            return Memory()
+        }
+        if decoded.separated { save() }
+        return decoded.memory
+    }
+
+    /// A file's sites as they are kept, and whether any had to be given an
+    /// identity of its own to be read (separate).
+    private static func decode(_ raw: Data) -> (memory: Memory, separated: Bool)? {
+        var data = raw
         // Sites saved while yab spelled it the British way.
         if let text = String(data: data, encoding: .utf8), text.contains("\"colour\"") {
             data = Data(text.replacingOccurrences(of: "\"colour\"", with: "\"color\"").utf8)
         }
-        guard let read = try? JSONDecoder().decode(Memory.self, from: data) else {
-            Store.quarantine(file)
-            return Memory()
+        guard var read = try? JSONDecoder().decode(Memory.self, from: data) else { return nil }
+        let separated = separate(&read)
+        return (read, separated)
+    }
+
+    /// Before #2027 a search of your own was known by its host, so one
+    /// added on a host the app searches itself (github.com/issues beside
+    /// GitHub), or one written twice by a sync, shared its id with another:
+    /// one keyword, one switch and one list of what was asked for both.
+    /// Each such one is given its own identity, the address it was added
+    /// with, carrying the keyword, address, switch and words it had, so
+    /// nothing it did changes and no search goes. Every other search keeps
+    /// its id, and with it everything kept under it. Reads neither `all`
+    /// nor `memory`: it runs while the file is first read.
+    private static func separate(_ memory: inout Memory) -> Bool {
+        var taken = Set(preset.map(\.id))
+        var keywords = settings.dictionary(forKey: keywordsKey) as? [String: String] ?? [:]
+        var templates = settings.dictionary(forKey: templatesKey) as? [String: String] ?? [:]
+        var moved = false
+        for index in memory.learned.indices {
+            let scope = memory.learned[index]
+            guard taken.contains(scope.id) else { taken.insert(scope.id); continue }
+            guard scope.own == true, scope.extensionID == nil else { continue }
+            var id = scope.template, n = 2
+            while taken.contains(id) { id = scope.template + "#\(n)"; n += 1 }
+            taken.insert(id)
+            let old = scope.id
+            memory.learned[index].id = id
+            memory.learned[index].site = scope.host
+            if let keyword = keywords[old] { keywords[id] = keyword }
+            if let template = templates[old] { templates[id] = template }
+            if let asked = memory.asked[old] { memory.asked[id] = asked }
+            if off.contains(old) { off.insert(id); Store.settings.set(off.sorted(), forKey: offKey) }
+            moved = true
         }
-        return read
+        guard moved else { return false }
+        settings.set(keywords, forKey: keywordsKey)
+        settings.set(templates, forKey: templatesKey)
+        return true
+    }
+
+    /// The tests: a scopes.json read as the app reads it, its sites then
+    /// the fixture's (withSitesForTesting). Nil when the file can't be read.
+    static func readForTesting(_ data: Data) -> Bool? {
+        precondition(Store.testing && Store.unitTests && fixtureSettings != nil)
+        guard let decoded = decode(data) else { return nil }
+        memory = decoded.memory
+        changed()
+        return decoded.separated
     }
 
     private static var saving = false
@@ -599,7 +745,26 @@ extension Browser {
     @discardableResult
     func enterScope() -> Bool {
         guard query.scope == nil, let scope = query.offering else { return false }
-        query.before = typed
+        enter(scope, giving: typed, words: "")
+        return true
+    }
+
+    /// A space typed after a site's alias, with Settings' Keyboard shortcut
+    /// at Space or Tab: the field becomes that site's, as Tab makes it,
+    /// with the words after the space in it (Scopes.spaced). Only in the
+    /// plain field, as Tab's site is only offered there. ⌫ in its empty
+    /// field gives back the alias and its space, as Chromium's does
+    /// (OmniboxEditModel::ClearKeyword), so words typed on from there stay
+    /// words.
+    func enterScope(spacing old: String, to new: String, caret: Int) -> Bool {
+        guard query.scope == nil, query.place == nil, !query.actionsPage, query.edit == nil, !query.answering,
+              emojiWords == nil, let (scope, words) = Scopes.spaced(from: old, to: new, caret: caret) else { return false }
+        enter(scope, giving: (new as NSString).substring(to: caret), words: words)
+        return true
+    }
+
+    private func enter(_ scope: Scope, giving before: String, words: String) {
+        query.before = before
         query.offering = nil
         // Before the scope is published, so the one redraw it causes has it.
         query.tints = (scope.tint(dark: false), scope.tint(dark: true))
@@ -611,8 +776,7 @@ extension Browser {
         }
         picked = nil
         query.pointed = nil
-        typed = ""
-        return true
+        typed = words
     }
 
     /// ⌫ in the empty field gives back the words Tab took; Escape keeps

@@ -16,6 +16,13 @@ struct AskCardTests {
         return made
     }
 
+    @Test func arrivalMetadataDoesNotChangeTheQuestionsSemanticIdentity() {
+        let first = AgentPermit(kind: .sendMessage(to: "Mom"), session: "same-caller", detail: "Messages", draft: "Landing at 18:40")
+        let second = AgentPermit(kind: .sendMessage(to: "Mom"), session: "same-caller", detail: "Messages", draft: "Landing at 18:40")
+        #expect(first == second)
+        #expect(first.askOrder <= second.askOrder)
+    }
+
     @Test func mailSearchIsASearchFieldWithItsReach() {
         let asker = session()
         var permit = AgentPermit(kind: .mailRead, session: asker.id, detail: "Looks for \u{201C}boarding pass\u{201D}")

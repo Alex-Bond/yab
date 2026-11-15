@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 import Testing
 @testable import Fast
 
@@ -19,19 +20,78 @@ struct AgentSecretsTests {
         #expect(!AgentSecrets.protected(nil))
     }
 
-    @Test func secretProbeReturnsOnlyABoolean() async throws {
-        let cases: [(String, Bool)] = [
-            ("<title>Checkout</title><input type=password value=synthetic-password>", false),
-            ("<h1>Recovery phrase</h1><p>SYNTHETIC_WORDS_ONLY</p>", true),
-            ("<label>Seed phrase<input></label>", true),
-            ("<input name=recovery_phrase value=SYNTHETIC_WORDS_ONLY>", true),
-            ("<textarea>-----BEGIN PRIVATE KEY----- SYNTHETIC</textarea>", true),
-            ("<input value='" + String(repeating: "a", count: 64) + "'>", true),
+    @Test nonisolated func pdfViewerIsAnExactBrowserOrigin() {
+        #expect(AgentSecrets.builtInPDFViewer(URL(string: "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html")))
+        for value in ["chrome-extension://vault/page.html", "https://mhjfbmdgcfjbbpaeojofohoefgiehjai/",
+                      "blob:chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/id",
+                      "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai.evil/index.html"] {
+            #expect(!AgentSecrets.builtInPDFViewer(URL(string: value)))
+        }
+        // Other consumers still treat extension URLs (including wrappers) as
+        // protected. Only the native frame classifier recognizes the viewer.
+        #expect(AgentSecrets.protected(URL(string: "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html")))
+    }
+
+    @Test func originalPDFTextIsNumberedByPage() throws {
+        let document = PDFSignTests.contract(form: false)
+        let second = PDFSignTests.contract(form: false)
+        document.insert(try #require(second.page(at: 0)), at: 1)
+        let text = try AgentPDF.extract(#require(document.dataRepresentation()))
+        #expect(text.contains("Page 1\n"))
+        #expect(text.contains("Page 2\n"))
+        #expect(text.components(separatedBy: "Master Services Agreement").count == 3)
+        #expect(throws: (any Error).self) { try AgentPDF.extract(Data("not a PDF".utf8)) }
+    }
+
+    static let hex = String(repeating: "a", count: 64)
+
+    /// Pages the shipped 0.47.18 guard refused, read with its own probe
+    /// (evals/golden/fixtures/agent_guard_0.47.18.js) and with this one.
+    @Test func ordinaryPagesThe04718GuardRefusedAreReadable() async throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../evals/golden/fixtures/agent_guard_0.47.18.js").standardizedFileURL
+        let shipped = try String(contentsOf: fixture, encoding: .utf8)
+        for html in [
+            // Apple Developer, Certificates, Identifiers & Profiles.
+            "<title>Certificates, Identifiers & Profiles</title><nav>Certificates Identifiers Devices Profiles Keys</nav><h1>Register a new identifier</h1><p>Keys let you sign requests. Download the private key once; Apple doesn't keep a copy.</p><label>Description<input name=description></label><label>Identifier<input name=identifier placeholder='group.com.example.app'></label>",
+            "<h1>Docs</h1><p>Generate a private key with openssl, then keep your recovery codes and recovery phrase somewhere safe.</p>",
+            "<h1>Sample</h1><pre>-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg...\n-----END PRIVATE KEY-----</pre>",
+            "<h1>Wallet</h1><p>Address</p><input name=address value=0x" + Self.hex + "><input name=secret_key value=" + Self.hex + ">",
+            "<h1>Account security</h1><input name=backup_codes value=SYNTHETIC>",
+        ] {
+            let page = await AgentKeysTests.page(html)
+            let old = try await page.call("return Boolean(" + shipped + ")", in: .agent, gesture: false)
+            let current = try await page.call("return " + AgentSecrets.reasonProbe, in: .agent, gesture: false)
+            #expect(old as? Bool == true, "0.47.18 refused this page")
+            #expect(current as? Bool == false, "an ordinary page: \(html.prefix(60))")
+        }
+    }
+
+    @Test func onlyRecoveryPhraseAndPrivateKeyFieldsAreRefused() async throws {
+        let cases: [(String, String?)] = [
+            ("<title>Checkout</title><input type=password value=synthetic-password>", nil),
+            ("<h1>Recovery phrase</h1><p>SYNTHETIC_WORDS_ONLY</p>", nil),
+            ("<h1>Mnemonic devices</h1><input name=title>", nil),
+            ("<input name=recovery_code>", nil),
+            ("<input aria-label='Recovery email'>", nil),
+            ("<input type=hidden name=seed_phrase value=x>", nil),
+            ("<label>Seed phrase<input></label>", "recovery phrase field"),
+            ("<input name=recovery_phrase value=SYNTHETIC_WORDS_ONLY>", "recovery phrase field"),
+            ("<input id=seedPhraseWord3>", "recovery phrase field"),
+            ("<textarea placeholder='Enter your 12 recovery words'></textarea>", "recovery phrase field"),
+            ("<input autocomplete=off name=mnemonic>", "recovery phrase field"),
+            ("<span id=l>Backup phrase</span><textarea aria-labelledby=l></textarea>", "recovery phrase field"),
+            ("<fieldset><legend>Secret Recovery Phrase</legend><input aria-label='Word 1'><input aria-label='Word 2'></fieldset>", "recovery phrase field"),
+            ("<div contenteditable aria-label='Seed words'></div>", "recovery phrase field"),
+            ("<textarea>-----BEGIN PRIVATE KEY----- SYNTHETIC</textarea>", "private key field"),
+            ("<input value='-----BEGIN RSA PRIVATE KEY----- SYNTHETIC'>", "private key field"),
         ]
         for (html, expected) in cases {
             let page = await AgentKeysTests.page(html)
-            let result = try await page.call("return " + AgentSecrets.probe, in: .agent, gesture: false)
-            #expect(result as? Bool == expected)
+            let result = try await page.call("return " + AgentSecrets.reasonProbe, in: .agent, gesture: false)
+            if let expected { #expect(result as? String == expected, "\(html)") }
+            else { #expect(result as? Bool == false, "\(html)") }
+            #expect(!String(describing: result).contains("SYNTHETIC"))
         }
     }
 
@@ -45,10 +105,10 @@ struct AgentSecretsTests {
         """, in: .agent)
         for (html, expected) in [
             ("<input aria-label='Full name' value=Ada>", false),
-            ("<h1>Recovery phrase</h1><p>SYNTHETIC_WORDS_ONLY</p>", true),
+            ("<h1>Recovery phrase</h1><p>SYNTHETIC_WORDS_ONLY</p>", false),
             ("<input name=recovery_phrase value=SYNTHETIC_WORDS_ONLY>", true),
             ("<textarea>-----BEGIN PRIVATE KEY----- SYNTHETIC</textarea>", true),
-            ("<input value='" + String(repeating: "a", count: 64) + "'>", true),
+            ("<input name=secret_key value='" + Self.hex + "'>", false),
             ("<button>Save draft</button>", false),
         ] {
             _ = try await page.call("document.getElementById('host').shadowRoot.getElementById('nested').shadowRoot.innerHTML = html; return true;",
@@ -58,19 +118,62 @@ struct AgentSecretsTests {
         }
     }
 
-    @Test func unreadablyDeepShadowTreesFailClosed() async throws {
+    @Test func webKitChecksCurrentFramesAndNamesWhatItFound() async throws {
+        let page = await AgentKeysTests.page("<h1>Ordinary account</h1>")
+        _ = try await page.call("""
+        const frame = document.createElement('iframe');
+        frame.srcdoc = '<h1>Import a wallet</h1><input name=seed_phrase value=SYNTHETIC_WORDS_ONLY>';
+        await new Promise(resolve => { frame.onload = resolve; document.body.append(frame); });
+        return true;
+        """, in: .agent)
+        #expect(await AgentSecrets.check(page) == false)
+        let said = AgentSecrets.refusal(for: page)
+        #expect(said.contains("recovery-phrase field"))
+        #expect(!said.contains("SYNTHETIC_WORDS_ONLY"))
+        #expect(!said.lowercased().contains("password"))
+        _ = try await page.call("document.querySelector('iframe').remove(); return true;", in: .agent)
+        #expect(await AgentSecrets.check(page))
+    }
+
+    @Test func refusalsSayWhatWasFound() {
+        #expect(AgentSecrets.message("extension page").contains("extension's own page"))
+        #expect(AgentSecrets.message("recovery phrase field").contains("recovery-phrase field"))
+        #expect(AgentSecrets.message("private key field").contains("private key"))
+        for reason in AgentSecrets.reasons.keys {
+            #expect(!AgentSecrets.message(reason).contains("keys or passwords"))
+        }
+    }
+
+    @Test func largeAndDeepOrdinaryDocumentsStayReadable() async throws {
+        for html in [
+            "<h1>Dashboard</h1>" + String(repeating: "<span>cell</span>", count: 120000),
+            "<h1>Feed</h1><p>" + String(repeating: "update ", count: 200000) + "</p>",
+            "<h1>Commits</h1><pre>" + Self.hex + "</pre><input name=commit value=" + Self.hex + ">",
+        ] {
+            let page = await AgentKeysTests.page(html)
+            let result = try await page.call("return " + AgentSecrets.probe, in: .agent, gesture: false)
+            #expect(result as? Bool == false)
+        }
         let page = await AgentKeysTests.page("<title>Account</title><div id=host></div>")
         _ = try await page.call("""
         let host = document.getElementById('host');
-        for (let n = 0; n < 33; n++) {
+        for (let n = 0; n < 40; n++) {
           const root = host.attachShadow({mode:'open'});
           host = document.createElement('div');
           root.appendChild(host);
         }
+        for (let n = 0; n < 300; n++) document.body.appendChild(document.createElement('div')).attachShadow({mode:'open'}).innerHTML = '<span>item</span>';
         return true;
         """, in: .agent)
-        let result = try await page.call("return " + AgentSecrets.probe, in: .agent, gesture: false)
-        #expect(result as? Bool == true)
+        #expect(try await page.call("return " + AgentSecrets.probe, in: .agent, gesture: false) as? Bool == false)
+        // A seed field at the bottom of that deep tree is still found.
+        _ = try await page.call("""
+        let host = document.getElementById('host');
+        while (host.shadowRoot) host = host.shadowRoot.firstElementChild || host.shadowRoot.firstChild;
+        host.innerHTML = '<input name=recovery_phrase>';
+        return true;
+        """, in: .agent)
+        #expect(try await page.call("return " + AgentSecrets.probe, in: .agent, gesture: false) as? Bool == true)
     }
 }
 

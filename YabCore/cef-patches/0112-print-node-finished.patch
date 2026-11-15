@@ -1,0 +1,27 @@
+--- a/chrome/browser/printing/print_view_manager.cc
++++ b/chrome/browser/printing/print_view_manager.cc
+@@ -647,9 +647,22 @@
+   // (PrintRenderFrameHelper::PrintWithParams). Left to Chrome's preview, the
+   // tab is dimmed for a dialog this embedding never shows.
+   if (auto hook = extensions::GetExternalExtensionHooks().print_request) {
+-    // Nothing to resume: this request has no suspended script.
++    // Nothing to resume: this request has no suspended script. A node's
++    // request still has a renderer waiting: PrintRenderFrameHelper::PrintNode
++    // keeps print_in_progress_ until the preview "dialog" closes, and drops
++    // every later PrintNode of that frame until then, so the PDF viewer's
++    // Print worked once per page. The embedder's finish (or the request
++    // dropped unfinished) closes it as Chrome's dialog does.
++    base::OnceClosure done = base::DoNothing();
++    if (params->webnode_only) {
++      PrintPreviewForWebNode(render_frame_host);
++      done = base::BindOnce(
++          [](base::ScopedClosureRunner) {},
++          base::ScopedClosureRunner(base::BindOnce(
++              &PrintViewManager::PrintPreviewDone, weak_factory_.GetWeakPtr())));
++    }
+     if (hook(web_contents(), render_frame_host, /*scripted=*/false,
+-             base::DoNothing())) {
++             std::move(done))) {
+       PrintPreviewAllowedForTesting();
+       return;
+     }

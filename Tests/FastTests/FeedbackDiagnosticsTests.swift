@@ -45,6 +45,24 @@ struct FeedbackDiagnosticsTests {
         #expect(Set(reloads.keys) == ["count"] && reloads["count"] as? Int == 0)
     }
 
+    /// Feedback #1984: a lost YabCore reloads every Chromium page on screen.
+    /// It is an event with its fixed word and status, and a site that
+    /// doesn't know the kind yet still gets the rest.
+    @Test func aLostChromiumHelperIsAnEventAndOlderSitesGetTheRest() throws {
+        let log = FeedbackDiagnostics(clock: { 100 })
+        log.record(.tabClosed)
+        log.helperLost(.signal, code: 11, recovering: true)
+        log.helperLost(.protocolViolation, code: nil, recovering: false)
+        let events = log.events()
+        #expect(events.map(\.kind) == [.tabClosed, .helperLost, .helperLost])
+        #expect(events[1].reason == "signal" && events[1].code == 11)
+        #expect(events[2].reason == "protocolViolation.stopped" && events[2].code == nil)
+        let texts = log.snapshots(stallLog: "", state: FeedbackDiagnostics.State())
+        #expect(texts.count == 2)
+        let older = try #require(JSONSerialization.jsonObject(with: Data(texts[1].utf8)) as? [String: Any])
+        #expect((older["events"] as? [[String: Any]])?.map { $0["kind"] as? String } == ["tabClosed"])
+    }
+
     @Test func missingMemoryReadingsAreNotReportedAsZero() {
         let log = FeedbackDiagnostics(clock: { 100 })
         var memory = FeedbackDiagnostics.Memory()
@@ -260,6 +278,23 @@ struct FeedbackDiagnosticsTests {
         let payload = try #require(try JSONSerialization.jsonObject(with: Data(sent.utf8)) as? [String: Any])
         #expect((payload["page"] as? [String: Any])?["backing"] as? Double == 2)
         #expect(log.snapshots(stallLog: "").first.map { !$0.contains("\"page\"") } == true)
+    }
+
+    /// A tab with no WebKit page (a Chromium one, or one not built yet) is
+    /// not asleep unless it sleeps: #1927 and #1930 said "asleep" for the
+    /// Chromium page being scrolled. The engine is said either way.
+    @Test func aPageWithoutWebKitIsNotCalledAsleep() async {
+        _ = NSApplication.shared
+        let tab = Tab()
+        defer { tab.close() }
+        let awake = await FeedbackDiagnostics.page(of: tab, front: true)
+        #expect(awake["asleep"] == nil)
+        #expect(awake["engine"] as? String == tab.engineKind.rawValue)
+        tab.setAddressOptimistically(URL(string: "about:blank#diagnostics-asleep")!)
+        _ = tab.page
+        tab.sleep(picture: nil, reason: .heavyPage)
+        let asleep = await FeedbackDiagnostics.page(of: tab, front: true)
+        #expect(asleep["asleep"] as? Bool == true)
     }
 
     /// The tab in front is always `page`; another page that draws a canvas

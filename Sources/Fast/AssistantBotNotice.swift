@@ -57,8 +57,9 @@ struct AssistantBotNotice: View {
                 .accessibilityIdentifier("assistant.bot.notice")
             }
         }
-        // Whether a plan is signed in is read only on a bot's own page: a
-        // login shell in every window at launch is a cost for everyone.
-        .task(id: bot) { if bot != nil { await setup.look() } }
+        // Whether a plan is signed in is read only on a bot's own page, and
+        // from files: the notice shows by itself, nobody asked, so it never
+        // starts the login shell (Cortex).
+        .task(id: bot) { if bot != nil { await setup.look(whereTasksRun: false) } }
     }
 }

@@ -66,11 +66,20 @@ final class GeminiAccount: ObservableObject {
     private var checkedLogin = false
 
     @Published private(set) var awaitingCode = false
+    /// The sign-in's tab is open: until then Connect says it is opening,
+    /// not that a tab is asking.
+    @Published private(set) var pageOpen = false
     @Published private(set) var submittingCode = false
     @Published private(set) var codeError: String?
 
     func showSignIn() {
-        if codeError != nil { signIn(); return }
+        guard waiting == .signingIn else { return }
+        // The CLI gone without a page: a fresh one, rather than a button
+        // that does nothing (#1829).
+        if codeError != nil || login == nil || login?.closed == true || login?.finished == true || login?.authorizationURL == nil { signIn(); return }
+        if let login, !login.opened, login.authorizationURL != nil {
+            login.openPage(in: Links.browser ?? BrowserWindows.shared.newWindow(), choice: choice ?? .another)
+        }
         login?.show()
     }
 
@@ -85,6 +94,7 @@ final class GeminiAccount: ObservableObject {
     private func updateCodeState(_ signer: GeminiLogin) {
         guard login === signer else { return }
         awaitingCode = signer.awaitingCode
+        if pageOpen != signer.opened { pageOpen = signer.opened }
         submittingCode = signer.submittedCode && signer.codeError == nil && !signer.finished
         codeError = signer.codeError
     }
@@ -120,7 +130,10 @@ final class GeminiAccount: ObservableObject {
     /// Asks the CLI once a minute at most, or now when `fresh`.
     /// `within`: seconds `agy models` may take (25 at most).
     func look(fresh: Bool = false, within: TimeInterval = 25, permit: ProviderLaunchPermit? = nil,
-              find: (Bool) async -> Shell.Found = { await Shell.find(fresh: $0) }, profile: URL = GeminiSupport.profile) async {
+              find: (Bool) async -> Shell.Found = { await Shell.find(fresh: $0) }, profile: URL = GeminiSupport.profile,
+              confirmed: ((Bool) -> Void)? = nil) async {
+        var usable = false
+        defer { confirmed?(usable) }
         guard let permit = permit ?? ProviderConsent.shared.permit("gemini") ?? ProviderConsent.shared.connectionPermit("gemini"), permit.valid else { return }
         let mine = attempt
         if !fresh, let lookedAt, lookedAt.timeIntervalSinceNow > -60 { return }
@@ -155,10 +168,25 @@ final class GeminiAccount: ObservableObject {
         guard ran.code == 0, deadline.timeIntervalSinceNow > 0 else { keep(signedIn: false); return }
         // /usage refreshes quota from Google's backend without a model turn.
         // Unlike `models`, this must be able to use the keychain credential.
-        let auth = await Shell.timed(binary, ["-p", "/usage", "--output-format", "json"], env: prepared.env,
-                                     limit: max(1, deadline.timeIntervalSinceNow), in: prepared.cwd, permit: permit, captureErrors: true)
+        // A login it can't use makes it start a sign-in of its own: it
+        // opens Google through Yab's launcher and waits a minute for a code
+        // on its stdin, which nobody can give it. That page is the answer,
+        // signed out: the check ends there (SignInAsked), at once.
+        let asked = SignInAsked()
+        defer { asked.end() }
+        var env = prepared.env
+        env["YAB_GEMINI_PAGE"] = asked.page?.path
+        let auth = await Shell.timed(binary, ["-p", "/usage", "--output-format", "json"], env: env,
+                                     limit: max(1, deadline.timeIntervalSinceNow), in: prepared.cwd,
+                                     started: { asked.watch($0) }, permit: permit, captureErrors: true)
         guard permit.valid, attempt == mine else { return }
+        if asked.asked {
+            lastSaid = "Antigravity isn't signed in."
+            keep(signedIn: false)
+            return
+        }
         let checked = Self.authenticated(auth)
+        usable = checked
         if !checked {
             lastSaid = auth.late ? "Antigravity did not finish checking its Google sign-in."
                 : (auth.diagnostic + "\n" + auth.output).split(separator: "\n").map(String.init)
@@ -176,14 +204,14 @@ final class GeminiAccount: ObservableObject {
 
     /// Read only: the CLI prints its own public identity in its TUI header.
     /// /usage (including JSON) carries quotas, never an email or plan.
-    func identify(permit: ProviderLaunchPermit? = nil) async {
-        guard !Store.testing, signedIn == true, waiting == nil,
+    func identify(permit: ProviderLaunchPermit? = nil, profile: URL = GeminiSupport.profile, duringSignIn: Bool = false) async {
+        guard (!Store.testing || duringSignIn), (signedIn == true || duringSignIn), (waiting == nil || duringSignIn),
               let permit = permit ?? ProviderConsent.shared.permit("gemini") ?? ProviderConsent.shared.connectionPermit("gemini"),
               permit.valid, let binary else { return }
         let mine = attempt
         let inspector = GeminiLogin()
         defer { inspector.stop() }
-        do { try inspector.start(binary: binary, profile: GeminiSupport.profile,
+        do { try inspector.start(binary: binary, profile: profile,
                                  base: ProcessInfo.processInfo.environment, switching: false, permit: permit) }
         catch { return }
         let deadline = Date().addingTimeInterval(15)
@@ -218,7 +246,7 @@ final class GeminiAccount: ObservableObject {
         // A passive refresh during Switch Account must not accept the old
         // shared login, or finish before its new public identity is read.
         if signedIn == true, let login, waiting == .signingIn, choice?.source != .mac {
-            checkedLogin = login.opened
+            checkedLogin = login.opened || login.authenticated
             return
         }
         self.signedIn = signedIn
@@ -231,19 +259,23 @@ final class GeminiAccount: ObservableObject {
 
     /// The person's selected Google account, in its Yab space or a private
     /// tab. The CLI owns OAuth and the shared keyring entry throughout.
-    func signIn(permit: ProviderLaunchPermit? = nil, in browser: Browser? = nil) {
+    func signIn(permit: ProviderLaunchPermit? = nil, in browser: Browser? = nil,
+                profile: URL = GeminiSupport.profile) {
         guard let permit = permit ?? ProviderConsent.shared.connectionPermit("gemini") ?? ProviderConsent.shared.permit("gemini"), permit.valid else { return }
         enabled = true
         guard let binary else { return install(permit: permit) }
         let selected = choice ?? .another
-        let replacing = signedIn == true && selected.source != .mac
+        // A failed /usage check does not prove the shared CLI login is
+        // absent. An explicit Google account choice must also replace an
+        // existing TUI header when readiness was false or unknown.
+        let replacing = selected.source != .mac
         attempt += 1
         let mine = attempt
         login?.stop()
         let signer = GeminiLogin()
         login = signer
         checkedLogin = false
-        awaitingCode = false; submittingCode = false; codeError = nil
+        awaitingCode = false; submittingCode = false; codeError = nil; pageOpen = false
         signer.changed = { [weak self, weak signer] in
             guard let signer else { return }
             self?.updateCodeState(signer)
@@ -262,18 +294,53 @@ final class GeminiAccount: ObservableObject {
             defer { signer.stop(); if attempt == mine { login = nil; waiting = nil; awaitingCode = false; submittingCode = false } }
             guard permit.valid, attempt == mine else { return }
             if selected.source == .mac {
-                await look(fresh: true, within: max(1, deadline.timeIntervalSinceNow), permit: permit)
+                await look(fresh: true, within: max(1, deadline.timeIntervalSinceNow), permit: permit, profile: profile)
                 return
             }
             identity = nil
             keep(signedIn: false)
-            do { try signer.start(binary: binary, profile: GeminiSupport.profile,
+            do { try signer.start(binary: binary, profile: profile,
                                   base: ProcessInfo.processInfo.environment, switching: replacing, signingIn: true, permit: permit) }
             catch { trouble = error.localizedDescription; return }
             var checkedAt = Date.distantPast
             var restarted = false
             while Date() < deadline, permit.valid, attempt == mine {
-                if let browser = browser ?? Links.browser { signer.openPage(in: browser, choice: selected) }
+                if !signer.opened, signer.authorizationURL != nil {
+                    signer.openPage(in: browser ?? Links.browser ?? BrowserWindows.shared.newWindow(), choice: selected)
+                }
+                if let failure = signer.failure { trouble = failure; return }
+                if signer.usesACP {
+                    if signer.authenticated {
+                        // Only the authenticate response completes OAuth. A
+                        // usable old keyring or an open page is not completion.
+                        var verified = false
+                        await look(fresh: true, within: max(1, deadline.timeIntervalSinceNow), permit: permit, profile: profile,
+                                   confirmed: { verified = $0 })
+                        guard permit.valid, attempt == mine else { return }
+                        guard verified else {
+                            trouble = "Antigravity couldn't verify Google's sign-in. Try again."
+                            return
+                        }
+                        await identify(permit: permit, profile: profile, duringSignIn: true)
+                        guard permit.valid, attempt == mine else { return }
+                        guard identity != nil else {
+                            trouble = "Antigravity couldn't confirm the signed-in Google account. Try again."
+                            return
+                        }
+                        waiting = nil
+                        keep(signedIn: true)
+                        if let picked = selected.email, let actual = identity?.email,
+                           picked.lowercased() != actual.lowercased() {
+                            notice = "You picked \(picked); Google signed in \(actual)."
+                        }
+                        if let settings = SettingsWindow.shared.window, settings.isVisible { settings.makeKeyAndOrderFront(nil) }
+                        NSApp.activate()
+                        return
+                    }
+                    if signer.closed { cancel(); return }
+                    try? await Task.sleep(for: .milliseconds(100))
+                    continue
+                }
                 signer.completeCodePage()
                 if signer.codeError != nil {
                     // Keep the actionable error on the connect card. Show Sign-In
@@ -287,7 +354,7 @@ final class GeminiAccount: ObservableObject {
                 // for the CLI to open OAuth before accepting /usage again.
                 if signer.opened, closed || Date().timeIntervalSince(checkedAt) >= 3 {
                     checkedAt = Date()
-                    await look(fresh: true, within: max(1, deadline.timeIntervalSinceNow), permit: permit)
+                    await look(fresh: true, within: max(1, deadline.timeIntervalSinceNow), permit: permit, profile: profile)
                     guard permit.valid, attempt == mine else { return }
                     guard Date() < deadline else { break }
                     if checkedLogin {
@@ -326,7 +393,7 @@ final class GeminiAccount: ObservableObject {
                     if signer.loggedOut, !restarted {
                         restarted = true
                         signer.stop()
-                        do { try signer.start(binary: binary, profile: GeminiSupport.profile,
+                        do { try signer.start(binary: binary, profile: profile,
                                               base: ProcessInfo.processInfo.environment, switching: false, signingIn: true, permit: permit) }
                         catch { trouble = error.localizedDescription; return }
                     } else { trouble = "Antigravity closed its sign-in. Press Sign In to try again."; return }
@@ -465,5 +532,50 @@ final class GeminiAccount: ObservableObject {
         exec \(quoted(binary))
 
         """
+    }
+}
+
+/// A readiness check's agy run that started a sign-in of its own: it handed
+/// Yab's launcher a page (GeminiSupport.launcherScript writes it to
+/// $YAB_GEMINI_PAGE). The run is ended the moment the page is written, from
+/// the folder's write event, so a check never waits on a sign-in nobody
+/// sees; the page itself is never opened (#2038).
+final class SignInAsked: @unchecked Sendable {
+    let page: URL?
+    private let folder: URL?
+    private let lock = NSLock()
+    private var source: DispatchSourceFileSystemObject?
+
+    init() {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("yab-gemini-check-" + UUID().uuidString)
+        let made = (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+                                                            attributes: [.posixPermissions: 0o700])) != nil
+        self.folder = made ? folder : nil
+        page = made ? folder.appendingPathComponent("page") : nil
+    }
+
+    var asked: Bool { page.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
+
+    func watch(_ process: Process) {
+        guard let folder else { return }
+        let descriptor = open(folder.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: .write, queue: .global())
+        source.setEventHandler { [weak self] in self?.stopIfAsked(process) }
+        source.setCancelHandler { close(descriptor) }
+        lock.lock(); self.source = source; lock.unlock()
+        source.resume()
+        // Written before the watch began.
+        stopIfAsked(process)
+    }
+
+    private func stopIfAsked(_ process: Process) {
+        guard asked, process.isRunning else { return }
+        Shell.end(process, grace: 1)
+    }
+
+    func end() {
+        lock.lock(); source?.cancel(); source = nil; lock.unlock()
+        if let folder { try? FileManager.default.removeItem(at: folder) }
     }
 }

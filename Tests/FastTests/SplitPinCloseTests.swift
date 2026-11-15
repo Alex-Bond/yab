@@ -72,7 +72,8 @@ struct SplitPinCloseTests {
 
     /// A pair kept whole, above the line (Arc's pinned split): ⌘W on a half
     /// puts both down, they stay a pair and kept, and you land off them.
-    @Test func cmdWOnAKeptPairPutsBothDown() async throws {
+    @Test(arguments: [false, true])
+    func cmdWOnAKeptPairPutsBothDown(closingFocusedHalf: Bool) async throws {
         let (browser, id) = window()
         defer { forget(id) }
         let loose = browser.open(URL(string: "https://example.test/loose")!, foreground: false)
@@ -84,7 +85,7 @@ struct SplitPinCloseTests {
         #expect(left.kept && right.kept && browser.pair(of: left.id) != nil)
         browser.select(left)
         browser.focus(right)
-        browser.shut([right], byKey: true)
+        browser.shut([closingFocusedHalf ? right : left], byKey: true)
         try await settle(browser)
         #expect(left.kept && right.kept)
         #expect(left.asleep && right.asleep)

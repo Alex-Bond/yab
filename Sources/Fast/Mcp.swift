@@ -189,7 +189,8 @@ enum Wire {
             if let value = ProcessInfo.processInfo.environment[key] { arguments += ["--env", "\(key)=\(value)"] }
         }
         open.arguments = arguments + ["-a", Bundle.main.bundlePath, "--args"] + flags
-        guard (try? open.run()) != nil else { return false }
+        LaunchJournal.record("mcp.open", target: Bundle.main.bundleURL)
+        guard (try? open.runValidated()) != nil else { return false }
         open.waitUntilExit()
         // Up in a second or two; if it has been up a while and still isn't
         // listening, it has been told not to.
@@ -789,10 +790,13 @@ enum Mcp {
             let limit = Date().addingTimeInterval(personWait)
             var state = "waiting"
             var question = ""
+            var mailResult: [String: Any]?
             // A question with no tab of its own is asked on one the browser
             // picked; one for the whole chat waits on the chat.
             var wait: [String: Any] = ["do": "handoff-wait", "seconds": 20]
-            if let chat = got["chat"] as? String { wait["chat"] = chat } else { wait["id"] = got["tab"] ?? request["id"] ?? "" }
+            if let mail = got["mailAsk"] as? String { wait["mailAsk"] = mail }
+            else if let chat = got["chat"] as? String { wait["chat"] = chat }
+            else { wait["id"] = got["tab"] ?? request["id"] ?? "" }
             // A first look at once, for what Yab asks: said to the client
             // while the call keeps waiting.
             var told = false
@@ -800,6 +804,7 @@ enum Mcp {
                 wait["seconds"] = told ? min(20, max(1, limit.timeIntervalSinceNow)) : 0.3
                 let heard = ask(wait)
                 state = heard["state"] as? String ?? "done"
+                mailResult = heard["result"] as? [String: Any]
                 if let asked = heard["question"] as? String, !asked.isEmpty { question = asked }
                 if state != "waiting" { break }
                 // Said at once, then again every round: the line stays, and
@@ -811,7 +816,7 @@ enum Mcp {
             if state == "stopped" { return ["error": "The user stopped this task. Stop now."] }
             if state == "taken" { return ["error": Agents.takenWords] }
             if state == "waiting" { return ["error": unanswered(question)] }
-            got = ask(request)
+            got = mailResult ?? ask(request)
             // Asked and allowed, and done: said, so the agent doesn't think
             // it is still waiting.
             if got["error"] == nil { got["allowed"] = true }

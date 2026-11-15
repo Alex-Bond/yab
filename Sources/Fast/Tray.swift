@@ -106,11 +106,8 @@ final class Tray: NSPanel {
         generation += 1
         leaving = false
 
-        if parentWindowRef !== window {
-            parentWindowRef?.removeChildWindow(self)
-            window.addChildWindow(self, ordered: .above)
-            parentWindowRef = window
-        }
+        WindowHosting.attach(self, to: window)
+        parentWindowRef = window
         fit()
         watch()
 

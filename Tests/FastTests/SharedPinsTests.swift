@@ -5,7 +5,7 @@ import Testing
 /// The pins every space shares (SharedPins.swift, docs/shared-pins.md): the
 /// rules as pure functions, then a window's real tabs through switches,
 /// pins, merges and splits. One at a time: the shared row is one file.
-@Suite(.serialized)
+@Suite(.serialized, .spacesListAlone)
 struct SharedPinsTests {
     private func entry(_ url: String, pin: String? = "P", id: String? = UUID().uuidString) -> Session.Entry {
         Session.Entry(url: url, title: url, pin: pin, name: nil, seen: nil, id: id)
@@ -641,11 +641,10 @@ struct SharedPinsTests {
         #expect(browser.tabs.contains { $0 === script })
     }
 
-    /// Row 1149: a Meet tab stuck across spaces, in the way of a folder.
-    /// A call goes along only while it is live; in another space its
-    /// home's folder isn't drawn there, and once the call is over it goes
-    /// back to its own space, in its folder, not left in the one you are in.
-    @MainActor @Test func aCallGoesAlongOnlyWhileLiveAndThenGoesHome() throws {
+    /// Feedback #1878: a call stays in its space, live, in its folder,
+    /// rather than going along into every space you go to; it is never a
+    /// visitor there (`homeSpace`), so nothing has to send it home after.
+    @MainActor @Test func aLiveCallStaysInItsSpace() throws {
         let world = World()
         defer { world.close() }
         let browser = world.browser
@@ -658,25 +657,74 @@ struct SharedPinsTests {
         meet.nest = folder
         browser.select(meet)
         meet.pretendCall(true)
-        #expect(meet.onCall && browser.travels(meet))
+        #expect(meet.onCall && !browser.travels(meet))
+        #expect(Browser.holdsOwn([meet]))
 
         browser.switchSpace(to: work)
-        #expect(browser.tabs.contains { $0 === meet } && meet.homeSpace == home)
-        // Its home's folder is not drawn here.
-        #expect(!Folders.nests(in: browser.tabs).contains { $0.nest === folder })
-
-        let there = world.page("https://example.test/work")
-        browser.lay(browser.tabs + [there])
-        browser.select(there)
-        meet.pretendCall(false)
-        #expect(!browser.travels(meet))
         #expect(!browser.tabs.contains { $0 === meet })
         #expect(browser.parked[home]?.tabs.contains { $0 === meet } == true)
-        #expect(meet.nest === folder && meet.kept && meet.homeSpace == nil)
+        #expect(browser.spaceHolding(meet.id) == home && meet.homeSpace == nil)
+        #expect(meet.nest === folder && meet.kept && meet.onCall)
+        // Still the call the menu's keys mean, from here.
+        #expect(browser.call === meet)
+
+        browser.switchSpace(to: home)
+        #expect(browser.tabs.contains { $0 === meet } && browser.activeID == meet.id)
+        meet.pretendCall(false)
     }
 
-    /// A call's tab has Move to › Space like any: the same live tab goes
-    /// and stays there; its next call goes along again.
+    /// Feedback #1878: switched away from a live call, its page comes out
+    /// into the call window though its tab stays parked in its space; the
+    /// window's way back goes to that space, picks the tab, and lands.
+    @MainActor @Test func aCallLeftInItsSpaceFloatsAndComesBack() async throws {
+        let world = World()
+        defer { world.close() }
+        let browser = world.browser
+        let home = browser.spaceID
+        let work = world.space("Work")
+        let meet = Tab(factory: .webKitOnly)
+        browser.prepare(meet)
+        let url = URL(string: "https://meet.example.test/abc-defg-hij")!
+        let web = requireNativeWebKitFixture(meet, "SharedPinsTests")
+        web.loadHTMLString("<p>call</p>", baseURL: url)
+        let loaded = Date().addingTimeInterval(10)
+        // The HTML's own document: a fresh view's about:blank is complete at
+        // once, and the HTML's commit after the call went out landed it
+        // (pageCommitted), whenever loading was slower than the lift.
+        while (try? await web.evaluateJavaScript("document.readyState === 'complete' && !!document.querySelector('p')")) as? Bool != true, Date() < loaded {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        meet.setAddressOptimistically(url)
+        let page = world.page("https://example.test/page")
+        browser.lay([meet, page])
+        browser.select(meet)
+        meet.pretendCall(true)
+        #expect(browser.activeID == meet.id)
+        #expect(!meet.isBlank && !meet.asleep && meet.builtPage != nil && !meet.documentPiP.showing)
+        let floats = browser.prefs.floatsOnLeave
+        browser.prefs.floatsOnLeave = true
+        defer {
+            if browser.floating != nil { browser.land() }
+            meet.pretendCall(false)
+            browser.prefs.floatsOnLeave = floats
+            meet.close()
+        }
+
+        browser.switchSpace(to: work)
+        #expect(browser.parked[home]?.tabs.contains { $0 === meet } == true)
+        #expect(browser.activeID != meet.id && !browser.floater.showing)
+        let deadline = Date().addingTimeInterval(10)
+        while browser.floating != meet.id, Date() < deadline { try await Task.sleep(nanoseconds: 50_000_000) }
+        #expect(browser.floating == meet.id && browser.floater.kind == .call)
+        #expect(browser.floatingCall === meet && browser.spaceID == work)
+
+        browser.returnFloatingTab()
+        #expect(browser.spaceID == home && browser.activeID == meet.id)
+        #expect(browser.floating == nil && !meet.floating)
+    }
+
+    /// A call's tab has Move to › Space like any: the same live tab goes,
+    /// its page and call with it, and stays there.
     @MainActor @Test func aCallsTabMovesToASpaceAndStays() throws {
         let world = World()
         defer { world.close() }
@@ -691,15 +739,10 @@ struct SharedPinsTests {
         browser.select(page)
         let move = try #require(browser.moveTabs([meet], to: work, say: false))
         #expect(move.tabs.first?.now === meet)
-        #expect(meet.stays && !browser.travels(meet))
+        #expect(!meet.stays && !browser.travels(meet))
         browser.switchSpace(to: work)
         browser.switchSpace(to: home)
         #expect(browser.spaceHolding(meet.id) == work)
-
-        meet.pretendCall(false)
-        #expect(!meet.stays)
-        meet.pretendCall(true)
-        #expect(browser.travels(meet))
         meet.pretendCall(false)
     }
 
@@ -896,6 +939,68 @@ struct SharedPinsTests {
         b.followPins(Session.read(space: Space.pinsID).tabs)
         #expect(!b.tabs.contains { $0 === copy })
         #expect(gmail.everywhere == nil && a.tabs.contains { $0 === gmail })
+    }
+
+    @MainActor @Test func pairOnlyChangesArePartOfTheSharedPinMarks() {
+        let entries = [entry("https://pair.test/left"), entry("https://pair.test/right")]
+        let alone = SharedPins.marks(entries, pairs: [])
+        let paired = SharedPins.marks(entries, pairs: [.init(first: 0, second: 1, share: 0.6)])
+        let resized = SharedPins.marks(entries, pairs: [.init(first: 0, second: 1, share: 0.4)])
+        #expect(alone != paired)
+        #expect(paired != resized)
+        #expect(SharedPins.marks(entries, pairs: []) == alone)
+    }
+
+    /// R2776: a second window follows the pins before either window quits.
+    /// Following just the entries used to write the shared row without its
+    /// pair, so the next launch had two separate squares.
+    @MainActor @Test(arguments: [false, true])
+    func followingPinsKeepsTheirPairThroughTheOtherWindowsSave(parked: Bool) throws {
+        let world = World()
+        defer { world.close() }
+        let a = world.browser
+        let client = world.space("Pair Client", own: true)
+        let b = Browser(windowID: UUID())
+        defer {
+            b.letGo()
+            Session.settle()
+            if let window = b.windowID {
+                try? FileManager.default.removeItem(at: Store.file("session-window-\(window.uuidString).json"))
+                try? FileManager.default.removeItem(at: Store.file("session-window-\(window.uuidString)-\(client.uuidString).json"))
+                Store.settings.removeObject(forKey: "window.\(window.uuidString).space")
+            }
+        }
+        b.spaces = a.spaces
+        SharedPins.turn(true, in: [a, b], spacesOn: true)
+        if parked { b.switchSpace(to: client) }
+        let left = world.page("https://pair.test/left"), right = world.page("https://pair.test/right")
+        a.lay([left, right])
+        left.pin = "L"
+        right.pin = "R"
+        a.pairs = [Pair(first: left.id, second: right.id, share: 0.6)]
+        a.writeSession(now: true)
+        let saved = Session.read(space: Space.pinsID)
+        #expect(saved.pairs?.count == 1)
+
+        // The same entry notification as toldPins sends to another window.
+        b.followPins(saved.tabs, pairs: saved.pairs ?? [])
+        b.flushSession()
+        let persisted = Session.read(space: Space.pinsID)
+        #expect(persisted.pairs?.count == 1)
+        #expect(persisted.pairs?.first?.share == 0.6)
+        let row = b.loadRow(Space.pinsID)
+        defer { for tab in row.tabs { tab.close() } }
+        #expect(row.tabs.count == 2 && row.pairs.count == 1)
+        #expect(row.pairs.first?.share == 0.6)
+
+        // No entry changed: a divider move and Separate still propagate.
+        b.followPins(saved.tabs, pairs: [.init(first: 0, second: 1, share: 0.4)])
+        b.flushSession()
+        #expect(Session.read(space: Space.pinsID).pairs?.first?.share == 0.4)
+        b.followPins(saved.tabs, pairs: [])
+        b.flushSession()
+        #expect(Session.read(space: Space.pinsID).pairs == nil)
+        #expect(b.sharedPins?.count == 2)
     }
 
     // MARK: the grid standing still
@@ -1102,6 +1207,7 @@ private final class World {
 
     private static var sharedFile: URL { Store.file("session-\(Space.pinsID.uuidString).json") }
     private static var spacesFile: URL { Store.file("spaces.json") }
+    static let first = Space(id: Space.firstID, name: "Personal", icon: "🏠", ownSignIns: false)
 
     init() {
         spaces = Store.settings.object(forKey: "spaces")
@@ -1111,6 +1217,11 @@ private final class World {
         // In Each Space while the window comes up, so it starts as every
         // other test's does; each test turns the pins on itself.
         Store.settings.set(false, forKey: SharedPins.key)
+        // From the first space alone, whatever the Mac's test world was
+        // left with: a list without it (a run that crashed before `close`
+        // put the list back) failed every test that goes to it, and
+        // crashed the run on an empty list (`Browser.space`).
+        Spaces.write([World.first])
         browser = Browser(windowID: id)
         browser.prefs.usesSpaces = true
     }
@@ -1123,7 +1234,9 @@ private final class World {
     func space(_ name: String, own: Bool = false) -> UUID {
         let space = Space(id: UUID(), name: name, icon: "🧪", ownSignIns: own)
         browser.spaces.append(space)
-        if !own { Spaces.sharing.insert(space.id) }
+        // Native profile discovery rereads this list and rebuilds sharing.
+        // Keep the fixture's persisted and in-memory Space membership equal.
+        Spaces.write(browser.spaces)
         made.append(space.id)
         return space.id
     }
@@ -1141,6 +1254,7 @@ private final class World {
         Store.settings.set(pins, forKey: SharedPins.key)
         if let shared { try? shared.write(to: World.sharedFile) } else { try? FileManager.default.removeItem(at: World.sharedFile) }
         if let spacesList { try? spacesList.write(to: World.spacesFile, options: .atomic) } else { try? FileManager.default.removeItem(at: World.spacesFile) }
+        _ = Spaces.read()
         try? FileManager.default.removeItem(at: Store.file("session-window-\(id.uuidString).json"))
         for space in made {
             Spaces.sharing.remove(space)

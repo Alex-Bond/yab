@@ -47,6 +47,7 @@ extension SyncCenter {
     /// Capability records that came in: an iPhone this Mac doesn't list yet
     /// has the device list read again, so its name is there to send to.
     func heardCapabilities(_ records: [SyncKit.Record]) {
+        refreshAssistantAnswererNames()
         let known = Set(devices.map(\.id))
         if records.contains(where: { $0.id != Self.deviceID && !known.contains($0.id) }) { refreshDevicesSoon() }
         objectWillChange.send()

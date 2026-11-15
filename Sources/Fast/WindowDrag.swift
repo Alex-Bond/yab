@@ -30,6 +30,18 @@ enum WindowDrag {
     private static var kept: Set<ObjectIdentifier> = []
     /// The window a press off the handles is being handed round in.
     private static weak var pressing: NSWindow?
+    private static var tabPress: NSEvent?
+
+    /// The first movement chooses the gesture. Once a horizontal reorder
+    /// has started it may still leave the strip and tear out normally.
+    static func dragTab(in window: NSWindow) -> Bool {
+        guard let event = tabPress, event.window === window,
+              NSEvent.pressedMouseButtons & 1 != 0,
+              !window.styleMask.contains(.fullScreen) else { return false }
+        tabPress = nil
+        window.performDrag(with: event)
+        return true
+    }
 
     static func keep(_ window: NSWindow) {
         window.isMovable = true
@@ -71,6 +83,8 @@ enum WindowDrag {
             typealias Send = @convention(c) (NSWindow, Selector, NSEvent) -> Void
             let pass = unsafeBitCast(method_getImplementation(method), to: Send.self)
             let handle: @convention(block) (NSWindow, NSEvent) -> Void = { window, event in
+                if event.type == .leftMouseDown { tabPress = event }
+                if event.type == .leftMouseUp { tabPress = nil }
                 guard event.type == .leftMouseDown, !onHandle(window, event) else { return pass(window, send, event) }
                 let before = pressing
                 pressing = window
@@ -124,6 +138,16 @@ protocol WindowHandle: NSView {}
 enum StripPress {
     /// A little slack, so a shaky click is still a click.
     static let slack: CGFloat = 3
+    /// Keep a handle after the plus even when the tab run scrolls.
+    static let endGap: CGFloat = 12
+
+    static func inTabAir(_ point: CGPoint, bounds: CGRect) -> Bool {
+        bounds.contains(point) && (point.y < bounds.minY + 6 || point.y >= bounds.maxY - 6)
+    }
+
+    static func verticalTab(_ dx: CGFloat, _ dy: CGFloat) -> Bool {
+        abs(dy) >= 5 && abs(dy) > abs(dx)
+    }
 
     /// The press has gone far enough to be the window being moved.
     static func drags(_ dx: CGFloat, _ dy: CGFloat) -> Bool {

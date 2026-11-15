@@ -158,17 +158,15 @@ struct PurchasesTests {
     /// after its snippet) or it went to the bin; what was read keeps
     /// between launches as it was.
     @Test func aMailIsReadOnceUntilItChanges() throws {
-        let from = MailPerson.one("Figma <billing@figma.com>")!
-        var mail = MailMessage(id: "m1", thread: "t1", from: from, subject: "Your Figma receipt", snippet: "Total $144",
-                               date: Self.now, labels: ["INBOX"])
-        let first = Purchases.key(mail, account: "me@x.test")
-        #expect(Purchases.key(mail, account: "me@x.test") == first)
-        #expect(Purchases.key(mail, account: "other@x.test") != first)
-        mail.text = "Thanks for your payment. Total: $144.00"
-        let worded = Purchases.key(mail, account: "me@x.test")
+        var head = MailPurchaseHead(id: "m1", labels: ["INBOX"], snippet: 10)
+        let first = Purchases.key(head, account: "me@x.test")
+        #expect(Purchases.key(head, account: "me@x.test") == first)
+        #expect(Purchases.key(head, account: "other@x.test") != first)
+        head.body = true
+        let worded = Purchases.key(head, account: "me@x.test")
         #expect(worded != first)
-        mail.labels.insert("TRASH")
-        #expect(Purchases.key(mail, account: "me@x.test") != worded)
+        head.labels.insert("TRASH")
+        #expect(Purchases.key(head, account: "me@x.test") != worded)
 
         var known = Purchases.Known()
         known.found[first] = Self.world[0].purchase
@@ -176,7 +174,7 @@ struct PurchasesTests {
         let back = try JSONDecoder().decode(Purchases.Known.self, from: JSONEncoder().encode(known))
         #expect(back.found == known.found)
         #expect(back.none == known.none)
-        #expect(back.build == Purchases.build)
+        #expect(back.rules == MailPurchases.rules)
     }
 
     /// Two accounts of receipts read as refresh reads them, twice: the
@@ -199,14 +197,71 @@ struct PurchasesTests {
         let clock = ContinuousClock()
         func ms(_ duration: Duration) -> Double { Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15 }
         var first: (items: [Purchases.Item], kept: Purchases.Known, fresh: Int) = ([], Purchases.Known(), 0)
-        let full = ms(clock.measure { first = Purchases.pass(engines, since: since, now: Self.now, before: Purchases.Known()) })
+        let full = ms(clock.measure { first = Purchases.pass(engines, since: since, now: Self.now, before: Purchases.Known(), rest: { _ in }) })
         var second = first
-        let next = ms(clock.measure { second = Purchases.pass(engines, since: since, now: Self.now, before: first.kept) })
+        let next = ms(clock.measure { second = Purchases.pass(engines, since: since, now: Self.now, before: first.kept, rest: { _ in }) })
         print(String(format: "purchases-pass: %d mails, first pass %.0f ms (%d read), next pass %.0f ms (%d read)",
                      first.kept.count, full, first.fresh, next, second.fresh))
         #expect(first.fresh == 300)
         #expect(second.fresh == 0)
         #expect(second.items.map(\.id) == first.items.map(\.id))
         #expect(next < full / 4)
+    }
+
+    static func kept(_ count: Int) -> MailStore {
+        let store = MailStore(file: MailStore.memory)
+        _ = store.put((0..<count).map { n in
+            var mail = MailPurchasesSpeedTests.receipt(n, size: 2_000)
+            mail.text = HTMLText.plain(mail.html ?? "")
+            return mail
+        })
+        return store
+    }
+
+    static var since: Date { MailPurchasesSpeedTests.now.addingTimeInterval(-400 * day) }
+
+    /// A quit in the middle of a first reading: what was read by the last
+    /// save stays read, so a launch goes on from there.
+    @Test func aPassCutShortGoesOnFromItsLastSave() {
+        let store = Self.kept(Purchases.saveEvery + 60)
+        var saves: [Purchases.Known] = []
+        let whole = Purchases.pass([("me@x.test", store)], since: Self.since, now: MailPurchasesSpeedTests.now, before: Purchases.Known(),
+                                   rest: { _ in }, reached: { _, kept in saves.append(kept) })
+        #expect(whole.fresh == Purchases.saveEvery + 60)
+        // Before the first batch, then at the save.
+        #expect(saves.count == 2)
+        let last = saves[saves.count - 1]
+        #expect(last.count >= Purchases.saveEvery)
+        let again = Purchases.pass([("me@x.test", store)], since: Self.since, now: MailPurchasesSpeedTests.now, before: last, rest: { _ in })
+        #expect(again.fresh == whole.fresh - last.count)
+        #expect(again.items.map(\.id) == whole.items.map(\.id))
+    }
+
+    /// What was read outlives the build that read it: only other rules
+    /// read it again.
+    @Test func whatWasReadIsKeptByTheRulesNotTheBuild() throws {
+        let store = Self.kept(4)
+        let first = Purchases.pass([("me@x.test", store)], since: Self.since, now: MailPurchasesSpeedTests.now, before: Purchases.Known(), rest: { _ in })
+        let saved = try JSONEncoder().encode(first.kept)
+        let back = try JSONDecoder().decode(Purchases.Known.self, from: saved)
+        #expect(back.rules == MailPurchases.rules)
+        #expect(Purchases.pass([("me@x.test", store)], since: Self.since, now: MailPurchasesSpeedTests.now, before: back, rest: { _ in }).fresh == 0)
+    }
+
+    /// The words arriving after the snippet read it again; nothing else does.
+    @Test func aMailIsReadAgainWhenItsWordsArrive() {
+        let store = MailStore(file: MailStore.memory)
+        var mail = MailPurchasesSpeedTests.receipt(1, size: 2_000)
+        let html = mail.html
+        mail.html = nil
+        _ = store.put([mail])
+        let first = Purchases.pass([("me@x.test", store)], since: Self.since, now: MailPurchasesSpeedTests.now, before: Purchases.Known(), rest: { _ in })
+        #expect(first.fresh == 1)
+        mail.text = HTMLText.plain(html ?? "")
+        mail.html = html
+        _ = store.put([mail])
+        let again = Purchases.pass([("me@x.test", store)], since: Self.since, now: MailPurchasesSpeedTests.now, before: first.kept, rest: { _ in })
+        #expect(again.fresh == 1)
+        #expect(Purchases.pass([("me@x.test", store)], since: Self.since, now: MailPurchasesSpeedTests.now, before: again.kept, rest: { _ in }).fresh == 0)
     }
 }

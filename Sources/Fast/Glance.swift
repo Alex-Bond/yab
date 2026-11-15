@@ -143,6 +143,27 @@ final class TabGlance: ObservableObject {
     private var agreed = false
     private var underFolder: String?
     var folderFrames: [String: CGRect] = [:]
+    /// Bookmarks borrow a folder anchor and the same dwell, dismissal and
+    /// pointer corridor as tabs; their content comes from the row.
+    private(set) var bookmarkChips: [String: BookmarkBar.Chip] = [:]
+
+    func putBookmark(_ key: String, chip: BookmarkBar.Chip, frame: CGRect) {
+        if shownFolder == key, bookmarkChips[key] != chip { objectWillChange.send() }
+        bookmarkChips[key] = chip
+        folderFrames[key] = frame
+    }
+
+    func removeBookmark(_ key: String) {
+        hoverFolder(key, false)
+        bookmarkChips[key] = nil
+        folderFrames[key] = nil
+        if shownFolder == key { drop() }
+    }
+
+    func hoverBookmark(_ key: String, _ on: Bool) {
+        hoverFolder(key, on)
+    }
+
     /// The tab row or pill under the pointer, if one is.
     var pointed: Tab.ID? { under }
     /// The last tab whose own hovering said the pointer came onto it and
@@ -213,7 +234,7 @@ final class TabGlance: ObservableObject {
         return glance
     }
 
-    private init(_ browser: Browser) {
+    init(_ browser: Browser) {
         self.browser = browser
         // Heard as the tab in front is about to change, while the one being
         // left is still on screen: the moment to keep a picture of it.
@@ -264,11 +285,11 @@ final class TabGlance: ObservableObject {
         // says: that can come again for a tab the pointer never left, as the
         // tab is drawn anew, and a leaving can go unheard.
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            MainActor.assumeIsolated { self?.moved(event) }
+            AppKitMainThread.sync { self?.moved(event) }
             return event
         } as Any)
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]) { [weak self] event in
-            let consumed = MainActor.assumeIsolated { () -> Bool in
+            let consumed = AppKitMainThread.sync { () -> Bool in
                 guard let self else { return false }
                 if self.typed(event) { return true }
                 self.pressed(event)
@@ -276,6 +297,10 @@ final class TabGlance: ObservableObject {
             }
             return consumed ? nil : event
         } as Any)
+    }
+
+    deinit {
+        for monitor in monitors { NSEvent.removeMonitor(monitor) }
     }
 
     /// The pointer came onto a tab, or went off it. Nothing is published
@@ -402,6 +427,11 @@ final class TabGlance: ObservableObject {
             return
         }
         pinRequest = nil
+        if bookmarkChips[id] != nil {
+            if shownFolder != id { closePreview() }
+            shownFolder = id
+            return
+        }
         let folders = browser?.folderBook ?? .shared
         let folder = folders.folder(id)
         let shut = !(folder?.nest?.open ?? folders.open.contains(id))
@@ -823,7 +853,7 @@ final class TabGlance: ObservableObject {
     /// The pointer is on the space's tray over the tabs (`underTray`).
     private var covered: Bool {
         guard let window = home else { return false }
-        return underTray(window.convertPoint(fromScreen: NSEvent.mouseLocation), in: window)
+        return ActionMenu.isOpen(in: window) || underTray(window.convertPoint(fromScreen: NSEvent.mouseLocation), in: window)
     }
 
     /// The space's tray (New Space, Change Emoji… with its Emoji and Icon)
@@ -931,6 +961,21 @@ final class TabGlance: ObservableObject {
         }
     }
 
+    /// Only a picture history already kept, cut by the tab card's own
+    /// drawing code. This path never asks WebKit or a site for a picture.
+    static func storedStill(_ url: URL) async -> NSImage? {
+        let key = Diary.key(url)
+        return await withCheckedContinuation { continuation in
+            studio.async {
+                let source = [Diary.shot(key), Diary.og(key)].lazy.compactMap { NSImage(contentsOf: $0) }.first
+                let picture = source?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                let cut = picture.flatMap { Self.cut($0, scale: 2) }
+                let image = cut.map { NSImage(cgImage: $0, size: NSSize(width: width, height: still)) }
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
     /// The picture at the card's size in pixels, filling it from the top,
     /// its top corners the card's.
     private nonisolated static func cut(_ picture: CGImage, scale: CGFloat) -> CGImage? {
@@ -1013,6 +1058,7 @@ struct GlanceLayer: View {
                         GlanceCard(tab: tab, still: tab.id == browser.activeID ? nil : glance.stills[id],
                                    act: { [weak glance] in glance?.act($0, on: tab) },
                                    holding: { [weak glance] in glance?.hold($0) })
+                            .id(id)
                             // Where it is, as a preview's is: the pointer on
                             // it holds it while it has a button.
                             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { box in
@@ -1023,6 +1069,22 @@ struct GlanceLayer: View {
                             .padding(.top, spot.y)
                             .allowsHitTesting(glance.holds)
                     }
+                } else if let id = glance.shownFolder,
+                          let chip = glance.bookmarkChips[id], let frame = glance.folderFrames[id] {
+                    let local = frame.offsetBy(dx: -origin.x, dy: -origin.y)
+                    let spot = CGPoint(x: min(max(8, local.minX), max(8, window.width - TabGlance.width - 8)), y: local.maxY + 6)
+                    Group {
+                        if chip.node.isFolder || chip.stacked {
+                            FolderGlanceCard(title: chip.title, bookmarks: chip.contents)
+                        } else {
+                            BookmarkGlanceCard(browser: browser, glance: glance, node: chip.node)
+                        }
+                    }
+                    .id(id)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { glance.previewFrame = $0 }
+                    .padding(.leading, spot.x)
+                    .padding(.top, spot.y)
+                    .allowsHitTesting(glance.holds)
                 } else if let id = glance.shownFolder,
                           let frame = glance.folderFrames[id], frame.width > 0,
                           let folder = folderContents(id) {
@@ -1132,23 +1194,165 @@ struct GlanceLayer: View {
     }
 }
 
-private struct GlanceCard: View {
-    @ObservedObject var tab: Tab
-    let still: NSImage?
-    /// Does what the card's button says, the card going with it.
-    let act: (TabGist.Action) -> Void
-    /// Whether the card has a button to take the pointer for.
-    let holding: (Bool) -> Void
+/// The kept page's signals, from tabs and live folders already in memory.
+@MainActor
+enum BookmarkGlance {
+    @MainActor struct Open {
+        let browser: Browser
+        let tab: Tab?
+        let space: UUID
+        let count: Int
+        let url: URL
 
-    var body: some View {
-        // Once a second, for a deaf page's seconds and a playing tab's
-        // time left; the rest changes with the tab, which is watched.
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            card(TabGist.of(tab, at: context.date))
+        var text: String {
+            let name = space == Space.mailID ? Space.mail.name : browser.spaces.first { $0.id == space }?.name ?? browser.space.name
+            return "Open in " + name + (count > 1 ? " · \(count) tabs" : "")
+        }
+
+        func go() {
+            if browser.spaceID != space { browser.switchSpace(to: space) }
+            guard browser.spaceID == space,
+                  let target = browser.tabs.first(where: { tab != nil ? $0.id == tab?.id : ($0.pending ?? $0.address).map(Diary.key) == Diary.key(url) }) else { return }
+            browser.select(target)
+            BrowserWindows.shared.window(for: browser)?.makeKeyAndOrderFront(nil)
         }
     }
 
-    private func card(_ gist: TabGist) -> some View {
+    struct Stored {
+        let browser: Browser
+        let space: UUID
+        let url: URL
+    }
+
+    private static func owners(_ browser: Browser) -> [Browser] {
+        let others = browser.privateBrowsing ? [] : BrowserWindows.shared.browsers.filter { $0 !== browser && !$0.privateBrowsing }
+        return [browser] + others
+    }
+
+    /// Rows not yet visited this launch have no Tab objects. Read their
+    /// saved addresses once per hover, without loading a row or a page.
+    static func stored(in browser: Browser) -> [Stored] {
+        guard !browser.privateBrowsing else { return [] }
+        return owners(browser).flatMap { owner in
+            guard owner.prefs.usesSpaces else { return [Stored]() }
+            return owner.spaces.filter { $0.id != owner.spaceID && owner.parked[$0.id] == nil }.flatMap { space in
+                owner.pages(in: space.id).map { Stored(browser: owner, space: space.id, url: $0.url) }
+            }
+        }
+    }
+
+    static func opened(_ node: Bookmark, in browser: Browser, stored: [Stored] = []) -> Open? {
+        guard let url = node.url.flatMap(URL.init(string:)) else { return nil }
+        let key = Diary.key(url)
+        var matches: [(Browser, Tab?, UUID)] = []
+        var seen = Set<Tab.ID>()
+        for owner in owners(browser) {
+            for tab in owner.everyTab where tab.shy == browser.privateBrowsing {
+                guard let address = tab.pending ?? tab.address, Diary.key(address) == key, seen.insert(tab.id).inserted else { continue }
+                let space = owner.tabs.contains { $0 === tab } ? owner.spaceID : owner.spaceHolding(tab.id) ?? owner.spaceID
+                guard space == owner.spaceID || owner.prefs.usesSpaces || space == Space.mailID && owner.prefs.usesMail else { continue }
+                matches.append((owner, tab, space))
+            }
+        }
+        for entry in stored where entry.browser.spaceID != entry.space && entry.browser.parked[entry.space] == nil && Diary.key(entry.url) == key {
+            matches.append((entry.browser, nil, entry.space))
+        }
+        guard let first = matches.first else { return nil }
+        return Open(browser: first.0, tab: first.1, space: first.2, count: matches.count, url: url)
+    }
+
+    static func gist(_ node: Bookmark, open: Open?, at now: Date) -> TabGist {
+        let url = node.url.flatMap(URL.init(string:))
+        var signals = TabGist.Signals(address: url, label: BookmarkBar.label(node))
+        signals.item = LiveSeen.item(LiveText.thing(url))
+        signals.words = signals.item?.words
+        signals.now = now
+        var gist = open?.tab.map { TabGist.of($0, at: now) } ?? TabGist.make(signals)
+        if gist.title == nil {
+            if let tab = open?.tab {
+                gist.title = MarkdownLink.title(LiveGitHub.shortTitle(tab.label), host: tab.address?.host() ?? "")
+            } else {
+                gist.title = signals.item?.title ?? BookmarkBar.titleParts(node).title
+            }
+        }
+        if let open, let url {
+            gist.now = TabGist.Now(word: nil, text: open.text, tone: .going)
+            gist.action = TabGist.Action(label: "Go to Tab", kind: .open(url))
+        }
+        return gist
+    }
+
+    static func site(_ url: URL, path: Bool = true) -> String {
+        guard let host = url.host(), !host.isEmpty else { return Address.shown(url) }
+        let name = IDN.shown(host.hasPrefix("www.") ? String(host.dropFirst(4)) : host)
+        return name + (path && url.path != "/" ? url.path : "")
+    }
+}
+
+private struct BookmarkGlanceCard: View {
+    let browser: Browser
+    let glance: TabGlance
+    let node: Bookmark
+    @State private var still: NSImage?
+    @State private var stored: [BookmarkGlance.Stored] = []
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let open = BookmarkGlance.opened(node, in: browser, stored: stored)
+            let gist = BookmarkGlance.gist(node, open: open, at: context.date)
+            GlanceBody(gist: gist, title: BookmarkBar.titleParts(node).title,
+                       icon: node.savedIcon,
+                       letter: String(BookmarkBar.label(node).prefix(1)).uppercased(),
+                       site: node.url.flatMap(URL.init(string:)).map { BookmarkGlance.site($0) },
+                       still: still,
+                       act: { action in
+                           glance.drop()
+                           if let open { open.go() }
+                           else if case .open(let url) = action.kind { browser.visit(url) }
+                       }, holding: { glance.hold($0) }) { EmptyView() }
+        }
+        .task(id: node.url) {
+            still = nil
+            stored = BookmarkGlance.stored(in: browser)
+            guard !browser.privateBrowsing, let url = node.url.flatMap(URL.init(string:)),
+                  BookmarkGlance.opened(node, in: browser, stored: stored) == nil else { return }
+            let picture = await TabGlance.storedStill(url)
+            if !Task.isCancelled { still = picture }
+        }
+    }
+}
+
+private struct GlanceCard: View {
+    @ObservedObject var tab: Tab
+    let still: NSImage?
+    let act: (TabGist.Action) -> Void
+    let holding: (Bool) -> Void
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            GlanceBody(gist: TabGist.of(tab, at: context.date), title: tab.label,
+                       icon: tab.icon, letter: tab.monogram, site: tab.address.map { BookmarkGlance.site($0, path: false) },
+                       still: still, act: act, holding: holding) {
+                if let page = tab.peek { PeekLine(page: page) }
+                if tab.worker != nil { AgentLine(tab: tab) }
+            }
+        }
+    }
+}
+
+/// The one card drawing, for tabs and kept pages alike.
+private struct GlanceBody<Extra: View>: View {
+    let gist: TabGist
+    let title: String
+    let icon: NSImage?
+    let letter: String
+    let site: String?
+    let still: NSImage?
+    let act: (TabGist.Action) -> Void
+    let holding: (Bool) -> Void
+    @ViewBuilder let extra: () -> Extra
+
+    var body: some View {
         let shape = RoundedRectangle(cornerRadius: TabGlance.corner, style: .continuous)
         return VStack(alignment: .leading, spacing: 0) {
             // The page's picture only when the card has nothing to say of
@@ -1161,7 +1365,7 @@ private struct GlanceCard: View {
                     .overlay(alignment: .bottom) { Palette.hairline.frame(height: 1) }
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text(gist.title ?? tab.label)
+                Text(gist.title ?? title)
                     .sidebarFont(size: 13)
                     .foregroundStyle(Palette.ink)
                     .lineLimit(3)
@@ -1175,12 +1379,7 @@ private struct GlanceCard: View {
             if let now = gist.now {
                 NowLine(now: now, action: gist.action, act: act)
             }
-            if let page = tab.peek {
-                PeekLine(page: page)
-            }
-            if tab.worker != nil {
-                AgentLine(tab: tab)
-            }
+            extra()
         }
         .frame(width: TabGlance.width)
         // No clip over the whole card, which would be a mask every frame it
@@ -1204,7 +1403,7 @@ private struct GlanceCard: View {
                 if let person = gist.person {
                     Initial(name: person)
                 } else {
-                    Mark(icon: tab.icon, letter: tab.monogram, size: 12)
+                    Mark(icon: icon, letter: letter, size: 12)
                 }
                 Text(facts)
                     .sidebarFont(size: 11.5)
@@ -1213,22 +1412,13 @@ private struct GlanceCard: View {
             }
         } else if let site {
             HStack(spacing: 6) {
-                Mark(icon: tab.icon, letter: tab.monogram, size: 12)
+                Mark(icon: icon, letter: letter, size: 12)
                 Text(site)
                     .sidebarFont(size: 11.5)
                     .foregroundStyle(Palette.muted)
                     .lineLimit(1)
             }
         }
-    }
-
-    /// The site, without its www; a page of yab's own by its address.
-    private var site: String? {
-        guard let address = tab.address else { return nil }
-        if let host = address.host(), !host.isEmpty {
-            return IDN.shown(host.hasPrefix("www.") ? String(host.dropFirst(4)) : host)
-        }
-        return Address.shown(address)
     }
 }
 
@@ -1284,7 +1474,38 @@ private struct Initial: View {
 /// The same quiet card as a tab's gives its name and the first few pages.
 private struct FolderGlanceCard: View {
     let title: String
-    let tabs: [Tab]
+    struct Line: Identifiable {
+        let id: String
+        let title: String
+        let icon: NSImage?
+        let letter: String
+        var folder = false
+        var detail: String? = nil
+    }
+    let detail: String
+    let lines: [Line]
+    let limit: Int
+
+    init(title: String, tabs: [Tab]) {
+        self.title = title
+        detail = "\(tabs.count) \(tabs.count == 1 ? "tab" : "tabs")"
+        lines = tabs.map { Line(id: $0.id.uuidString, title: $0.label, icon: $0.icon, letter: $0.monogram) }
+        limit = 6
+    }
+
+    init(title: String, bookmarks: [Bookmark]) {
+        self.title = title
+        let pages = bookmarks.filter { !$0.isFolder }.count
+        let folders = bookmarks.filter(\.isFolder).count
+        detail = "\(pages) \(pages == 1 ? "bookmark" : "bookmarks") · \(folders) \(folders == 1 ? "folder" : "folders")"
+        lines = bookmarks.map { node in
+            let parts = BookmarkBar.titleParts(node)
+            return Line(id: node.id.uuidString, title: parts.title, icon: node.savedIcon,
+                        letter: String(BookmarkBar.label(node).prefix(1)).uppercased(), folder: node.isFolder,
+                        detail: node.isFolder ? String(Bookmarks.count(node.children ?? [])) : parts.tail)
+        }
+        limit = 3
+    }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: TabGlance.corner, style: .continuous)
@@ -1294,26 +1515,36 @@ private struct FolderGlanceCard: View {
                     .sidebarFont(size: 13, weight: .medium)
                     .foregroundStyle(Palette.ink)
                     .lineLimit(2)
-                Text("\(tabs.count) \(tabs.count == 1 ? "tab" : "tabs")")
+                Text(detail)
                     .sidebarFont(size: 11.5)
                     .foregroundStyle(Palette.muted)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            if !tabs.isEmpty {
+            if !lines.isEmpty {
                 Palette.hairline.frame(height: 1)
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(tabs.prefix(6))) { tab in
+                    ForEach(Array(lines.prefix(limit))) { line in
                         HStack(spacing: 8) {
-                            Mark(icon: tab.icon, letter: tab.monogram, size: 12)
-                            Text(tab.label)
+                            Group {
+                                if line.folder {
+                                    BookmarkBar.FolderMark().foregroundStyle(Palette.muted)
+                                } else {
+                                    Mark(icon: line.icon, letter: line.letter, size: 12)
+                                }
+                            }
+                            .frame(width: 12, height: 12)
+                            Text(line.title)
                                 .sidebarFont(size: 11.5)
                                 .foregroundStyle(Palette.ink)
                                 .lineLimit(1)
+                            if let detail = line.detail {
+                                Text(detail).sidebarFont(size: 11.5).foregroundStyle(Palette.muted).lineLimit(1)
+                            }
                         }
                     }
-                    if tabs.count > 6 {
-                        Text("\(tabs.count - 6) more")
+                    if lines.count > limit {
+                        Text("\(lines.count - limit) more")
                             .sidebarFont(size: 11.5)
                             .foregroundStyle(Palette.muted)
                     }
@@ -1684,7 +1915,7 @@ struct FolderPreviewSearch: NSViewRepresentable {
             guard let window else { return }
             take()
             keyWatch = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.take() }
+                AppKitMainThread.sync { self?.take() }
             }
         }
 

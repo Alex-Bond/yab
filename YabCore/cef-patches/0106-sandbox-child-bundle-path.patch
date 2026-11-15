@@ -1,0 +1,22 @@
+--- a/content/browser/sandbox_parameters_mac.mm
++++ b/content/browser/sandbox_parameters_mac.mm
+@@ -119,8 +119,18 @@
+   CHECK(serializer->SetBooleanParameter(
+       sandbox::policy::kParamDisableSandboxDenialLogging, !enable_logging));
+ 
++  // The child's own bundle when the embedder names it (CEF's
++  // --main-bundle-path): an updater can set the running bundle aside under a
++  // new name while the browser runs, and the browser's MainBundlePath() keeps
++  // the old one, which then holds another build. A child of the bundle set
++  // aside could not read its own framework.
++  base::FilePath main_bundle_path =
++      target_command_line.GetSwitchValuePath("main-bundle-path");
++  if (main_bundle_path.empty()) {
++    main_bundle_path = base::apple::MainBundlePath();
++  }
+   std::string bundle_path =
+-      sandbox::policy::GetCanonicalPath(base::apple::MainBundlePath()).value();
++      sandbox::policy::GetCanonicalPath(main_bundle_path).value();
+   CHECK(
+       serializer->SetParameter(sandbox::policy::kParamBundlePath, bundle_path));
+ 

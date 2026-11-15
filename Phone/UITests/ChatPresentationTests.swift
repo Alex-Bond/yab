@@ -46,7 +46,7 @@ final class ChatPresentationTests: XCTestCase {
         app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
         app.terminate()
         app.launch()
-        let later = app.buttons["welcome.start"]
+        let later = app.buttons["welcome.skip"]
         XCTAssertTrue(later.waitForExistence(timeout: 15))
         XCTAssertTrue(wait { later.isHittable })
         app.passWelcome()

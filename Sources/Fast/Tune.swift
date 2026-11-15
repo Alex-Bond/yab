@@ -56,6 +56,10 @@ struct Tune: Equatable {
     /// The cover itself, 112 pixels across, or the site's icon without one.
     var cover: CGImage?
 
+    /// A notification is audible, but is not a track to keep in the player.
+    /// Short loops and live streams still have useful playback controls.
+    var shortSound: Bool { duration > 0 && duration <= 3 && !loops && !live }
+
     func position(at now: CFTimeInterval = CACurrentMediaTime()) -> Double {
         guard playing else { return elapsed }
         let run = elapsed + max(0, now - stamp)
@@ -165,7 +169,6 @@ final class TuneWatch: NSObject {
     /// A Chromium tab's page instead (`chromium(_:page:tab:)`): its session
     /// comes from YabCore's media reports, not WebKit's private names.
     private weak var remote: ChromiumPage?
-    private var remotePlayed = false
     private var remoteReport: ChromiumMediaReport?
     private weak var tab: Tab?
     private var session = false
@@ -742,16 +745,16 @@ final class TuneWatch: NSObject {
 extension TuneWatch {
     /// YabCore's media report for a Chromium tab (ChromiumPage+Media.swift):
     /// the same session WebKit keeps, made from the page's media and its
-    /// MediaSession. A page has one from its first play until its media goes.
+    /// MediaSession. A page has one from the first time it is heard until
+    /// its media goes: a muted preview playing or a MediaSession set up
+    /// with nothing heard is none, as WebKit's Now Playing session isn't.
     func chromium(_ report: ChromiumMediaReport, page: ChromiumPage, tab: Tab) {
         if web != nil { return }
         self.tab = tab
         remote = page
         let before = remoteReport?.media?.time
         remoteReport = report
-        if report.playing || report.audible { remotePlayed = true }
-        if report.media == nil, report.session == nil { remotePlayed = false }
-        sessioned(report.session != nil || (report.media != nil && remotePlayed))
+        sessioned(report.heard && (report.session != nil || report.media != nil))
         guard session else { return }
         let title = report.session.map(\.title).flatMap { $0.isEmpty ? nil : $0 } ?? page.title ?? ""
         let artist = report.session?.artist ?? ""
@@ -784,7 +787,6 @@ extension TuneWatch {
     private func stopChromium() {
         remote = nil
         remoteReport = nil
-        remotePlayed = false
         session = false
         pageMedia = false
         cover = nil
@@ -990,7 +992,7 @@ final class Player {
         // and the island stays.
         return browser.everyTab
             .filter { tab in
-                guard let tune = tab.tune, tune.named, started[tab.id] != nil, !shown.contains(tab.id),
+                guard let tune = tab.tune, tune.named, !tune.shortSound, started[tab.id] != nil, !shown.contains(tab.id),
                       !Player.elsewhere(tab) else { return false }
                 return tune.playing || now - (stopped[tab.id] ?? now) < Player.patience
             }

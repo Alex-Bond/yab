@@ -14,7 +14,7 @@ import Foundation
 /// - chrome://newtab: a fresh tab's blank page, as tabs.create with no
 ///   address gives.
 ///
-/// Any other chrome:// page is left as it was: nothing opens.
+/// Other chrome:// pages belong to Chromium itself.
 enum ChromePages {
     enum Place: Equatable {
         /// Settings › Shortcuts, at this extension's commands when known.
@@ -37,7 +37,15 @@ enum ChromePages {
         let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
             .first { $0.name == "id" }?.value.flatMap { $0.isEmpty ? nil : $0 }
         switch host {
-        case "extensions":
+        case "extensions", "extension":
+            // Chrome embeds options_ui pages without open_in_tab inside this
+            // WebUI. It must stay a Chromium document: Settings cannot host the
+            // extension iframe. A details ?id= URL still belongs to Settings.
+            if host == "extensions", path.isEmpty,
+               URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .contains(where: { $0.name == "options" && $0.value.map(ChromiumExtensions.validID) == true }) == true {
+                return nil
+            }
             // configureCommands is the old name of the shortcuts page.
             if path == "shortcuts" || path == "configurecommands" { return .shortcuts(id ?? opener) }
             return .extensions(id)
@@ -46,6 +54,12 @@ enum ChromePages {
         case "newtab", "new-tab-page": return .newTab
         default: return nil
         }
+    }
+
+    /// WebUI pages cannot be hosted by WebKit or spared under memory pressure.
+    static func needsChromium(_ url: URL?) -> Bool {
+        guard let url, url.scheme?.lowercased() == "chrome", let host = url.host(), !host.isEmpty else { return false }
+        return place(of: url) == nil
     }
 
     /// chrome://settings/<path>, as Chromium names its sections.

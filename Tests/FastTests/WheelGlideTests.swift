@@ -71,6 +71,9 @@ struct WheelGlideTests {
 
     @Test @MainActor func eachFrameIsAPreciseEventForTheNotchesWindowAndPlace() throws {
         let notch = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: -1, wheel2: 0, wheel3: 0))
+        // CGEvent's default source inherits the console's held modifiers.
+        // This fixture represents an unmodified notch, independent of that state.
+        notch.flags = []
         notch.location = CGPoint(x: 300, y: 200)
         let line = try #require(NSEvent(cgEvent: notch))
         #expect(WheelGlide.glides(line))
@@ -89,6 +92,7 @@ struct WheelGlideTests {
         notch.flags = .maskCommand
         #expect(!WheelGlide.glides(try #require(NSEvent(cgEvent: notch))))
         let finger = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 5, wheel2: 0, wheel3: 0))
+        finger.flags = []
         finger.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
         finger.setIntegerValueField(.scrollWheelEventScrollPhase, value: 2)
         #expect(!WheelGlide.glides(try #require(NSEvent(cgEvent: finger))))

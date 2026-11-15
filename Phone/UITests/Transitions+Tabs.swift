@@ -11,6 +11,24 @@ import XCTest
 extension TransitionCatalog {
     static let tabs: [Transition] = [
         Transition(
+            "tabsNew", signposts: ["searchSheet"], state: "stack.gallery", arguments: ["-YabSearchSheet"],
+            ready: { app in TabsTransitions.galleryUp(app) },
+            perform: { app in app.buttons["tabs.new"].tap() },
+            arrived: { app in app.textFields["field.input"].waitForExistence(timeout: 10) }
+        ),
+        Transition(
+            "tabsSidebar", state: "stack.gallery", arguments: ["-YabSearchSheet"],
+            ready: { app in TabsTransitions.galleryUp(app) },
+            perform: { app in app.buttons["tabs.sidebar"].tap() },
+            arrived: { app in app.buttons["spaces.done"].waitForExistence(timeout: 10) }
+        ),
+        Transition(
+            "tabsPinch", signposts: ["tabsOpen"], state: "stack.many",
+            ready: { app in TabsTransitions.stackReady(app) && app.webViews.firstMatch.exists },
+            perform: { app in app.webViews.firstMatch.pinch(withScale: 0.45, velocity: -1.5) },
+            arrived: { app in TabsTransitions.galleryUp(app) }
+        ),
+        Transition(
             "tabsOpen",
             state: "stack.many",
             ready: { app in TabsTransitions.stackReady(app) },
@@ -19,6 +37,52 @@ extension TransitionCatalog {
             undo: { app in
                 TabsTransitions.tapCard(app, "work-figma-onb")
                 _ = TabsTransitions.stackReady(app)
+            }
+        ),
+        Transition(
+            "tabsScroll",
+            state: "stack.gallery",
+            ready: { app in TabsTransitions.galleryUp(app) },
+            perform: { app in
+                let card = TabsTransitions.element(app, "tabs.card.work-figma-onb")
+                guard card.exists else { XCTFail("no Figma card to scroll"); return }
+                let screen = app.windows.firstMatch.frame
+                let x = min(max(card.frame.minX + 30, 20), screen.width - 20)
+                let start = app.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: x, dy: card.frame.midY))
+                start.press(forDuration: 0.05,
+                            thenDragTo: start.withOffset(CGVector(dx: -110, dy: 0)),
+                            withVelocity: .slow, thenHoldForDuration: 0.05)
+            },
+            arrived: { app in
+                TransitionCatalog.wait(10) {
+                    let card = TabsTransitions.element(app, "tabs.card.work-figma-onb")
+                    return card.exists && abs(card.frame.midX - app.windows.firstMatch.frame.midX) < 12
+                }
+            }
+        ),
+        Transition(
+            "tabsCardClose",
+            signposts: ["tabsCardFly", "tabsReflow"],
+            state: "stack.gallery",
+            ready: { app in TabsTransitions.galleryUp(app) },
+            perform: { app in
+                let card = TabsTransitions.element(app, "tabs.card.work-gh-pr")
+                guard card.exists else { XCTFail("no GitHub card to close"); return }
+                let screen = app.windows.firstMatch.frame
+                let x = min(max(card.frame.minX + 40, 20), screen.width - 20)
+                let start = app.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: x, dy: card.frame.midY))
+                start.press(forDuration: 0.05,
+                            thenDragTo: start.withOffset(CGVector(dx: 0, dy: -380)),
+                            withVelocity: .fast, thenHoldForDuration: 0)
+            },
+            arrived: { app in
+                TransitionCatalog.wait(10) {
+                    TabsTransitions.element(app, "tabs.gallery").exists
+                        && !TabsTransitions.element(app, "tabs.card.work-gh-pr").exists
+                        && TabsTransitions.element(app, "tabs.card.work-hn").exists
+                }
             }
         ),
         Transition(

@@ -25,6 +25,9 @@ import WebKit
 @MainActor
 enum SiteNotices {
     nonisolated static let category = "site.note"
+    /// An extension's: no site to turn off or show controls for, and
+    /// swept away still heard, for its onClosed.
+    nonisolated static let extensionCategory = "site.extension"
     nonisolated static let turnOff = "site.off"
     nonisolated static let controls = "site.controls"
 
@@ -131,8 +134,23 @@ enum SiteNotices {
         var alert: Alert = .standard
         /// How the face came out: "face" (as a message), "picture", "plain".
         var look = "plain"
+        /// Chromium's own, when a Chromium page or worker showed it: where
+        /// the person's answer goes back to (SiteNotices+Chromium.swift).
+        var chromium: Chromium?
+        /// Who said it when that isn't its host: an extension's name, and
+        /// its icon for a notification that brought none.
+        var from = ""
+        var fromIcon: Data?
 
         var host: String { URL(string: origin)?.host() ?? origin }
+        /// Under the title: the site, or the extension and what Chrome
+        /// shows there for it (its contextMessage).
+        var sender: String {
+            guard chromium?.extensionID != nil else { return host }
+            let name = from.isEmpty ? "Extension" : from
+            let context = chromium?.subtitle ?? ""
+            return context.isEmpty ? name : name + " · " + context
+        }
         /// The same tag takes the place of the site's last one with it.
         var request: String { SiteNotices.request(origin: origin, tag: tag, id: id) }
     }
@@ -148,14 +166,15 @@ enum SiteNotices {
         var info: [String: Any] = ["site": note.origin, "note": String(note.id), "worker": note.worker,
                                    "silent": note.alert == .silent]
         if let tab = note.tab { info["tab"] = tab.uuidString }
+        if let chromium = note.chromium { info["chromium"] = chromium.fields }
         return info
     }
 
-    /// Up now, by WebKit's id: what a close() from the page takes down.
-    private static var standing: [UInt64: Note] = [:]
+    /// Up now, by the engine's id: what a close() from the page takes down.
+    static var standing: [UInt64: Note] = [:]
     /// The last ones shown and clicked, for the bench.
     private(set) static var shown: [Note] = []
-    private(set) static var clicked: [UInt64] = []
+    static var clicked: [UInt64] = []
 
     // MARK: - WebKit's provider
 
@@ -321,7 +340,7 @@ enum SiteNotices {
 
     // MARK: - the banner
 
-    private static func post(_ note: Note) async {
+    static func post(_ note: Note) async {
         var note = note
         let picture = await picture(for: note)
         note.look = picture == nil ? "plain" : "picture"
@@ -334,6 +353,7 @@ enum SiteNotices {
         }
         guard await MailNotify.shared.center.permission() == .allowed else { return record(note) }
         let content = Self.content(note)
+        await addButtons(note, to: content)
         var shown: UNNotificationContent = content
         if let picture {
             if let face = try? await face(note, picture: picture, content: content) {
@@ -349,12 +369,13 @@ enum SiteNotices {
 
     static func content(_ note: Note) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
-        content.title = note.title.isEmpty ? note.host : note.title
-        content.subtitle = note.host
+        let own = note.chromium?.extensionID != nil
+        content.title = note.title.isEmpty ? (own && !note.from.isEmpty ? note.from : note.host) : note.title
+        content.subtitle = note.sender
         content.body = note.body
         content.sound = soundAllowed(info(note)) ? .default : nil
         content.threadIdentifier = thread(note.origin)
-        content.categoryIdentifier = category
+        content.categoryIdentifier = own ? extensionCategory : category
         content.userInfo = info(note)
         return content
     }
@@ -411,6 +432,9 @@ enum SiteNotices {
     /// without the page; then the site's icon. No more than a megabyte, no
     /// longer than two seconds.
     private static func picture(for note: Note) async -> Data? {
+        if let image = note.chromium?.image { return png(image) ?? image }
+        // An extension's own icon, as a site's falls back to its favicon.
+        if note.chromium?.extensionID != nil { return note.fromIcon.flatMap { png($0) } }
         if let url = URL(string: note.icon), ["http", "https", "data"].contains(url.scheme?.lowercased() ?? "") {
             if let tab = note.tab.flatMap(find)?.tab, let built = tab.webKitOnly("WebKit notification source", build: false),
                let data = await within(2, { await fromPage(built, note.icon) }), let png = png(data) {
@@ -475,12 +499,15 @@ enum SiteNotices {
     nonisolated static var categories: Set<UNNotificationCategory> {
         let off = UNNotificationAction(identifier: turnOff, title: "Turn Off for This Site", options: [])
         let panel = UNNotificationAction(identifier: controls, title: "Site Controls…", options: [.foreground])
-        return [UNNotificationCategory(identifier: category, actions: [off, panel], intentIdentifiers: [], options: [.customDismissAction])]
+        return [UNNotificationCategory(identifier: category, actions: [off, panel], intentIdentifiers: [], options: [.customDismissAction]),
+                UNNotificationCategory(identifier: extensionCategory, actions: [], intentIdentifiers: [], options: [.customDismissAction])]
     }
 
     /// Not over the site you are looking at: you see what it says already.
     static func presenting(_ info: [AnyHashable: Any]) -> UNNotificationPresentationOptions {
         guard let origin = info["site"] as? String else { return [.banner, .sound, .list] }
+        // An extension's, over its own page too, as Chromium shows it.
+        if origin.hasPrefix("chrome-extension://") { return soundAllowed(info) ? [.banner, .sound, .list] : [.banner, .list] }
         if NSApp.isActive, let key = NSApp.keyWindow, let browser = BrowserWindows.shared.browser(for: key),
            let tab = browser.active, Browser.origin(of: tab.address) == origin {
             return []
@@ -506,6 +533,8 @@ enum SiteNotices {
         let id = (info["note"] as? String).flatMap(UInt64.init)
         let worker = info["worker"] as? Bool ?? false
         let tab = (info["tab"] as? String).flatMap(UUID.init)
+        if let fields = info["chromium"] as? [String: Any], let chromium = Chromium(fields: fields),
+           answer(action, chromium, origin: origin, id: id, tab: tab) { return }
         switch action {
         case UNNotificationDismissActionIdentifier:
             guard let id, let manager = worker ? workers : pages, let number = fn("WKUInt64Create", (@convention(c) (UInt64) -> Ref?).self)?(id),
@@ -542,18 +571,22 @@ enum SiteNotices {
 
     /// The site's tab brought forward, if one is open.
     @discardableResult
-    private static func front(_ origin: String, tab id: UUID?) -> (browser: Browser, tab: Tab)? {
-        if !Store.testing {
-            if Headless.hidden {
-                Headless.show(.request)
-                Links.showBrowser()
-            }
-            NSApp.activate(ignoringOtherApps: true)
-        }
+    static func front(_ origin: String, tab id: UUID?) -> (browser: Browser, tab: Tab)? {
+        bringForward()
         // In whichever window and space it waits (BrowserWindows.reveal).
         if let id, let found = BrowserWindows.shared.reveal(id, front: !Store.testing) { return found }
         guard let found = tab(for: origin) else { return nil }
         return BrowserWindows.shared.reveal(found.tab.id, front: !Store.testing)
+    }
+
+    /// Yab in front, its windows shown if they were hidden.
+    static func bringForward() {
+        guard !Store.testing else { return }
+        if Headless.hidden {
+            Headless.show(.request)
+            Links.showBrowser()
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private static func find(_ id: UUID) -> (browser: Browser, tab: Tab)? {
@@ -565,7 +598,7 @@ enum SiteNotices {
 
     /// The site's tab: the one in front if it is the site's, or the one
     /// last looked at.
-    private static func tab(for origin: String) -> (browser: Browser, tab: Tab)? {
+    static func tab(for origin: String) -> (browser: Browser, tab: Tab)? {
         var best: (browser: Browser, tab: Tab)?
         for browser in BrowserWindows.shared.browsers {
             for tab in browser.tabs + browser.parkedTabs where Browser.origin(of: tab.address) == origin {
@@ -581,6 +614,7 @@ enum SiteNotices {
     private static func takeDown(_ origin: String) {
         let gone = standing.filter { $0.value.origin == origin }
         for id in gone.keys { standing[id] = nil }
+        tellChromium(gone: gone.values.compactMap(\.chromium))
         guard AgentNotices.possible, !Store.testing else { return }
         let center = UNUserNotificationCenter.current()
         Task {
@@ -716,6 +750,12 @@ enum SiteNotices {
             }
         case let one where one.hasPrefix("forget:"): forget(String(one.dropFirst(7)))
         case "push": return WebPush.shared.bench()
+        case let row where row.hasPrefix("revoke:"):
+            // Site Controls' cross on one of the page in front's rows.
+            if let tab = browser.active { SiteFacts(tab: tab).allowed.first { $0.title == String(row.dropFirst(7)) }?.forget() }
+        case let press where press.hasPrefix("button"):
+            // "button0" or "button1": the newest notification's own button.
+            if let note = shown.last, let index = Int(press.dropFirst("button".count)) { answer(buttonAction(index), info(note)) }
         case let click where click.hasPrefix("click"):
             if let note = pick("click") { answer(UNNotificationDefaultActionIdentifier, info(note)) }
         case let dismiss where dismiss.hasPrefix("dismiss"):
@@ -725,10 +765,13 @@ enum SiteNotices {
         return ["os": record?.state.rawValue ?? MailNotify.shared.permission.rawValue, "working": working, "faces": faces,
                 "shown": shown.map { ["id": String($0.id), "worker": $0.worker, "origin": $0.origin, "title": $0.title, "body": $0.body,
                                       "tag": $0.tag, "icon": $0.icon, "look": $0.look, "request": $0.request,
+                                      "from": $0.from, "sender": $0.sender, "category": content($0).categoryIdentifier,
+                                      "engine": $0.chromium == nil ? "webkit" : "chromium", "buttons": $0.chromium?.buttons ?? [],
                                       "tab": $0.tab.map { String($0.uuidString.prefix(8)).lowercased() } ?? ""] },
                 "standing": standing.keys.map(String.init).sorted(),
                 "clicked": clicked.map(String.init),
                 "said": policies(),
+                "rows": browser.active.map { SiteFacts(tab: $0).allowed.map { "\($0.title): \($0.said ? "Allowed" : "Blocked")" } } ?? [],
                 "front": browser.active.flatMap { Browser.origin(of: $0.address) } ?? "",
                 "frontTab": browser.active.map { String($0.id.uuidString.prefix(8)).lowercased() } ?? "",
                 "asks": browser.tabs.flatMap { tab in tab.asks.map { "\($0.kind) \($0.stage) \($0.host)" } }]

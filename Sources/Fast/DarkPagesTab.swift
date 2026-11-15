@@ -24,7 +24,7 @@ extension Tab {
     /// Before the request leaves: the decision for where the tab is going,
     /// the appearance it is drawn in and the ground under its first frame.
     func darkArm(url: URL?, host: String?) {
-        if DarkPages.active(windowDark: DarkPages.windowDark) { DarkLists.shared.warm() }
+        if DarkPages.active(windowDark: DarkPages.windowDark(for: self)) { DarkLists.shared.warm() }
         let decision = DarkPages.decision(for: self, url: url, host: host)
         darkState.armed = decision
         darkDress(decision)
@@ -37,8 +37,8 @@ extension Tab {
     /// request leaves (ChromiumPage+Dark.swift).
     func darkDress(_ decision: DarkDecision) {
         guard let view = builtPage else { return }
-        let wantedDark = DarkPages.appearance(decision, windowDark: DarkPages.windowDark)
-            ?? (DarkPages.windowDark ? NSAppearance.Name.darkAqua : nil)
+        let wantedDark = DarkPages.appearance(decision, windowDark: DarkPages.windowDark(for: self))
+            ?? (DarkPages.windowDark(for: self) ? NSAppearance.Name.darkAqua : nil)
         if let wanted = wantedDark {
             if view.appearance?.name != wanted { view.appearance = NSAppearance(named: wanted) }
             darkState.appearanceSet = true
@@ -178,6 +178,11 @@ extension Tab {
             darkState.host = PageScripts.host(of: address)
             if page.engine == .chromium {
                 let address = self.address
+                // A page that came without Dark pages' world gets it bound
+                // first: the run below waits for it in the page's queue.
+                if let chromium = page as? ChromiumPage, !chromium.scripts.darkBound {
+                    chromium.refreshFeatureScripts(to: address)
+                }
                 let source = DarkPages.engine.source + "\n;\n" + DarkPages.startScript(DarkLook.read(), ground: DarkPages.groundHex()).source
                 // Remote evaluations can overlap while creating a world.
                 // Finish the proxy first, then start the engine in one call.
@@ -254,7 +259,7 @@ extension Browser {
     /// be dark, Dark Reader the extension isn't doing it, and it is a site.
     func darkPageReady(_ given: Tab? = nil) -> Tab? {
         guard let tab = given ?? active, !tab.isBlank, !tab.bench, PageScripts.host(of: tab.address) != nil,
-              DarkPages.active(windowDark: DarkPages.windowDark, mode: prefs.darkPages), !DarkPages.extensionOn(for: tab),
+              DarkPages.active(windowDark: DarkPages.windowDark(for: tab), mode: prefs.darkPages), !DarkPages.extensionOn(for: tab),
               tab.dark == .engine || tab.dark == .own || tab.dark == .off
                 || (tab.dark == .none && prefs.darkPages == .off && DarkPages.eligible(tab, url: tab.address)) else { return nil }
         return tab

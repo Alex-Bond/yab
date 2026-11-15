@@ -749,6 +749,12 @@ enum DevKeys {
         if browser.devPicking, event.keyCode == 53 { browser.stopPickingElement(); return true }
         let responder = (event.window ?? NSApp.keyWindow)?.firstResponder
         guard contains(responder) || DevFloating.owner(of: event.window ?? NSApp.keyWindow) === browser else { return false }
+        // ⌥⌘J and ⌥⌘I from inside the card put it away, as Chromium's do
+        // from inside its DevTools (#1467). ⌥⌘J leaves the keys in
+        // Console's prompt, and the window's key monitor hands keys typed
+        // in the card to the card: pressed again, it went nowhere.
+        if Keymap.shared.matches(event, .console) { browser.showConsole(); return true }
+        if Keymap.shared.matches(event, .inspector) { browser.developerTools(); return true }
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
         let key = Hotkey.readings(event).first?.key ?? event.charactersIgnoringModifiers?.lowercased() ?? ""
         if flags == [.command, .shift], key == "c" { browser.inspectElement(); return true }

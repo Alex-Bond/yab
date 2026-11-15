@@ -64,8 +64,8 @@ final class Hotkeys: ObservableObject {
         // App Shortcuts are written to the app's own defaults, or the global
         // ones for every app, and macOS hands a running app the change.
         watching = [
-            NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.soon() }
+            NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: nil) { [weak self] _ in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.soon() } }
             },
             DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.apple.KeyboardShortcutsChanged"), object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.soon() }
@@ -127,6 +127,8 @@ final class Hotkeys: ObservableObject {
     /// Asked again once things settle: defaults change for every setting yab
     /// writes, a burst of them at a time, and the keys only rarely.
     private var pending = false
+    /// A refresh for the window's own changes is on its way (watchBrowser).
+    private var queued = false
 
     private func watchBrowser() {
         let browser = BrowserWindows.shared.activeBrowser
@@ -136,10 +138,17 @@ final class Hotkeys: ObservableObject {
         watchedTab = nil
         watchedBrowser = browser
         guard let browser else { return }
+        // Once a turn of the run loop however many of these changed: a
+        // change of space writes four of them, and each asked the menus again.
         let changed = { [weak self] in
-            DispatchQueue.main.async {
-                self?.watchTab()
-                self?.refresh()
+            MainActor.assumeIsolated {
+                guard let self, !self.queued else { return }
+                self.queued = true
+                DispatchQueue.main.async {
+                    self.queued = false
+                    self.watchTab()
+                    self.refresh()
+                }
             }
         }
         browserWatch = [

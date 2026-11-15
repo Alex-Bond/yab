@@ -25,7 +25,7 @@ enum LiveSuggest {
     /// This Mac's visits in the window, as plain pairs of address and count.
     @MainActor
     static func visits(days: Int = 30, now: Date = Date()) -> [(url: String, count: Int)] {
-        History.shared.visits(since: now.addingTimeInterval(-Double(days) * 86_400)).map { ($0.url, $0.count) }
+        History.current.visits(since: now.addingTimeInterval(-Double(days) * 86_400)).map { ($0.url, $0.count) }
     }
 
     /// The sources these visits use, most first. Visits to a repository
@@ -61,7 +61,7 @@ enum LiveSuggest {
     /// The repositories opened most, for following one.
     @MainActor
     static func repos(days: Int = 30, now: Date = Date()) -> [(name: String, visits: Int)] {
-        repos(History.shared.visits(since: now.addingTimeInterval(-Double(days) * 86_400)).map { ($0.url, $0.count) })
+        repos(History.current.visits(since: now.addingTimeInterval(-Double(days) * 86_400)).map { ($0.url, $0.count) })
     }
 
     static func repos(_ visits: [(url: String, count: Int)]) -> [(name: String, visits: Int)] {

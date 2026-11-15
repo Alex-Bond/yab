@@ -18,8 +18,30 @@ final class PageView: WKWebView, NSTextContent {
         SleepHush.shared.pages.add(self)
     }
 
+    override func stopLoading() {
+        navigationEvents.stopLoadRetry(self)
+        super.stopLoading()
+    }
+
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+    }
+
+    // Every caller, Swift or Objective-C, goes through MediaPresentationClose:
+    // WebKit keeps this call's completion block without retaining it.
+    override func closeAllMediaPresentations(completionHandler: (@MainActor @Sendable () -> Void)? = nil) {
+        MediaPresentationClose.send(self, then: completionHandler)
+    }
+
+    override func addTrackingArea(_ area: NSTrackingArea) {
+        super.addTrackingArea(PageHoverTracking.wrap(area, in: self))
+    }
+
+    override func removeTrackingArea(_ area: NSTrackingArea) {
+        if let entry = PageHoverTracking.take(area, from: self) {
+            super.removeTrackingArea(entry.area)
+            withExtendedLifetime(entry) {}
+        } else { super.removeTrackingArea(area) }
     }
 
     // Before the first focus report arrives there is no known text field.
@@ -122,6 +144,7 @@ final class PageView: WKWebView, NSTextContent {
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
+        navigationEvents.resumeNetworkLoad()
         updateVideoOpening()
     }
 
@@ -130,8 +153,14 @@ final class PageView: WKWebView, NSTextContent {
         updateVideoOpening()
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        giveUpKeys(leavingFor: newWindow)
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        navigationEvents.resumeNetworkLoad()
         windowClick = WindowClick()
         PageFullScreenMove.moved(self)
         updateVideoOpening()
@@ -176,6 +205,7 @@ final class PageView: WKWebView, NSTextContent {
         wrapContextLink(in: menu, event: event)
         defer {
             Self.dress(menu)
+            splitLinkHere(menu)
             Self.menuWatch?(menu)
         }
         if let (user, linked) = onAppleCodeContext?() {
@@ -364,6 +394,37 @@ final class PageView: WKWebView, NSTextContent {
         if !NSApp.sendAction(command.action, to: command.target, from: item) { menuOpen = nil }
     }
 
+    /// The link menu's Open in Split View: what ⌥-click on the link does
+    /// (Browser.splitLink), under Open Link in New Tab, as Arc had it
+    /// (feedback #1900). The same row on Chromium tabs (ChromiumMenuRow).
+    static let splitLinkTitle = "Open in Split View"
+    static let splitLinkID = "YabOpenLinkInSplitView"
+    /// Puts a link in Split View beside this page's tab.
+    var onSplitLink: ((URL) -> Void)?
+
+    private func splitLinkHere(_ menu: NSMenu) {
+        guard onSplitLink != nil,
+              let tab = menu.items.first(where: { $0.identifier?.rawValue == "WKMenuItemIdentifierOpenLinkInNewWindow" }),
+              !menu.items.contains(where: { $0.identifier?.rawValue == Self.splitLinkID }) else { return }
+        let item = NSMenuItem(title: Self.splitLinkTitle, action: #selector(splitContextLink(_:)), keyEquivalent: "")
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier(Self.splitLinkID)
+        MenuMark.put(Self.marks[Self.splitLinkID], on: item)
+        menu.insertItem(item, at: menu.index(of: tab) + 1)
+    }
+
+    /// The link is the page's contextmenu event's for this press, as Open
+    /// Link in New Tab reads it; without one (a link that isn't the web's),
+    /// the new tab row's own action.
+    @objc private func splitContextLink(_ item: NSMenuItem) {
+        if let link = contextLink, link.at >= contextMenuStarted, link.source == url, contextMenuSource == url {
+            contextLink = nil
+            onSplitLink?(link.url)
+        } else if let tab = contextLinkItem {
+            openContextLink(tab)
+        }
+    }
+
     func takeMenuOpen(for destination: URL?) -> Bool? {
         defer { menuOpen = nil }
         guard let intent = menuOpen, intent.url == destination, intent.source == url,
@@ -381,6 +442,7 @@ final class PageView: WKWebView, NSTextContent {
     static let marks: [String: String] = [
         "WKMenuItemIdentifierOpenLink": "yab.arrowout",
         "WKMenuItemIdentifierOpenLinkInNewWindow": "yab.tab.plus",
+        "YabOpenLinkInSplitView": "rectangle.split.2x1",
         "WKMenuItemIdentifierDownloadLinkedFile": "yab.download",
         "WKMenuItemIdentifierCopyLink": "link",
         "WKMenuItemIdentifierCopyLinkWithHighlight": "yab.text",
@@ -501,7 +563,6 @@ final class PageView: WKWebView, NSTextContent {
     private weak var wordsMenu: NSMenu?
     private var webImage: [String: (target: AnyObject?, action: Selector?, act: ImageAct)] = [:]
     private var imageMenuFlags: NSEvent.ModifierFlags = []
-    private var webMedia: (target: AnyObject?, action: Selector?)?
     private var menuAt: CFTimeInterval = 0
     /// Hide Element: what is at this point of the page, taken off it for
     /// good on this site, as Hide Elements does once pointed at (Curtain).
@@ -524,25 +585,50 @@ final class PageView: WKWebView, NSTextContent {
     static func currentMenuWords(_ words: MenuWords?, source: URL?, now: CFTimeInterval = CACurrentMediaTime()) -> MenuWords? {
         words.flatMap { $0.source == source && now - $0.at < 3 ? $0 : nil }
     }
-    private var menuReadTurn: UInt = 0
+    /// The menu WebKit is holding back for the read below, if any.
+    private var menuRead: MenuRead?
+
+    /// WebKit's completion for one held menu, called exactly once.
+    /// Dropped uncalled, WebKit's CompletionHandlerCallChecker throws as
+    /// the block goes, and the browser aborts (crash #1124: a second
+    /// right-click on the page before the first menu's read ended).
+    @MainActor final class MenuRead {
+        private var done: (@MainActor (Bool) -> Void)?
+        init(_ done: @escaping @MainActor (Bool) -> Void) { self.done = done }
+        var pending: Bool { done != nil }
+        /// `current`: still the page's newest menu, to be shown as it is.
+        func finish(current: Bool) {
+            let done = self.done
+            self.done = nil
+            done?(current)
+        }
+    }
 
     /// The words selected, read while WebKit holds its menu back for
     /// Browser's getContextMenuFromProposedMenu, so the rows made from them
     /// are in the menu as it opens. In a link's menu only words selected
     /// inside that link count, with the link's address. Never more than a
     /// quarter of a second: the menu is not held for a slow page.
-    func readBeforeMenu(_ menu: NSMenu, _ done: @escaping @MainActor () -> Void) {
+    /// A menu asked for while another is still held answers the older
+    /// one first, as no longer current (`done(false)`): WebKit's menu for it
+    /// is gone, and its completion must still be called.
+    func readBeforeMenu(_ menu: NSMenu, _ done: @escaping @MainActor (_ current: Bool) -> Void) {
         menuWords = nil
-        menuReadTurn &+= 1
-        let turn = menuReadTurn, source = url
+        menuRead?.finish(current: false)
+        menuRead = nil
+        let source = url
         let ids = Set(menu.items.compactMap { $0.identifier?.rawValue })
         let search = ids.contains("WKMenuItemIdentifierSearchWeb")
-        guard search || ids.contains("WKMenuItemIdentifierCopyLink") else { done(); return }
+        guard search || ids.contains("WKMenuItemIdentifierCopyLink") else { done(true); return }
+        let read = MenuRead(done)
+        menuRead = read
         let finish: @MainActor (String, String?) -> Void = { [weak self] words, link in
-            guard let self, self.menuReadTurn == turn else { return }
-            self.menuReadTurn &+= 1
-            if self.url == source, !words.isEmpty { self.menuWords = (words, link, source, CACurrentMediaTime()) }
-            done()
+            guard read.pending else { return }
+            if let self, self.menuRead === read {
+                self.menuRead = nil
+                if self.url == source, !words.isEmpty { self.menuWords = (words, link, source, CACurrentMediaTime()) }
+            }
+            read.finish(current: true)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { MainActor.assumeIsolated { finish("", nil) } }
         if search {
@@ -781,15 +867,25 @@ final class PageView: WKWebView, NSTextContent {
     /// A video playing from a blob:, as on x.com, gets none from WebKit:
     /// Yab's own goes where WebKit's would, after the video's own rows.
     func mediaHere(_ menu: NSMenu, since: CFTimeInterval, document: PointedMedia?, again: Bool = true) {
-        if again { webMedia = nil }
         guard onMedia != nil, !menu.items.contains(where: { ["YabDownloadMedia", "YabDownloadAudio"].contains($0.identifier?.rawValue ?? "") }) else { return }
         if let item = menu.items.first(where: { $0.identifier?.rawValue == "WKMenuItemIdentifierDownloadMedia" }) {
             guard again else { return }
-            webMedia = (item.target, item.action)
             item.target = self
             item.action = #selector(mediaRow(_:))
-            // WebKit greys it for some videos; Yab saves those.
-            item.isEnabled = true
+            // The page receipt can follow WebKit's native menu callback.
+            // Until it arrives, only a known direct media document can save.
+            let heard = document ?? mediaHeard?(since) ?? url.flatMap {
+                VideoSave.isMediaFile($0) ? PointedMedia(src: $0.absoluteString) : nil
+            }
+            item.title = heard.map(VideoSave.downloadTitle) ?? "Media Download Unavailable"
+            item.isEnabled = heard != nil
+            if heard == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self, weak item] in
+                    guard let self, let item, let heard = self.mediaHeard?(since) else { return }
+                    item.title = VideoSave.downloadTitle(heard)
+                    item.isEnabled = true
+                }
+            }
             return
         }
         let videoRows = ["WKMenuItemIdentifierToggleVideoViewer", "WKMenuItemIdentifierToggleEnhancedFullScreen",
@@ -811,7 +907,7 @@ final class PageView: WKWebView, NSTextContent {
             return videoRows.contains(id) || (document != nil && (id.hasPrefix("WKMenuItemIdentifierMedia")
                 || id == "WKMenuItemIdentifierOpenMediaInNewWindow" || id == "WKMenuItemIdentifierCopyMediaLink"))
         })
-        let item = NSMenuItem(title: heard.audio ? "Download Audio" : "Download Video", action: #selector(mediaRow(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: VideoSave.downloadTitle(heard), action: #selector(mediaRow(_:)), keyEquivalent: "")
         item.target = self
         item.identifier = NSUserInterfaceItemIdentifier(heard.audio ? "YabDownloadAudio" : "YabDownloadMedia")
         guard let last else {
@@ -831,9 +927,10 @@ final class PageView: WKWebView, NSTextContent {
 
     @objc private func mediaRow(_ item: NSMenuItem) {
         if onMedia?(menuAt) == true { return }
-        if let web = webMedia, let action = web.action {
-            NSApp.sendAction(action, to: web.target, from: item)
-        }
+        // Never fall back to WebKit's silent built-in download action.
+        // No page receipt and no standalone file is an explicit refusal.
+        item.title = "Media Download Unavailable"
+        item.isEnabled = false
     }
 
     /// Copy Text, under Copy Image Address, when the picture holds words:
@@ -1021,21 +1118,29 @@ final class PageView: WKWebView, NSTextContent {
     var lastInput: TimeInterval?
 
     /// A script's window can follow a click with no modifiers in its action.
-    /// Only a recent mouse event in this page's window may borrow held keys.
+    /// Only a recent mouse event in this page's window supplies click intent.
     struct WindowClick {
-        private var last: (at: TimeInterval, window: Int)?
+        private var last: (at: TimeInterval, window: Int, button: Int, flags: NSEvent.ModifierFlags)?
 
         mutating func record(_ event: NSEvent) {
             switch event.type {
             case .leftMouseDown, .leftMouseUp:
-                last = (event.timestamp, event.windowNumber)
+                last = (event.timestamp, event.windowNumber, event.buttonNumber, event.modifierFlags)
             case .otherMouseDown where event.buttonNumber == 2, .otherMouseUp where event.buttonNumber == 2:
-                last = (event.timestamp, event.windowNumber)
+                last = (event.timestamp, event.windowNumber, event.buttonNumber, event.modifierFlags)
             case .keyDown, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp:
                 last = nil
             default:
                 break
             }
+        }
+
+        func modifiers(at now: TimeInterval, in window: Int?) -> NSEvent.ModifierFlags? {
+            follows(at: now, in: window) ? last?.flags : nil
+        }
+
+        func button(at now: TimeInterval, in window: Int?) -> Int? {
+            follows(at: now, in: window) ? last?.button : nil
         }
 
         func follows(at now: TimeInterval, in window: Int?) -> Bool {
@@ -1050,11 +1155,23 @@ final class PageView: WKWebView, NSTextContent {
         windowClick.follows(at: ProcessInfo.processInfo.systemUptime, in: window?.windowNumber)
     }
 
+    var recentWindowClickModifiers: NSEvent.ModifierFlags? {
+        windowClick.modifiers(at: ProcessInfo.processInfo.systemUptime, in: window?.windowNumber)
+    }
+
+    var recentWindowClickButton: Int? {
+        windowClick.button(at: ProcessInfo.processInfo.systemUptime, in: window?.windowNumber)
+    }
+
     private func recordWindowInput(_ event: NSEvent) {
         if Self.agentActing { windowClick = WindowClick() } else { windowClick.record(event) }
     }
 
     override func mouseDown(with event: NSEvent) {
+        // A new native down ends a prior capture, including one whose up
+        // arrived before its DOM answer. Flush that sequence before this one.
+        topPress?.resolve(false)
+        topPress = nil
         recordWindowInput(event)
         clearMenuOpen()
         onTouch?()
@@ -1063,23 +1180,38 @@ final class PageView: WKWebView, NSTextContent {
         if !PageView.agentActing { PageView.person?(self); RelayGuard.felt(self); lastInput = event.timestamp }
         PageView.reached?(self)
         // The site's menu at the top: held back, the window's if it moves (TopDrag).
-        topPress = TopPress.holds(event, in: self) ? TopPress(down: event) : nil
-        if topPress != nil { return }
+        if TopPress.holds(event, in: self) {
+            let press = TopPress(down: event,
+                forward: { [weak self] in self?.forwardTopPress($0) },
+                drag: { [weak self] in self?.window?.performDrag(with: $0) },
+                finished: { [weak self] in self?.topPress = nil })
+            topPress = press
+            press.check(in: self, zoom: pageZoom)
+            return
+        }
         super.mouseDown(with: event)
     }
 
     /// The page says the pointer is on its menu at the top (TopDragRelay).
-    var topGrab = false
+    var topGrab = false {
+        didSet { if !topGrab { topGrabPoint = nil } }
+    }
+    /// The page point that actually passed the header hit test, in CSS pixels.
+    var topGrabPoint: CGPoint?
     private var topPress: TopPress?
 
+    private func forwardTopPress(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown: super.mouseDown(with: event)
+        case .leftMouseDragged: mouseDragged(with: event)
+        case .leftMouseUp: mouseUp(with: event)
+        default: break
+        }
+    }
+
     override func mouseDragged(with event: NSEvent) {
-        guard var press = topPress else { return super.mouseDragged(with: event) }
-        guard !press.moved else { return }
-        let from = press.down.locationInWindow, now = event.locationInWindow
-        guard StripPress.drags(now.x - from.x, now.y - from.y) else { return }
-        press.moved = true
-        topPress = press
-        window?.performDrag(with: press.down)
+        if let press = topPress { press.receive(event); return }
+        super.mouseDragged(with: event)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -1108,12 +1240,7 @@ final class PageView: WKWebView, NSTextContent {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if let press = topPress {
-            topPress = nil
-            if press.moved { return }
-            // Not a drag after all: the page's click, the press first.
-            super.mouseDown(with: press.down)
-        }
+        if let press = topPress { press.receive(event); return }
         recordWindowInput(event)
         super.mouseUp(with: event)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.onSelectionPause?() }
@@ -1973,8 +2100,28 @@ extension Browser {
     /// made from it are in the menu as it opens (PageView.readBeforeMenu).
     @objc(_webView:getContextMenuFromProposedMenu:forElement:userInfo:completionHandler:)
     func contextMenu(_ webView: WKWebView, proposed menu: NSMenu, element: AnyObject?, userInfo: AnyObject?,
-                     completionHandler: @escaping (NSMenu) -> Void) {
+                     completionHandler: @escaping (NSMenu?) -> Void) {
         guard let page = webView as? PageView else { completionHandler(menu); return }
-        page.readBeforeMenu(menu) { completionHandler(menu) }
+        // An older menu's read, overtaken by a newer right-click, still
+        // answers WebKit: with no menu, which WebKit then doesn't show
+        // (WebContextMenuProxyMac::showContextMenuWithItems).
+        page.readBeforeMenu(menu) { current in completionHandler(current ? menu : nil) }
+    }
+}
+
+extension NSView {
+    /// A view about to be taken out of any window with the keys, it or a
+    /// view inside it, gives them up first, so its own resignFirstResponder
+    /// runs. Not on the way to another window (full screen, a tab torn
+    /// off), whose own code hands the keys over.
+    /// AppKit takes them from a view taken out of its window without asking
+    /// it, and WebKit only lets Secure Event Input go in its resign: a
+    /// page switched away from with a password field focused left it on,
+    /// and while it is on macOS keeps Caps Lock from switching input
+    /// sources, in Yab and every other app (feedback #949, #1563).
+    func giveUpKeys(leavingFor newWindow: NSWindow?) {
+        guard newWindow == nil, let window, let responder = window.firstResponder as? NSView,
+              responder === self || responder.isDescendant(of: self) else { return }
+        window.makeFirstResponder(nil)
     }
 }

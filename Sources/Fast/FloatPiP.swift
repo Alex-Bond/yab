@@ -75,6 +75,50 @@ enum SitePiP {
         else { system() }
     }
 
+    /// A native close belongs to one presentation and one delegate. Reopening
+    /// the controller cancels the old queued notification; duplicate closes
+    /// coalesce. Weak references let teardown win before the next run-loop turn.
+    @MainActor final class CloseDelivery {
+        private var tickets: [ObjectIdentifier: UUID] = [:]
+        private let closed = NSHashTable<NSViewController>.weakObjects()
+
+        func opened(_ controller: NSViewController) {
+            tickets[ObjectIdentifier(controller)] = nil
+            closed.remove(controller)
+        }
+
+        func isPending(_ controller: NSViewController) -> Bool {
+            tickets[ObjectIdentifier(controller)] != nil
+        }
+
+        func handles(_ controller: NSViewController) -> Bool {
+            isPending(controller) || closed.contains(controller)
+        }
+
+        func schedule(_ controller: NSViewController) {
+            guard !handles(controller) else { return }
+            let id = ObjectIdentifier(controller), ticket = UUID()
+            tickets[id] = ticket
+            let delegate = controller.value(forKey: "delegate") as AnyObject?
+            DispatchQueue.main.async { [weak self, weak controller, weak delegate] in
+                guard let self, self.tickets[id] == ticket else { return }
+                // Keep the receipt while WebKit completes: that completion
+                // may itself synchronously request another dismissal.
+                defer {
+                    if self.tickets[id] == ticket { self.tickets[id] = nil }
+                }
+                guard let controller, let delegate,
+                      controller.value(forKey: "delegate") as AnyObject? === delegate else { return }
+                // A late duplicate dismiss must not fall through to the
+                // system controller and complete WebKit's one-shot callback
+                // again. Only a new presentation relinquishes this receipt.
+                self.closed.add(controller)
+                let closed = NSSelectorFromString("pipDidClose:")
+                if delegate.responds(to: closed) { _ = delegate.perform(closed, with: controller) }
+            }
+        }
+    }
+
     /// Every browser, asked in turn for a video WebKit puts out: true when
     /// its window took it. Nobody taking it leaves it to the system's
     /// window (a call's window is up).
@@ -91,6 +135,7 @@ enum SitePiP {
     private enum Hand {
         nonisolated(unsafe) static var installed = false
         nonisolated(unsafe) static var held: [ObjectIdentifier: Picture] = [:]
+        @MainActor static let closing = CloseDelivery()
         /// Where the video stood as WebKit set it up to go out, the window
         /// and the frame in it: PIPViewController has neither until the
         /// way back.
@@ -115,17 +160,21 @@ enum SitePiP {
             }
             replace(pip, "presentViewControllerAsPictureInPicture:") { old in
                 { (me: NSViewController, content: NSViewController?) in
-                    MainActor.assumeIsolated {
+                    AppKitMainThread.sync {
                         let system = {
                             unsafeBitCast(old, to: Object.self)(me, NSSelectorFromString("presentViewControllerAsPictureInPicture:"), content)
                         }
-                        guard let content, present(me, content, otherwise: system) else { return system() }
+                        guard let content else { return system() }
+                        // Any new presentation, including system fallback,
+                        // invalidates a close queued for the previous one.
+                        closing.opened(me)
+                        if !present(me, content, otherwise: system) { system() }
                     }
                 } as @convention(block) (NSViewController, NSViewController?) -> Void
             }
             replace(pip, "dismissViewController:") { old in
                 { (me: NSViewController, content: NSViewController?) in
-                    MainActor.assumeIsolated {
+                    AppKitMainThread.sync {
                         if dismiss(me) { return }
                         unsafeBitCast(old, to: Object.self)(me, NSSelectorFromString("dismissViewController:"), content)
                     }
@@ -133,7 +182,7 @@ enum SitePiP {
             }
             replace(pip, "dismissViewControllerWithFlyback:") { old in
                 { (me: NSViewController, flyback: Bool) in
-                    MainActor.assumeIsolated {
+                    AppKitMainThread.sync {
                         if dismiss(me) { return }
                         unsafeBitCast(old, to: Flag.self)(me, NSSelectorFromString("dismissViewControllerWithFlyback:"), flyback)
                     }
@@ -190,6 +239,11 @@ enum SitePiP {
                 }
                 SitePiP.declined(picture, cancel: {
                     trace("present: rejected stale automatic request")
+                    // WebKit is still EnteringPIP. Closing before its entry
+                    // acknowledgement leaves requestPictureInPicture pending:
+                    // exitPIP only accepts InPIP. Complete that native protocol
+                    // before returning it, without ever showing a window.
+                    acknowledgeEntry(controller, picture)
                     _ = dismiss(controller)
                 }, system: {
                     held[ObjectIdentifier(controller)] = nil
@@ -215,10 +269,14 @@ enum SitePiP {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { entered(controller, picture, tries: tries - 1) }
                 return
             }
+            acknowledgeEntry(controller, picture)
+        }
+
+        @MainActor private static func acknowledgeEntry(_ controller: NSViewController, _ picture: Picture) {
             let said = NSSelectorFromString("boundsDidChangeForVideoViewContainer:")
             if let delegate = controller.value(forKey: "delegate") as AnyObject?, delegate.responds(to: said) {
                 _ = delegate.perform(said, with: picture.view)
-                trace("entered: told, \(20 - tries) tries")
+                trace("entered: told")
             } else {
                 trace("entered: no delegate to tell")
             }
@@ -227,20 +285,20 @@ enum SitePiP {
         /// WebKit taking its video back, from the page's exit, ⇧⌘P or the
         /// tab going: out of Yab's window, and WebKit told it closed.
         @MainActor private static func dismiss(_ controller: NSViewController) -> Bool {
-            guard let picture = held.removeValue(forKey: ObjectIdentifier(controller)) else { return false }
+            guard let picture = held.removeValue(forKey: ObjectIdentifier(controller)) else {
+                // A reentrant/duplicate dismiss still belongs to our pending
+                // close; forwarding it would also invoke the system close.
+                return closing.handles(controller)
+            }
             trace("dismiss")
+            // Mark it before `gone` can synchronously ask to close it again.
+            closing.schedule(controller)
             let gone = picture.gone
             picture.gone = nil
             gone?()
             if picture.view.window != nil { picture.view.removeFromSuperview() }
-            // After WebKit's own dismissing has returned, as the system's
-            // window says it a moment later.
-            DispatchQueue.main.async {
-                let closed = NSSelectorFromString("pipDidClose:")
-                if let delegate = controller.value(forKey: "delegate") as AnyObject?, delegate.responds(to: closed) {
-                    _ = delegate.perform(closed, with: controller)
-                }
-            }
+            // The queued notification runs after WebKit's own dismissing
+            // has returned, as the system's window says it a moment later.
             return true
         }
     }
@@ -253,10 +311,15 @@ extension Browser {
     @objc(_webView:hasVideoInPictureInPictureDidChange:)
     func webView(_ webView: WKWebView, hasVideoInPictureInPictureDidChange has: Bool) {
         guard let tab = tab(for: webView) else { return }
+        if has, rejectsPendingVideoRequest(for: tab) {
+            webView.closeAllMediaPresentations(completionHandler: {})
+            return
+        }
+        if !has { endedPendingVideoRequest(for: tab) }
         let departure: FullscreenPiPDeparture.Context?
         switch fullscreenDeparture.receipt(for: tab, in: self) {
         case .rejected where has:
-            webView.closeAllMediaPresentations(completionHandler: nil)
+            webView.closeAllMediaPresentations(completionHandler: {})
             return
         case .automatic(let context): departure = context
         case .ordinary where has:
@@ -283,6 +346,7 @@ extension Browser {
     /// beyond tab(for:)'s legacy active-tab fallback. Ambiguous geometry
     /// remains non-owned; never cancel another page from a window guess.
     func automaticPiPReceipt(for picture: SitePiP.Picture, tab: Tab) -> FullscreenPiPDeparture.Receipt {
+        if rejectsPendingVideoRequest(for: tab) { return .rejected }
         if picture.native != nil { return .ordinary }
         guard let window = picture.window else { return .ordinary }
         let center = CGPoint(x: picture.rect.midX, y: picture.rect.midY)

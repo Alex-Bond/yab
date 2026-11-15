@@ -29,6 +29,7 @@ struct PasswordManagersSection: View {
     @ObservedObject var model: SettingsModel
     let browser: Browser
     @ObservedObject private var extensions = Extensions.here
+    @ObservedObject private var managers = ManagerExtensions.shared
     @ObservedObject private var connections = PasswordManagers.Connections.shared
 
     private var note: String {
@@ -78,7 +79,7 @@ struct PasswordManagersSection: View {
         } footer: {
             SettingsNote(note)
         }
-        .onAppear { connections.look(); connections.lookAround() }
+        .onAppear { connections.look(); connections.lookAround(); managers.refresh() }
     }
 }
 
@@ -109,6 +110,7 @@ private struct AddManagerRow: View {
 private struct HereRow: View {
     let id: String
     @ObservedObject private var extensions = Extensions.here
+    @ObservedObject private var managers = ManagerExtensions.shared
     @ObservedObject private var connections = PasswordManagers.Connections.shared
 
     var body: some View {
@@ -116,12 +118,12 @@ private struct HereRow: View {
             ManagerIcon(id: id, side: 28)
             VStack(alignment: .leading, spacing: 3) { // design: SettingsRow's own 3 between a title and its line
                 Text(PasswordManagers.name(id))
-                Text(extensions.busy == id ? "Adding its extension…" : PasswordManagers.found(id) ?? "")
+                Text(managers.adding == id ? "Adding its extension…" : PasswordManagers.found(id) ?? "")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if extensions.busy == id {
+            if managers.adding == id {
                 ProgressView().controlSize(.small)
             } else {
                 Button(SettingsWords.text("Connect")) { connections.openConnect(id) }.settingsButton()
@@ -138,6 +140,7 @@ private struct ManagerRow: View {
     @ObservedObject var model: SettingsModel
     let browser: Browser
     @ObservedObject private var extensions = Extensions.here
+    @ObservedObject private var managers = ManagerExtensions.shared
     @ObservedObject private var connections = PasswordManagers.Connections.shared
     @State private var waiting = false
 
@@ -155,7 +158,7 @@ private struct ManagerRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if extensions.busy == id || waiting {
+            if managers.adding == id || waiting {
                 ProgressView().controlSize(.small)
             } else if let action = row.action {
                 Button(action) { act(row) }.settingsButton()
@@ -180,8 +183,8 @@ private struct ManagerRow: View {
 
     private func act(_ row: PasswordManagers.Row) {
         switch row {
-        case .noExtension: extensions.install(from: id)
-        case .off: if let item = PasswordManagers.installed(id) { extensions.setEnabled(item.id, true) }
+        case .noExtension: managers.add(id)
+        case .off: if let item = PasswordManagers.installed(id) { managers.setEnabled(item.id, true) }
         case .notAllowed:
             waiting = true
             Extensions.openOnePassword()
@@ -221,6 +224,7 @@ struct ManagerIcon: View {
     let id: String
     let side: CGFloat
     @ObservedObject private var extensions = Extensions.here
+    @ObservedObject private var managers = ManagerExtensions.shared
 
     var body: some View {
         Group {
@@ -320,7 +324,7 @@ private struct CardButton: View {
 /// The words of a failed add, short: the store's own refusal, or the
 /// network's, which are long, as one line.
 @MainActor private func addTrouble(_ id: String) -> String? {
-    guard Extensions.here.installErrors[PasswordManagers.canonical(id)] != nil else { return nil }
+    guard ManagerExtensions.shared.addFailed(id) else { return nil }
     return "Couldn't add its extension. Check the connection and try again."
 }
 
@@ -330,6 +334,7 @@ private struct CardButton: View {
 struct ConnectManagersPage: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject private var extensions = Extensions.here
+    @ObservedObject private var managers = ManagerExtensions.shared
     @ObservedObject private var connections = PasswordManagers.Connections.shared
     /// Fixed as the page opens, so a row added here stays where it was.
     @State private var ids: [String] = PasswordManagers.providers.map(\.id).filter {
@@ -342,10 +347,14 @@ struct ConnectManagersPage: View {
             PenTileView(page: .passwords)
         }
         Section {
-            ForEach(ids, id: \.self) { id in row(id) }
+            ForEach(ids.filter { connections.connection($0) == nil }, id: \.self) { id in row(id) }
         }
         .onChange(of: connections.list.map(\.provider)) { _, now in
             if ids.contains(where: now.contains) { connections.leaveConnect() }
+        }
+        // Added here, with nothing to ask: connected, not one more press.
+        .onChange(of: managers.adding) { was, _ in
+            if let was, PasswordManagers.connectsAtOnce(was) { connections.openConnect(was) }
         }
     }
 
@@ -354,13 +363,13 @@ struct ConnectManagersPage: View {
         let added = PasswordManagers.installed(id) != nil
         let trouble = addTrouble(id)
         let detail = !selectable ? "Needs Apple's approval for Yab"
-            : extensions.busy == id ? "Adding its extension…"
+            : managers.adding == id ? "Adding its extension…"
             : trouble ?? (added ? "Extension in Yab" : "Adds its extension to Yab")
         return HStack(spacing: 10) {
             ManagerIcon(id: id, side: 28)
             VStack(alignment: .leading, spacing: 3) { // design: SettingsRow's own 3 between a title and its line
                 Text(PasswordManagers.name(id))
-                if selectable, trouble != nil, extensions.busy != id {
+                if selectable, trouble != nil, managers.adding != id {
                     TroubleLine(words: detail)
                 } else {
                     Text(detail)
@@ -372,12 +381,12 @@ struct ConnectManagersPage: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             if !selectable {
                 EmptyView()
-            } else if extensions.busy == id {
+            } else if managers.adding == id {
                 ProgressView().controlSize(.small)
             } else if added {
                 Button(SettingsWords.text("Connect")) { connections.openConnect(id) }.settingsButton()
             } else {
-                Button(trouble == nil ? "Add" : "Try Again") { extensions.install(from: id) }.settingsButton()
+                Button(trouble == nil ? "Add" : "Try Again") { managers.add(id) }.settingsButton()
             }
         }
         .opacity(selectable ? 1 : 0.45)
@@ -475,6 +484,7 @@ private struct UnlockField: View {
 struct ConnectManagerPage: View {
     let id: String
     @ObservedObject private var extensions = Extensions.here
+    @ObservedObject private var managers = ManagerExtensions.shared
     @ObservedObject private var connections = PasswordManagers.Connections.shared
     @State private var mode = PasswordManagers.Mode.you
     @State private var password = ""
@@ -491,14 +501,17 @@ struct ConnectManagerPage: View {
     private var yab: Bool { mode == .yab }
     private var valid: Bool { !yab || !password.trimmingCharacters(in: .whitespaces).isEmpty }
     private var added: Bool { PasswordManagers.installed(id) != nil }
-    private var allows: Bool { PasswordManagers.provider(id)?.allows == true }
+    /// 1Password's app, only where it is on this Mac.
+    private var allows: Bool {
+        PasswordManagers.provider(id)?.allows == true && connections.here[PasswordManagers.canonical(id)] == PasswordManagers.appFound
+    }
     private var allowed: Bool {
         guard let item = PasswordManagers.installed(id) else { return false }
         return extensions.onePasswordAnswered.contains(item.id)
     }
     /// Steps shown only while one of them is left: a manager already
     /// working connects with the choice alone.
-    private var setUp: Bool { !added || (allows && !allowed) || extensions.busy == id }
+    private var setUp: Bool { PasswordManagers.leftToSetUp(id) || managers.adding == id }
 
     var body: some View {
         PageHero(title: "Connect \(name)", detail: "Choose how to unlock \(name).") {
@@ -549,17 +562,21 @@ struct ConnectManagerPage: View {
             .padding(.top, 8)
         }
         .animation(Motion.settle, value: setUp)
+        // The extension added on this page, and nothing left to ask.
+        .onChange(of: setUp) { _, now in
+            if !now, PasswordManagers.connectsAtOnce(id) { connections.openConnect(id) }
+        }
     }
 
     @ViewBuilder private var steps: some View {
-        let adding = extensions.busy == id
+        let adding = managers.adding == id
         let trouble = adding ? nil : addTrouble(id)
         step(mark: SetUpMark(number: 1, done: added, busy: adding),
              title: "Add the \(name) extension",
              detail: added ? "Added." : adding ? "Adding…" : trouble ?? "From the Chrome Web Store, into Yab.",
              trouble: trouble != nil) {
             if !added && !adding {
-                Button(trouble == nil ? "Add" : "Try Again") { extensions.install(from: id) }.settingsButton()
+                Button(trouble == nil ? "Add" : "Try Again") { managers.add(id) }.settingsButton()
             }
         }
         if allows {
@@ -621,12 +638,11 @@ struct ConnectManagerPage: View {
 
     /// Connected: back on Passwords, its row lit.
     private func connect() {
-        guard connections.connect(id, mode: mode, password: yab ? password : nil) else {
+        guard connections.connectAndSignIn(id, mode: mode, password: yab ? password : nil) else {
             failed = true
             return
         }
         password = ""
-        connections.leaveConnect()
     }
 }
 

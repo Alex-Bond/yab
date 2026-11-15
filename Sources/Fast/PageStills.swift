@@ -132,6 +132,8 @@ final class PageStills {
     private(set) var misses: [String: Int] = [:]
     private(set) var captures = 0
     private(set) var failed = 0
+    /// Chromium stills made from the page's last whole picture, not asked for.
+    private(set) var reused = 0
     private(set) var captureMs: [Double] = []
     /// The main thread's own share of each picture: asking, and taking the
     /// answer (WebKit's own handling of its reply comes before it).
@@ -144,7 +146,7 @@ final class PageStills {
             "bytes": stills.values.reduce(0) { $0 + $1.bytes },
             "budget": PageStills.budget,
             "reduced": stills.values.filter(\.reduced).count,
-            "hits": hits, "misses": misses, "captures": captures, "failed": failed,
+            "hits": hits, "misses": misses, "captures": captures, "failed": failed, "reused": reused,
             "capture_ms": captureMs.suffix(40).map { ($0 * 10).rounded() / 10 },
             "main_ms": mainMs.suffix(80).map { ($0 * 100).rounded() / 100 },
             "near": near.count,
@@ -160,6 +162,7 @@ final class PageStills {
         misses = [:]
         captures = 0
         failed = 0
+        reused = 0
         captureMs = []
         mainMs = []
     }
@@ -295,17 +298,44 @@ final class PageStills {
         guard matches() else { return }
         let now = CACurrentMediaTime()
         if let since = asked[owner], now - since < 4 { return }
-        if let kept = stills[owner], kept.key.refusal(for: key) == nil, now - kept.drawn < 2 { return }
+        // A whole page's picture from the renderer each time, and a still only
+        // stands in for the 10-15 ms until the page's own frame: leaving a tab
+        // again with the same view of the same page takes no new one.
+        if let kept = stills[owner], kept.key.refusal(for: key) == nil, now - kept.drawn < 30 { return }
         asked[owner] = now
         let epoch = epochs[owner, default: 0]
-        page.snapshot(PageShot(afterUpdates: false)) { [weak self] image, _ in
+        let pixels = CGSize(width: (key.size.width * key.scale).rounded(), height: (key.size.height * key.scale).rounded())
+        // The page was just pictured whole as it is now, for the tone's look
+        // after the scroll that brought this still (ChromiumPage.RecentWhole):
+        // that picture, rather than the window drawn and read back again.
+        if let encoded = page.recentWholePicture() {
+            let size = key.size, scale = key.scale
+            queue.async {
+                let picture = ChromiumPage.picture(encoded, page: size, rect: CGRect(origin: .zero, size: size), width: size.width, backing: scale)?
+                    .cgImage(forProposedRect: nil, context: nil, hints: nil)
+                let surface = picture.flatMap { Self.surface(from: $0, pixels: pixels) }
+                DispatchQueue.main.async {
+                    guard self.epochs[owner, default: 0] == epoch else { return }
+                    self.asked[owner] = nil
+                    guard let surface, matches() else { self.failed += 1; return }
+                    self.captures += 1
+                    self.reused += 1
+                    self.captureMs.append((CACurrentMediaTime() - now) * 1000)
+                    if self.captureMs.count > 200 { self.captureMs.removeFirst(100) }
+                    self.store(Still(owner: owner, key: key, surface: surface, reduced: false, shy: shy))
+                }
+            }
+            return
+        }
+        // Asked now, ahead of the page's hide (the stage calls this before the
+        // page leaves it): Chromium pictures a page only while it is shown.
+        page.snapshotInOrder(PageShot(afterUpdates: false, brief: true)) { [weak self] image, _ in
             guard let self, self.epochs[owner, default: 0] == epoch, matches() else { return }
             self.asked[owner] = nil
             guard let picture = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
                 self.failed += 1
                 return
             }
-            let pixels = CGSize(width: (key.size.width * key.scale).rounded(), height: (key.size.height * key.scale).rounded())
             self.queue.async {
                 let surface = Self.surface(from: picture, pixels: pixels)
                 DispatchQueue.main.async {
@@ -353,6 +383,22 @@ final class PageStills {
         let image = CIImage(ioSurface: still.surface)
         guard let copy = CIContext(options: [.cacheIntermediates: false]).createCGImage(image, from: image.extent) else { return nil }
         return NSImage(cgImage: copy, size: still.key.size)
+    }
+
+    /// The same, small, drawn off the main thread: ⌃Tab asks for every tile
+    /// at once, and a still of a whole 5K window takes tens of milliseconds.
+    func picture(of owner: UUID, width: CGFloat, done: @escaping @MainActor (NSImage?) -> Void) {
+        guard PageStills.on, let still = stills[owner], still.showing > 0 || keep(still.surface) else { return done(nil) }
+        let surface = still.surface, size = still.key.size
+        DispatchQueue.global(qos: .userInitiated).async {
+            let source = CIImage(ioSurface: surface)
+            let scale = min(1, 2 * width / max(source.extent.width, 1))
+            let image = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            let copy = CIContext(options: [.cacheIntermediates: false]).createCGImage(image, from: image.extent)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { done(copy.map { NSImage(cgImage: $0, size: size) }) }
+            }
+        }
     }
 
     /// The still kept under `owner`, whatever page it is now asked for:

@@ -87,6 +87,8 @@ struct NativeSetting {
     /// snippets', each written the way its row in Settings writes it.
     static var kept: [Self] { [
         flag("suggestions", "Suggestions under the field", key: "hints.noticing", default: true) { Hints.shared.suggesting = $0 },
+        flag("site-search-space", "Space after a site's alias starts its search, as Tab does (Chrome's Space or Tab; off is Tab alone)",
+             key: Scopes.spaceKey, default: true),
         flag("meetings", "Your next meeting on a pinned calendar", key: "meetings.show", default: true) { Meetings.shared.wanted = $0 },
         stored("app-icon", "App icon", ["type": "string", "enum": AppIconStyle.allCases.map(\.rawValue)],
                read: { .string(AppIconStyle.saved.rawValue) }) { value in
@@ -174,6 +176,12 @@ struct NativeSetting {
             guard case .string(let raw) = value, PeekClick(rawValue: raw) != nil else { throw NativeFailure("invalid_arguments", "shift or option") }
             Store.settings.set(raw, forKey: PeekClick.key)
         },
+        stored("energy-saver", "Energy Saver: off, when battery is at 20% or lower, or when unplugged", ["type": "string", "enum": EnergySaver.allCases.map(\.rawValue)],
+               read: { .string(EnergySaver.current.rawValue) }) { value in
+            guard case .string(let raw) = value, let choice = EnergySaver(rawValue: raw) else { throw NativeFailure("invalid_arguments", "off, low or unplugged") }
+            EnergySaver.current = choice
+        },
+        flag("experimental-switcher-strip", "Recent Tabs Over the Page (Ctrl-Tab row)", key: SwitcherStrip.key, default: false),
         stored("switcher-reach", "Recent tabs come from every space or this space", ["type": "string", "enum": SwitchReach.allCases.map(\.rawValue)],
                read: { .string(SwitchReach.current.rawValue) }) { value in
             guard case .string(let raw) = value, SwitchReach(rawValue: raw) != nil else { throw NativeFailure("invalid_arguments", "Unknown reach") }
@@ -282,6 +290,8 @@ enum NativeActions {
                                  "codes-mail", "codes-texts", "codes-archive", "your-cards", "save-cards", "fill-cards", "fill-forms", "draft-forms",
                                  "shield", "cookies", "cache", "diary-text", "extensions-private", "default-browser", "agents-routines", "memory-forget",
                                  "mail-people", "sync-passwords", "activity", "crashes",
+                                 // Profile selection changes access to signed-in accounts; the person confirms it.
+                                 "space-sign-ins",
                                  // The person's consent for mail going to their AI (MailConsent): theirs alone.
                                  "mail-ahead", "mail-summaries", "mail-agents-others",
                                  // AI in Yab (AIUse): the person turns AI on or off, never an agent.
@@ -316,7 +326,7 @@ enum NativeActions {
             // tabs"), as one batch Undo brings back where each stood.
             action("tabs.close", "Close the user's tabs; Undo brings them all back where they were", "space",
                    ["tabs": ["type": "array", "items": string, "minItems": 1, "maxItems": NativeActions.closeLimit],
-                    "includePinned": ["type": "boolean", "description": "Only when the user named the pinned or kept tabs themselves"]],
+                    "includePinned": ["type": "boolean", "description": "Only when the user named the pinned or kept tabs themselves. Those are put to sleep in their places, as ⌘W does, not removed"]],
                    required: ["tabs"], undo: true, permission: "none"),
             action("tabs.group", "Keep selected tabs in a new folder", "space", ["tabs": ["type": "array", "items": string, "minItems": 1, "maxItems": 50], "name": string], required: ["tabs", "name"], undo: true, permission: "ask_if_user_tabs"),
             // The column's Move to Folder, Move Out of Folder and Remove

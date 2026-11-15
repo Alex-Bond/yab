@@ -58,8 +58,8 @@ struct PageFonts: Codable, Equatable {
         if !body.isEmpty { rules.append(":where(html, body) { font-family: \(Self.family(body, fallback: "serif")); }") }
         if !sans.isEmpty { rules.append(":where(input, button, select, textarea) { font-family: \(Self.family(sans, fallback: "sans-serif")); }") }
         if !fixed.isEmpty { rules.append(":where(pre, code, kbd, samp) { font-family: \(Self.family(fixed, fallback: "monospace")); }") }
-        // The page script also names the face on generic-family elements;
-        // any custom family makes rules here, so the sheet brings the face.
+        // A custom family anywhere makes rules here, so the sheet brings the
+        // emoji face; the generic families come from the engines (PageFamilies).
         if [standard, serif, sans, fixed].contains(where: { !$0.isEmpty }) { rules.insert(Self.emojiFace, at: 0) }
         return rules.joined(separator: "\n")
     }
@@ -93,84 +93,52 @@ enum PageAppearance {
         min(3, max(0.4, current + (increasing ? 0.1 : -0.1)))
     }
 
+    /// The page's sheet of defaults, put in once per document and left as it
+    /// is: nothing watches the page or reads or sets its elements. The generic
+    /// families are the engines' own settings (PageFamilies), so a page asking
+    /// for sans-serif gets the chosen face from the engine itself (#1889: the
+    /// script that named it on every added element cost 14% of Speedometer).
     static func script(_ fonts: PageFonts) -> String {
         let data = try! JSONEncoder().encode(fonts.css)
         let css = String(decoding: data, as: UTF8.self)
-        let familyData = try! JSONEncoder().encode([
-            "serif": PageFonts.family(fonts.serif, fallback: "serif"),
-            "sans-serif": PageFonts.family(fonts.sans, fallback: "sans-serif"),
-            "monospace": PageFonts.family(fonts.fixed, fallback: "monospace"),
-        ])
-        let families = String(decoding: familyData, as: UTF8.self)
         return """
         \(marker)
         (() => {
           if (!/^https?:$/.test(location.protocol)) return;
           const css = \(css);
-          const families = \(families);
           const previous = globalThis.__yabPageDefaults;
           previous?.observer?.disconnect();
           previous?.rootObserver?.disconnect();
+          // What an older copy of this script named on elements, put back.
           for (const [node, value] of previous?.changed || []) {
             if (node.isConnected) {
               if (value.font) node.style.setProperty('font-family', value.font, value.priority);
               else node.style.removeProperty('font-family');
             }
           }
-          const state = {changed:new Map(), observer:null, rootObserver:null};
+          const state = {rootObserver:null};
           globalThis.__yabPageDefaults = state;
-          const customFamilies = Object.values(families).some(Boolean);
-          const scan = root => {
-            if (!customFamilies || !root) return;
-            const nodes = [root, ...root.querySelectorAll('*')];
-            for (const node of nodes) {
-              if (!(node instanceof HTMLElement) || !node.isConnected) continue;
-              const family = getComputedStyle(node).fontFamily.trim().toLowerCase();
-              const wanted = families[family];
-              if (!wanted) continue;
-              state.changed.set(node, {font:node.style.getPropertyValue('font-family'),
-                                      priority:node.style.getPropertyPriority('font-family')});
-              node.style.setProperty('font-family', wanted);
-            }
-          };
           const apply = () => {
             let style = document.getElementById('yab-page-defaults');
-            if (!document.documentElement) return;
-            if (!css) { style?.remove(); }
-            else if (!style) {
+            if (!css) { style?.remove(); return; }
+            if (!style) {
               style = document.createElement('style');
               style.id = 'yab-page-defaults';
               document.documentElement.prepend(style);
             }
-            if (css) style.textContent = css;
-            scan(document.documentElement);
+            if (style.textContent !== css) style.textContent = css;
           };
-          apply();
-          if (css && !document.documentElement) {
-            state.rootObserver = new MutationObserver(() => {
-              if (!document.documentElement || globalThis.__yabPageDefaults !== state) return;
-              state.rootObserver.disconnect();
-              state.rootObserver = null;
-              apply();
-            });
-            state.rootObserver.observe(document, {childList:true});
-          }
-          const ready = () => {
-            if (globalThis.__yabPageDefaults !== state) return;
-            state.rootObserver?.disconnect();
+          if (document.documentElement) { apply(); return; }
+          if (!css) return;
+          // At document start the engine may not have made <html> yet: the
+          // sheet goes in the moment it exists, and the watch ends there.
+          state.rootObserver = new MutationObserver(() => {
+            if (!document.documentElement || globalThis.__yabPageDefaults !== state) return;
+            state.rootObserver.disconnect();
             state.rootObserver = null;
             apply();
-            if (!customFamilies) return;
-            state.observer = new MutationObserver(records => {
-              for (const record of records) for (const node of record.addedNodes) {
-                if (node.nodeType === Node.ELEMENT_NODE) scan(node);
-              }
-              for (const node of state.changed.keys()) if (!node.isConnected) state.changed.delete(node);
-            });
-            state.observer.observe(document.documentElement, {childList:true, subtree:true});
-          };
-          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready, {once:true});
-          else ready();
+          });
+          state.rootObserver.observe(document, {childList:true});
         })();
         """
     }
@@ -185,8 +153,9 @@ enum PageAppearance {
         for script in retained where !remaining.contains(ObjectIdentifier(script)) {
             controller.addUserScript(script)
         }
-        // The one object a tab's next arming puts first (PageScripts).
-        controller.addUserScript(PageScripts.fonts(fonts))
+        // The one object a tab's next arming puts first (PageScripts), and
+        // none when no face or size of one's own is chosen.
+        if !fonts.css.isEmpty { controller.addUserScript(PageScripts.fonts(fonts)) }
     }
 }
 

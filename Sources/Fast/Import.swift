@@ -50,6 +50,17 @@ enum Chromium {
         /// A fixture or an explicitly selected data folder.
         var dataRoot: URL? = nil
 
+        /// A capability carried only through one explicit Bring In operation.
+        /// Never persisted in preferences or granted by keychain ACLs.
+        private(set) var importRoot: URL? = nil
+        var credentialAccess: Bool { importRoot == root }
+
+        func authorizingImport() -> Source {
+            var copy = self
+            copy.importRoot = root
+            return copy
+        }
+
         var id: String { name }
 
         /// Where the app is, if it is on this Mac at all: as Launch
@@ -77,7 +88,8 @@ enum Chromium {
         /// History files, which the browser writes as it goes. Nil when no
         /// profile has one.
         var lastUsed: Date? {
-            profiles
+            guard credentialAccess else { return nil }
+            return profiles
                 .map { $0.appendingPathComponent("History") }
                 .compactMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
                 .max()
@@ -110,8 +122,13 @@ enum Chromium {
             var trouble: Error?
             func folders(in folder: URL) -> [URL] {
                 do {
-                    return try files.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles)
-                        .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                    return try files.contentsOfDirectory(atPath: folder.path)
+                        .filter { !$0.hasPrefix(".") && !Self.credentialName($0) }
+                        .compactMap { name in
+                            let url = folder.appendingPathComponent(name)
+                            var directory: ObjCBool = false
+                            return files.fileExists(atPath: url.path, isDirectory: &directory) && directory.boolValue ? url : nil
+                        }
                 } catch {
                     if trouble == nil { trouble = error }
                     return []
@@ -122,7 +139,9 @@ enum Chromium {
             let markers = ["Preferences", "Secure Preferences", "Login Data", "Login Data For Account",
                            "Bookmarks", "AccountBookmarks", "History", "Web Data", "Cookies", "Network/Cookies", "Sessions", "Current Session", "Last Session"]
             func isProfile(_ folder: URL) -> Bool {
-                markers.contains { files.fileExists(atPath: folder.appendingPathComponent($0).path) }
+                // readdir names only: never stat a credential file to discover a profile.
+                let names = Set((try? files.contentsOfDirectory(atPath: folder.path)) ?? [])
+                return markers.contains { names.contains($0) } || names.contains("Network")
             }
             let candidates = isProfile(root) ? [root] : folders(in: root).flatMap { folder in
                 isProfile(folder) ? [folder] : folders(in: folder).filter(isProfile)
@@ -138,16 +157,26 @@ enum Chromium {
             return (sorted, sorted.isEmpty ? trouble : nil)
         }
 
-        /// On this Mac: a profile to read, or a data folder that is there
-        /// but couldn't be read. The app need not be found; Launch
-        /// Services misses some copies, and the data is what is brought.
+        /// On this Mac: a data container exists. Whether it has portable
+        /// data is determined after the person chooses the operation. The
+        /// app need not be found; LaunchServices misses some copies.
         var present: Bool {
-            let found = scan
-            return !found.profiles.isEmpty || found.trouble != nil
+            // Discovery needs only the container's existence. Walking every
+            // profile here made idle history requests and command menus read
+            // other browsers' directories before anyone chose an import.
+            var directory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: root.path, isDirectory: &directory) && directory.boolValue
+        }
+
+        static func credentialName(_ name: String) -> Bool {
+            ["Login Data", "Login Data For Account", "Web Data", "Cookies", "Local State"].contains {
+                name == $0 || name.hasPrefix($0 + "-")
+            }
         }
 
         var files: [URL] {
-            profiles.flatMap { folder in
+            guard credentialAccess else { return [] }
+            return profiles.flatMap { folder in
                 ["Login Data", "Login Data For Account"].map { folder.appendingPathComponent($0) }
                     .filter { FileManager.default.fileExists(atPath: $0.path) }
             }
@@ -245,7 +274,8 @@ enum Chromium {
         var never: [String]
     }
 
-    /// `quiet`: fail rather than ask for the key, for a read nobody asked for.
+    /// `quiet`: do not show another keychain prompt during this import.
+    /// A current import capability is still required.
     static func read(_ source: Source, quiet: Bool = false) throws -> Found {
         guard let passphrase = safeStorage(source, quiet: quiet) else { throw Trouble.noPassphrase }
         let key = stretch(passphrase)
@@ -307,14 +337,18 @@ enum Chromium {
         var out: [Bookmark] = []
         var earlier = Set<String>()
         for folder in source.profiles {
-            let profile = bookmarkFiles.compactMap { tree(at: folder.appendingPathComponent($0)) }
-                .reduce(into: [Bookmark]()) { joined, file in Self.join(file, into: &joined) }
+            let profile = bookmarks(inProfile: folder)
             // Only against the profiles before it: within one, a page kept
             // in two folders was kept there twice on purpose.
             Bookmarks.merge(profile, into: &out, skipping: earlier, fresh: true)
             earlier.formUnion(Bookmarks.addresses(profile))
         }
         return out
+    }
+
+    static func bookmarks(inProfile folder: URL) -> [Bookmark] {
+        bookmarkFiles.compactMap { tree(at: folder.appendingPathComponent($0)) }
+            .reduce(into: [Bookmark]()) { joined, file in Self.join(file, into: &joined) }
     }
 
     /// The account's file first: Chrome lists its bookmarks ahead of this
@@ -516,6 +550,7 @@ enum Chromium {
     /// `only`: the profile folders wanted, "Default", "Profile 1"; all of
     /// them when nil.
     private static func cookieFiles(in source: Source, only: Set<String>? = nil) -> [URL] {
+        guard source.credentialAccess else { return [] }
         var out: [URL] = []
         for folder in source.profiles {
             if let only, !only.contains(folder.lastPathComponent) { continue }
@@ -546,8 +581,9 @@ enum Chromium {
         return NSError(domain: "YabImport.SQLite", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "\(stage): \(message)"])
     }
 
-    static func copyWithLog(_ file: URL) throws -> URL {
-        do { return try snapshot(file) }
+    static func copyWithLog(_ file: URL, into folder: URL = FileManager.default.temporaryDirectory,
+                            within limit: TimeInterval = 10) throws -> URL {
+        do { return try snapshot(file, into: folder, within: limit) }
         catch {
             let failure = error as NSError
             // A closed WAL database may have no journal or SHM file. macOS
@@ -560,7 +596,7 @@ enum Chromium {
             guard failure.domain == "YabImport.SQLite", failure.code == Int(SQLITE_CANTOPEN), !hasWAL() else { throw error }
             let fm = FileManager.default
             let before = try fm.attributesOfItem(atPath: file.path)
-            let copy = try snapshot(file, immutable: true)
+            let copy = try snapshot(file, immutable: true, into: folder, within: limit)
             let after = try? fm.attributesOfItem(atPath: file.path)
             guard !hasWAL(), before[.modificationDate] as? Date == after?[.modificationDate] as? Date,
                   before[.size] as? Int == after?[.size] as? Int,
@@ -572,10 +608,9 @@ enum Chromium {
         }
     }
 
-    private static func snapshot(_ file: URL, immutable: Bool = false) throws -> URL {
-        let temp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("yab-import-\(UUID().uuidString).db")
-        var source: OpaquePointer?, target: OpaquePointer?
+    private static func snapshot(_ file: URL, immutable: Bool = false, into folder: URL, within limit: TimeInterval) throws -> URL {
+        let temp = folder.appendingPathComponent("yab-import-\(UUID().uuidString).db")
+        var source: OpaquePointer?
         var uri = URLComponents(url: file, resolvingAgainstBaseURL: false)
         uri?.queryItems = [URLQueryItem(name: "immutable", value: "1")]
         let path = immutable ? uri?.string ?? file.path : file.path
@@ -586,20 +621,37 @@ enum Chromium {
             throw error
         }
         defer { sqlite3_close(source) }
+        do {
+            try backup(source, into: temp, within: limit)
+        } catch {
+            // Only with the copy's own connection closed: unlinking the file
+            // of a database open in this process was EXC_GUARD (a vnode guard
+            // on the copy), Yab gone. A large History or Web Data, or one
+            // another browser held locked (Chrome keeps its databases in
+            // exclusive mode), failed the backup in its ten seconds and took
+            // Yab down that way (0.46.17, macOS 27.0.1).
+            removeWithLog(temp)
+            throw error
+        }
+        return temp
+    }
+
+    /// `source` copied into a new database at `temp` within `limit` seconds.
+    /// The copy's connection is closed by the time this returns, whether or
+    /// not the copy worked.
+    private static func backup(_ source: OpaquePointer, into temp: URL, within limit: TimeInterval) throws {
+        var target: OpaquePointer?
         guard sqlite3_open_v2(temp.path, &target, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK, let target else {
             let error = sqliteFailure(target, at: "Snapshot open")
             if let target { sqlite3_close(target) }
-            removeWithLog(temp)
             throw error
         }
         defer { sqlite3_close(target) }
         sqlite3_busy_timeout(source, 2000)
         guard let backup = sqlite3_backup_init(target, "main", source, "main") else {
-            let error = sqliteFailure(target, at: "Snapshot init")
-            removeWithLog(temp)
-            throw error
+            throw sqliteFailure(target, at: "Snapshot init")
         }
-        let deadline = Date().addingTimeInterval(10)
+        let deadline = Date().addingTimeInterval(limit)
         var status: Int32
         repeat {
             status = sqlite3_backup_step(backup, 256)
@@ -607,10 +659,8 @@ enum Chromium {
         } while (status == SQLITE_OK || status == SQLITE_BUSY || status == SQLITE_LOCKED) && Date() < deadline
         let finished = sqlite3_backup_finish(backup)
         guard status == SQLITE_DONE, finished == SQLITE_OK else {
-            removeWithLog(temp)
             throw NSError(domain: "YabImport.SQLite", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Snapshot failed: step \(status), finish \(finished)"])
         }
-        return temp
     }
 
     static func removeWithLog(_ temp: URL) {
@@ -746,6 +796,7 @@ enum Chromium {
 
     /// Also read for its cards (WalletImport).
     static func safeStorage(_ source: Source, quiet: Bool = false) -> String? {
+        guard source.credentialAccess else { return nil }
         if Store.testing, let key = standInKeys.withLock({ $0[source.root.path] }) { return key }
         var out: CFTypeRef?
         let query: [String: Any] = [

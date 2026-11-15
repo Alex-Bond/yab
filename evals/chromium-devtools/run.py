@@ -5,9 +5,10 @@ Farm only:
   ./farm exec --display --needs capture,foreground,pointer --name "…" -- \
     bash evals/chromium-devtools/run.sh HOST:/path/App.app [scenario,…]
 
-Keys, clicks and menus are real events (window-tiling's pointer.py). What it
-writes in devtools.json is only what a picture needs to be found; the pictures
-are the result.
+Keyboard scenarios use real events (window-tiling's pointer.py). The survival
+probe can also invoke the native NSMenu action and capture the app window with
+ScreenCaptureKit, without system pointer permission. devtools.json records the
+renderer/document assertions as well as the pictures.
 """
 import argparse
 import importlib.util
@@ -55,6 +56,7 @@ class Run:
         self.app, self.out, self.base = app, out, base
         self.w = r1s.World(app, out, base)
         self.n = 0
+        self.native_menu = os.environ.get('DEVTOOLS_NATIVE_MENU') == '1'
         self.log = []
 
     def say(self, tag, **kw):
@@ -77,6 +79,12 @@ class Run:
         return max(rows, key=lambda r: r['frame'][2] * r['frame'][3])
 
     def shot(self, tag):
+        if os.environ.get('DEVTOOLS_SKIP_SHOTS') == '1':
+            return 'diagnostic-without-picture-' + tag
+        if self.native_menu:
+            row = self.w.shot(tag)
+            assert 'window' in row, row
+            return row['name']
         self.n += 1
         stem = f'{self.n:02d}-{tag}'
         x, y, ww, hh = self.main()['frame']
@@ -128,6 +136,14 @@ class Run:
         ptr('click', f[0] + f[2] / 2, f[1] + f[3] / 2)
         time.sleep(.8)
         return True
+
+    def panel(self, tab, title):
+        """A panel by its head, or through DevTools itself when the head has overflowed."""
+        if self.head(title):
+            return True
+        shown = self.frontend(tab, "const U = await import('devtools://devtools/bundled/ui/legacy/legacy.js');"
+                              f"await U.ViewManager.ViewManager.instance().showView('{title.lower()}'); return true")
+        return shown.get('value') is True
 
     def fresh(self, url=None):
         tab = self.w.open(url or self.base + '/dt')
@@ -183,6 +199,7 @@ def s_open(R, r):
         R.shot('menu-' + item.replace(' ', '-'))
         R.w.ask(do='ui', devtools=False)
         time.sleep(1.5)
+    assert r['i'] and not r['i_again']['open'] and r['j'] and r['c'].get('frontend'), r
 
 
 def s_panels(R, r):
@@ -204,7 +221,7 @@ def s_panels(R, r):
     time.sleep(1)
     R.shot('console-two')
     r['console_read'] = R.frontend(t, "return [...document.querySelectorAll('*')].length")
-    r['network_click'] = R.head('Network')
+    r['network_click'] = R.panel(t, 'Network')
     R.w.cr(t, op='navigate', url=R.base + '/dt?again=1')
     R.w.loaded(t)
     time.sleep(2)
@@ -213,12 +230,14 @@ def s_panels(R, r):
     time.sleep(1.5)
     R.shot('sources')
     for name in ('Performance', 'Application', 'Memory', 'Security'):
-        r[name] = R.head(name)
+        r[name] = R.panel(t, name)
         time.sleep(1)
         R.shot(name.lower())
     r['state'] = R.frontend(t)
     R.w.ask(do='ui', devtools=False)
     time.sleep(1)
+    pressed = ('elements_click', 'console_click', 'network_click', 'sources_click', 'Performance', 'Application', 'Memory', 'Security')
+    assert all(r[name] for name in pressed) and r['state'].get('frontend'), {name: r[name] for name in pressed}
 
 
 def s_inspect(R, r):
@@ -328,6 +347,7 @@ def s_webkit(R, r):
     time.sleep(1.5)
     R.w.ask(do='ui', devtools=False)
     time.sleep(1)
+    assert r['engine']['engine'] == 'webKit' and r['back_chromium']['frontend'].get('frontend'), r
 
 
 def s_react(R, r):
@@ -347,14 +367,87 @@ def s_react(R, r):
     r['components'] = R.head('Components')
     time.sleep(3)
     R.shot('react-components')
+    # Three React panels overflow a narrow card's head into its More menu.
     r['profiler'] = R.head('Profiler')
+    if not r['profiler']:
+        R.w.ask(do='ui', devpane='panel:Profiler')
+        time.sleep(.8)
+        r['profiler'] = 'Profiler' in str(R.frontend(t).get('selected')) or 'profiler' in str(R.state().get('pane')).lower()
     time.sleep(2)
     R.shot('react-profiler')
     R.w.ask(do='ui', devtools=False)
     time.sleep(1)
+    assert r['components'] and r['profiler'], r
 
 
-SCENARIOS = {'open': s_open, 'panels': s_panels, 'inspect': s_inspect, 'dock': s_dock, 'webkit': s_webkit, 'react': s_react}
+def s_survival(R, r):
+    """Opening the real card must preserve the renderer and live document."""
+    r['attempts'] = []
+    def listeners(pid):
+        result = subprocess.run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], capture_output=True, text=True)
+        assert result.returncode in (0, 1), result.stderr
+        return sorted(line[1:] for line in result.stdout.splitlines() if line.startswith('n'))
+    diagnostic = os.environ.get('DEVTOOLS_DIAGNOSTIC') == '1'
+    r['diagnostic'] = diagnostic
+    r['route'] = 'native-menu' if R.native_menu else ('internal-command' if diagnostic else 'keyboard')
+    def menu_toggle():
+        result = R.w.ask(do='app-menu', menu='View', path=['Developer', 'Developer Tools'])
+        assert result.get('pressed'), result
+        return result
+    helper_pid = None
+    for attempt in range(5):
+        t = R.fresh()
+        token = R.w.js(t, "window.devToolsSurvival = crypto.randomUUID(); return window.devToolsSurvival")
+        before = R.w.cr(t)
+        helper_pid = helper_pid or before['helperPID']
+        assert before['helperPID'] == helper_pid, 'Helper restarted between attempts'
+        R.shot(f'survival-{attempt}-before')
+        row = {'before': before, 'token': token, 'listeners': listeners(before['helperPID']), 'cycles': []}
+        r['attempts'].append(row)
+        for cycle in range(4 if attempt == 0 else 1):
+            if diagnostic:
+                R.w.ask(do='ui', devpane='elements')
+            elif R.native_menu:
+                menu_toggle()
+            else:
+                R.key(KEY['i'], OPTCMD, focus=True)
+            time.sleep(2)
+            after = R.w.cr(t)
+            row['cycles'].append({'after': after, 'frontend': R.frontend(t)})
+            R.say('survival-progress', attempt=attempt, cycle=cycle, **row['cycles'][-1])
+            R.shot(f'survival-{attempt}-{cycle}')
+            assert before['rendererPID'] > 0, row
+            assert all(after[key] == before[key] for key in ('rendererPID', 'helperPID', 'remote')), row
+            assert not after.get('failure'), row
+            assert R.w.js(t, 'return window.devToolsSurvival') == token, row
+            R.ready(t)
+            if diagnostic or R.native_menu:
+                R.w.ask(do='ui', devpane='elements')
+            else:
+                assert R.panel(t, 'Elements')
+            time.sleep(.5)
+            target = R.frontend(t, SDK + "const target=S.TargetManager.TargetManager.instance().primaryPageTarget(); return {url:target?.inspectedURL(),panel:U.InspectorView.InspectorView.instance().tabbedPane.selectedTabId};")
+            R.shot(f'survival-{attempt}-{cycle}-elements')
+            row['cycles'][-1]['target'] = target
+            assert target['value']['url'] == before['url'] and target['value']['panel'] == 'elements', target
+            if diagnostic:
+                R.w.ask(do='ui', devtools=False)
+            elif R.native_menu:
+                menu_toggle()
+            else:
+                R.key(KEY['i'], OPTCMD)
+            time.sleep(1)
+            assert not R.state()['open'], R.state()
+            closed = R.w.cr(t)
+            row['cycles'][-1]['closed'] = closed
+            assert all(closed[key] == before[key] for key in ('rendererPID', 'helperPID', 'remote')), row
+            assert R.w.js(t, 'return window.devToolsSurvival') == token, row
+            closed_listeners = listeners(closed['helperPID'])
+            row['cycles'][-1]['closedListeners'] = closed_listeners
+            assert closed_listeners == row['listeners'], row
+
+
+SCENARIOS = {'survival': s_survival, 'open': s_open, 'panels': s_panels, 'inspect': s_inspect, 'dock': s_dock, 'webkit': s_webkit, 'react': s_react}
 
 
 def main():
@@ -406,6 +499,8 @@ def main():
             time.sleep(.5)
         q['left'] = r1s.bundle_processes(R.app)
         R.say('quit', **q)
+        if not q['exited'] or q['left']:
+            failed.append('quit')
         for row in q['left']:
             try:
                 os.kill(row['pid'], 9)

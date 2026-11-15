@@ -59,6 +59,15 @@ struct TabRecency: Codable, Equatable, Sendable {
         return out
     }
 
+    /// The iPhone switcher contains only this space's mobile Today pages.
+    /// The page in front always has its card, whatever it is (a pin, a kept
+    /// page, the Mac's): All Tabs never opens empty over a page.
+    static func mobileTodayOrder(of space: Space, recent: [Tab.ID]) -> [Tab] {
+        var ids = Set(space.today.filter { !$0.onMac }.map(\.id))
+        if let front = space.current { ids.insert(front) }
+        return order(of: space, recent: recent).filter { ids.contains($0.id) }
+    }
+
     /// A tab with nothing in it: about:blank, or a world's blank New Tab.
     static func isEmpty(_ tab: Tab) -> Bool {
         if let url = tab.url, !url.isEmpty { return url == "about:blank" }

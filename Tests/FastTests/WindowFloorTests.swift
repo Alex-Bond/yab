@@ -30,6 +30,28 @@ struct WindowFloorTests {
         #expect(old[0] != old[1])
     }
 
+    /// Crash #510: a layout pass off the main thread reached `measured`, and
+    /// `assumeIsolated` trapped. The measurement now arrives on the main
+    /// queue, whichever thread said it.
+    @Test func aMeasurementFromAnotherThreadIsHeardOnTheMainThread() async {
+        let size = CGSize(width: 321, height: 123)
+        let heard = await withCheckedContinuation { (done: CheckedContinuation<(CGSize, Bool), Never>) in
+            DispatchQueue.global().async {
+                WindowFloorLayout.onMain { done.resume(returning: (size, Thread.isMainThread)) }
+            }
+        }
+        #expect(heard.0 == size)
+        #expect(heard.1)
+        // A main-thread layout must finish before observable state changes.
+        var ran = false
+        WindowFloorLayout.onMain { ran = true }
+        #expect(!ran)
+        await withCheckedContinuation { done in
+            DispatchQueue.main.async { done.resume() }
+        }
+        #expect(ran)
+    }
+
     @Test func contentIsLaidAtTheWindowsSize() {
         let host = NSHostingController(rootView: WindowFloorLayout(measured: { _ in }) {
             Color.clear.frame(minWidth: 300, maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)

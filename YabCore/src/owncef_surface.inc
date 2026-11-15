@@ -1,6 +1,9 @@
 // Included inside namespace yc after the wire event helpers.
 #if YABCORE_OWNCEF_SURFACES
 static void PublishOwnCEFSurface(Tab& tab) {
+  // Its window publishes itself (PollLayers). This surface is empty, and would
+  // say the page has gone.
+  if (tab.documentPiP && !tab.externalPage) return;
   const auto& frame = tab.surface;
   const bool nativePage = tab.externalPage && [tab.nativePageReceipt[@"rendererBound"] boolValue];
   NSDictionary* state = @{
@@ -11,7 +14,13 @@ static void PublishOwnCEFSurface(Tab& tab) {
     @"pageY": nativePage ? tab.nativePageReceipt[@"pageY"] : @0,
     @"pixelWidth": @(frame.pixelWidth), @"pixelHeight": @(frame.pixelHeight),
     @"scale": @(frame.scale), @"requestedScale": @(tab.scale),
-    @"visible": @(tab.visible), @"source": @"cefCallback"
+    @"visible": @(tab.visible), @"source": @"cefCallback",
+    // Surface ownership: which document and renderer this compositor now
+    // shows. A cross-process navigation or renderer swap keeps the window
+    // compositor's context, so without these the state would read the same
+    // and never be published: the client re-checks its host and shown state
+    // on each new owner instead of waiting for a resize or a key window.
+    @"generation": @(tab.documentGeneration), @"renderer": @(tab.rendererPID)
   };
   NSString* encoded = JSON(state);
   if (![encoded isEqual:tab.lastLayer]) {

@@ -24,10 +24,9 @@ extension Browser {
         }
         // No page: the chat starts with the words alone, and the agent
         // opens the site the words name.
-        chatAttach.set([])
-        chatAttach.words = words
-        chatDraft = words
         newChat()
+        chatAttach.set([])
+        chatDraft = words
         if !chatOpen { moveChat(open: true) }
     }
 

@@ -32,7 +32,11 @@ struct ChatProblem {
             (text.contains("model") && ["not supported", "unsupported", "not available", "does not exist", "may not exist", "do not have access",
                                          "don't have access", "not have access to it"].contains(where: text.contains)) {
             kind = .modelUnavailable
-        } else if ["authentication_error", "unauthorized", "invalid_api_key", "invalid api key", "token expired", "token has expired", "not logged in", "login required", "invalid_grant"].contains(where: text.contains) {
+        // Plain CLI auth failures can also say "timed out". Recognize the
+        // authentication failure before the generic network fallback.
+        } else if ["authentication_error", "authentication required", "authentication failed", "requires google sign-in",
+                   "unauthorized", "invalid_api_key", "invalid api key", "token expired", "token has expired",
+                   "not logged in", "not signed in", "login required", "invalid_grant"].contains(where: text.contains) {
             kind = .signIn
         } else if status == 403 || text.contains("permission_error") || text.contains("permission_denied") {
             kind = .access

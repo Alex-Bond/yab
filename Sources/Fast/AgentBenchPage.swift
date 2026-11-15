@@ -40,7 +40,7 @@ extension Bench {
         let session = c.session
         guard let tab = find(request, in: browser), !tab.shy else { answer(["error": "No accessible non-private tab"]); return }
         if let session, let known = agents.session(session), !known.state.live { answer(["error": "This task has ended"]); return }
-        guard tab.webInspecting else { answer(["error": "Open Developer Tools for this tab before reading its recorded data"]); return }
+        guard tab.webInspecting || tab.chromiumDev != nil else { answer(["error": "Open Developer Tools for this tab before reading its recorded data"]); return }
         let limit = min(200, max(1, request["limit"] as? Int ?? 100))
         answer(tab.devtoolsRead(request["kind"] as? String ?? "", limit: limit))
         return
@@ -569,47 +569,86 @@ extension Bench {
         tab.approved = nil
         agents.touch(session, "upload · \(tab.address?.host ?? "")")
         AgentFeed.shared.did(tab, .click)
-        tab.uploading = (files, Date().addingTimeInterval(20))
         FileShelf.shared.gave(files, to: tab.address?.host ?? "")
+        let names = files.map(\.lastPathComponent)
+        // One answer: a press that fails is answered, and its offer then lapses unheard.
+        var answered = false
+        func reply(_ out: [String: Any]) { guard !answered else { return }; answered = true; answer(out) }
+        // Into the page's field in script, for a page that never opens its
+        // picker (a drop zone takes them as a drag from Finder would).
+        func intoField() {
+            let total = files.reduce(0) { $0 + ((try? FileManager.default.attributesOfItem(atPath: $1.path)[.size] as? Int) ?? 0) }
+            guard total <= 25 << 20 else { reply(["error": "the page didn't open its file picker from \(ref); click what attaches a file and upload again"]); return }
+            let given: [[String: Any]] = files.compactMap { url in
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                let type = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType) ?? nil
+                return ["name": url.lastPathComponent, "data": data.base64EncodedString(), "type": type ?? ""]
+            }
+            AgentPage.run(tab, AgentFiles.intoField, ["ref": ref, "files": given], frame: frame) { result in
+                guard case .success(let value) = result, let out = value as? [String: Any] else { reply(["error": "couldn't give the page the files"]); return }
+                reply(out["error"] == nil ? ["ok": true, "how": out["done"] as? String ?? "field", "files": names] : out)
+            }
+        }
+        // What ref names pressed for real, as a person's click: the page's
+        // own handler opens its picker.
+        func press(_ then: @escaping @MainActor () -> Void) {
+            AgentPage.run(tab, AgentFiles.opener, ["ref": ref], frame: frame) { result in
+                guard case .success(let value) = result, let out = value as? [String: Any], out["error"] == nil else {
+                    tab.uploading = nil
+                    if case .success(let value) = result, let out = value as? [String: Any] { reply(out) } else { reply(["error": "couldn't click \(ref)"]) }
+                    return
+                }
+                guard let x = out["x"] as? Double, let y = out["y"] as? Double else { then(); return }
+                // A ref in another site's frame: its point is the frame's own.
+                guard let marker else { _ = AgentPage.click(tab.page, x: x, y: y); then(); return }
+                AgentPage.run(tab, AgentPage.frameBox, ["k": marker]) { box in
+                    if case .success(let value) = box, let at = value as? [String: Any], let bx = at["x"] as? Double, let by = at["y"] as? Double {
+                        _ = AgentPage.click(tab.page, x: x + bx, y: y + by)
+                    }
+                    then()
+                }
+            }
+        }
+        // Chromium: by path, the way browser automation uploads (Puppeteer's
+        // uploadFile, Playwright's setInputFiles), never through the person's
+        // chooser, which Chromium opens for no hidden or inactive tab: an
+        // agent's tab out of sight is both (feedback #1963).
+        if let chromium = tab.page as? ChromiumPage {
+            let paths = files.map(\.path)
+            Task { @MainActor in
+                guard await AgentSecrets.check(chromium) else { reply(["error": AgentSecrets.Refused(chromium).localizedDescription]); return }
+                do {
+                    if try await chromium.agentSetFiles(AgentFiles.field, arguments: ["ref": ref], frame: frame, paths: paths) {
+                        reply(["ok": true, "how": "field", "files": names]); return
+                    }
+                } catch {
+                    reply(["error": "couldn't give the page the files: \(AgentPage.Said(error).localizedDescription)"]); return
+                }
+                guard !ref.isEmpty else { reply(["error": "no file field on this page: give upload the ref of what attaches a file (a button, a drop zone)"]); return }
+                // A picker the press opens itself: its field takes the files.
+                chromium.agentOfferFiles(paths, seconds: 4, opened: { press {} }) { taken, error in
+                    if taken { reply(["ok": true, "how": "picker", "files": names]); return }
+                    if let error { reply(["error": "couldn't give the page the files: \(error)"]); return }
+                    intoField()
+                }
+            }
+            return
+        }
+        tab.uploading = (files, Date().addingTimeInterval(20))
         // The page's picker, answered with the files; or, when it never
         // asks, the files put in its field.
         func settle() {
             let limit = Date().addingTimeInterval(4)
             func check() {
-                if tab.uploading == nil { answer(["ok": true, "how": "picker", "files": files.map(\.lastPathComponent)]); return }
+                if tab.uploading == nil { reply(["ok": true, "how": "picker", "files": names]); return }
                 if Date() < limit { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { check() }; return }
                 tab.uploading = nil
-                let total = files.reduce(0) { $0 + ((try? FileManager.default.attributesOfItem(atPath: $1.path)[.size] as? Int) ?? 0) }
-                guard total <= 25 << 20 else { answer(["error": "the page didn't open its file picker from \(ref); click what attaches a file and upload again"]); return }
-                let given: [[String: Any]] = files.compactMap { url in
-                    guard let data = try? Data(contentsOf: url) else { return nil }
-                    let type = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType) ?? nil
-                    return ["name": url.lastPathComponent, "data": data.base64EncodedString(), "type": type ?? ""]
-                }
-                AgentPage.run(tab, AgentFiles.intoField, ["ref": ref, "files": given], frame: frame) { result in
-                    guard case .success(let value) = result, let out = value as? [String: Any] else { answer(["error": "couldn't give the page the files"]); return }
-                    answer(out["error"] == nil ? ["ok": true, "how": out["done"] as? String ?? "field", "files": files.map(\.lastPathComponent)] : out)
-                }
+                intoField()
             }
             check()
         }
         guard !ref.isEmpty else { settle(); return }
-        AgentPage.run(tab, AgentFiles.opener, ["ref": ref], frame: frame) { result in
-            guard case .success(let value) = result, let out = value as? [String: Any], out["error"] == nil else {
-                tab.uploading = nil
-                if case .success(let value) = result, let out = value as? [String: Any] { answer(out) } else { answer(["error": "couldn't click \(ref)"]) }
-                return
-            }
-            guard let x = out["x"] as? Double, let y = out["y"] as? Double else { settle(); return }
-            // A ref in another site's frame: its point is the frame's own.
-            guard let marker else { _ = AgentPage.click(tab.page, x: x, y: y); settle(); return }
-            AgentPage.run(tab, AgentPage.frameBox, ["k": marker]) { box in
-                if case .success(let value) = box, let at = value as? [String: Any], let bx = at["x"] as? Double, let by = at["y"] as? Double {
-                    _ = AgentPage.click(tab.page, x: x + bx, y: y + by)
-                }
-                settle()
-            }
-        }
+        press { settle() }
     }
 
     func handleAgentDownload(_ c: AgentCall) {
@@ -840,7 +879,7 @@ extension Bench {
             answer(["error": "no browser \(request["source"] as? String ?? ""), there are: \(Chromium.installed().map(\.name).joined(separator: ", "))"])
             return
         }
-        browser.takeCookies(from: source) { count in answer(["cookies": count]) }
+        browser.takeCookies(from: source.authorizingImport()) { count in answer(["cookies": count]) }
     }
 
     func handleAgentLook(_ c: AgentCall) {

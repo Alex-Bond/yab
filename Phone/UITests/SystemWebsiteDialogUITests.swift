@@ -138,7 +138,7 @@ final class SystemWebsiteDialogUITests: XCTestCase {
                                "-YabPrivateLockTestAuthentication", "off"]
         app.terminate()
         app.launch()
-        let welcome = app.buttons["welcome.start"], join = app.buttons["join.close"]
+        let welcome = app.buttons["welcome.skip"], join = app.buttons["join.close"]
         let arrived = wait {
             self.document(app, self.site.url()).exists || welcome.exists || join.exists || app.textFields["field.input"].exists
         }

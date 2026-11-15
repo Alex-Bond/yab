@@ -116,10 +116,12 @@ private struct FieldSurface: View {
     let size: CGSize
 
     var body: some View {
-        let rows = app.fieldRows
+        // The rows once a draw: the key and the address written on read them.
         let content = NewTabContent.make(for: app)
+        let rows = app.fieldRows(content: content)
         let plain = rows.isEmpty && content.sheetRows.isEmpty
-        FieldStage(mode: mode, size: size, rows: rows, content: content, key: app.fieldKey, hasNow: app.nowItem != nil)
+        FieldStage(mode: mode, size: size, rows: rows, content: content, key: app.fieldKey(rows: rows),
+                   completion: app.fieldCompletion(rows: rows), hasNow: app.nowItem != nil)
             .onChange(of: plain) { _, plain in app.field.sheetBody = Metrics.SearchSheet.body(plain: plain) }
     }
 }
@@ -134,6 +136,8 @@ private struct FieldStage: View {
     let rows: [WordRow]
     let content: NewTabContent
     let key: WordRow.Key
+    /// The best row's address after the words, written on in the field.
+    let completion: String?
     let hasNow: Bool
 
     /// The plate's field stands in the space's card as New Tab's does: the
@@ -187,7 +191,8 @@ private struct FieldStage: View {
                 .opacity(model.cards * Double(min(max((fromMenu - 0.6) / 0.3, 0), 1)))
                 .offset(y: (1 - model.cards) * Metrics.Field.rowsRise + model.drag)
 
-            FieldPill(mode: mode, geometry: g, key: key, hasNow: hasNow, fontSizeChanged: { nativeBodyFontSize = $0 })
+            FieldPill(mode: mode, geometry: g, key: key, completion: completion, hasNow: hasNow,
+                      fontSizeChanged: { nativeBodyFontSize = $0 })
                 .opacity(model.spacesBar ? 0 : Double(min(max((fromMenu - 0.6) / 0.4, 0), 1)))
                 .allowsHitTesting(!model.spacesBar)
                 .offset(y: model.sheetPose.map { g.sheetDrop($0) + model.drag } ?? 0)
@@ -314,7 +319,7 @@ private struct FieldStage: View {
                         .frame(width: size.width, height: size.height, alignment: .topLeading)
                         .allowsHitTesting(false)
                 } else {
-                    answered(RowsCard(rows: rows, dark: true, bestLit: !app.fieldAnswerTakesKey, choose: app.choose), dark: true)
+                    answered(RowsCard(rows: rows, dark: true, bestLit: !app.fieldAnswerTakesKey, isPrivate: true, choose: app.choose), dark: true)
                         .frame(width: g.cardWidth)
                         .bottomAt(x: Metrics.Edge.bar, y: g.field.minY - Metrics.NewTab.privateRowsAboveField, in: size)
                         .gesture(closeDrag)
@@ -429,6 +434,7 @@ private struct FieldPill: View {
     let mode: Surfaces.FieldMode
     let geometry: FieldGeometry
     let key: WordRow.Key
+    let completion: String?
     let hasNow: Bool
     let fontSizeChanged: (CGFloat) -> Void
 
@@ -466,7 +472,7 @@ private struct FieldPill: View {
             .offset(x: rect.minX, y: rect.minY)
             .allowsHitTesting(false)
 
-            FieldContents(mode: mode, key: key, fontSizeChanged: fontSizeChanged)
+            FieldContents(mode: mode, key: key, completion: completion, fontSizeChanged: fontSizeChanged)
                 .equatable()
                 .frame(width: to.width, height: to.height)
                 // Lifted by a finger: the words come in as the plate becomes the field.
@@ -518,10 +524,11 @@ private struct FieldContents: View, Equatable {
     @State private var mathKeys = FieldMathKeys()
     let mode: Surfaces.FieldMode
     let key: WordRow.Key
+    let completion: String?
     let fontSizeChanged: (CGFloat) -> Void
 
     /// The pill's morph runs over it; its own reads bring it back when they change.
-    static func == (a: Self, b: Self) -> Bool { a.mode == b.mode && a.key == b.key }
+    static func == (a: Self, b: Self) -> Bool { a.mode == b.mode && a.key == b.key && a.completion == b.completion }
 
     var body: some View {
         let model = app.field
@@ -563,7 +570,7 @@ private struct FieldContents: View, Equatable {
                     .padding(.trailing, mode == .newTab || model.inSheet ? Metrics.Field.newTabGap - Metrics.Field.gap : 0)
             }
             let listening = mode == .newTab && app.voice.listening
-            FieldInput(text: model.text, selected: model.showsAddress, completion: app.fieldCompletion,
+            FieldInput(text: model.text, selected: model.showsAddress, completion: completion,
                        placeholder: listening ? "Listening…" : privateSearch ? "Search…" : NewTabPager.shared.onChats ? (NewTabPager.shared.showsArchive ? "Search archive" : "Search chats") : "Search, ask or give a task",
                        compactPlaceholder: listening ? "Listening…" : mode == .address && !privateSearch ? "Address…" : "Search…",
                        accessibilityPurpose: purpose,

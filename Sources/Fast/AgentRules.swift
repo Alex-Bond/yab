@@ -80,7 +80,13 @@ final class AgentRules: ObservableObject {
     /// Whether a press spends money: those never become exceptions. In
     /// the languages the words that ask are in (AgentPage.commits).
     nonisolated static func paying(_ label: String) -> Bool {
-        let english = "pay|pay now|buy|buy now|place (your )?order|order now|purchase|complete (purchase|order|payment)|confirm (and pay|payment|purchase|order|transfer)|submit (payment|order)|transfer|withdraw|donate"
+        // A bare Transfer or Withdraw is GitHub's Transfer repository or
+        // Withdraw invitation: asked like any commit, not as a payment.
+        // "Purchase orders", a table or a field's name in a business app,
+        // is a record, not a press that buys (register 1762): as in
+        // AgentPage.commits.
+        let purchase = #"purchase(?! (?:orders?|requisitions?|requests?|histor(?:y|ies)|invoices?|records?)(?![\p{L}\p{N}]))"#
+        let english = "pay|pay now|buy|buy now|place (your )?order|order now|" + purchase + "|complete (purchase|order|payment)|confirm (and pay|payment|purchase|order|transfer)|submit (payment|order)|transfer (money|funds|now)|withdraw (money|funds|now)|send money|donate"
         let others = "bezahlen|jetzt (kaufen|bezahlen)|kaufen|bestellen|zahlungspflichtig bestellen|überweisen|spenden"
             + "|payer|acheter|commander|valider (la|ma) commande|confirmer (le paiement|la commande)|faire un don"
             + "|pagar|comprar|realizar pedido|finalizar (compra|pedido)|confirmar (pago|pagamento|pedido|compra)|donar|doar"

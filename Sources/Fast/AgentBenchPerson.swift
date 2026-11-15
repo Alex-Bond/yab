@@ -76,6 +76,15 @@ extension Bench {
         let agents = c.agents
         let session = c.session
         let limit = Date().addingTimeInterval(request["seconds"] as? Double ?? 20)
+        if let mail = request["mailAsk"] as? String {
+            func heard() {
+                let status = agents.mailStatus(mail, session: session)
+                if status["state"] as? String != "waiting" || Date() >= limit { answer(status); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { heard() }
+            }
+            heard()
+            return
+        }
         // A question for the whole chat (Agents.askChat): waiting while the
         // chat still asks it, answered once it doesn't.
         if let chat = request["chat"] as? String {
@@ -347,6 +356,7 @@ extension Bench {
             }
             agents.touch(session, "autofill · \(site)")
             AgentFeed.shared.did(tab, .type)
+            tab.walletLook()
             tab.walletFill(address.filling, what: .address, origin: origin) { filled in
                 guard filled > 0 else {
                     answer(["error": "no address boxes here that Yab could fill: type it in, or call handoff"])
@@ -387,6 +397,9 @@ extension Bench {
             return
         }
         agents.touch(session, "autofill · \(site)")
+        // Frames that drew their card's boxes after loading look now, while
+        // the person confirms: no frame watches its page for them.
+        tab.walletLook()
         let also = tab.walletHosts(.card)
         Wallet.prove("let an agent fill \(chosen.title) on \(site)" + (also.isEmpty ? "" : " (its form is \(also.joined(separator: ", ")))")) { proven in
             switch proven {
@@ -427,6 +440,12 @@ extension Bench {
         let agents = c.agents
         // Allow or Not now on a permit's card, without a hand, a --test run only.
         guard Store.testing else { answer(["error": "agent-answer only works on a --test run"]); return }
+        if let mail = request["mailAsk"] as? String {
+            guard agents.mailRequest(mail) != nil else { answer(["error": "nothing asked there"]); return }
+            agents.answerMail(mail, yes: request["yes"] as? Bool ?? true)
+            answer(["ok": true])
+            return
+        }
         // A chat's own question (Agents.askChat), as its notification's buttons answer it.
         if let chat = request["chat"] as? String {
             guard agents.session(chat)?.permit != nil else { answer(["error": "nothing asked there"]); return }
@@ -457,6 +476,7 @@ extension Bench {
         func front() -> (AgentPermit, Tab?, String?)? {
             switch held.first {
             case .chat(let id): return agents.session(id)?.permit.map { ($0, nil, id) }
+            case .mail(let id): return agents.mailRequest(id).map { ($0.permit, nil, nil) }
             case .tab(let id):
                 guard let tab = browser.everyTab.first(where: { $0.id == id }), let permit = tab.permit ?? tab.sending?.permit else { return nil }
                 return (permit, tab, nil)
@@ -474,14 +494,27 @@ extension Bench {
                 guard let (permit, tab, chat) = front() else { c.answer(["error": "nothing stands there"]); return }
                 let yes = act != "no"
                 if act == "elsewhere" { stand.said(permit, tab: tab, words: "Allowed on iPhone", good: true) }
-                if let chat { agents.answer(chat: chat, yes: yes, key: permit.key) } else if let tab { agents.answer(tab, yes: yes) }
+                if let shown = stand.presented[ObjectIdentifier(browser)], !shown.actionable || shown.key != permit.key {
+                    c.answer(["error": "the answered card is still leaving"]); return
+                }
+                if case .mail(let id) = held.first { agents.answerMail(id, yes: yes) }
+                else if let chat { agents.answer(chat: chat, yes: yes, key: permit.key) }
+                else if let tab { agents.answer(tab, yes: yes) }
                 c.answer(["ok": true])
             default:
                 c.answer(["error": "act is yes, no, undo, elsewhere, open, back or all"])
             }
             return
         }
-        var said: [String: Any] = ["count": held.count]
+        var said: [String: Any] = ["count": held.count,
+            "order": held.compactMap { agents.cornerPermit($0, in: browser)?.key }]
+        let surface = stand.presented[ObjectIdentifier(browser)]
+        said["transitioning"] = held.first != nil && (surface.map { !$0.actionable || $0.held != held.first } ?? true)
+        said["visiblePermits"] = Array(stand.questionCards[ObjectIdentifier(browser), default: [:]].values).sorted()
+        if let frame = stand.frames[ObjectIdentifier(browser)] {
+            said["cardFrame"] = ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height,
+                                  "right": frame.maxX, "bottom": frame.maxY]
+        }
         if case .tab(let id) = held.first, let tab = browser.everyTab.first(where: { $0.id == id }), tab.permit == nil, tab.sending == nil, !tab.choices.isEmpty {
             said["front"] = ["choices": tab.choices, "question": tab.handoff ?? ""]
         }
@@ -508,7 +541,10 @@ extension Bench {
         guard Store.testing else { c.answer(["error": "agent-notice-click only works on a --test run"]); return }
         let agents = c.agents
         var info: [String: String] = [:]
-        if let chat = c.request["chat"] as? String, !chat.isEmpty {
+        if let mail = c.request["mailAsk"] as? String {
+            guard agents.mailRequest(mail) != nil else { c.answer(["error": "mail request asks nothing"]); return }
+            info = ["mailAsk": mail]
+        } else if let chat = c.request["chat"] as? String, !chat.isEmpty {
             guard let permit = agents.session(chat)?.permit else { c.answer(["error": "chat \(chat) asks nothing"]); return }
             info = ["permit": permit.key, "chat": chat]
         } else if let prefix = (c.request["tab"] as? String)?.lowercased(), !prefix.isEmpty {
@@ -532,13 +568,7 @@ extension Bench {
                 let front = BrowserWindows.shared.browsers.first { BrowserWindows.shared.window(for: $0) === key }
                 let browser = front ?? c.browser
                 let held = agents.corneredAll(in: browser)
-                let permit: String? = {
-                    switch held.first {
-                    case .chat(let id): return agents.session(id)?.permit?.key
-                    case .tab(let id): return browser.everyTab.first { $0.id == id }.flatMap { ($0.permit ?? $0.sending?.permit)?.key }
-                    case nil: return nil
-                    }
-                }()
+                let permit = held.first.flatMap { agents.cornerPermit($0, in: browser)?.key }
                 answer(["hiddenBefore": hidden, "activeBefore": wasActive, "active": NSApp.isActive, "hidden": NSApp.isHidden,
                         "key": key != nil, "visible": key?.isVisible == true, "miniaturized": key?.isMiniaturized == true,
                         "space": browser.space.name, "front": browser.active.map(Bench.short) ?? "",
@@ -568,6 +598,7 @@ extension Bench {
                   "question": root?.permit?.question ?? "", "reading": root?.mailReading ?? false,
                   "notices": AgentNotices.shared.asked.filter { $0.info["chat"] == chat }.map { ["category": $0.category, "body": $0.body] },
                   "cleared": AgentNotices.shared.cleared.filter { $0 == "agent.permit." + chat }.count,
+                  "mailAsks": agents.mailRequests.map { ["id": $0.id, "permit": $0.permit.key] },
                   "tabs": tabs])
     }
 
@@ -740,7 +771,7 @@ extension Bench {
         guard !order.isEmpty else { answer(none); return }
         Task { @MainActor in
             for id in order {
-                guard let item = PasswordManagers.installed(id), let base = Extensions.shared.contexts[item.id]?.baseURL else { continue }
+                guard let item = PasswordManagers.installed(id), let base = ManagerExtensions.shared.base(item.id) else { continue }
                 var found = await menu(in: tab, origin: base, manager: id)
                 // Rows that can't be read, or nothing at all: its own unlock
                 // page says whether it is locked.
@@ -957,7 +988,7 @@ extension Bench {
         }
         // Another site's frame: asked in each, the extensions' own left out.
         await withCheckedContinuation { done in AgentPage.discover(tab.page) { done.resume() } }
-        let own = Extensions.shared.contexts.values.map(\.baseURL.absoluteString)
+        let own = ManagerExtensions.shared.origins
         for frame in AgentPage.frames[ObjectIdentifier(tab.page)] ?? [] where !own.contains(where: frame.href.hasPrefix) {
             guard let inner = try? await tab.page.call(fieldScript, arguments: [:], in: .named("yab-agent"), frame: frame.info) as? [String: Any],
                   inner["x"] != nil else { continue }

@@ -46,20 +46,10 @@ enum SettingsPenArt {
         context.restoreGState()
     }
 
-    /// A drawing's ink or marker in its 384-point space, for the first run's
-    /// pieces (Welcome/FirstRunArt) that draw these beside their own.
-    static func shape(_ name: String, marker isMarker: Bool) -> CGPath? { path(name, marker: isMarker) }
-
     private static func path(_ name: String, marker isMarker: Bool) -> CGPath? {
         let key = name + (isMarker ? ".marker" : ".ink")
         if let hit = paths[key] { return hit }
-        guard let words = (isMarker ? marker : ink)[name], let frozen = parse(words) else { return nil }
-        paths[key] = frozen
-        return frozen
-    }
-
-    /// Trusted M/L/C/Z words, numbers apart, into one path.
-    nonisolated static func parse(_ words: String) -> CGPath? {
+        guard let words = (isMarker ? marker : ink)[name] else { return nil }
         let tokens = words.split(whereSeparator: \.isWhitespace)
         let made = CGMutablePath(); var i = 0
         while i < tokens.count {
@@ -78,7 +68,8 @@ enum SettingsPenArt {
             default: return nil
             }
         }
-        return made.copy()
+        let frozen = made.copy()!; paths[key] = frozen
+        return frozen
     }
 
     // Source PenArt uses one nonzero filled path per 384-point SVG.

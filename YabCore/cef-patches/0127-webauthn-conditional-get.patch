@@ -1,0 +1,193 @@
+--- a/cef/libcef/browser/views/external_webauthn.cc
++++ b/cef/libcef/browser/views/external_webauthn.cc
+@@ -84,7 +84,10 @@ CefRefPtr<CefBrowserProcessHandler> Handler() {
+   if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
+     return nullptr;
+   }
+-  auto app = CefAppManager::Get()->GetApplication();
++  // A frame torn down at shutdown cancels its request (0127) after the app
++  // manager may be gone.
++  CefAppManager* manager = CefAppManager::Get();
++  auto app = manager ? manager->GetApplication() : nullptr;
+   return app ? app->GetBrowserProcessHandler() : nullptr;
+ }
+ 
+@@ -142,12 +145,22 @@ class Proxy : public WebAuthenticationRequestProxy {
+                  Pending(std::move(callback)));
+   }
+ 
++  // A conditional get (0127) is kept by the client, pending with no UI
++  // and no timeout, until the person picks one of its passkeys in its own
++  // autofill list (as Chrome's autofill lists iCloud Keychain's), or the
++  // page aborts or goes away (OnWebAuthnRequestCanceled). It carries
++  // mediation "conditional".
++  bool TakesConditionalRequests() override { return true; }
++  void SetRequestConditional() override { conditional_ = true; }
++
+   RequestId SignalGetRequest(
+       const blink::mojom::PublicKeyCredentialRequestOptionsPtr& options,
+       GetCallback callback) override {
++    const bool conditional = std::exchange(conditional_, false);
+     return Start("get", webauthn::ToValue(options),
+                  options->extensions->remote_desktop_client_override.get(),
+-                 Pending(std::move(callback)));
++                 Pending(std::move(callback)),
++                 conditional ? "conditional" : nullptr);
+   }
+ 
+   RequestId SignalIsUvpaaRequest(IsUvpaaCallback callback) override {
+@@ -155,6 +168,13 @@ class Proxy : public WebAuthenticationRequestProxy {
+                  Pending(std::move(callback)));
+   }
+ 
++  // isConditionalMediationAvailable(): answered "true" or "false" as isUvpaa.
++  void SignalIsConditionalMediationAvailableRequest(
++      IsUvpaaCallback callback) override {
++    Start("isConditional", base::Value(base::Value::Type::DICT), nullptr,
++          Pending(std::move(callback)));
++  }
++
+   void CancelRequest(RequestId id) override {
+     if (!pending_.erase(id)) {
+       return;
+@@ -211,7 +231,8 @@ class Proxy : public WebAuthenticationRequestProxy {
+   RequestId Start(const char* kind,
+                   base::Value options,
+                   const blink::mojom::RemoteDesktopClientOverride* caller,
+-                  Pending callback) {
++                  Pending callback,
++                  const char* mediation = nullptr) {
+     const RequestId id = ++next_id_;
+     const content::GlobalRenderFrameHostId frame =
+         std::exchange(frame_, content::GlobalRenderFrameHostId());
+@@ -253,6 +274,9 @@ class Proxy : public WebAuthenticationRequestProxy {
+                      caller ? caller->same_origin_with_ancestors : true);
+     request->SetString("topOrigin", top_origin.Serialize());
+     request->SetBool("mainFrame", rfh == top);
++    if (mediation) {
++      request->SetString("mediation", mediation);
++    }
+     request->SetString("options",
+                        base::WriteJson(options).value_or(std::string("{}")));
+     content::BrowserContext* context = contents->GetBrowserContext();
+@@ -275,6 +299,7 @@ class Proxy : public WebAuthenticationRequestProxy {
+   std::map<RequestId, Pending> pending_;
+   RequestId next_id_ = 0;
+   content::GlobalRenderFrameHostId frame_;
++  bool conditional_ = false;
+ };
+ 
+ Proxy& GetProxy() {
+--- a/content/browser/webauth/authenticator_common_impl.cc
++++ b/content/browser/webauth/authenticator_common_impl.cc
+@@ -907,7 +907,18 @@ AuthenticatorCommonImpl::AuthenticatorCommonImpl(
+       security_checker_(static_cast<RenderFrameHostImpl*>(render_frame_host)
+                             ->GetWebAuthRequestSecurityCheckerImpl()) {}
+ 
+-AuthenticatorCommonImpl::~AuthenticatorCommonImpl() = default;
++AuthenticatorCommonImpl::~AuthenticatorCommonImpl() {
++  // Yab: the frame's document went away (a navigation, the frame removed)
++  // with a request still at the embedder's proxy: it hears so, as on an
++  // abort, so its own UI goes and a conditional get it keeps doesn't
++  // outlive the page. Chromium answers no one; the page is gone.
++  if (req_state_ && req_state_->pending_proxied_request_id) {
++    if (WebAuthenticationRequestProxy* embedder =
++            GetEmbedderWebAuthenticationRequestProxy()) {
++      embedder->CancelRequest(*req_state_->pending_proxied_request_id);
++    }
++  }
++}
+ 
+ std::unique_ptr<AuthenticatorRequestClientDelegate>
+ AuthenticatorCommonImpl::MaybeCreateRequestDelegate() {
+@@ -1986,8 +1997,14 @@ void AuthenticatorCommonImpl::ContinueGetAssertionAfterRpIdCheck(
+       GetWebAuthnRequestProxyIfActive(caller_origin);
+   if (proxy) {
+     // Yab: nor an immediate one, which must not show UI when nothing is
+-    // there to offer; the proxy can't tell.
+-    if (options->mediation == Mediation::CONDITIONAL ||
++    // there to offer; the proxy can't tell. A conditional one only for the
++    // embedder's proxy when it keeps it pending until the person picks a
++    // passkey in its own autofill list, as Chrome's autofill does.
++    const bool conditional = options->mediation == Mediation::CONDITIONAL;
++    const bool embedder_conditional =
++        conditional && proxy == GetEmbedderWebAuthenticationRequestProxy() &&
++        proxy->TakesConditionalRequests();
++    if ((conditional && !embedder_conditional) ||
+         options->mediation == Mediation::IMMEDIATE ||
+         public_key_options->extensions->remote_desktop_client_override ||
+         public_key_options->extensions->remote_client_data_json) {
+@@ -2001,6 +2018,9 @@ void AuthenticatorCommonImpl::ContinueGetAssertionAfterRpIdCheck(
+         blink::mojom::RemoteDesktopClientOverride::New(
+             /*origin=*/req_state_->caller_origin,
+             /*same_origin_with_ancestors=*/!is_cross_origin_iframe);
++    if (embedder_conditional) {
++      proxy->SetRequestConditional();
++    }
+     req_state_->pending_proxied_request_id = proxy->SignalGetRequest(
+         options->public_key,
+         base::BindOnce(&AuthenticatorCommonImpl::OnGetAssertionProxyResponse,
+@@ -2382,7 +2402,15 @@ void AuthenticatorCommonImpl::
+     return;
+   }
+   // Conditional requests cannot be proxied, signal the feature as unavailable.
+-  if (GetWebAuthnRequestProxyIfActive(caller_origin)) {
++  if (WebAuthenticationRequestProxy* proxy =
++          GetWebAuthnRequestProxyIfActive(caller_origin)) {
++    // Yab: unless the embedder's proxy keeps them itself; it says whether it
++    // can serve one now (whether this Mac's passkeys are there for it).
++    if (proxy == GetEmbedderWebAuthenticationRequestProxy() &&
++        proxy->TakesConditionalRequests()) {
++      proxy->SignalIsConditionalMediationAvailableRequest(std::move(callback));
++      return;
++    }
+     std::move(callback).Run(false);
+     return;
+   }
+--- a/content/public/browser/web_authentication_request_proxy.h
++++ b/content/public/browser/web_authentication_request_proxy.h
+@@ -5,6 +5,9 @@
+ #ifndef CONTENT_PUBLIC_BROWSER_WEB_AUTHENTICATION_REQUEST_PROXY_H_
+ #define CONTENT_PUBLIC_BROWSER_WEB_AUTHENTICATION_REQUEST_PROXY_H_
+ 
++#include <utility>
++
++#include "base/functional/callback.h"
+ #include "base/functional/callback_forward.h"
+ #include "content/common/content_export.h"
+ #include "third_party/blink/public/mojom/webauthn/authenticator.mojom-forward.h"
+@@ -77,8 +80,34 @@ class WebAuthenticationRequestProxy {
+   // that call, on the same task. A proxy that answers with UI of its own needs
+   // to know which page asked; others ignore it.
+   virtual void SetRequestFrame(RenderFrameHost* frame) {}
++
++  // Yab: whether this proxy takes conditional gets (mediation
++  // "conditional") and keeps each pending, with no UI and no timeout, until
++  // the person picks one of its passkeys in its own autofill list or the
++  // page aborts. Only the embedder's proxy is asked.
++  virtual bool TakesConditionalRequests();
++
++  // Yab: the next SignalGetRequest, on the same task, is a conditional get.
++  virtual void SetRequestConditional() {}
++
++  // Yab: PublicKeyCredential.isConditionalMediationAvailable() (and
++  // getClientCapabilities' conditionalGet) for a proxy that takes
++  // conditional gets. Not cancellable, like SignalIsUvpaaRequest.
++  virtual void SignalIsConditionalMediationAvailableRequest(
++      IsUvpaaCallback callback);
+ };
+ 
++// Out of the class: chromium-style takes no inline virtual body but "{}".
++inline bool WebAuthenticationRequestProxy::TakesConditionalRequests() {
++  return false;
++}
++
++inline void
++WebAuthenticationRequestProxy::SignalIsConditionalMediationAvailableRequest(
++    IsUvpaaCallback callback) {
++  std::move(callback).Run(false);
++}
++
+ // Yab: a proxy the embedder sets for every frame of every profile, consulted
+ // ahead of WebAuthenticationDelegate::MaybeGetRequestProxy, for an embedder
+ // that answers WebAuthn with its own UI after Chromium's own checks (origin,

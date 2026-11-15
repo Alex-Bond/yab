@@ -161,7 +161,7 @@ enum UserscriptMove {
             let unzip = Process()
             unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
             unzip.arguments = ["-x", "-k", zip.path, out.path]
-            try unzip.run(); unzip.waitUntilExit()
+            try unzip.runValidated(); unzip.waitUntilExit()
             guard unzip.terminationStatus == 0 else { throw Userscript.Invalid("This backup couldn't be opened.") }
         }
         var files: [URL] = []

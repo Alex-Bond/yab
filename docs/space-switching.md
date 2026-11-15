@@ -539,3 +539,77 @@ them lets a sideways line go on.
 The island (the player) keeps its own swipe. `bench spacewheel` posts the
 same events for probes; `evals/space-wheel/yab_wheel.py` plays every case
 over each part of the column before (the wheel let through) and after.
+
+## Tabs across the top: Dia's turn (feedback #254)
+
+With Sidebar Off a change of space follows Dia's strip, filmed at 60 fps on
+m4 (Dia 1.52, three profiles; `evals/dia-top-spaces`, artifact
+https://claude.ai/artifact/7crDwopz32R96iz1GuYahY) and built as the
+prototype's "Yab, improved" (`StripTurn` in SpaceFoot.swift):
+
+- The space's capsule is a plate of its own after back, forward and
+  reload: the emoji and the name, no chevron, 16 points before the first
+  tab.
+- One critically damped spring, ω 26 rad/s (Dia's capsule edge, fitted
+  over five takes: ω 23 to 28.5, ζ 0.96 to 1.08), carries the plate's
+  width, the tabs after it (`LeadSlide`), the window's color (SpaceWash,
+  `clearOnStrip`) and the name, which comes in from the side the space lies
+  on as the old one goes out the other (`StripCarousel`). SwiftUI draws it
+  for 0.27 s (99.3%); the plate and the tabs are laid out at the new
+  space's place once and only drawn on the way (`CapsulePlate`,
+  `LeadSlide`), not laid out again every frame.
+- The page and the tabs are the new space's in the switch's own pass; the
+  new tabs come up 24 points from the side over 140 ms while the old row
+  goes 16 points the other way, gone by 78 ms (`StripArrival`,
+  `StripComing`). Begun in that pass (`StripTurns`), not a frame behind:
+  a frame behind, the strip stood empty through the switch's long pass.
+- Two fingers over the capsule: names as a carousel under the fingers,
+  the old tabs going 40 points with them and fading, the next space's
+  coming up from 35% of the way, the color mixing (`SpacePull`, reach 420).
+  Let go, any way toward a neighbor (more than 3%) brings it at once,
+  carried on from where the fingers left everything; no way round the
+  ends, where the name gives up to 12% and springs back. ⌃1 to ⌃9 and
+  ⌃← ⌃→ (round the ends) are as before.
+
+Dia's own stalls are left out: its 88 to 127 ms before anything moves, the
+capsule empty for 50 ms, the cut tabs, the 150 to 300 ms wait after the
+fingers lift and the 450 ms after a menu pick.
+
+**Measured** (`evals/dia-top-spaces/perf_ab.sh`, base b9a52a58, `bench
+pace` main thread per key, medians): on renderer-2, three rounds of eight
+switches, the first frame after the key 54 to 59 ms before and 37 to 41 ms
+now; the whole switch 156 to 163 ms before and 167 to 168 ms now, the
+spring drawn 70 ms longer than the old 0.2 s curve. On adhd, filmed at the
+same time (`ab.sh`): 65 and 61 ms, 156 and 159 ms. The shortcuts were read
+again four times a switch (`Hotkeys`, now once). Make Default's menu item
+asking LaunchServices on every redraw was fixed on main meanwhile
+(`Links.isDefault`, 58bbe41a).
+
+**Played in Core Animation** (StripLayers.swift, 2026-10-29). On main of
+that day the SwiftUI turn above cost the switch 30 ms more than main's own
+(`perf_ab.sh` on adhd: 163 to 166 ms against 135 to 137), each part drawn
+10 to 45 ms of the main thread, the tabs' slide the most; and the strip
+waited out the window's 70 to 90 ms pass behind the page, so the old row
+showed for two frames at the new row's arrival offset before it went.
+
+The strip is now in an `NSHostingView` of its own (`StripHost`). A switch
+pictures it before writing anything and sets the turn off from that picture
+at once, with the page put up first (PageStills): the plate springs to the
+new name's width, the names turn, the old row rides the plate's edge and
+dims, in a layer-hosting view over the host, by the render server. Once the
+window's pass has laid the strip out for the new space it is pictured again
+and the new row comes in on the plate's edge as the old one goes; the turn
+lands when its last animation does and the strip itself shows. Set off
+after the writes, its flush laid the whole window out first; picturing the
+host while it was hidden by its alpha drew nothing; a completion block set
+after the animations fired at once. The SwiftUI turn remains for the bench
+(`strip-turn` cut `layers`) and when a picture can't be made.
+
+Films (`ab.sh`, adhd and m4): the strip moves in the frame the page
+changes, 19 to 29 ms after the key against main's 80 to 90; the new row is
+in by 85 to 130 ms; settled by 230 to 300 ms, as Dia (265 to 300).
+`perf_ab.sh` on adhd, three rounds of eight switches, medians: 141, 141 and
+133 ms on main, 123, 118 and 115 ms with the turn.
+
+Not verified: a real trackpad (posted scroll events), hover in dark
+(the pointer state was not caught in that film).

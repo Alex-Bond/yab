@@ -178,6 +178,59 @@ final class SharedBottomToolbarTests: XCTestCase {
     }
 
     /// Check the actual mounted UIButton and its drawn glyph, beyond identity.
+    /// Up on the plate (PlateSwipe), through the recognizer's own state
+    /// machine: a quick flick is the spaces sidebar; a slower drag is All
+    /// Tabs, the page held under the finger from its first point.
+    func testPlateFlickIsTheSidebarAndADragIsAllTabs() async throws {
+        let (app, _, _, plus) = try await host(size: Metrics.screen)
+        let owned = try XCTUnwrap(window)
+        let installed = await until { owned.gestureRecognizers?.contains { $0.delegate is PlateGestures } == true }
+        XCTAssertTrue(installed)
+        let pan = try XCTUnwrap(owned.gestureRecognizers?.compactMap { $0 as? UIPanGestureRecognizer }.first { $0.delegate is PlateGestures })
+        let gestures = try XCTUnwrap(pan.delegate as? PlateGestures)
+        let ready = await until { plus.accessibilityIdentifier == "chrome.plus" }
+        XCTAssertTrue(ready)
+        let plate = try XCTUnwrap(views(owned).first { $0.accessibilityIdentifier == "chrome.plate" })
+        let at = plate.convert(CGPoint(x: plate.bounds.midX, y: plate.bounds.midY), to: owned)
+
+        // The flick: 110 points up in an instant, let go at 2000 a second.
+        XCTAssertTrue(gestures.receive(at: at, touched: plate, in: owned))
+        XCTAssertTrue(gestures.begin(translation: CGPoint(x: 0, y: -12), velocity: CGPoint(x: 0, y: -2000)))
+        gestures.follow(.began, translation: CGPoint(x: 0, y: -12), velocity: CGPoint(x: 0, y: -2000))
+        gestures.follow(.changed, translation: CGPoint(x: 0, y: -110), velocity: CGPoint(x: 0, y: -2000))
+        gestures.follow(.ended, translation: CGPoint(x: 0, y: -110), velocity: CGPoint(x: 0, y: -2000))
+        XCTAssertEqual(app.surfaces.field, .newTab, "a flick up is the spaces sidebar")
+        let gone = await until { TabStack.of(app).gallery == nil }
+        XCTAssertTrue(gone, "and no All Tabs")
+        app.field.close()
+        let closed = await until { app.surfaces.field == nil }
+        XCTAssertTrue(closed)
+
+        // The drag: the finger holds a moment, then goes on up slowly.
+        let free = await until { gestures.receive(at: at, touched: plate, in: owned) }
+        XCTAssertTrue(free)
+        XCTAssertTrue(gestures.begin(translation: CGPoint(x: 0, y: -12), velocity: CGPoint(x: 0, y: -300)))
+        gestures.follow(.began, translation: CGPoint(x: 0, y: -12), velocity: CGPoint(x: 0, y: -300))
+        let taken = await until { TabStack.of(app).gallery != nil }
+        XCTAssertTrue(taken, "All Tabs takes the finger at once, no waiting to see")
+        let finger = CGPoint(x: 40, y: -140)
+        gestures.follow(.changed, translation: finger, velocity: CGPoint(x: 0, y: -300))
+        let stack = TabStack.of(app)
+        let shown = try XCTUnwrap(stack.gallery)
+        let n = shown.order.count
+        let front = try XCTUnwrap(app.browser.space.tab(shown.order[n - 1]))
+        let card = stack.pose(n - 1, of: front, in: shown, layout: stack.layout(shown)).rect
+        let under = CGPoint(x: at.x + finger.x, y: at.y + finger.y)
+        XCTAssertLessThan(card.width, Metrics.screen.width, "the page shrinks as it rises")
+        XCTAssertEqual(card.midX - at.x, finger.x, accuracy: card.width / 2, "it goes sideways with the finger")
+        XCTAssertTrue(card.insetBy(dx: -2, dy: -2).contains(under), "the page stays under the finger: \(card) \(under)")
+        gestures.follow(.changed, translation: CGPoint(x: 0, y: -240), velocity: CGPoint(x: 0, y: -300))
+        gestures.follow(.ended, translation: CGPoint(x: 0, y: -240), velocity: CGPoint(x: 0, y: -300))
+        let open = await until { TabStack.of(app).gallery?.phase == .open }
+        XCTAssertTrue(open, "let go past the middle, All Tabs opens")
+        XCTAssertNil(app.surfaces.field)
+    }
+
     func testNativePlusGlyphRemainsAboveItsGlass() async throws {
         // No other tab open in Work: the right button is + (Tabs/TabStack).
         let (_, _, _, plus) = try await host(size: CGSize(width: 375, height: 812)) { app in

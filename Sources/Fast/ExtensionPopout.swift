@@ -18,14 +18,19 @@ import WebKit
 //
 // Its page's window.close() closes it, as Chrome lets an extension's page
 // close itself whatever its history (allow_scripts_to_close_windows).
+//
+// The window itself, its frame and where it stands, is the one both engines
+// show (ExtensionWindowFrame); this is what WebKit needs of it.
 
 @available(macOS 15.4, *)
 @MainActor
-final class ExtensionPopout: NSObject, NSWindowDelegate, WKUIDelegate, WKNavigationDelegate {
+final class ExtensionPopout: NSObject, WKUIDelegate, WKNavigationDelegate {
     /// Open ones, oldest first.
     private(set) static var open: [ExtensionPopout] = []
 
-    let window: NSWindow
+    /// The window it is shown in.
+    let shown: ExtensionWindowFrame
+    var window: NSWindow { shown.window }
     let web: WKWebView
     let extensionID: String
     /// What WebKit knows it as: the window and the one tab in it.
@@ -87,72 +92,54 @@ final class ExtensionPopout: NSObject, NSWindowDelegate, WKUIDelegate, WKNavigat
         PasskeyRelay.install(in: views.userContentController)
         // The page's EyeDropper in its pages (EyeDropper.swift).
         EyeDropperRelay.install(in: views.userContentController)
-        let popout = ExtensionPopout(context: context, configuration: views)
+        let asked = configuration.frame
+        let size = NSSize(width: asked.width.isFinite && asked.width > 0 ? asked.width : 380,
+                          height: asked.height.isFinite && asked.height > 0 ? asked.height : 600)
+        let popout = ExtensionPopout(context: context, configuration: views, browser: BrowserWindows.shared.browser(for: parent), size: size)
         open.append(popout)
         popout.controller.didOpenWindow(popout.frame)
         popout.controller.didOpenTab(popout.page)
-        popout.window.setFrame(place(configuration.frame, over: parent), display: false)
-        if configuration.shouldBeFocused {
-            NSApp.activate()
-            popout.window.makeKeyAndOrderFront(nil)
-        } else {
-            popout.window.orderFront(nil)
+        // Where the extension asked, in the screen's coordinates (WebKit has
+        // turned Chrome's top-left ones round), when it has no pin to hang from.
+        let origin = asked.minX.isFinite && asked.minY.isFinite ? asked.origin : nil
+        popout.shown.show(focused: configuration.shouldBeFocused) { glass in
+            ExtensionWindowFrame.standing(glass, asked: origin, over: parent)
         }
         // From yab's popup copy, which an extension's page needs to be sent
         // its events (Extensions.popupCopy); WebKit is told the address asked for.
         popout.web.load(URLRequest(url: Browser.page(url)))
         if Store.testing {
-            let asked = configuration.frame, made = popout.window.frame
+            let made = popout.shown.extensionFrame
             FileHandle.standardError.write(Data("YAB_EXTENSION_POPOUT open window=\(popout.window.windowNumber) asked=\([asked.minX, asked.minY, asked.width, asked.height]) frame=\([made.minX, made.minY, made.width, made.height])\n".utf8))
         }
         return popout
     }
 
-    /// Where the extension asked, in the screen's coordinates (WebKit has
-    /// turned Chrome's top-left ones round), whatever it left out taken
-    /// from the top right of the window it came from, and kept on the screen.
-    private static func place(_ asked: CGRect, over parent: NSWindow?) -> NSRect {
-        let width = asked.width.isFinite && asked.width > 0 ? asked.width : 380
-        let height = asked.height.isFinite && asked.height > 0 ? asked.height : 600
-        let from = parent?.frame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        var rect = NSRect(x: asked.minX.isFinite ? asked.minX : from.maxX - width - 15,
-                          y: asked.minY.isFinite ? asked.minY : from.maxY - 90 - height,
-                          width: width, height: height)
-        let screen = NSScreen.screens.first { $0.frame.intersects(rect) } ?? parent?.screen ?? NSScreen.main
-        if let room = screen?.visibleFrame {
-            rect.size.width = min(max(rect.width, 240), room.width)
-            rect.size.height = min(max(rect.height, 200), room.height)
-            rect.origin.x = min(max(rect.minX, room.minX), room.maxX - rect.width)
-            rect.origin.y = min(max(rect.minY, room.minY), room.maxY - rect.height)
-        }
-        return rect.integral
-    }
-
-    private init(context: WKWebExtensionContext, configuration: WKWebViewConfiguration) {
+    private init(context: WKWebExtensionContext, configuration: WKWebViewConfiguration, browser: Browser?, size: NSSize) {
         extensionID = context.uniqueIdentifier
         base = context.baseURL
         owner = context.webExtensionController
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 600),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                          backing: .buffered, defer: false)
         AppleWritingTools.configure(configuration)
-        web = WKWebView(frame: window.contentLayoutRect, configuration: configuration)
+        web = WKWebView(frame: NSRect(origin: .zero, size: size), configuration: configuration)
+        let name = context.webExtension.displayName ?? ""
+        let extensions = Extensions.all.first { $0.controller === context.webExtensionController }
+        let button = extensions?.buttons.first { $0.id == context.uniqueIdentifier }
+            ?? Extensions.Button(id: context.uniqueIdentifier, name: name, label: name,
+                                 icon: context.webExtension.icon(for: NSSize(width: 32, height: 32)), badge: "", enabled: true, pinned: false)
+        shown = ExtensionWindowFrame(page: web, owner: .init(id: context.uniqueIdentifier, name: name, button: button),
+                                     browser: browser, asked: size)
         super.init()
         frame.popout = self
         page.popout = self
-        window.isReleasedWhenClosed = false
-        window.tabbingMode = .disallowed
-        // Over a browser window in full screen, as the prompt it is.
-        window.collectionBehavior = [.fullScreenAuxiliary]
-        window.minSize = NSSize(width: 240, height: 200)
-        // White behind the page until it paints, as Chrome's popup window.
-        window.backgroundColor = .white
-        window.title = context.webExtension.displayName ?? ""
-        window.delegate = self
-        web.autoresizingMask = [.width, .height]
         web.uiDelegate = self
         web.navigationDelegate = self
-        window.contentView = web
+        shown.onClose = { [weak self] in self?.close(closing: true) }
+        shown.onKey = { [weak self] key in
+            guard let self else { return }
+            if key { self.controller.didFocusWindow(self.frame) }
+            // Once the next window is key.
+            else { DispatchQueue.main.async { Extensions.shared.focusChanged() } }
+        }
         titled = web.observe(\.title, options: [.new]) { [weak self] web, _ in
             MainActor.assumeIsolated {
                 guard let self, let title = web.title, !title.isEmpty else { return }
@@ -164,7 +151,6 @@ final class ExtensionPopout: NSObject, NSWindowDelegate, WKUIDelegate, WKNavigat
         let controller = configuration.userContentController
         controller.removeScriptMessageHandler(forName: Self.closeHandler)
         controller.add(Self.router, name: Self.closeHandler)
-        Self.listen()
     }
 
     /// Gone, for good: WebKit is told, and the extension hears
@@ -181,8 +167,9 @@ final class ExtensionPopout: NSObject, NSWindowDelegate, WKUIDelegate, WKNavigat
         if Store.testing {
             FileHandle.standardError.write(Data("YAB_EXTENSION_POPOUT closed window=\(window.windowNumber)\n".utf8))
         }
-        window.delegate = nil
-        if !closing { window.close() }
+        shown.onClose = nil
+        shown.onKey = nil
+        if !closing { shown.window.close() }
         web.stopLoading()
         Extensions.all.forEach { $0.focusChanged() }
     }
@@ -193,36 +180,7 @@ final class ExtensionPopout: NSObject, NSWindowDelegate, WKUIDelegate, WKNavigat
         for popout in open where popout.extensionID == id && (controller == nil || popout.controller === controller) { popout.close() }
     }
 
-    func focus() {
-        NSApp.activate()
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    // MARK: - its window
-
-    func windowWillClose(_ notification: Notification) { close(closing: true) }
-
-    func windowDidBecomeKey(_ notification: Notification) {
-        controller.didFocusWindow(frame)
-    }
-
-    func windowDidResignKey(_ notification: Notification) {
-        // Once the next window is key.
-        DispatchQueue.main.async { Extensions.shared.focusChanged() }
-    }
-
-    /// ⌘W closes it, here and not in the browser: the menu's close is the
-    /// browser's tab's.
-    private static var keys: Any?
-    private static func listen() {
-        guard keys == nil else { return }
-        keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard let popout = owning(event.window), Keymap.shared.action(for: event)?.action == .closeTab else { return event }
-            popout.window.performClose(nil)
-            return nil
-        }
-    }
+    func focus() { shown.focus() }
 
     // MARK: - its page
 
@@ -303,15 +261,15 @@ final class PopoutWindow: NSObject, WKWebExtensionWindow {
         return .normal
     }
 
-    func frame(for context: WKWebExtensionContext) -> CGRect { popout?.window.frame ?? .null }
+    /// The window as the extension asked for it: the page's width, the
+    /// frame's height (ExtensionWindowFrame.extensionFrame).
+    func frame(for context: WKWebExtensionContext) -> CGRect { popout?.shown.extensionFrame ?? .null }
     func screenFrame(for context: WKWebExtensionContext) -> CGRect {
         popout?.window.screen?.frame ?? NSScreen.main?.frame ?? .null
     }
 
     func setFrame(_ frame: CGRect, for context: WKWebExtensionContext) async throws {
-        guard let window = popout?.window, frame.width.isFinite, frame.height.isFinite,
-              frame.minX.isFinite, frame.minY.isFinite else { return }
-        window.setFrame(frame.integral, display: true)
+        popout?.shown.extensionFrame = frame
     }
 
     func focus(for context: WKWebExtensionContext) async throws { popout?.focus() }

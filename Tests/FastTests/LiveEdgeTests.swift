@@ -629,19 +629,37 @@ import Testing
         #expect(endless.evaluateScript("v.playbackRate")?.toDouble() == 1)
     }
 
-    @Test func adOnAVideoStillRunsFast() throws {
-        let context = try adPage(liveClass: false, duration: "30", time: 5)
+    /// Request 1969: YouTube's player counts an ad run faster than 2.5x,
+    /// one sent to its end, and a Skip pressed by script (an untrusted
+    /// click) as an abnormality, which brings the "Ad blockers are not
+    /// allowed" wall. An ad that gets through is only muted.
+    @Test func adOnAVideoIsOnlyMuted() throws {
+        let context = try adPage(liveClass: false, duration: "30", time: 5, setup: """
+            var scriptSkipped = false;
+            skipAction = function () { scriptSkipped = true; };
+            """)
+        context.evaluateScript("beat(); beat(); now += 6000; beat();")
         #expect(context.evaluateScript("v.muted")?.toBool() == true)
-        #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 16)
-        #expect(abs((context.evaluateScript("v.currentTime")?.toDouble() ?? 0) - 29.8) < 0.001)
+        #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 1)
+        #expect(context.evaluateScript("v.currentTime")?.toDouble() == 5)
+        // The Skip button is up and pressable, and left for the person.
+        #expect(context.evaluateScript("!scriptSkipped && skipAction !== null")?.toBool() == true)
+        // When the ad ends, the sound comes back.
+        context.evaluateScript("classes = []; changed();")
+        #expect(context.evaluateScript("v.muted")?.toBool() == false)
+        #expect(context.exception == nil)
     }
 
+    // The Skips below are the person's own (the script never presses one):
+    // the player then changes the class, the source or the element.
     @Test func skipClearingAdClassDoesNotSeekOrPlayContent() throws {
         let context = try adPage(liveClass: false, duration: "30", time: 5, setup: """
             skipAction = function () {
               classes = []; v.duration = 60; v.currentTime = 10; v.paused = true;
             };
             """)
+        #expect(context.evaluateScript("v.muted && skipAction !== null")?.toBool() == true)
+        context.evaluateScript("skipButton.click(); changed();")
         #expect(context.evaluateScript("v.currentTime")?.toDouble() == 10)
         #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 1)
         #expect(context.evaluateScript("v.muted")?.toBool() == false)
@@ -656,7 +674,7 @@ import Testing
               v.playbackRate = 1.25; v.muted = false; v.paused = true;
             };
             """)
-        context.evaluateScript("beat(); beat(); heard.playing({ target: v, type: 'playing' }); beat();")
+        context.evaluateScript("skipButton.click(); beat(); beat(); heard.playing({ target: v, type: 'playing' }); beat();")
         #expect(context.evaluateScript("v.currentTime")?.toDouble() == 10)
         #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 1.25)
         #expect(context.evaluateScript("v.muted")?.toBool() == false)
@@ -673,7 +691,7 @@ import Testing
               heard.playing({ target: v, type: 'playing' });
             };
             """)
-        context.evaluateScript("beat(); beat();")
+        context.evaluateScript("skipButton.click(); beat(); beat();")
         #expect(context.evaluateScript("v.currentTime")?.toDouble() == 10)
         #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 1.75)
         #expect(context.evaluateScript("v.muted")?.toBool() == false)
@@ -714,12 +732,14 @@ import Testing
         context.evaluateScript("v.currentSrc = 'blob:content'; beat(); v.playbackRate = 1.5; v.muted = true; classes = []; changed(); beat();")
         #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 1.5)
         #expect(context.evaluateScript("v.muted")?.toBool() == true)
-        context.evaluateScript("v.currentSrc = 'blob:next-ad'; v.duration = 30; v.currentTime = 5; classes = ['ad-showing']; changed();")
-        #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 16)
-        #expect(abs((context.evaluateScript("v.currentTime")?.toDouble() ?? 0) - 29.8) < 0.001)
+        context.evaluateScript("v.muted = false; v.currentSrc = 'blob:next-ad'; v.duration = 30; v.currentTime = 5; classes = ['ad-showing']; changed();")
+        // The next ad is enrolled again: muted, neither sped up nor sent on.
+        #expect(context.evaluateScript("v.muted")?.toBool() == true)
+        #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 1.5)
+        #expect(context.evaluateScript("v.currentTime")?.toDouble() == 5)
         context.evaluateScript("classes = []; changed();")
         #expect(context.evaluateScript("v.playbackRate")?.toDouble() == 1.5)
-        #expect(context.evaluateScript("v.muted")?.toBool() == true)
+        #expect(context.evaluateScript("v.muted")?.toBool() == false)
     }
 
     @Test func userPauseAfterAdStillWins() throws {

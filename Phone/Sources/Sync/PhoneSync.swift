@@ -1071,10 +1071,11 @@ public nonisolated final class PhoneSync: @unchecked Sendable {
 
     /// Only this metadata field changes, never paint or website data.
     @discardableResult
-    public func setSpaceSignIns(_ id: String, own: Bool) throws -> SyncSpace {
+    public func setSpaceSignIns(_ id: String, own: Bool, signInWith: String? = nil) throws -> SyncSpace {
         guard var space = journal.record(.init(collection: SyncCollection.space, id: id)).flatMap(SyncSpace.init) else { throw Failure.noSuchSpace(id) }
         space.ownSignIns = own
-        try write(SyncCollection.space, id, ["ownSignIns": .bool(own)])
+        space.signInWith = signInWith
+        try write(SyncCollection.space, id, ["ownSignIns": .bool(own), "signInWith": Value(signInWith)])
         emit(.local, [.space(space)])
         return space
     }

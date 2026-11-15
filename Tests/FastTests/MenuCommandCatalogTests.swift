@@ -93,6 +93,40 @@ struct MenuCommandCatalogTests {
         }
     }
 
+    @Test func sharePageLeadsHistoryAndSuggestionsAndAppearsInActions() throws {
+        try withPage { browser, tab in
+            let url = URL(string: "https://share.example.test/page")!
+            browser.history = History([Visit(url: url.absoluteString, key: Address.pretty(url),
+                title: "Share Page", count: 200, last: Date(), typed: 100)])
+            let saved = Keymap.shared.chosen[Shortcut.Action.sharePage.rawValue]
+            defer {
+                if let saved { Keymap.shared.set(Hotkey(stored: saved), for: .sharePage) }
+                else { Keymap.shared.reset(.sharePage) }
+            }
+            for key: Hotkey? in [nil, Hotkey("s", .control)] {
+                Keymap.shared.set(key, for: .sharePage)
+                #expect(Command.sharePage.keys == (key?.text ?? ""))
+                for actions in [false, true] {
+                    browser.query.actionsPage = actions
+                    for words in ["Share Page…", "share page", "share this page", "share link"] {
+                        browser.replaceTyped(words)
+                        #expect(browser.offers.first?.kind == .command(.sharePage))
+                        let merged = SearchSuggestions.merge([
+                            Suggestion(key: words + " chrome", title: "", url: nil, kind: .suggested)
+                        ], into: browser.offers, lead: browser.query.lead)
+                        #expect(merged.list.first?.kind == .command(.sharePage))
+                    }
+                }
+            }
+            #expect(Command.sharePage.available(in: browser))
+            #expect(Command.sharePage.opens(in: browser))
+            #expect(MenuCommands.entries[.sharePage]?.shortcut == .sharePage)
+            let empty = Browser(windowID: UUID())
+            #expect(!Command.sharePage.available(in: empty))
+            _ = tab
+        }
+    }
+
     @Test func everyRegisteredActionHasSearchableWordsAndAPreparedScore() {
         for (command, entry) in MenuCommands.entries {
             #expect(Command.allCases.contains(command))
@@ -133,6 +167,73 @@ struct MenuCommandCatalogTests {
                     #expect(merged.list.filter { $0.kind == .command(command) }.count == 1)
                 }
             }
+        }
+    }
+
+    @Test func addingExtensionsLeadsHistoryAndSuggestionsAndAppearsInActions() throws {
+        try withPage { browser, _ in
+            let url = URL(string: "https://extension.example.test/add")!
+            browser.history = History([Visit(url: url.absoluteString, key: Address.pretty(url),
+                                             title: "Add Extension", count: 200, last: Date(), typed: 100)])
+            for actions in [false, true] {
+                browser.query.actionsPage = actions
+                for words in ["Add Extension", "install extension", "custom extension", "unpacked extension", "load unpacked", "A Folder on This Mac"] {
+                    browser.replaceTyped(words)
+                    #expect(browser.offers.first?.kind == .command(.addExtension))
+                    let suggestions = [Suggestion(key: words + " chrome", title: "", url: nil, kind: .suggested)]
+                    let merged = SearchSuggestions.merge(suggestions, into: browser.offers, lead: browser.query.lead)
+                    #expect(merged.list.first?.kind == .command(.addExtension))
+                    #expect(Command.addExtension.available(in: browser))
+                    #expect(Command.addExtension.opens(in: browser))
+                    #expect(MenuCommands.entries[.addExtension]?.shortcut == nil)
+                }
+                // The short toolbar label can also match Addresses in Actions.
+                // It remains an indexed action above history and web guesses.
+                browser.replaceTyped("Add")
+                let add = try #require(browser.offers.firstIndex { $0.kind == .command(.addExtension) },
+                    "Actions=\(actions), available=\(Command.addExtension.available(in: browser)), exact=\(Command.addExtension.matchesExactly("Add", in: browser)), score=\(String(describing: Command.addExtension.score("Add", in: browser))), rows=\(browser.offers.map { String(describing: $0.kind) })")
+                for (index, row) in browser.offers.enumerated() where row.kind == .visited || row.kind == .suggested {
+                    #expect(add < index)
+                }
+                let merged = SearchSuggestions.merge([Suggestion(key: "Add chrome", title: "", url: nil, kind: .suggested)], into: browser.offers, lead: browser.query.lead)
+                let mergedAdd = try #require(merged.list.firstIndex { $0.kind == .command(.addExtension) })
+                for (index, row) in merged.list.enumerated() where row.kind == .visited || row.kind == .suggested {
+                    #expect(mergedAdd < index)
+                }
+            }
+        }
+    }
+
+    @Test func importingExtensionsUsesTheSameAvailabilityAndLeadsHistoryAndSuggestions() throws {
+        try withPage { browser, _ in
+            let engine = Store.settings.object(forKey: PageEngineSelection.key)
+            let list = Extensions.of(browser)
+            let saved = list.installed
+            defer {
+                Store.settings.set(engine, forKey: PageEngineSelection.key)
+                list.joinList(saved)
+            }
+            Store.settings.set(PageEngineKind.chromium.rawValue, forKey: PageEngineSelection.key)
+            let id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            list.takeNative(id: id, name: "Import fixture", version: "1.0", enabled: true)
+            let native = ChromiumExtensions.of(browser)
+            let busy = native.busy
+            defer { native.busy = busy }
+            native.busy = false
+            #expect(Command.importExtensions.available(in: browser))
+            let url = URL(string: "https://extensions.example.test/import")!
+            browser.history = History([Visit(url: url.absoluteString, key: Address.pretty(url), title: "Import Extensions", count: 200, last: Date(), typed: 100)])
+            for actions in [false, true] {
+                browser.query.actionsPage = actions
+                for words in ["Import", "Import Extensions", "Import Yab Extensions"] {
+                    browser.replaceTyped(words)
+                    #expect(browser.offers.first?.kind == .command(.importExtensions))
+                    let merged = SearchSuggestions.merge([Suggestion(key: words + " chrome", title: "", url: nil, kind: .suggested)], into: browser.offers, lead: browser.query.lead)
+                    #expect(merged.list.first?.kind == .command(.importExtensions))
+                }
+            }
+            native.busy = true
+            #expect(!Command.importExtensions.available(in: browser))
         }
     }
 

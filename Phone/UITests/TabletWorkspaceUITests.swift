@@ -231,40 +231,52 @@ final class TabletWorkspaceUITests: XCTestCase {
         XCTAssertTrue(search.isHittable)
     }
 
-    func testTabletOnboardingChainFinishesAtTheField() throws {
+    func testTabletOnboardingGuideFinishesAtSidebar() throws {
         guard Atlas.model == "ipad" else { throw XCTSkip("Tablet UI") }
-        // The default-browser step, its Not Now, and the hand-over to search.
-        launch("welcome.18")
-        let notNow = app.buttons["welcome.linksNotNow"]
-        XCTAssertTrue(notNow.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["welcome.makeDefault"].isHittable)
-        try picture("ipad-onboarding-default")
-        notNow.tap()
-        XCTAssertTrue(app.textFields["field.input"].waitForExistence(timeout: 10), "the chain leaves no field")
+        launch("welcome.15")
+        let skip = app.buttons["welcome.skip"]
+        XCTAssertTrue(skip.waitForExistence(timeout: 10))
+        try picture("ipad-onboarding-private")
+        skip.tap()
+        XCTAssertTrue(app.buttons["tablet.address"].waitForExistence(timeout: 10))
+        XCTAssertFalse(element("welcome").exists)
         try picture("ipad-onboarding-finished")
     }
 
-    func testTabletChainStandsInTheScreenAndKeepsNoCheckMarks() throws {
+    func testTabletOnboardingPageStaysOneColumn() throws {
         guard Atlas.model == "ipad" else { throw XCTSkip("Tablet UI") }
-        for state in ["welcome.6", "welcome.10", "welcome.16"] {
+        for state in ["welcome.8", "welcome.10"] {
             launch(state)
             let title = app.staticTexts["welcome.title"]
             XCTAssertTrue(title.waitForExistence(timeout: 10))
+            XCTAssertFalse(app.buttons["welcome.recovery"].exists)
             for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
                 XCUIDevice.shared.orientation = orientation
-                let screen = app.windows.firstMatch.frame
-                XCTAssertTrue(wait { title.exists && screen.contains(title.frame) }, "\(state) runs off the screen")
+                let words = app.staticTexts["welcome.words"]
+                XCTAssertTrue(wait { title.isHittable && words.frame.minY >= title.frame.maxY })
+                XCTAssertLessThanOrEqual(words.frame.width, 525)
+                XCTAssertTrue(app.windows.firstMatch.frame.contains(words.frame))
                 try picture("ipad-\(state)-\(orientation == .portrait ? "portrait" : "landscape")")
             }
             XCUIDevice.shared.orientation = .portrait
         }
+        launch("welcome.14")
+        let make = app.buttons["welcome.makeDefault"]
+        XCTAssertTrue(make.waitForExistence(timeout: 10))
+        XCTAssertTrue(make.isHittable)
+        app.buttons["welcome.skip"].tap()
+        XCTAssertTrue(app.buttons["tablet.address"].waitForExistence(timeout: 10))
+        try picture("ipad-joined-onboarding-finished")
     }
 
     func testPhoneAndTabletSheetsAndOnboarding() throws {
-        for state in ["page.1", "field.1", "site.1", "site.3", "settings.1", "welcome.5", "welcome.13", "stack.gallery"] {
+        for state in ["page.1", "field.1", "site.1", "site.3", "settings.1", "welcome.5", "welcome.11", "stack.gallery"] {
             launch(state)
             if Atlas.model != "ipad" { XCTAssertFalse(app.buttons["tablet.address"].exists) }
             if state.hasPrefix("welcome") { XCTAssertFalse(app.buttons["workspace.menu"].exists) }
+            if Atlas.model == "ipad", state.hasPrefix("welcome"), element("welcome.words").exists {
+                XCTAssertLessThanOrEqual(element("welcome.words").frame.width, 525)
+            }
             try picture("\(Atlas.model)-\(state)")
         }
     }

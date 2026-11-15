@@ -55,7 +55,8 @@ final class Agents: ObservableObject {
         /// "claude" or "codex", which changes only before a new chat
         /// starts, its plan out of room (choose). "external" for one
         /// that attached itself, "aside" for a chat brought from Aside.
-        var cli: String
+        var cli: String { didSet { capabilityMembershipChanged?() } }
+        fileprivate var capabilityMembershipChanged: (() -> Void)?
         /// `cli` as an agent Yab knows, nil for a name it doesn't. `cli`
         /// stays the string: chats keep it on disk as it is, the bench
         /// answers it in JSON, and `run` takes whatever name it is asked.
@@ -122,12 +123,21 @@ final class Agents: ObservableObject {
         /// The launched process's actual home, including isolated probe homes.
         var providerEnvironment: [String: String] = [:]
         var providerArchiveArgs: [String] = []
-        var providerRun = UUID()
+        var providerRun = UUID() {
+            didSet { streamPublication = nil }
+        }
         /// An outside agent delegated this task through MCP, rather than
         /// the person opening a chat in Yab.
         var providerBackground = false
         /// Its steps, the same whichever agent it is (ChatItem).
-        var items: [ChatItem] = []
+        var items: [ChatItem] = [] {
+            didSet { itemsRevision &+= 1 }
+        }
+        /// A constant-time dirty mark for a visible transcript. Counting its
+        /// growing Unicode text on every feed tick walks the whole answer.
+        private(set) var itemsRevision: UInt64 = 0
+        /// Cursor's tokens share one pending publication, never one per token.
+        var streamPublication: UUID?
         /// Where its chat began: the field, Here, tabs of its own.
         var origin = Chat.Began.other
         /// The message Claude Code is writing, for its words as they come.
@@ -297,7 +307,7 @@ final class Agents: ObservableObject {
         var parent: String?
         /// The assistant in the cloud it works for (Assistants): its own
         /// session, or a task one started. Narrows; never widens.
-        var assistant: String?
+        var assistant: String? { didSet { capabilityMembershipChanged?() } }
         /// A subagent's kind: default, context_explorer, code_explorer or
         /// fork_self.
         var profile = "default"
@@ -411,6 +421,9 @@ final class Agents: ObservableObject {
     }
 
     @Published private(set) var sessions: [Session] = []
+    /// Mail sends belong to the app, not a tab slot or a short-lived CLI.
+    @Published var mailRequests: [MailSendAsk] = []
+    var mailReceipts: [String: MailSendAsk] = [:]
     /// The chat a window's column shows now: what it asks stands there, not on the page.
     /// Told on its own (ColumnChat), not as a change of Agents: some thirty
     /// views watch Agents, and the column changes this at every trip
@@ -484,9 +497,64 @@ final class Agents: ObservableObject {
     /// Per attached session, the moment it will have gone quiet (AgentFeed.rest).
     private var quieting: [String: DispatchWorkItem] = [:]
 
+    private var sessionsByID: [String: Session] = [:]
+    private let assistantTaskChanges = AgentCapabilityRevision()
+    private var assistantTaskLists: [String: (Int, [String])] = [:]
+
+    /// Only membership/CLI changes affect this list; progress and tool events
+    /// do not. Repeated capability calls never walk the session archive.
+    func assistantStarted(_ assistant: String) -> [String] {
+        let revision = assistantTaskChanges.value
+        if let (was, ids) = assistantTaskLists[assistant], was == revision { return ids }
+        var newest: [Session] = []
+        for session in sessions where session.assistant == assistant && session.cli != "external" {
+            let index = newest.firstIndex { $0.began < session.began } ?? newest.count
+            if index < 10 {
+                newest.insert(session, at: index)
+                if newest.count > 10 { newest.removeLast() }
+            }
+        }
+        let ids = newest.map(\.id)
+        if assistantTaskLists.count >= 512 { assistantTaskLists.removeAll(keepingCapacity: true) }
+        assistantTaskLists[assistant] = (revision, ids)
+        return ids
+    }
+
+    /// Sessions are retained for the life of the process. Index them once on
+    /// admission, rather than scanning every past task for each MCP poll.
+    func register(_ session: Session) {
+        session.capabilityMembershipChanged = { [assistantTaskChanges] in assistantTaskChanges.invalidate() }
+        sessions.append(session)
+        if sessionsByID[session.id] == nil { sessionsByID[session.id] = session }
+        // @Published sends before assigning. A synchronous subscriber can
+        // read/cache the previous list, so invalidate after admission too.
+        assistantTaskChanges.invalidate()
+    }
+
+    /// Large-profile unit fixtures must restore the singleton before yielding
+    /// the main actor; they never replace a real browser's sessions.
+    func withSessionFixture(_ fixture: [Session], perform: () -> Void) {
+        precondition(Store.unitTests)
+        let previous = sessions, previousIndex = sessionsByID
+        defer {
+            sessions = previous
+            sessionsByID = previousIndex
+            assistantTaskLists.removeAll()
+            assistantTaskChanges.invalidate()
+        }
+        sessions = fixture
+        sessionsByID = Dictionary(fixture.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for session in fixture {
+            session.capabilityMembershipChanged = { [assistantTaskChanges] in assistantTaskChanges.invalidate() }
+        }
+        assistantTaskLists.removeAll()
+        assistantTaskChanges.invalidate()
+        perform()
+    }
+
     func session(_ id: String?) -> Session? {
         guard let id else { return nil }
-        return sessions.first { $0.id == id }
+        return sessionsByID[id]
     }
 
     // MARK: - tasks from the iPhone
@@ -514,7 +582,7 @@ final class Agents: ObservableObject {
         session.full = false
         session.movable = false
         session.fromPhone = true
-        sessions.append(session)
+        register(session)
         return session
     }
 
@@ -686,7 +754,7 @@ final class Agents: ObservableObject {
         session.result = chat.answer
         session.asked = chat.items.filter { $0.kind == .asked }.map(\.text)
         session.ended = chat.updated
-        sessions.append(session)
+        register(session)
         return session
     }
 
@@ -713,12 +781,29 @@ final class Agents: ObservableObject {
     func stopObservingRemoteTasks(_ id: UUID) { taskObservers[id] = nil }
 
     private func changed(_ session: Session) {
+        // A structural change publishes all words already received immediately.
+        session.streamPublication = nil
         objectWillChange.send()
         if let root = chatRoot(session) { Chats.shared.keep(chat(of: root)) }
         recall()
         let heard = waiters.removeValue(forKey: session.id) ?? []
         heard.forEach { $0() }
         if session.remoteTask != nil { Array(taskObservers.values).forEach { $0(session) } }
+    }
+
+    /// Keep the stream lossless in memory, but publish/save at most ten
+    /// times a second. A fixed deadline (not a debounce) also delivers during
+    /// a continuous stream. Tools, permissions and completion still use changed.
+    private func streamChanged(_ session: Session) {
+        guard session.streamPublication == nil else { return }
+        let publication = UUID(), run = session.providerRun
+        session.streamPublication = publication
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak session] in
+            guard let self, let session, session.streamPublication == publication else { return }
+            session.streamPublication = nil
+            guard session.providerRun == run else { return }
+            self.changed(session)
+        }
     }
 
     func note(_ session: Session, _ event: String) {
@@ -823,7 +908,7 @@ final class Agents: ObservableObject {
         AgentSetupModel.shared.used(by: name)
         let session = Session(id: Agents.newID(), cli: "external", name: pretty, prompt: "", state: .attached)
         session.client = Self.clientSession(client)
-        sessions.append(session)
+        register(session)
         changed(session)
         return session
     }
@@ -839,7 +924,7 @@ final class Agents: ObservableObject {
         guard Store.testing else { return }
         let made = session(id) ?? {
             let session = Session(id: id, cli: "external", name: "Script", prompt: "", state: state)
-            sessions.append(session)
+            register(session)
             return session
         }()
         made.task = true
@@ -851,7 +936,7 @@ final class Agents: ObservableObject {
     func scripted() -> Session {
         if let made = session(Agents.script) { return made }
         let session = Session(id: Agents.script, cli: "external", name: "Script", prompt: "", state: .attached)
-        sessions.append(session)
+        register(session)
         changed(session)
         return session
     }
@@ -947,7 +1032,7 @@ final class Agents: ObservableObject {
             session.providerBackground = background
             if let profile { session.profile = profile }
             if let name, parent != nil { session.name = name }
-            sessions.append(session)
+            register(session)
         }
         session.providerPermit = ProviderConsent.shared.permit(cli)
         session.turnPermit.revoke()
@@ -1107,9 +1192,12 @@ final class Agents: ObservableObject {
     static var preferred: String {
         // A test world standing in for a Mac with only Codex on it.
         let codexFirst = Store.testing && ProcessInfo.processInfo.environment["YAB_AGENT_PREFER"] == "codex"
+        // What a task would find (AgentLaunch): files alone can't rule out
+        // a connected Claude or Codex on the login shell's PATH.
+        let known = Shell.cachedTerminal ?? (AgentLaunch.needsTerminal(.shared) ? nil : Shell.cached)
         return preferred(connected: AgentSetupModel.clis.filter { cli in
             AgentPlan.of(cli)?.tools == true && (cli == "gemini" ? GeminiAccount.shared.ready : AgentSetup.connected(cli))
-        }, found: Shell.cached, codexFirst: codexFirst)
+        }, found: known, codexFirst: codexFirst)
     }
 
     /// `connected`: the agents whose skill Connect put in place. One of
@@ -1163,7 +1251,9 @@ final class Agents: ObservableObject {
             await retiring.value
             session.archiveTask = nil
         }
-        let shell = await Shell.find()
+        // Where it runs, the environment readiness looked in (AgentLaunch).
+        let shell = await AgentLaunch.environment()
+        AgentSetupModel.shared.taskResolved()
         guard dispatchAllowed(session) else { return }
         if session.agent == .gemini {
             if let refusal = geminiRefusal(session) {
@@ -1171,27 +1261,30 @@ final class Agents: ObservableObject {
                 finish(session, .failed)
                 return
             }
-            guard let binary = shell.gemini else {
+            // Its copy and environment as readiness resolved them (AgentLaunch).
+            guard let launch = AgentLaunch.resolve(session.cli, in: shell) else {
                 session.result = GeminiSupport.notSetUp
                 finish(session, .failed)
                 return
             }
-            session.binary = binary
-            session.env = shell.env
+            session.binary = launch.binary
+            session.env = launch.env
             start(session, message: session.prompt)
             return
         }
         if session.movable, session.cli != "cursor" { await choose(session, shell) }
         guard session.state == .starting, dispatchAllowed(session) else { return }
-        guard let binary = session.agent == .cursor ? shell.cursor : session.agent == .codex ? shell.codex : shell.claude else {
+        // Its copy, and the first account with room in your order (Settings ›
+        // AI › Models), in that account's environment: the resolution
+        // readiness projects (AgentLaunch.resolve).
+        guard let launch = AgentLaunch.resolve(session.cli, in: shell, skipping: session.spent) else {
             session.result = "\(session.planName) isn't set up on this Mac. Connect it in Settings › AI."
             finish(session, .failed)
             return
         }
-        // The first account with room, in your order (Settings › AI › Models).
-        let account = PlanAccounts.shared.pick(session.cli, skipping: session.spent)
-        session.account = account?.id
-        var env = PlanAccounts.shared.env(account, base: shell.env)
+        let binary = launch.binary
+        session.account = launch.account?.id
+        var env = launch.env
         // Signed in first, through a tab of ours if need be.
         if await !signedIn(session, binary: binary, env: env) {
             guard session.state == .starting else { return }
@@ -1226,7 +1319,7 @@ final class Agents: ObservableObject {
                 finish(session, .failed)
                 return
             }
-            env = PlanAccounts.shared.env(signedIn, base: shell.env)
+            env = AgentLaunch.on(signedIn, cli: session.cli, binary: binary, in: shell).env
             session.state = .starting
             note(session, "Signed in")
         }
@@ -3147,7 +3240,7 @@ final class Agents: ObservableObject {
             case .delta(let id, let words, let thinking):
                 session.items.grow(id, by: words, kind: thinking ? .thinking : .message, at: Date())
                 if !thinking { session.result += words }
-                changed(session)
+                streamChanged(session)
             case .tool(let item):
                 var next = item
                 if let previous = session.items.first(where: { $0.id == item.id }) {
@@ -3715,15 +3808,19 @@ final class Agents: ObservableObject {
         PlanAccounts.shared.ranOut(from)
         if let from { session.spent.insert(from) }
         guard let next = PlanAccounts.shared.pick(session.cli, skipping: session.spent) else { return false }
-        var base = session.env.filter { $0.key != "CLAUDE_CONFIG_DIR" && $0.key != "CODEX_HOME" }
-        // Back to the usual account from another, which ran without your token
-        // or your key.
-        if session.agent == .claude, let token = Shell.cached?.env[Shell.claudeToken] { base[Shell.claudeToken] = token }
-        if session.agent == .claude, let key = Shell.cached?.env[AgentKey.anthropic] { base[AgentKey.anthropic] = key }
+        // The next account's environment as a task starting on it gets it
+        // (AgentLaunch): back to the usual account from another, your token
+        // and key come again from where the task began.
+        let env: [String: String]
+        if let found = Shell.cachedTerminal {
+            env = AgentLaunch.on(next, cli: session.cli, binary: session.binary, in: found).env
+        } else {
+            env = PlanAccounts.shared.env(next, base: session.env.filter { $0.key != "CLAUDE_CONFIG_DIR" && $0.key != "CODEX_HOME" })
+        }
         // The conversation, where the next account's CLI looks for it.
         session.carried = Agents.carry(session, from: from, to: next)
         session.account = next.id
-        session.env = PlanAccounts.shared.env(next, base: base)
+        session.env = env
         session.limitHit = false
         session.result = ""
         note(session, "Out of room on \(PlanAccounts.shared.account(from)?.email ?? "this account"), carrying on with \(next.email ?? "another account")")
@@ -3765,8 +3862,7 @@ final class Agents: ObservableObject {
     private func signedIn(_ session: Session, binary: String, env: [String: String]) async -> Bool {
         guard dispatchAllowed(session), let permit = session.providerPermit else { return false }
         if session.agent == .cursor { return await CursorRunner.identify(binary: binary, env: env, permit: permit).signedIn }
-        let args = session.agent == .codex ? ["login", "status"] : ["auth", "status"]
-        let ran = await Shell.timed(binary, args, env: env, permit: permit, captureErrors: true)
+        let ran = await Shell.timed(binary, Agents.signInCheck(session.cli), env: env, permit: permit, captureErrors: true)
         let (code, output) = (ran.code, ran.output)
         guard dispatchAllowed(session) else { return false }
         if ran.late || ![0, 1].contains(code) {
@@ -3778,7 +3874,18 @@ final class Agents: ObservableObject {
             finish(session, .failed)
             return false
         }
-        if session.agent == .codex { return code == 0 }
+        return Agents.saysSignedIn(session.cli, code: code, output: output)
+    }
+
+    /// What a task asks its CLI before it starts: whether it is signed in.
+    nonisolated static func signInCheck(_ cli: String) -> [String] {
+        cli == "codex" ? ["login", "status"] : ["auth", "status"]
+    }
+
+    /// The CLI's answer to signInCheck: Codex by its exit, Claude Code by
+    /// the loggedIn its JSON says.
+    nonisolated static func saysSignedIn(_ cli: String, code: Int32, output: String) -> Bool {
+        if cli == "codex" { return code == 0 }
         guard let data = output.data(using: .utf8),
               let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return code == 0 }
@@ -4439,15 +4546,19 @@ enum Shell {
     }
 
     @MainActor static var cached: Found?
+    @MainActor private static var cachedLoginEnvironment = false
+    /// The cached answer when it is the terminal environment tasks run in
+    /// (AgentLaunch.environment), not a look from files alone.
+    @MainActor static var cachedTerminal: Found? { cachedLoginEnvironment || AgentFixture.requested ? cached : nil }
 
     /// `fresh` asks again, for an agent installed since yab opened.
-    @MainActor static func find(fresh: Bool = false) async -> Found {
+    @MainActor static func find(fresh: Bool = false, resolvingLogin: Bool = true) async -> Found {
         if AgentFixture.requested {
             let fixture = AgentFixture.discovery() ?? Found(claude: nil, codex: nil, env: [:], late: true)
             cached = fixture
             return fixture
         }
-        if let cached, !fresh { return cached }
+        if let cached, !fresh, !resolvingLogin || cachedLoginEnvironment { return cached }
         let own = ProcessInfo.processInfo.environment
         // A test world with no agent on its Mac (evals/no-agent).
         if Store.testing, own["YAB_AGENTS"] == "none" {
@@ -4455,14 +4566,32 @@ enum Shell {
             cached = none
             return none
         }
-        let shell = own["SHELL"] ?? "/bin/zsh"
+        let found = await discover(environment: own, resolvingLogin: resolvingLogin)
+        cached = found
+        cachedLoginEnvironment = resolvingLogin
+        return found
+    }
+
+    /// Kept separate so a passive discovery can be proved against a shell
+    /// with observable side effects, inside a fixture home.
+    @MainActor static func discover(environment own: [String: String], resolvingLogin: Bool) async -> Found {
+        let shell = loginShell(own["SHELL"])
         let marker = "__yab_agent__"
         // A token from `claude setup-token` lives in the shell's own files
         // (export CLAUDE_CODE_OAUTH_TOKEN=…), which an app from the Dock never
         // reads: the login shell says it, after the rest. Never logged.
         var start = own
         if !mayInherit(own) { start[claudeToken] = nil }
-        let asked = await timed(shell, ["-ilc", "echo \(marker); echo \"$PATH\"; command -v claude; echo; command -v codex; echo; command -v agy; echo; echo \(tokenMarker); printenv \(claudeToken); echo \(tokenMarker)"], env: start)
+        // Passive discovery must not execute login scripts or read exported
+        // credentials. Resolve those only when a connection or task needs
+        // the terminal environment. File-based CLI discovery works in both.
+        let asked: (output: String, late: Bool)
+        if resolvingLogin {
+            let ran = await timed(shell, ["-ilc", "echo \(marker); echo \"$PATH\"; command -v claude; echo; command -v codex; echo; command -v agy; echo; echo \(tokenMarker); printenv \(claudeToken); echo \(tokenMarker)"], env: start)
+            asked = (ran.output, ran.late)
+        } else {
+            asked = ("", false)
+        }
         let (output, shellToken) = token(in: asked.output)
         let lines = output.components(separatedBy: marker).last?.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) ?? []
         let rest = lines.dropFirst().filter { !$0.isEmpty }
@@ -4487,7 +4616,7 @@ enum Shell {
         if let given = shellToken ?? (mayInherit(own) ? own[claudeToken].flatMap(clean) : nil) { env[claudeToken] = given }
         // And the API key you connected Claude with, from Yab's keychain
         // item (AgentKey): the one ANTHROPIC_ value that is yours.
-        env = AgentKey.apply(env)
+        if resolvingLogin { env = AgentKey.apply(env) }
         let paths = rest.filter { $0.hasPrefix("/") && !$0.contains(":") }
         var found = Found(env: env)
         found.late = asked.late
@@ -4497,7 +4626,8 @@ enum Shell {
         // until you connect one or ask it something.
         let shellPath = env["PATH"] ?? ""
         let copies = { (name: String) in
-            paths.filter { $0.hasSuffix("/" + name) } + AgentCopies.onPath(name, shellPath) + AgentCopies.places(name)
+            paths.filter { $0.hasSuffix("/" + name) } + AgentCopies.onPath(name, shellPath)
+                + AgentCopies.places(name, home: own["HOME"] ?? NSHomeDirectory())
         }
         let (claudeCopies, codexCopies) = (copies("claude"), copies("codex"))
         let newest = await Task.detached(priority: .userInitiated) {
@@ -4505,7 +4635,8 @@ enum Shell {
         }.value
         found.claude = newest.0
         found.codex = newest.1
-        found.cursor = (AgentCopies.onPath("cursor-agent", shellPath) + AgentCopies.places("cursor-agent"))
+        found.cursor = (AgentCopies.onPath("cursor-agent", shellPath)
+                        + AgentCopies.places("cursor-agent", home: own["HOME"] ?? NSHomeDirectory()))
             .first { FileManager.default.isExecutableFile(atPath: $0) }
         found.gemini = AgentCopies.newest(copies("agy"))?.path
         // A test run can be given stand-ins that speak the same streams.
@@ -4518,7 +4649,6 @@ enum Shell {
             if let cursor = given["YAB_AGENT_CURSOR"] { found.cursor = there(cursor) }
             if let gemini = given["YAB_AGENT_GEMINI"] { found.gemini = there(gemini) }
         }
-        cached = found
         return found
     }
 
@@ -4553,6 +4683,16 @@ enum Shell {
         (env["CLAUDECODE"] ?? "").isEmpty && (env["CLAUDE_CODE_ENTRYPOINT"] ?? "").isEmpty
     }
 
+    /// An inherited SHELL can name an uninstalled Homebrew shell, or be empty.
+    static func loginShell(_ candidate: String?) -> String {
+        if let candidate, let url = ProcessLaunch.executableURL(candidate) {
+            let process = Process()
+            process.executableURL = url
+            if (try? ProcessLaunch.validate(process)) != nil { return candidate }
+        }
+        return "/bin/zsh"
+    }
+
     /// Binaries macOS stopped the moment they ran: XProtect or Gatekeeper
     /// kill a copy they flag, and move it to the Trash.
     private static let stoppedLock = NSLock()
@@ -4573,11 +4713,21 @@ enum Shell {
     static func start(_ process: Process, permit: ProviderLaunchPermit?, localSetup: LocalAgentSetupPermit? = nil,
                       disconnect: ProviderDisconnectPermit? = nil) throws -> Bool {
         guard [permit != nil, localSetup != nil, disconnect != nil].filter({ $0 }).count <= 1 else { return false }
+        // A NUL inside an argument or a variable makes Foundation raise an
+        // Objective-C exception that `try` can't catch, and Yab died seconds
+        // after every launch: a diary page's text went into the prompt that
+        // names a thread (a reporter's diagnostics, 0.46.13). They go without it.
+        process.arguments = process.arguments?.map(Self.withoutNUL)
+        process.environment = process.environment?.mapValues(Self.withoutNUL)
         if let disconnect { return try disconnect.start(process) }
         if let localSetup { return try localSetup.start(process) }
         if let permit { return try permit.start(process) }
-        try process.run()
+        try process.runValidated()
         return true
+    }
+
+    nonisolated static func withoutNUL(_ text: String) -> String {
+        text.contains("\u{0}") ? text.replacingOccurrences(of: "\u{0}", with: "") : text
     }
 
     static func run(_ binary: String, _ args: [String], env: [String: String], limit: Double = 15,
@@ -4607,10 +4757,24 @@ enum Shell {
         await withCheckedContinuation { done in
             DispatchQueue.global().async {
                 let process = Process()
-                process.executableURL = URL(fileURLWithPath: binary)
+                // Setting a nil executableURL itself raises NSException on
+                // macOS. Reject the original path before touching NSTask.
+                guard let executable = ProcessLaunch.executableURL(binary) else {
+                    done.resume(returning: Ran(code: -1, output: "", late: false,
+                                               diagnostic: "Cannot launch process: invalid executable path"))
+                    return
+                }
+                process.executableURL = executable
                 process.arguments = args
-                process.environment = AgentCopies.environment(for: binary, base: env)
                 if let folder { process.currentDirectoryURL = folder }
+                // Reject malformed paths before resolving the CLI's symlinks or
+                // opening pipes; validate again at run time in case it moved.
+                do { try ProcessLaunch.validate(process) }
+                catch {
+                    done.resume(returning: Ran(code: -1, output: "", late: false, diagnostic: error.localizedDescription))
+                    return
+                }
+                process.environment = AgentCopies.environment(for: binary, base: env)
                 let out = Pipe()
                 process.standardOutput = out
                 process.standardError = FileHandle.nullDevice
@@ -5091,8 +5255,7 @@ enum AgentCLI {
             let open = Process()
             open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
             open.arguments = [url]
-            try? open.run()
-            open.waitUntilExit()
+            if (try? open.runValidated()) != nil { open.waitUntilExit() }
         }
         exit(0)
     }

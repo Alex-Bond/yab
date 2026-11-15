@@ -1,24 +1,14 @@
 import XCTest
 
 extension XCUIApplication {
-    /// The first run's way on without a Mac (Welcome/FirstRun): Get Started,
-    /// Continue Without a Mac, Continue under Private by Default, and Not Now
-    /// on the optional default-browser step; the icon then stretches into
-    /// the New Tab field over the empty page. Each step waits for its button
-    /// to stand still: the steps morph into each other on springs, and a tap
-    /// taken while one settles can land on what is still moving.
+    /// The first run's way on without a Mac (Welcome/FirstRun): Skip, from
+    /// any page, which leaves the New Tab field over the empty page. Waits
+    /// for Skip to stand still: the first page fades in under it.
     func passWelcome(timeout: TimeInterval = 10) {
-        for (id, wait) in [("welcome.start", timeout), ("welcome.noMac", 5), ("welcome.continue", 5)] {
-            let button = buttons[id]
-            guard button.waitForExistence(timeout: wait) else { return }
-            button.waitUntilStill()
-            button.tap()
-        }
-        let links = buttons["welcome.linksNotNow"]
-        if links.waitForExistence(timeout: 5) {
-            links.waitUntilStill()
-            links.tap()
-        }
+        let skip = buttons["welcome.skip"]
+        guard skip.waitForExistence(timeout: timeout) else { return }
+        skip.waitUntilStill()
+        skip.tap()
     }
 
     /// Closes the field (the New Tab field the first run leaves over the

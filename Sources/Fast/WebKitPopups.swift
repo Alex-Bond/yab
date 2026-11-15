@@ -250,6 +250,18 @@ extension Browser {
             }
             return webKitOpened(tab, by: webView, for: action)
         }
+        if popup {
+            let tab = Tab(shy: parent?.shy ?? false, configuration: configuration, factory: .webKitOnly)
+            tab.popup = true; tab.opener = from; tab.from = from; tab.scripted = scripted
+            if let url = action.request.url { tab.setAddressOptimistically(url) }
+            prepare(tab)
+            outside.append(tab)
+            let size = windowFeatures.width.flatMap { width in
+                windowFeatures.height.map { NSSize(width: width.doubleValue, height: $0.doubleValue) }
+            }
+            LinkWindow.present(tab, for: self, size: size)
+            return webKitOpened(tab, by: webView, for: action)
+        }
         // A web page sending you on to an extension's own page in a new tab,
         // Nord Account handing NordPass back its sign-in (app.html?verify_token=):
         // WebKit's copy of the web page's configuration can't serve
@@ -262,14 +274,6 @@ extension Browser {
             _ = open(url, foreground: parent.id == activeID, from: parent, linked: true, backToSource: action.navigationType == .linkActivated)
             return nil
         }
-        // A link to a new tab from a pin or a kept tab: a peek over it, no
-        // row, as Arc opens one from a pinned tab. A script's window, a
-        // sign-in, still gets its tab: it talks to the page that opened it.
-        if action.navigationType == .linkActivated, !popup, modifiedForeground == nil, let parent, parent.pin != nil || parent.kept,
-           tabs.contains(where: { $0 === parent }), let url = action.request.url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-            peek(url, from: parent)
-            return nil
-        }
         // A link to a site a rule keeps in another space: opened there, in
         // that space's sign-ins, as Arc's Air Traffic Control sends it
         // (LinkRoutes). Only a link you clicked, or Open Link in New Tab: a
@@ -277,6 +281,14 @@ extension Browser {
         if action.navigationType == .linkActivated || menuForeground != nil, !popup, let parent,
            tabs.contains(where: { $0 === parent }), let url = action.request.url,
            routePageLink(url, from: parent, foreground: menuForeground ?? modifiedForeground ?? true) {
+            return nil
+        }
+        // A link to a new tab from a pin or a kept tab: a peek over it, no
+        // row, as Arc opens one from a pinned tab. A script's window, a
+        // sign-in, still gets its tab: it talks to the page that opened it.
+        if action.navigationType == .linkActivated, !popup, modifiedForeground == nil, let parent, parent.pin != nil || parent.kept,
+           tabs.contains(where: { $0 === parent }), let url = action.request.url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            peek(url, from: parent)
             return nil
         }
         let tab = Tab(shy: parent?.shy ?? false, configuration: configuration, factory: .webKitOnly)

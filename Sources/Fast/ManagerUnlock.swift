@@ -90,6 +90,29 @@ enum ManagerUnlock {
 
     enum Outcome: Equatable { case unlocked, notUnlocked, noField, notRunning }
 
+    /// A manager's page, however it is drawn: a tab's on either engine, or
+    /// the raw WebKit view of its popup. Nil from a page gone.
+    struct Page {
+        let call: @MainActor (String, [String: Any]) async -> Any?
+        let pressReturn: @MainActor () -> Void
+
+        @MainActor init(_ page: any PageHandle) {
+            call = { [weak page] script, arguments in
+                guard let page else { return nil }
+                return try? await page.call(script, arguments: arguments)
+            }
+            pressReturn = { [weak page] in if let page { _ = AgentPage.press(page, "Enter") } }
+        }
+
+        @MainActor init(popup web: WKWebView) {
+            call = { [weak web] script, arguments in
+                guard let web else { return nil }
+                return try? await web.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
+            }
+            pressReturn = { [weak web] in _ = web?.webKitAgentPress("Enter") }
+        }
+    }
+
     /// Is a password box showing on the page.
     static let boxScript = """
     return [...document.querySelectorAll('input[type=password]')].some(e => {
@@ -122,11 +145,11 @@ enum ManagerUnlock {
     /// typed into; the tab closes. Nil when the page couldn't be read.
     @MainActor static func peekLocked(_ id: String, in browser: Browser, house: (Tab) -> Void) async -> Bool? {
         guard let item = PasswordManagers.installed(id), item.enabled,
-              let context = Extensions.here.contexts[item.id],
+              let base = ManagerExtensions.shared.base(item.id),
               let page = PasswordManagers.provider(id)?.unlockPage else { return nil }
-        let address = context.baseURL.appendingPathComponent(page)
+        let address = base.appendingPathComponent(page)
         let tab = browser.benchOpen(address)
-        guard let web = tab.webKitOnly("Legacy password-manager unlock") else { browser.close(tab); return nil }
+        let web = tab.page
         house(tab)
         defer { browser.close(tab) }
         for _ in 0..<40 {
@@ -136,7 +159,7 @@ enum ManagerUnlock {
         // Its app draws a beat after it loads: a box that comes is a lock.
         var seen: Bool?
         for _ in 0..<12 {
-            let box = try? await web.callAsyncJavaScript(boxScript, arguments: [:], in: nil, contentWorld: .page)
+            let box = await Page(web).call(boxScript, [:])
             if box as? Bool == true { return true }
             if box != nil { seen = false }
             try? await Task.sleep(for: .milliseconds(250))
@@ -150,15 +173,11 @@ enum ManagerUnlock {
     @MainActor static func run(_ id: String, secret: String, in browser: Browser, session: String?, house: (Tab) -> Void,
                                done: @escaping @MainActor (Outcome) -> Void) {
         guard PasswordManagers.yabMayUnlock(id), let item = PasswordManagers.installed(id), item.enabled,
-              let context = Extensions.here.contexts[item.id],
+              let base = ManagerExtensions.shared.base(item.id),
               let page = PasswordManagers.provider(id)?.unlockPage else { done(.notRunning); return }
-        let address = context.baseURL.appendingPathComponent(page)
+        let address = base.appendingPathComponent(page)
         let tab = browser.benchOpen(address)
-        guard let web = tab.webKitOnly("Legacy password-manager unlock") else {
-            browser.close(tab)
-            done(.notRunning)
-            return
-        }
+        let web = tab.page
         tab.agent = session ?? Agents.script
         house(tab)
         func finish(_ outcome: Outcome) {
@@ -171,21 +190,20 @@ enum ManagerUnlock {
                 try? await Task.sleep(for: .milliseconds(250))
             }
             // Only on the extension's own origin.
-            guard web.url?.host() == context.baseURL.host() else { finish(.noField); return }
-            finish(await enter(secret, into: web))
+            guard web.url?.host() == base.host() else { finish(.noField); return }
+            finish(await enter(secret, into: Page(web)))
         }
     }
 
     /// The password typed into a page of the manager's that shows its box,
     /// Return pressed, then up to 6 s for the box to go.
-    @MainActor static func enter(_ secret: String, into web: WKWebView) async -> Outcome {
-        let filled = try? await web.callAsyncJavaScript(fillScript, arguments: ["secret": secret], in: nil, contentWorld: .page)
+    @MainActor static func enter(_ secret: String, into page: Page) async -> Outcome {
+        let filled = await page.call(fillScript, ["secret": secret])
         guard filled as? String == "filled" else { return .noField }
-        _ = web.webKitAgentPress("Enter")
+        page.pressReturn()
         for _ in 0..<24 {
             try? await Task.sleep(for: .milliseconds(250))
-            let box = try? await web.callAsyncJavaScript(boxScript, arguments: [:], in: nil, contentWorld: .page)
-            if box as? Bool == false { return .unlocked }
+            if await page.call(boxScript, [:]) as? Bool == false { return .unlocked }
         }
         return .notUnlocked
     }
@@ -205,9 +223,9 @@ enum ManagerUnlock {
     """
 
     /// Whether the page shows the manager's lock screen within `seconds`.
-    @MainActor static func lockScreen(_ web: WKWebView, seconds: Double) async -> Bool {
+    @MainActor static func lockScreen(_ page: Page, seconds: Double) async -> Bool {
         for _ in 0..<max(1, Int(seconds * 4)) {
-            if (try? await web.callAsyncJavaScript(lockScreenScript, arguments: [:], in: nil, contentWorld: .page)) as? Bool == true { return true }
+            if await page.call(lockScreenScript, [:]) as? Bool == true { return true }
             try? await Task.sleep(for: .milliseconds(250))
         }
         return false
@@ -233,9 +251,9 @@ enum ManagerUnlock {
             if !web.isLoading, web.url?.absoluteString.hasPrefix(address.absoluteString) == true { break }
             try? await Task.sleep(for: .milliseconds(250))
         }
-        guard web.url?.host() == context.baseURL.host(), await lockScreen(web, seconds: 4) else { return .noField }
+        guard web.url?.host() == context.baseURL.host(), await lockScreen(Page(web), seconds: 4) else { return .noField }
         guard let secret = await secret() else { return .noField }
-        return await enter(secret, into: web)
+        return await enter(secret, into: Page(web))
     }
 
     /// After an unlock, the open pages with a sign-in told they are seen

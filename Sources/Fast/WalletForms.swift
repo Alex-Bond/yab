@@ -32,45 +32,63 @@ final class WalletRelay: NSObject, PageScriptReceiving {
 
     static let script = PageScript.load("wallet-forms", vars: ["GROUND": DropFrame.ground])
 
-    /// What every frame gets instead: a look for a box, and on the first
-    /// one, a word to yab, which puts `script` into that frame alone
-    /// (Tab.walletHeard). A page's frames are mostly ads, a player, a
-    /// widget, with nothing to type into; seventy kilobytes run in each of
-    /// them, and a watch on every change to their pages, cost more than
-    /// any other script of yab's in a page full of frames. A box that only
-    /// shows up later, or inside a shadow root, sends for it when it does,
-    /// or when the caret comes into it.
+    /// What every frame gets instead: a look for a card's or an address's
+    /// box, and on the first one, a word to yab, which puts `script` into
+    /// that frame alone (Tab.walletHeard). A page's frames are mostly ads,
+    /// a player, a widget; seventy kilobytes run in each of them, and the
+    /// script's watch on every change to their pages, cost more than any
+    /// other script of yab's in a page full of frames. Any box used to be
+    /// enough, so a Todo list or an editor in a frame carried the whole
+    /// wallet: Speedometer 3.1 on an M2 Pro scored 31.3 with it and 41.0
+    /// without, its tests being such frames. A payment frame's boxes say
+    /// what they are (autocomplete, the payment form's own field names);
+    /// a box of a form, or one whose own words say it is for a card, an
+    /// address, a name, an email or a phone, sends when the caret comes into
+    /// it. Speedometer puts the caret in its Todo box too: a box that says
+    /// none of that ("What needs to be done?") sends nothing (38.1 with it,
+    /// 41.2 without the wallet).
+    /// No frame watches its page for boxes drawn later: it looks when its
+    /// document has loaded, and again when yab asks, as a card's or an
+    /// address's box gets the caret anywhere in the tab (Tab.walletLook).
+    /// Even a watch on added nodes alone cost Speedometer 3 points (37.9
+    /// against 41.0 without the wallet, M2 Pro).
     static let soon = #"""
     (function () {
       if (window === window.top || window.__yabWallet || window.__yabWalletSoon) return;
       window.__yabWalletSoon = true;
       var BOX = 'input:not([type=hidden]), select, textarea';
-      var asked = false, watch = null;
+      var PAY = ['[autocomplete*=cc- i]', '[autocomplete*=billing i]', '[autocomplete*=shipping i]',
+        '[autocomplete*=street-address i]', '[autocomplete*=address-line i]', '[autocomplete*=postal-code i]',
+        '[data-elements-stable-field-name]', '[data-fieldtype]', '[name*=card i]', '[id*=card i]',
+        '[name*=cvc i]', '[name*=cvv i]', '[name*=csc i]', '[name*=expir i]', '[id*=expir i]',
+        '[placeholder*=card i]', '[placeholder*=CVC i]', '[placeholder*="MM"]', '[aria-label*=card i]'
+      ].map(function (a) { return 'input' + a + ', select' + a; }).join(', ');
+      var asked = false;
       function ask() {
         if (asked) return;
         asked = true;
-        if (watch) watch.disconnect();
         document.removeEventListener('focusin', focused, true);
         try { window.webkit.messageHandlers.yabWallet.postMessage({ kind: 'load' }); } catch (e) {}
       }
+      var WORDS = /card|cvc|cvv|expir|address|street|city|postal|zip|country|phone|email|name|karte|tarjeta|carte|cart[aã]o|carta|kaart|karty/i;
       function focused(e) {
         var el = e.composedPath ? e.composedPath()[0] : e.target;
-        if (el && el.matches && el.matches(BOX)) ask();
+        if (!el || !el.matches || !el.matches(BOX)) return;
+        var says = [el.name, el.id, el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.getAttribute('autocomplete')];
+        if (el.form || el.closest('form, [role=form]') || el.matches(PAY) || WORDS.test(says.join(' '))) ask();
       }
       document.addEventListener('focusin', focused, true);
-      if (document.querySelector(BOX)) return ask();
-      if (!document.documentElement) return;
-      // Only what was added is looked at, not the whole page again.
-      watch = new MutationObserver(function (records) {
-        for (var r = 0; r < records.length; r++) {
-          var added = records[r].addedNodes;
-          for (var i = 0; i < added.length; i++) {
-            var n = added[i];
-            if (n.nodeType === 1 && (n.matches(BOX) || n.querySelector(BOX))) return ask();
-          }
-        }
-      });
-      watch.observe(document.documentElement, { childList: true, subtree: true });
+      // A file box: Files places itself by the whole script (FormFiles), so
+      // a frame with one sends for it, and a press on one drawn later does.
+      document.addEventListener('click', function (e) {
+        var t = e.target;
+        if (asked || !t || t.tagName !== 'INPUT' || (t.type || '').toLowerCase() !== 'file') return;
+        window.__yabWalletFile = { el: t, t: Date.now() };
+        ask();
+      }, true);
+      window.__yabWalletLook = function () { if (!asked && document.querySelector(PAY + ', input[type=file]')) ask(); };
+      window.addEventListener('load', window.__yabWalletLook, { once: true });
+      window.__yabWalletLook();
     })();
     """#
 }
@@ -119,6 +137,9 @@ final class WalletWatch {
     /// The document the caret was last said to be in: frames speak out of
     /// turn, and the page's "left" can arrive after a frame's "came in".
     var caretIn = ""
+    /// When the frames were last asked to look for a card's or an
+    /// address's boxes (Tab.walletLook).
+    var lookedAt = Date.distantPast
     /// The form the caret is in, as yab would fill it (FormFill).
     var form = FormWatch()
     /// The page whose list was put away with Escape (Browser.dropWallet):
@@ -161,7 +182,7 @@ final class WalletWatch {
     }
 
     private func holds(_ entry: (name: String, frame: PageFrame, card: Bool, address: Bool), _ group: WalletField.Group) -> Bool {
-        group == .card ? entry.card : entry.address
+        group == .card ? (entry.card || entry.address) : entry.address
     }
 
     private func trusted(_ entry: (name: String, frame: PageFrame, card: Bool, address: Bool), main: String) -> Bool {
@@ -333,6 +354,9 @@ extension Tab {
             walletCaret(body, frame)
         case "fields":
             wallet.remember(frame, as: body["frame"] as? String ?? "", card: body["card"] as? Bool ?? false, address: body["address"] as? Bool ?? false)
+            // A payment form's frame has its boxes: its other frames, drawn
+            // later perhaps (a split card), look again.
+            if body["card"] as? Bool == true, !frame.isMain { walletLook() }
         case "seen":
             wallet.remember(frame, as: body["frame"] as? String ?? "")
             if let card = SeenCard(body["card"]) {
@@ -368,6 +392,18 @@ extension Tab {
             || (!wallet.caretOrigin.isEmpty && WalletWatch.origin(frame) == wallet.caretOrigin)
     }
 
+    /// A card's or an address's box has the caret: every frame looks once
+    /// more for such boxes of its own (WalletRelay.soon), so a payment
+    /// form that draws a frame's boxes late is filled with the rest, and no
+    /// frame has to watch its page for them.
+    func walletLook() {
+        wallet.lookedAt = Date()
+        guard let page = builtPage else { return }
+        page.childFrames { frames in
+            for frame in frames { page.run("window.__yabWalletLook && window.__yabWalletLook()", in: .yab, frame: frame, gesture: false) }
+        }
+    }
+
     private func walletCaret(_ body: [String: Any], _ frame: PageFrame) {
         let name = body["frame"] as? String ?? ""
         guard let raw = body["group"] as? String, let group = WalletField.Group(rawValue: raw),
@@ -381,6 +417,7 @@ extension Tab {
         }
         wallet.caretIn = name
         wallet.caretOrigin = WalletWatch.origin(frame)
+        if group == .card || group == .address, Date().timeIntervalSince(wallet.lookedAt) > 1 { walletLook() }
         if group != .card { wallet.form.frame = frame.isMain ? nil : frame }
         wallet.beat += 1
         let beat = wallet.beat

@@ -60,9 +60,39 @@ extension PagePolicy {
 @MainActor
 final class WebKitPageEvents: NSObject, WKNavigationDelegate, WKUIDelegate {
     weak var listener: (any PageEvents)?
-    var routeSiteEngine: ((URLRequest) async throws -> Bool)?
+    /// The engine's routing for an allowed main-frame request; the flag says
+    /// a person sent it (a click, Yab's own load), not a redirect or a script.
+    var routeSiteEngine: ((URLRequest, Bool) async throws -> Bool)?
     var prepareChromiumCookies: ((URL) async throws -> Void)?
+    var prepareFrame: ((URL) async -> Void)?
+    /// A hop of a WebKit navigation: a sign-in leaves cookies on the way.
+    var redirected: ((URL) -> Void)?
     var popups: [UUID: WebKitPopup] = [:]
+    private var loadRetry = DNSRetry()
+    private weak var recoveryPage: PageView?
+    private var currentNavigation: PageNavigation?
+    var documentNavigation: PageNavigation? { currentNavigation }
+
+    var waitingForNetwork: Bool { loadRetry.pending }
+
+    func cancelLoadRetry() {
+        loadRetry.begin(nil)
+        recoveryPage = nil
+    }
+
+    func stopLoadRetry(_ page: PageView) {
+        let pending = loadRetry.pending
+        cancelLoadRetry()
+        if pending {
+            listener?.page(page, navigation: .failed(currentNavigation,
+                NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled), provisional: true))
+        }
+    }
+
+    func acceptNavigation(_ request: URLRequest) {
+        loadRetry.begin(request)
+        LoadNetwork.shared.watch(self)
+    }
 
     override func responds(to selector: Selector!) -> Bool {
         super.responds(to: selector) || (listener as? NSObject)?.responds(to: selector) == true
@@ -87,59 +117,145 @@ final class WebKitPageEvents: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // A new destination cancels recovery before async policy can hold it.
+        if action.targetFrame?.isMainFrame == true { cancelLoadRetry() }
+        let decide: (WKNavigationActionPolicy) -> Void = { [weak self] policy in
+            if action.targetFrame?.isMainFrame == true {
+                if policy == .allow { self?.acceptNavigation(action.request) }
+                else { self?.cancelLoadRetry() }
+            }
+            decisionHandler(policy)
+        }
         LastingSignIns.whenReady(webView.configuration.websiteDataStore) { [weak self, weak webView] in
-            guard let self, let webView else { decisionHandler(.cancel); return }
-            guard let page = webView as? PageView, let listener = self.listener else { decisionHandler(.allow); return }
+            guard let self, let webView else { decide(.cancel); return }
+            guard let page = webView as? PageView, let listener = self.listener else { decide(.allow); return }
             var answered = false
             listener.page(page, decide: PageAction(action)) { policy in
                 guard !answered else { return }
                 answered = true
+                if policy == .allow, action.targetFrame?.isMainFrame == true, let skipped = self.skip(action.request, in: page) {
+                    // A click tracker with its destination inside: never
+                    // asked, the tab goes there (Shield.skip). Before the
+                    // content rule list, which would stop the tracker.
+                    decide(.cancel)
+                    page.load(URLRequest(url: skipped))
+                    return
+                }
                 if policy == .allow, action.targetFrame?.isMainFrame == true,
                    let url = action.request.url, let prepare = self.prepareChromiumCookies {
                     Task { @MainActor [weak self, weak page] in
                         do {
-                            if let route = self?.routeSiteEngine, try await route(action.request) {
-                                decisionHandler(.cancel)
+                            if let route = self?.routeSiteEngine, try await route(action.request, Self.byPerson(action)) {
+                                decide(.cancel)
                                 return
                             }
                             try await prepare(url)
-                            guard self?.listener != nil, page?.events != nil else { decisionHandler(.cancel); return }
-                            decisionHandler(.allow)
-                        } catch { decisionHandler(.cancel) }
+                            guard self?.listener != nil, page?.events != nil else { decide(.cancel); return }
+                            decide(.allow)
+                        } catch { decide(.cancel) }
                     }
-                } else { decisionHandler(policy.webKitAction) }
+                } else if policy == .allow, action.targetFrame?.isMainFrame == false, let url = action.request.url,
+                          let prepare = self.prepareFrame {
+                    Task { @MainActor in
+                        await prepare(url)
+                        decide(policy.webKitAction)
+                    }
+                } else { decide(policy.webKitAction) }
             }
         }
     }
 
+    /// A navigation a person made: a link clicked or a press's script, never
+    /// a server's redirect, which is a hop of a flow already under way (a
+    /// sign-in's way out and back), nor a script running on its own.
+    static func byPerson(_ action: WKNavigationAction) -> Bool {
+        let redirect = NSSelectorFromString("_isRedirect")
+        if action.responds(to: redirect) {
+            typealias Get = @convention(c) (AnyObject, Selector) -> Bool
+            if unsafeBitCast(action.method(for: redirect), to: Get.self)(action, redirect) { return false }
+        }
+        return action.navigationType == .linkActivated || WindowGate.gesture(action)
+    }
+
+    /// Skips in a row: one skip's destination may be another tracker's
+    /// address, as a redirect would be, but rules that send a tab round in
+    /// a circle end after a few, and the address loads as it is.
+    private var skips = 0
+
+    private func skip(_ request: URLRequest, in page: PageView) -> URL? {
+        guard let url = request.url, (request.httpMethod ?? "GET").uppercased() == "GET", skips < 4,
+              let skipped = Shield.shared.skip(url, persistent: page.configuration.websiteDataStore.isPersistent) else {
+            skips = 0
+            return nil
+        }
+        skips += 1
+        return skipped
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        ClientCertificates.cancel(in: webView)
         guard let page = webView as? PageView else { return }
-        listener?.page(page, navigation: .started(navigation?.pageNavigation))
+        currentNavigation = navigation?.pageNavigation
+        listener?.page(page, navigation: .started(currentNavigation))
     }
 
     func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
         guard let page = webView as? PageView else { return }
+        if let url = webView.url { redirected?(url) }
         listener?.page(page, navigation: .redirected(navigation?.pageNavigation))
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let page = webView as? PageView else { return }
+        currentNavigation = navigation?.pageNavigation
+        cancelLoadRetry()
         listener?.page(page, navigation: .committed(navigation?.pageNavigation))
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let page = webView as? PageView else { return }
+        guard navigation?.pageNavigation == currentNavigation else { return }
+        cancelLoadRetry()
         listener?.page(page, navigation: .finished(navigation?.pageNavigation))
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         guard let page = webView as? PageView else { return }
+        guard navigation?.pageNavigation == currentNavigation else { return }
+        cancelLoadRetry()
         listener?.page(page, navigation: .failed(navigation?.pageNavigation, error, provisional: false))
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         guard let page = webView as? PageView else { return }
+        guard navigation?.pageNavigation == currentNavigation else { return }
+        let failure = error as NSError
+        // Cancellations (including Stop) must never schedule a replacement.
+        if failure.domain == NSURLErrorDomain, failure.code == NSURLErrorCancelled {
+            cancelLoadRetry()
+            listener?.page(page, navigation: .failed(navigation?.pageNavigation, error, provisional: true))
+            return
+        }
+        let failed = failure.userInfo[NSURLErrorFailingURLErrorKey] as? URL
+        loadRetry.wait(code: failure.code, failed: failed, domain: failure.domain)
+        recoveryPage = page
         listener?.page(page, navigation: .failed(navigation?.pageNavigation, error, provisional: true))
+        resumeNetworkLoad()
+    }
+
+    func networkRestored() {
+        loadRetry.networkRestored()
+        resumeNetworkLoad()
+    }
+
+    func networkUnavailable() { loadRetry.networkUnavailable() }
+
+    func resumeNetworkLoad() {
+        guard let page = recoveryPage, listener != nil, page.navigationDelegate === self else { return }
+        let visible = page.window.map { $0.isVisible && !$0.isMiniaturized } == true &&
+            !page.isHiddenOrHasHiddenAncestor && !NSApp.isHidden
+        guard let request = loadRetry.take(visible: visible) else { return }
+        page.load(request)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
@@ -185,6 +301,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        ClientCertificates.cancel(in: webView)
         guard let view = webView as? PageView else { return }
         page(view, navigation: .started(navigation?.pageNavigation))
     }
@@ -294,13 +411,18 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         if (mimeType ?? "application/pdf") == "application/pdf", (name as NSString).pathExtension.isEmpty { name += ".pdf" }
         let owner = (webView as? any PageHandle).flatMap { tab(owning: $0) }
         let folder = downloadFolder(for: owner)
-        let file: URL
-        if prefs.asksWhereToSave {
-            guard let url = chooseDownloadLocation(name, folder) else { return }
-            file = url
-        } else {
-            file = Browser.free(name, in: folder)
+        let title = webView.title.flatMap { $0.isEmpty ? nil : $0 }
+        guard prefs.asksWhereToSave else {
+            return saveData(data, to: Browser.free(name, in: folder), source: source, page: page, title: title)
         }
+        chooseDownloadLocation(name, folder) { [weak self] url in
+            guard let self, let url else { return }
+            self.saveData(data, to: url, source: source, page: page, title: title)
+        }
+    }
+
+    /// A page's own data written where it goes, kept as a download is.
+    private func saveData(_ data: Data, to file: URL, source: URL?, page: URL?, title: String?) {
         guard (try? data.write(to: file, options: .atomic)) != nil else {
             toaster.pop("Couldn’t save the file", mark: "exclamationmark.triangle")
             return
@@ -314,7 +436,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             path: file.path,
             date: Date(),
             page: page,
-            pageTitle: webView.title.flatMap { $0.isEmpty ? nil : $0 },
+            pageTitle: title,
             source: source
         ))
         hoard.touched(file.lastPathComponent)

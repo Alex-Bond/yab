@@ -5,7 +5,7 @@ import Testing
 
 /// #224: two spaces may share a cookie store without sharing Grok's tabs.
 @MainActor
-@Suite(.serialized)
+@Suite(.serialized, .spacesListAlone)
 struct AssistantTabSpaceTests {
     @MainActor private final class World {
         let browser: Browser
@@ -17,6 +17,9 @@ struct AssistantTabSpaceTests {
         let savedList = try? Data(contentsOf: Store.file("spaces.json"))
 
         init() {
+            // From the first space alone, whatever the Mac's test world was
+            // left with: without it the switch to Space.firstID went nowhere.
+            Spaces.write([Space(id: Space.firstID, name: "Personal", icon: "🏠", ownSignIns: false)])
             browser = Browser(windowID: UUID())
             browser.lay([])
             browser.activeID = nil
@@ -43,7 +46,7 @@ struct AssistantTabSpaceTests {
             session.state = .done
             Assistants.shared.remove(grant.id)
             Store.settings.set(savedSpaces, forKey: "spaces")
-            if let savedList { try? savedList.write(to: Store.file("spaces.json")) }
+            if let savedList { try? savedList.write(to: Store.file("spaces.json")) } else { try? FileManager.default.removeItem(at: Store.file("spaces.json")) }
             for id in [home.id, other.id] {
                 Spaces.sharing.remove(id)
                 Spaces.pageCounts[id] = nil

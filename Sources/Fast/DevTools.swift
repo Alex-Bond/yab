@@ -495,7 +495,9 @@ extension Browser {
     /// ⌥⌘I on a page yab hasn't heard opens on Elements, one of its tabs.
     func openDevTools(_ pane: DevPane, then: ((Tab, NSObject) -> Void)? = nil) {
         guard let tab = toolsFront else { return }
-        if tab.usesChromiumDev {
+        // Restored tabs may not have built their page yet. Resolve its actual
+        // engine (including factory fallback) before selecting an inspector.
+        if tab.page.engine == .chromium {
             devPane = ChromiumDevPanes.normal(pane)
             listen(tab)
             showChromiumDev(tab, pane: devPane)
@@ -517,7 +519,11 @@ extension Browser {
     /// they were, the page as the device it was shown as.
     private func comeBack(_ tab: Tab) {
         if DevMemory.deviceOn, tab.device == nil, let device = DevMemory.device { tab.setDevice(device, remember: false) }
-        if DevMemory.detached, !devDetached {
+        // Chrome's frontend lives only in the docked card: the separate
+        // window is WebKit's own inspector window (DevFloating), which a
+        // Chromium page never has. Detached, its card was hidden and
+        // nothing showed (#1873).
+        if DevMemory.detached, !devDetached, tab.page.engine != .chromium {
             devDetached = true
             devFloating.prepare()
         }
@@ -561,7 +567,7 @@ extension Browser {
 
     /// The same native panels in their own window, keeping the inspector transport connected.
     func detachDevTools() {
-        guard toolsFront != nil else { return }
+        guard let engine = toolsFront?.page.engine, engine != .chromium else { return }
         if !devOpen { openDevTools(devPane) }
         devDetached = true
         DevMemory.detached = true
@@ -812,6 +818,13 @@ extension Browser {
         inspectorDock.cancelWaitingForWindow()
         inspectorDock.arrived = nil
         guard let tab = inspected else { return }
+        // The picker and highlight live in the inspected page, not WebKit's
+        // inspector window. Closing that window alone cannot retire them.
+        devPicking = false
+        tab.devModel(DevWorkbench.self).picking = false
+        tab.drawHighlight("null")
+        tab.webKitOnly("WebKit inspector picker teardown", build: false)?.evaluateJavaScript(
+            "window.__yabNativePicker?.stop();void 0", in: nil, in: .page) { _ in }
         inspected = nil
         tab.devReturn = keep ? DevReturn(document: tab.devDocument, overrides: tab.devOverrides) : nil
         // Its panels went with it. On one, Elements until the next page's
@@ -872,7 +885,8 @@ extension Browser {
         Reshape.pace = .reshape
         if !devOpen { devOpen = true }
         // Undocked, back in their own window (parkDevTools put it away).
-        if DevMemory.detached, !devDetached {
+        // Never for Chrome's frontend, which has no window of its own.
+        if DevMemory.detached, !devDetached, !tab.usesChromiumDev {
             devDetached = true
             devFloating.prepare()
         }

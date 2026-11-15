@@ -197,6 +197,7 @@ static bool MediaRequest(Tab& t, NSString* method, NSDictionary* p, NSString* re
       @"watcherMessages": @(mediaMessages), @"watcherErrors": @(mediaErrors), @"watcherLastError": @(mediaLastError.c_str()),
       @"healthPending": @(!t.healthToken.empty()), @"healthUnresponsive": @(t.healthUnresponsive),
       @"healthPings": @(t.healthPings), @"healthPongs": @(t.healthPongs),
+      @"healthSent": @(t.healthSent), @"healthAgain": @(t.healthAgain),
       @"frames": @(state.frames.size())});
     return true;
   }

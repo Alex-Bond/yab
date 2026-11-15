@@ -131,6 +131,49 @@ final class ReleaseGuardsTests: XCTestCase {
         }
     }
 
+    /// macOS 27.2 can follow the body with a plain-text "System Profile:"
+    /// appendix. The JSON before it is trimmed as any report's is, the
+    /// appendix stays on the Mac, and the body that goes is one document
+    /// the site can read (#758, #978, #1134, #1455, #1545 went raw).
+    func testAReportWithASystemProfileAfterItsBodyIsTrimmed() throws {
+        let home = "/Users/someone"
+        let head = #"{"app_name":"yab","app_version":"0.46.5","build_version":"202611022048"}"#
+        let body: [String: Any] = [
+            "exception": ["type": "EXC_BREAKPOINT", "signal": "SIGKILL"],
+            "faultingThread": 0,
+            "threads": [["id": 1, "triggered": true, "frames": [["imageOffset": 42, "imageIndex": 0]]]],
+            "usedImages": [["name": "yab"]],
+            "vmSummary": "mapped file \(home)/Documents/taxes.pdf",
+            "note": "a } and a { in a string",
+        ]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted]), as: UTF8.self)
+        let appendix = """
+
+        System Profile:
+        Network Service: Wi-Fi, AirPort, en0
+        Model: Mac15,12, BootROM 20457.41.3, proc 8:0:4:4 processors, 16 GB, SMC
+        Bluetooth: Version (null), 0 services, 0 devices, 0 incoming serial ports
+
+        """
+        let report = head + "\n" + json + appendix
+        guard case let .send(prepared) = Crashes.prepared(report, home: home, bytes: report.utf8.count, age: 60) else {
+            return XCTFail("not sent")
+        }
+        XCTAssertNil(prepared.parse)
+        let lines = prepared.text.split(separator: "\n", maxSplits: 1)
+        XCTAssertEqual(String(lines[0]), head)
+        let kept = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lines[1].utf8)) as? [String: Any])
+        XCTAssertEqual((kept["exception"] as? [String: Any])?["type"] as? String, "EXC_BREAKPOINT")
+        XCTAssertNil(kept["vmSummary"])
+        for secret in ["System Profile", "Mac15,12", "taxes.pdf", "someone"] {
+            XCTAssertFalse(prepared.text.contains(secret), secret)
+        }
+        // A body cut short is still left whole, to wait or go raw.
+        XCTAssertEqual(Crashes.document("{\"a\": [1, 2"), "{\"a\": [1, 2")
+        XCTAssertEqual(Crashes.document("Process: yab\n{}"), "Process: yab\n{}")
+        XCTAssertEqual(Crashes.document("  {\"a\": \"}\"}\nSystem Profile:"), "  {\"a\": \"}\"}")
+    }
+
     /// The first line alone never goes: a report with no body waits, and
     /// after a day is left behind.
     func testAReportWithoutABodyIsNeverSent() {
@@ -229,6 +272,17 @@ final class ReleaseGuardsTests: XCTestCase {
         }
         for label in ["Payment details", "Send", "Continue", "Pagina successiva", "Commentaires"] {
             XCTAssertFalse(AgentRules.paying(label), label)
+        }
+    }
+
+    /// Register 1762: an Airtable table called Purchase orders brought the
+    /// pay sheet up for every press near it; a purchase still pays.
+    func testAPurchaseOrderIsARecordNotAPayment() {
+        for label in ["Purchase orders", "Purchase order", "Purchase Requisitions", "Purchase history", "purchase invoice"] {
+            XCTAssertFalse(AgentRules.paying(label), label)
+        }
+        for label in ["Purchase", "Purchase now", "Purchase tickets", "Purchase subscription", "Buy now", "Place order"] {
+            XCTAssertTrue(AgentRules.paying(label), label)
         }
     }
 

@@ -1,0 +1,26 @@
+diff --git a/content/browser/web_contents/web_contents_impl.cc b/content/browser/web_contents/web_contents_impl.cc
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -11875,11 +11875,17 @@
+ 
+   std::move(response_callback).Run(success, user_input);
+ 
+-  std::vector<protocol::PageHandler*> page_handlers =
+-      protocol::PageHandler::EnabledForWebContents(this);
+-  for (auto* handler : page_handlers) {
+-    handler->DidCloseJavaScriptDialog(rfh->devtools_frame_token(), success,
+-                                      user_input);
++  // The frame can be gone by now: a dialog its renderer left open is closed
++  // as that renderer's death is handled, and FromID() then finds no frame.
++  // There is no frame to tell DevTools about; reading its token was a null
++  // dereference in every browser with the Page domain enabled.
++  if (rfh) {
++    std::vector<protocol::PageHandler*> page_handlers =
++        protocol::PageHandler::EnabledForWebContents(this);
++    for (auto* handler : page_handlers) {
++      handler->DidCloseJavaScriptDialog(rfh->devtools_frame_token(), success,
++                                        user_input);
++    }
+   }
+ 
+   is_showing_javascript_dialog_ = false;

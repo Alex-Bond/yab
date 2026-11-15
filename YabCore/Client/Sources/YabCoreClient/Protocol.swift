@@ -52,6 +52,9 @@ struct Request: Encodable {
     let id: String
     let method: String
     let params: [String: JSONValue]
+    /// How long this request may take, said to the helper too: without it
+    /// the helper answers "Operation timed out" at 20 s from its arrival.
+    var timeout: Double? = nil
 }
 struct Envelope: Decodable {
     let v: Int

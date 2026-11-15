@@ -109,8 +109,9 @@ struct ApplePasswordsTests {
         #expect(await passwords.isPaired)
     }
 
-    @Test func applesReloginPushEndsThePairing() async throws {
-        let program = try helper(ending: "send({'cmd': 10})")
+    @Test(arguments: [9, 10])
+    func applesSessionEndingPushRequiresPairing(cmd: Int) async throws {
+        let program = try helper(ending: "send({'cmd': \(cmd)})")
         defer { try? FileManager.default.removeItem(at: program.deletingLastPathComponent()) }
         let passwords = ApplePasswords(program: program)
         try await passwords.beginPairing()
@@ -192,22 +193,20 @@ struct ApplePasswordsTests {
         #expect(await passwords.processIdentifier == helperBefore)
     }
 
-    @Test func aHelperStuckForThreeRequestsIsStopped() async throws {
+    @Test func repeatedMissingAnswersNeverDestroyThePairedHelper() async throws {
         let program = try helper(ending: "pass", logins: "pass")
         defer { try? FileManager.default.removeItem(at: program.deletingLastPathComponent()) }
         let passwords = ApplePasswords(program: program, patience: 0.02)
         try await passwords.beginPairing()
         try await passwords.finishPairing(code: "123456")
-        for _ in 0..<2 {
+        let helperBefore = await passwords.processIdentifier
+        for _ in 0..<6 {
             await #expect(throws: ApplePasswords.Failure.timedOut) {
                 _ = try await passwords.logins(for: "example.test")
             }
         }
         #expect(await passwords.isPaired)
-        await #expect(throws: ApplePasswords.Failure.timedOut) {
-            _ = try await passwords.logins(for: "example.test")
-        }
-        try await eventually { await !passwords.isPaired }
+        #expect(await passwords.processIdentifier == helperBefore)
     }
 
     @Test func aReadRunsOutWithTheHostAliveAndItsLaterWordKept() async throws {
@@ -275,7 +274,7 @@ struct ApplePasswordsTests {
                     \(beforeProof)
                     reply = {'TID': tid, 'MSG': 3, 'ErrCode': 0, 'HAMK': enc(hamk)}
                 send({'cmd': 2, 'payload': {'QID': payload['QID'], 'PAKE': enc(json.dumps(reply).encode())}})
-            elif cmd == 4:
+            elif cmd in (4, 5):
                 \(logins)
             elif cmd == 6:
                 \(saves)
@@ -403,7 +402,7 @@ struct ApplePasswordsTests {
         func serve(_ answer: @escaping @Sendable (Int, Int) -> [String: Any]) {
             server = Task { [folder] in
                 while !Task.isCancelled {
-                    for cmd in [4, 6] {
+                    for cmd in [4, 5, 6] {
                         let file = folder.appendingPathComponent("request-\(cmd)")
                         guard let data = try? Data(contentsOf: file) else { continue }
                         try FileManager.default.removeItem(at: file)
@@ -471,6 +470,63 @@ struct ApplePasswordsTests {
         #expect(await passwords.isPaired)
     }
 
+    @Test func aLockedVaultKeepsPairingAndCanAnswerAfterUnlock() async throws {
+        let (peer, passwords) = try await savePeer { _, turn in
+            ["STATUS": 0, "RequiresUserAuthenticationToFill": turn == 0,
+             "Entries": [["USR": "fixture", "sites": ["site.test"]]]]
+        }
+        let helperBefore = await passwords.processIdentifier
+        for _ in 0..<2 {
+            let entries = try await passwords.logins(for: "site.test")
+            #expect(entries.map(\.user) == ["fixture"])
+            #expect(await passwords.isPaired)
+            #expect(await passwords.processIdentifier == helperBefore)
+        }
+        #expect(peer.count(4) == 2)
+    }
+
+    /// A pick asks Touch ID once (2026-11-08, the way the iCloud Passwords
+    /// extension does in Chromium): when the helper said it asks before
+    /// filling from the site, its password comes proven and Yab's own
+    /// question isn't put again (Vault.proveToFill). A helper that doesn't
+    /// ask, or never said, leaves Yab's question in place.
+    @Test(arguments: [true, false])
+    func theHelpersOwnTouchIDIsTheFillsOne(asks: Bool) async throws {
+        let (peer, passwords) = try await savePeer { cmd, _ in
+            var answer: [String: Any] = ["STATUS": 0,
+                                         "Entries": [["USR": "ann", "PWD": cmd == 5 ? "fixture-secret" : "Not Included", "sites": ["site.test"]]]]
+            if cmd == 4, asks { answer["RequiresUserAuthenticationToFill"] = true }
+            return answer
+        }
+        let vault = AppleVault(passwords: passwords, connect: { true })
+        let logins = try await vault.logins(for: "site.test")
+        #expect(logins.map(\.user) == ["ann"])
+        let secret = try await vault.secret(logins[0])
+        #expect(secret.password == "fixture-secret")
+        #expect(secret.proven == asks)
+        #expect(peer.count(5) == 1)
+        // No list for a site yet: nothing said, so not proven.
+        #expect(await passwords.asksBeforeFilling("other.test") == false)
+    }
+
+    @Test(arguments: [1, 2, 5, 6, 8])
+    func aRefusedListDoesNotTurnOffPairingAndTheNextListWorks(status: Int) async throws {
+        let (peer, passwords) = try await savePeer { _, turn in
+            ["STATUS": turn == 0 ? status : 0,
+             "Entries": turn == 0 ? [] : [["USR": "fixture", "sites": ["site.test"]]]]
+        }
+        let pid = await passwords.processIdentifier
+        await #expect(throws: ApplePasswords.Failure.refused(status)) {
+            _ = try await passwords.logins(for: "site.test")
+        }
+        #expect(await passwords.isPaired)
+        let entries = try await passwords.logins(for: "site.test")
+        #expect(entries.map(\.user) == ["fixture"])
+        #expect(await passwords.isPaired)
+        #expect(await passwords.processIdentifier == pid)
+        #expect(peer.count(4) == 2)
+    }
+
     /// The reply tagged cmd 4, with nothing in it: only the list can tell.
     @Test(arguments: [true, false])
     func aReplyWithNoAnswerAsksTheList(listed: Bool) async throws {
@@ -536,8 +592,43 @@ struct ApplePasswordsTests {
         #expect(ApplePasswords.codes(in: answer, host: "linear.app", locked: true).map(\.code) == [""])
     }
 
+    @Test func aCodeKeptForARelatedSiteIsOfferedOnlyWhenNamed() {
+        // X's code, kept in Passwords under twitter.com, on x.com.
+        let answer: [String: Any] = ["Entries": [
+            ["code": "246801", "username": "sam", "domain": "twitter.com", "source": "totp"],
+            ["code": "555111", "username": "sam", "domain": "other.com", "source": "totp"],
+        ]]
+        #expect(ApplePasswords.codes(in: answer, host: "x.com", locked: false).isEmpty)
+        #expect(ApplePasswords.codes(in: answer, host: "x.com", locked: false, also: ["twitter.com"])
+                == [ApplePasswords.Code(code: "246801", user: "sam", site: "x.com")])
+    }
+
     @Test func aCodeIsAskedForThePageWithoutItsQuery() {
         #expect(Browser.codePage(URL(string: "https://linear.app/login/2fa?token=abc#x")) == "https://linear.app/login/2fa")
         #expect(Browser.codePage(URL(string: "http://linear.app/login")) == nil)
+    }
+}
+
+
+extension ApplePasswordsTests {
+    @MainActor @Test func submittedPasswordIsComparedThroughTheAppleHelper() async throws {
+        let user = UUID().uuidString
+        let (peer, passwords) = try await savePeer { cmd, _ in
+            ["STATUS": 0, "Entries": [["USR": user, "PWD": cmd == 5 ? "fixture-secret" : "Not Included",
+                                      "sites": ["www.github.com"]]]]
+        }
+        defer { peer.server?.cancel() }
+        let adapter = AppleVault(passwords: passwords, connect: { false })
+        let login = Login(host: "github.com", user: user, password: "fixture-secret")
+        #expect(await PasswordSaveDecision.check(login, known: [], apple: adapter) == .none)
+        #expect(peer.count(4) == 1)
+        #expect(peer.count(5) == 1)
+        #expect(peer.body(5)["USR"] == user)
+        var changed = login
+        changed.password = "changed-secret"
+        #expect(await PasswordSaveDecision.check(changed, known: [], apple: adapter) == .update)
+        // Exact filled/saved credentials can suppress a duplicate; a username
+        // alone must never suppress an Update.
+        #expect(peer.count(5) == 2)
     }
 }

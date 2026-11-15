@@ -280,7 +280,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .general:
             return "default browser links other apps mail slack warn quit quitting confirm close import bring downloads save folder location ask where file files update updates version new release restart"
         case .search:
-            return "field launcher command bar return fallback under words ask task now before you type matches search engine google duckduckgo bing ecosia startpage kagi brave qwant custom tab site sites keyword alias youtube github wikipedia chatgpt opensearch suggestions scope quick action new document meeting shortcut"
+            return "field launcher command bar return fallback under words ask task now before you type matches search engine google duckduckgo bing ecosia startpage kagi brave qwant custom tab space site sites keyword alias keyboard shortcut youtube github wikipedia chatgpt opensearch suggestions scope quick action new document meeting shortcut"
         case .appearance:
             return "theme light dark system look style app icon dock layout address bar url toolbar top bar bookmarks bar sidebar vertical tabs tab icons letter favicon window backdrop background site match follow edge card color colour grain noise texture paper film wallpaper tint field dot lightness arc chrome"
         case .websites:
@@ -423,6 +423,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
 @MainActor
 final class SettingsModel: ObservableObject {
     let shortcutFilters = ShortcutFilter.Selection()
+    let engineSearch = EngineSearch()
     @Published private(set) var page: SettingsPage
     @Published var search = ""
     /// The row a search has picked out on the page: brought into view and
@@ -492,6 +493,7 @@ final class SettingsModel: ObservableObject {
     /// The window opening again: on one page, nothing behind or ahead of it.
     func start(at next: SettingsPage) {
         shortcutFilters.clear()
+        engineSearch.words = ""
         let next: SettingsPage = next.available ? next : .experimental
         search = ""
         spot = nil
@@ -512,6 +514,7 @@ final class SettingsModel: ObservableObject {
         // A shortcut opened from Settings search, an extension, or the
         // browser must not be hidden by the table's previous filters.
         if next == .shortcuts { shortcutFilters.clear() }
+        if next == .engine { engineSearch.words = "" }
         if !keepingSearch {
             if !search.isEmpty { search = "" }
             if spot != nil { spot = nil }
@@ -728,6 +731,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
     private var split: NSSplitViewController?
     private var navigation: NSToolbarItemGroup?
     private var shortcutToolbar: ShortcutFilterToolbar?
+    private var engineToolbar: EngineToolbar?
+    private var extensionToolbar: ExtensionToolbar?
+    private var extensionPickerMenu: NSMenu?
+    private var extensionPickerObserver: NSObjectProtocol?
+    private var extensionPickerItems: [[String: Any]] = []
+    private var watchExtensions: AnyCancellable?
+    private weak var watchedExtensions: ChromiumExtensions?
+    private var watchExtensionList: AnyCancellable?
     private var master: NSSwitch?
     /// The page's name in the toolbar, beside back and forward, shown once
     /// its hero's own name has scrolled up under the toolbar.
@@ -796,6 +807,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
         SettingsCards.shared.refresh()
     }
 
+    func showNewSpace(for browser: Browser) {
+        show(.spaces, for: browser)
+        model?.open(space: SpacePlace.new)
+        updateNavigation()
+    }
+
     /// A space's own page, from its menu in the tray.
     func showSpace(_ id: UUID, for browser: Browser) {
         show(.spaces, for: browser)
@@ -835,7 +852,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
     /// opened on it, the row washed, and how far down the page is.
     var benchWhere: [String: Any] {
         ["shown": window?.isVisible == true, "page": page.rawValue, "opened": model?.opened ?? "",
-         "spot": model?.spot?.id ?? "", "commands": commandsShown ?? "", "scrolled": Double(pageScrolled ?? 0)]
+         "spot": model?.spot?.id ?? "", "commands": commandsShown ?? "", "scrolled": Double(pageScrolled ?? 0), "masterHidden": master?.isHidden ?? true]
     }
 
     func showLiveFolder(_ nest: Nest, for browser: Browser) {
@@ -876,6 +893,50 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
         let adding = ExtensionAdding.shared
         let (verb, rest) = command.firstIndex(of: ":").map { (String(command[..<$0]), String(command[command.index(after: $0)...])) } ?? (command, "")
         switch verb {
+        case "toolbar-add", "toolbar-import":
+            guard Store.testing else { return [:] }
+            let id = verb == "toolbar-add" ? ExtensionToolbar.addID : ExtensionToolbar.importID
+            guard let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == id }), item.isEnabled,
+                  let action = item.action else { return ["error": "extension toolbar item unavailable"] }
+            NSApp.sendAction(action, to: item.target, from: item)
+        case "picker" where Store.testing:
+            guard let window, let content = window.contentView,
+                  let rect = Bench.spots["extension-add-source"], !rect.isEmpty else {
+                return ["error": "From menu has not laid out"]
+            }
+            if let observer = extensionPickerObserver { NotificationCenter.default.removeObserver(observer) }
+            extensionPickerMenu = nil
+            extensionPickerItems = []
+            extensionPickerObserver = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let menu = note.object as? NSMenu else { return }
+                    self?.extensionPickerMenu = menu
+                    self?.extensionPickerItems = menu.items.map { ["title": $0.title, "enabled": $0.isEnabled, "image": $0.image != nil] }
+                }
+            }
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            let at = NSPoint(x: rect.midX, y: content.bounds.height - rect.midY)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak window] in
+                guard let self, let window else { return }
+                let close = Timer(timeInterval: 12, repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.extensionPickerMenu?.cancelTracking()
+                        self.extensionPickerMenu = nil
+                        if let observer = self.extensionPickerObserver { NotificationCenter.default.removeObserver(observer) }
+                        self.extensionPickerObserver = nil
+                    }
+                }
+                RunLoop.main.add(close, forMode: .common)
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    if let event = NSEvent.mouseEvent(with: type, location: at, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) {
+                        NSApp.postEvent(event, atStart: false)
+                    }
+                }
+            }
         case "press":
             switch ExtensionAdd.step(model.opened) ?? .arrival {
             case .arrival: adding.go(model, browser)
@@ -884,6 +945,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
             }
         case "store": adding.chosen = .store
         case "folder": adding.chosen = .folder
+        case "folder-at" where Store.testing:
+            adding.chosen = .folder
+            adding.choose(folder: URL(fileURLWithPath: rest), model: model)
         case "browser": adding.chosen = .browser(rest)
         case "link": adding.link = rest
         case "tick", "untick": adding.tick(rest, verb == "tick", flight: ExtensionAdd.benchFlight)
@@ -897,6 +961,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
         var state = benchState()
         state["opened"] = model.opened ?? ""
         state["picked"] = Array(adding.picked)
+        state["phase"] = String(describing: adding.phase)
+        state["nativeProfile"] = adding.chromium?.profile ?? ""
+        state["pickerItems"] = extensionPickerItems
+        state["toolbar"] = window?.toolbar?.items.filter { ExtensionToolbar.identifiers.contains($0.itemIdentifier) }.map {
+            ["id": $0.itemIdentifier.rawValue, "title": $0.title, "native": $0.view == nil,
+             "bordered": $0.isBordered, "menu": $0 is NSMenuToolbarItem, "enabled": $0.isEnabled] as [String: Any]
+        } ?? []
+        state["candidate"] = adding.candidate?.id ?? ""
         state["problem"] = adding.error ?? ""
         state["extras"] = (adding.candidate?.extras ?? []).map { "\($0.key) \(adding.given.contains($0.key) ? "given" : "asked later") \($0.words)" }
         state["fresh"] = adding.fresh.mapValues { $0.map { "\($0.id) \($0.name)" } }
@@ -1014,6 +1086,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
             },
             "page": model.page.title,
             "spot": model.spot?.title ?? "",
+            "anchors": SettingsAnchorsShown.shown,
             "window": window?.windowNumber ?? 0,
         ]
     }
@@ -1065,6 +1138,18 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
         window.tabbingMode = .disallowed
         window.opensOnActiveSpace()
         shortcutToolbar = ShortcutFilterToolbar(selection: model.shortcutFilters, window: window)
+        engineToolbar = EngineToolbar(search: model.engineSearch, window: window)
+        extensionToolbar = ExtensionToolbar(add: { [weak self] in
+            if #available(macOS 15.4, *) { self?.model?.open(extension: ExtensionAdd.Step.arrival.rawValue) }
+        }, bring: { [weak self] in
+            guard let browser = self?.browser else { return }
+            if #available(macOS 15.4, *) { ChromiumExtensions.of(browser).importWebKitList(browser) }
+        })
+        if #available(macOS 15.4, *) {
+            watchExtensionList = Extensions.listsChanged.sink { [weak self] _ in
+                DispatchQueue.main.async { self?.updateNavigation() }
+            }
+        }
         let toolbar = NSToolbar(identifier: "SearchSettings")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
@@ -1108,12 +1193,19 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
             headingPage = model.page
             showHeading(nil)
         }
+        // The pages with glass of their own in the toolbar have no hero.
+        let nativeExtensions = model.page == .extensions && PageEngineFactory.chromiumEnabled
+        let ownGlass = model.page == .shortcuts || model.page == .engine || nativeExtensions
         // A previously scrolled page's invisible heading must not keep
-        // toolbar width that belongs to the Shortcuts search.
-        if model.page == .shortcuts { heading?.stringValue = "" }
+        // toolbar width that belongs to the page's search.
+        if nativeExtensions {
+            heading?.stringValue = SettingsWords.text(model.page.title)
+            heading?.alphaValue = 1
+            heading?.setAccessibilityElement(true)
+        } else if ownGlass { heading?.stringValue = "" }
         if let toolbar = window?.toolbar {
             // Hiding the switch alone leaves its toolbar item's width behind.
-            if model.page == .shortcuts {
+            if ownGlass {
                 if let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == masterID }) {
                     toolbar.removeItem(at: index)
                 }
@@ -1121,6 +1213,19 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
                 toolbar.insertItem(withItemIdentifier: masterID, at: toolbar.items.count)
             }
             shortcutToolbar?.attach(to: toolbar, visible: model.page == .shortcuts)
+            engineToolbar?.attach(to: toolbar, visible: model.page == .engine)
+            if let browser, #available(macOS 15.4, *) {
+                let native = ChromiumExtensions.of(browser)
+                if watchedExtensions !== native {
+                    watchedExtensions = native
+                    watchExtensions = native.objectWillChange.sink { [weak self] _ in
+                        DispatchQueue.main.async { self?.updateNavigation() }
+                    }
+                }
+                let list = model.page == .extensions && model.opened == nil && PageEngineFactory.chromiumEnabled
+                extensionToolbar?.attach(to: toolbar, visible: list,
+                    canImport: list && native.canImportWebKitList(browser), busy: native.busy)
+            }
         }
         navigation?.subitems.first?.isEnabled = model.canGoBack
         navigation?.subitems.last?.isEnabled = model.canGoForward
@@ -1128,7 +1233,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
             let about = model.page.master
             // Agents' switch only once there is one to pause.
             // Mail's, once there is mail to turn off.
-            master.isHidden = about == nil || (model.page.top == .ai && AgentSetupModel.shared.arriving)
+            master.isHidden = (model.page == .spaces && model.opened == SpacePlace.new) || about == nil || (model.page.top == .ai && AgentSetupModel.shared.arriving)
                 || (model.page == .mail && MailArrival.shows)
             if let about, let prefs = browser?.prefs {
                 master.state = prefs[keyPath: about.key] ? .on : .off
@@ -1197,9 +1302,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
     func windowDidDeminiaturize(_ notification: Notification) { SettingsCards.shared.refresh() }
 
     /// Native controls exercised by the isolated Shortcuts probe.
-    func beginShortcutSearch() -> NSSearchField? {
+    func beginToolbarSearch() -> NSSearchField? {
         guard Store.testing else { return nil }
-        return shortcutToolbar?.beginSearch()
+        return model?.page == .engine ? engineToolbar?.search.begin() : shortcutToolbar?.beginSearch()
     }
 
     var shortcutFilterButton: NSButton? {
@@ -1207,9 +1312,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
         return shortcutToolbar?.menuButton(in: window?.contentView?.superview)
     }
 
-    var shortcutToolbarState: [String: Any] {
+    var engineAddButton: NSButton? {
+        guard Store.testing else { return nil }
+        return engineToolbar?.addButton(in: window?.contentView?.superview)
+    }
+
+    var toolbarState: [String: Any] {
         guard Store.testing else { return [:] }
-        return shortcutToolbar?.state ?? [:]
+        return (model?.page == .engine ? engineToolbar?.state : shortcutToolbar?.state) ?? [:]
     }
 
     // MARK: - NSToolbarDelegate
@@ -1227,7 +1337,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar) + ShortcutFilterToolbar.identifiers
+        toolbarDefaultItemIdentifiers(toolbar) + ShortcutFilterToolbar.identifiers + EngineToolbar.identifiers + ExtensionToolbar.identifiers
     }
 
     func toolbar(
@@ -1238,7 +1348,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
         if id == separatorID, let split {
             return NSTrackingSeparatorToolbarItem(identifier: id, splitView: split.splitView, dividerIndex: 0)
         }
-        if let item = shortcutToolbar?.item(for: id) { return item }
+        if let item = shortcutToolbar?.item(for: id) ?? engineToolbar?.item(for: id) ?? extensionToolbar?.item(for: id) { return item }
         if id == headingID {
             let label = NSTextField(labelWithString: "")
             label.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -2487,7 +2597,18 @@ private struct SettingsAnchor: ViewModifier {
                     .animation(.easeOut(duration: spot == id ? 0.12 : 0.5), value: spot == id)
             }
             .id(id)
+            // Which rows are drawn now, for probes: a search result whose
+            // row no page draws scrolls nowhere (feedback #1894).
+            .onAppear { if Store.testing { SettingsAnchorsShown.ids[id, default: 0] += 1 } }
+            .onDisappear { if Store.testing { SettingsAnchorsShown.ids[id, default: 1] -= 1 } }
     }
+}
+
+/// The anchors Settings draws now, counted by row, in a --test run only.
+@MainActor
+enum SettingsAnchorsShown {
+    static var ids: [String: Int] = [:]
+    static var shown: [String] { ids.filter { $0.value > 0 }.map(\.key).sorted() }
 }
 
 extension View {
@@ -2999,7 +3120,7 @@ private struct SettingsDetail: View {
             case .websites: WebsitesPage(prefs: prefs, model: model)
             case .tabs: TabsPage(prefs: prefs)
             case .extensions: ExtensionsPage(browser: browser, model: model)
-            case .engine: EnginePage()
+            case .engine: EnginePage(search: model.engineSearch)
             case .boosts: EmptyView() // Own arrival, list and detail (BoostsSettings).
             case .spaces: SpacesPage(browser: browser, prefs: prefs, model: model)
             case .liveFolders: EmptyView() // Own arrival, list and detail above.

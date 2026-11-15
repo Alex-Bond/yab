@@ -125,7 +125,7 @@ final class PageWindowsUITests: XCTestCase {
         app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
         app.terminate()
         app.launch()
-        let notNow = app.buttons["welcome.start"]
+        let notNow = app.buttons["welcome.skip"]
         let input = app.textFields["field.input"]
         XCTAssertTrue(notNow.waitForExistence(timeout: 15))
         app.passWelcome()

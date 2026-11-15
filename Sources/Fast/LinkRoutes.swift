@@ -158,7 +158,8 @@ final class LinkRoutes: ObservableObject {
     /// An address pattern takes priority over a site; the pattern with
     /// more literal characters wins. Sites keep their former precedence:
     /// the longer path, then the longer host.
-    nonisolated static func best(_ routes: [LinkRoute], for url: URL) -> LinkRoute? {
+    nonisolated static func best(_ routes: [LinkRoute], for link: URL) -> LinkRoute? {
+        let url = carried(link)
         guard let host = url.host().map(bare), !host.isEmpty else { return nil }
         let path = url.path(percentEncoded: false).lowercased()
         let patternHost = url.host(percentEncoded: false).map(bare) ?? host
@@ -177,6 +178,37 @@ final class LinkRoutes: ObservableObject {
             }
             .max { a, b in priority(a) < priority(b) }
     }
+
+    /// The address a link checker's page carries, for rules to match:
+    /// Microsoft's Safe Links hand other apps their checking page with the
+    /// destination in its `url` query. Teams sends
+    /// teams.public.onecdn.static.microsoft/evergreen-assets/safelinks/1/atp-safelinks.html?url=https%3A%2F%2Fgitlab.com%2F...
+    /// (earlier statics.teams.cdn.office.net), Outlook
+    /// nam01.safelinks.protection.outlook.com/?url=..., so a gitlab.com rule
+    /// never took a link from Teams (feedback #1305). Only the rule looks
+    /// through it: the checking page is still what opens, so the
+    /// organization's check runs as it would in any browser.
+    nonisolated static func carried(_ url: URL) -> URL {
+        var url = url
+        // A checker's page can carry another's (Teams over Outlook's).
+        for _ in 0..<3 {
+            guard let host = url.host()?.lowercased(),
+                  host == "safelinks.protection.outlook.com" || host.hasSuffix(".safelinks.protection.outlook.com")
+                    || (teamsCheckers.contains(host) && url.path().lowercased().contains("/safelinks/")),
+                  let inner = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name.lowercased() == "url" })?.value,
+                  let destination = URL(string: inner.trimmingCharacters(in: .whitespaces)),
+                  ["http", "https"].contains(destination.scheme?.lowercased() ?? ""),
+                  destination.host()?.isEmpty == false else { break }
+            url = destination
+        }
+        return url
+    }
+
+    /// Where Teams has served its Safe Links page from.
+    private nonisolated static let teamsCheckers: Set<String> = [
+        "teams.public.onecdn.static.microsoft", "statics.teams.cdn.office.net", "statics.teams.cdn.live.net",
+    ]
 
     private nonisolated static func priority(_ route: LinkRoute) -> (Int, Int, Int) {
         route.pattern ? (1, route.site.filter { $0 != "*" }.count, 0) : (0, route.path.count, route.host.count)

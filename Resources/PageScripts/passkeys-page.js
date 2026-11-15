@@ -2,13 +2,19 @@
   if (!window.PublicKeyCredential || !window.CredentialsContainer) return;
   // A frame from another site, an ad's, a payment's, a sign-in's: it
   // can't ask on the page's behalf, so the whole of this would be for
-  // nothing. It keeps WebKit's own, but for the one request that jams
-  // macOS's passkey agent, the one waiting under a field, which waits
-  // here instead.
+  // nothing. On WebKit it keeps WebKit's own, but for the one request that
+  // jams macOS's passkey agent, the one waiting under a field, which waits
+  // here instead. Chromium's own runs in the helper, whose window nobody
+  // sees: its dialog stood there unseen with Touch ID armed behind it, the
+  // page grayed under it and the helper in front of Yab (feedback #1843).
+  // So on Chromium a web frame asks Yab like any other, which knows the
+  // frame from the helper and turns another site's down at once.
   if (window !== window.top) {
     var up = location.ancestorOrigins, above = up && up.length ? up[up.length - 1] : null;
     var there = above ? new URL(above).hostname : location.hostname, here = location.hostname;
-    if (there !== here && !there.endsWith('.' + here) && !here.endsWith('.' + there)) {
+    var web = location.protocol === 'https:' || location.protocol === 'http:';
+    if (there !== here && !there.endsWith('.' + here) && !here.endsWith('.' + there)
+        && ('__YAB_OTHER_SITES__' === 'engine' || !web)) {
       var C = CredentialsContainer.prototype, own = C.get, held = Symbol.for('yab.passkeys');
       if (C[held]) return;
       try { Object.defineProperty(C, held, { value: navigator.credentials }); } catch (e) { return; }
@@ -166,8 +172,10 @@
     if (signal && signal.aborted) return Promise.reject(aborted(signal));
     request.token = Math.random().toString(36).slice(2);
     return new Promise(function (resolve, reject) {
+      // Only while it is still out: a cancel for one already answered
+      // would be kept by Yab for nothing.
       if (signal) signal.addEventListener('abort', function () {
-        ask({ kind: 'cancel', token: request.token });
+        if (waiting[request.token]) ask({ kind: 'cancel', token: request.token });
         reject(aborted(signal));
       }, { once: true });
       ask(request).then(function (reply) {
@@ -188,6 +196,18 @@
   replace(proto, 'get', function get(options) {
     if (!options || !options.publicKey) return nativeGet.apply(this, arguments);
     var signal = options.signal, pk = options.publicKey, request;
+    // Chrome's immediate UI mode (uiMode: 'immediate' since Chrome 149,
+    // mediation: 'immediate' in its trial): a credential only if one is at
+    // hand without asking, else NotAllowedError at once, with no sheet, no
+    // phone and no security key. Nothing of the Mac's can be looked at
+    // without its sheet, so nothing is at hand: the page goes on to its own
+    // sign-in, as in a browser with none saved. Taken as an ordinary
+    // request, it brought up the Mac's whole sheet, Touch ID and all, where
+    // the page meant to ask quietly, and Chromium tabs before 0.46.11 even
+    // told pages they had it (immediateGet, feedback #1843).
+    if (options.uiMode === 'immediate' || options.mediation === 'immediate') {
+      return Promise.reject(new DOMException(refused, 'NotAllowedError'));
+    }
     if (options.mediation === 'conditional') {
       // Nothing of the Mac's is offered under the field yet: the request
       // waits, as it does while nobody picks a passkey, until the page
@@ -252,21 +272,18 @@
   var P = PublicKeyCredential;
   replace(P, 'isUserVerifyingPlatformAuthenticatorAvailable', function () { return Promise.resolve(true); });
   replace(P, 'isConditionalMediationAvailable', function () { return Promise.resolve(extensionAnswers()); });
-  var nativeCapabilities = P.getClientCapabilities;
-  if (typeof nativeCapabilities === 'function') {
-    replace(P, 'getClientCapabilities', function () {
-      var field = extensionAnswers();
-      function ours(c) {
-        c = Object.assign({}, c);
-        Object.keys(c).forEach(function (k) { if (k.indexOf('extension:') === 0 && k !== 'extension:credProps') c[k] = false; });
-        c['extension:prf'] = true;
-        return Object.assign(c, {
-          conditionalCreate: false, conditionalGet: field, conditionalMediation: field, relatedOrigins: false,
-          signalAllAcceptedCredentials: false, signalCurrentUserDetails: false, signalUnknownCredential: false,
-          hybridTransport: true, passkeyPlatformAuthenticator: true, userVerifyingPlatformAuthenticator: true
-        });
-      }
-      return nativeCapabilities.call(P).then(ours, function () { return ours({}); });
+  replace(P, 'getClientCapabilities', function () {
+    var field = extensionAnswers();
+    // Only the relay's capabilities: neither engine's native authenticator
+    // handles these requests. Inheriting its answers advertised Chromium's
+    // immediate mediation, which would instead open the Mac's normal sheet.
+    // Unlisted extensions are unsupported. Older WebKit has no native
+    // capability method at all; it must give the same answer here too.
+    return Promise.resolve({
+      conditionalCreate: false, conditionalGet: field, conditionalMediation: field, immediateGet: false, relatedOrigins: true,
+      signalAllAcceptedCredentials: false, signalCurrentUserDetails: false, signalUnknownCredential: false,
+      hybridTransport: true, passkeyPlatformAuthenticator: true, userVerifyingPlatformAuthenticator: true,
+      'extension:credProps': true, 'extension:prf': true
     });
-  }
+  });
 })();

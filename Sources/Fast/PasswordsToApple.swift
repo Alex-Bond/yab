@@ -35,9 +35,29 @@ enum PasswordsToApple {
                 guard PasswordManagers.Connections.shared.connection(PasswordManagers.apple) != nil else {
                     return State(appleConnected: false, savedCount: 0)
                 }
-                return State(appleConnected: true, savedCount: Vault.entries().count)
+                return State(appleConnected: true, savedCount: PasswordsToApple.savedCount)
             }, start: { PasswordsToApple.start() })
         }
+    }
+
+    /// How many logins Yab holds, for the field's command list, which asks on
+    /// every key. Read there, the keychain held each key 400 ms behind its lock:
+    /// the count is taken off the main thread, again only when the Vault changed.
+    private static var counted: (changes: Int, count: Int)?
+    private static var counting = false
+    private static var savedCount: Int {
+        let changes = Vault.changes
+        if counted?.changes != changes, !counting {
+            counting = true
+            Task.detached(priority: .utility) {
+                let count = Vault.entries().count
+                await MainActor.run {
+                    counted = (changes, count)
+                    counting = false
+                }
+            }
+        }
+        return counted?.count ?? 0
     }
 
     /// The offer after connecting was made: never again on its own.

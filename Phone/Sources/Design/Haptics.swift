@@ -104,7 +104,6 @@ enum Haptics {
         static let edited = "edited"             // a rename saved, a folder made
         static let nowDismissed = "now dismissed" // the Now line swept or crossed away
         static let unlockFailed = "unlock failed" // error: Face ID said no to Private
-        static let welcomeBurst = "welcome burst" // the first run's drawings leave the drop
         static let spaceMade = "space made"
         static let spaceDeleted = "space deleted"
         static let undone = "undone"             // Clear's Undo
@@ -119,7 +118,7 @@ enum Haptics {
              "site settings", Reason.stackTap, Reason.lookStep, Reason.lookPick, Reason.lookPage, Reason.lookDot, Reason.detent, Reason.aboutPress, Reason.aboutBack,
              Reason.permission, Reason.sheetBack, Reason.nowDismissed:
             return .tick
-        case Reason.cardThrown, Reason.clear, Reason.lookEnd, Reason.privateUnlocked, Reason.welcomeBurst, "drop":
+        case Reason.cardThrown, Reason.clear, Reason.lookEnd, Reason.privateUnlocked, "drop":
             return .thud
         case Reason.pagerEdge, Reason.backNothing, Reason.zoomLimit, Reason.carouselEnd, "icon end":
             return .wall

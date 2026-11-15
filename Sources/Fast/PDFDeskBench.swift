@@ -45,6 +45,25 @@ extension Bench {
         switch act {
         case "":
             return reply()
+        case "pinch":
+            // Native gesture input, confined to the owned PDF probe world.
+            guard let view = tab.builtPage, let window = view.window else {
+                return answer(["error": "pinch needs a page in a window"])
+            }
+            let amount = Double(number("by") ?? 0.5)
+            guard amount.isFinite, abs(amount) <= 2 else { return answer(["error": "invalid pinch"]) }
+            let at = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+            func step(_ n: Int) {
+                let phase: NSEvent.Phase = n == 0 ? .began : n == 13 ? .ended : .changed
+                guard let event = Bench.magnify(n == 0 || n == 13 ? 0 : amount / 12, phase: phase, at: at, in: window) else {
+                    return answer(["error": "no gesture event"])
+                }
+                NSApp.postEvent(event, atStart: false)
+                if n < 13 { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { step(n + 1) } }
+                else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { reply() } }
+            }
+            step(0)
+            return
         case "start":
             if request["memory"] as? Bool == true { Store.settings.set(true, forKey: "pdf.memory") }
             browser.fillSign(tab)
@@ -178,6 +197,12 @@ extension Bench {
             "starting": paper.starting, "on": paper.desk != nil, "signed": paper.signed?.path ?? "", "tabID": tab.id.uuidString,
             "mail": paper.mail != nil, "metrics": paper.metrics, "title": tab.title, "label": tab.label, "url": tab.address?.absoluteString ?? "",
         ]
+        if let page = tab.builtPage {
+            out["pageZoom"] = Double(page.pageZoom)
+            out["magnification"] = Double(page.magnification)
+            out["webKitPDF"] = page.webKit?.webKitShowsPDF ?? false
+            out["contentPID"] = Int(page.contentProcess ?? 0)
+        }
         if let mail = paper.mail { out["mailOrigin"] = ["account": mail.account, "thread": mail.thread, "message": mail.message] }
         if let desk = paper.desk { out["desk"] = desk.report }
         return out

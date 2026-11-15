@@ -61,10 +61,29 @@ enum DiagnosticReports {
 
     // MARK: payloads
 
+    /// A payload's JSON at most. MetricKit's run to a few hundred KB; one
+    /// past this is not worth the memory of reading it.
+    static let payloadBytes = 32 * 1024 * 1024
+
+    /// A payload's JSON read once into bytes of Yab's own, then parsed. On
+    /// iOS 27.3 Yab ended with SIGBUS inside `json` (#1537): what the parsed
+    /// payload held still pointed into `jsonRepresentation()`'s bytes, which
+    /// can be a file MetricKit maps and replaces as it delivers. A copy made
+    /// at once is read while it is whole, and nothing points into the file.
+    static func payload(_ data: Data) -> [String: Any]? {
+        guard !data.isEmpty, data.count <= payloadBytes else { return nil }
+        let owned = data.withUnsafeBytes { bytes in Data(bytes: bytes.baseAddress!, count: bytes.count) }
+        return (try? JSONSerialization.jsonObject(with: owned)) as? [String: Any]
+    }
+
     /// The crashes in one payload, as `MXDiagnosticPayload.jsonRepresentation()`
     /// writes it.
     static func crashes(inPayload data: Data, bundle: String) -> [CrashReport] {
-        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        guard let payload = payload(data) else { return [] }
+        return crashes(in: payload, bundle: bundle)
+    }
+
+    static func crashes(in payload: [String: Any], bundle: String) -> [CrashReport] {
         let end = payload["timeStampEnd"] as? String
         return (payload["crashDiagnostics"] as? [[String: Any]] ?? []).compactMap {
             report(crash: $0, end: end, bundle: bundle)
@@ -77,7 +96,12 @@ enum DiagnosticReports {
     /// metadata's words are read ("2.5 sec").
     static func hangs(inPayload data: Data, bundle: String, durations: [Int]? = nil)
         -> (reports: [CrashReport], stacks: [[String: Any]]) {
-        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return ([], []) }
+        guard let payload = payload(data) else { return ([], []) }
+        return hangs(in: payload, bundle: bundle, durations: durations)
+    }
+
+    static func hangs(in payload: [String: Any], bundle: String, durations: [Int]? = nil)
+        -> (reports: [CrashReport], stacks: [[String: Any]]) {
         let end = payload["timeStampEnd"] as? String
         var reports: [CrashReport] = [], stacks: [[String: Any]] = []
         for (number, hang) in (payload["hangDiagnostics"] as? [[String: Any]] ?? []).enumerated() {
@@ -359,7 +383,10 @@ enum DiagnosticReports {
     }
 
     static func json(_ object: [String: Any]) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        // An object JSON can't hold (a NaN, a date) raises an Objective-C
+        // exception that `try?` doesn't catch: asked first, it is "{}".
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
         else { return "{}" }
         return String(decoding: data, as: UTF8.self)
     }

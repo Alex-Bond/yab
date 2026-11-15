@@ -74,7 +74,7 @@ enum Leaving {
         let before = shown
         let held = BrowserWindows.shared.browsers.flatMap(\.pagesHeld)
         if Store.testing { FileHandle.standardError.write(Data("yab: Leaving.quit asks \(held.count) pages, \(held.filter { $0.builtPage is ChromiumPage }.count) Chromium\n".utf8)) }
-        each(held) { leave in
+        each(held, closing: false) { leave in
             if Store.testing { FileHandle.standardError.write(Data("yab: Leaving.quit answered leave=\(leave) asked=\(shown != before)\n".utf8)) }
             done(leave, shown != before)
         }
@@ -131,14 +131,15 @@ enum Leaving {
     /// These tabs' pages asked, one question at a time; `done(true)` once
     /// every one may go, `done(false)` at the first Stay. At once, in
     /// this call, when none of them has anything to say.
-    static func each(_ tabs: [Tab], done: @escaping (Bool) -> Void) {
+    /// `closing` false asks a Chromium page and leaves it open (Yab quitting).
+    static func each(_ tabs: [Tab], closing: Bool = true, done: @escaping (Bool) -> Void) {
         // Chromium gathers non-destructive native approvals after WebKit's
         // group agrees, then commits every exact native document together.
         // A view without a native document has no beforeunload or user input;
         // preserve the ordinary synchronous close for those unbuilt pages.
         let chromium = tabs.filter { !$0.gone && ($0.builtPage as? ChromiumPage)?.remoteID != nil }
         guard chromium.isEmpty else {
-            return eachWebKit(tabs) { leave in leave ? eachChromium(chromium, done: done) : done(false) }
+            return eachWebKit(tabs) { leave in leave ? eachChromium(chromium, closing: closing, done: done) : done(false) }
         }
         eachWebKit(tabs, done: done)
     }

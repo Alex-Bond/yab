@@ -534,7 +534,11 @@ final class Diary: @unchecked Sendable {
 
     func forgetEverything() {
         queue.async {
+            // Deleted means gone from the file too, freed pages and the log.
+            self.exec("PRAGMA secure_delete=ON")
             self.exec("DELETE FROM visits; DELETE FROM pages; DELETE FROM words; DELETE FROM looks; DELETE FROM threads; DELETE FROM acts;")
+            self.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.exec("PRAGMA secure_delete=OFF")
             self.lasts.removeAll()
             try? FileManager.default.removeItem(at: Diary.shots)
         }

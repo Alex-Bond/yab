@@ -1,3 +1,5 @@
+import Combine
+import CryptoKit
 import SwiftUI
 import WebKit
 
@@ -16,6 +18,9 @@ final class Favicons {
     /// Called with a host and its icon whenever one arrives, so every tab on
     /// that host can put it on at once.
     var arrived: ((String, NSImage) -> Void)?
+    /// Menus and kept pages can update their marks without replacing the
+    /// tab loader's arrival callback.
+    let changes = PassthroughSubject<String, Never>()
 
     /// The icons drawn lately, as many as Dia keeps: a year of browsing
     /// left thousands, every one held until quit.
@@ -55,6 +60,49 @@ final class Favicons {
     /// kept, never put on the site's other tabs.
     private var own: [String: NSImage] = [:]
     private var ownFailed: Set<String> = []
+    /// The icon each tab wears that its page named for itself (`wearOwn`),
+    /// one per tab: an icon arriving for the site
+    /// goes on the site's tabs that wear the site's, not over these. A
+    /// Notion tab wearing its page's icon took the next one kept for
+    /// notion.so, the other Notion tab's.
+    private let worn = NSMapTable<Tab, NSImage>.weakToWeakObjects()
+    /// Each tab's latest ask (`fetch(for:)`), as Chromium drops a download
+    /// its page's newer icons replaced: what an older ask brings in late
+    /// is not worn over a newer one's.
+    private let asked = NSMapTable<Tab, NSNumber>.weakToStrongObjects()
+
+    /// The icon each page last wore, by its address (`page`), as Chromium's
+    /// history keeps one per page URL (FaviconService's icon mapping, page
+    /// URL to icon URL) and finds a page's by its address before the page
+    /// is in, the host's only for a page with none (fallback_to_host).
+    /// Kept by host alone, Docs, Sheets and Slides, all on docs.google.com,
+    /// had one icon between them: a slideshow's sleeping or restored tab,
+    /// its pin, its row under the field and in the history wore the Docs
+    /// icon until the page had loaded (R2600). This session's, ahead of
+    /// the disk's (`pageTable`).
+    private var pageMemory = Held(limit: 1_000)
+    /// On disk (`pagesFile`): each page's picture by the hash of its bytes,
+    /// one file for the many pages wearing the same; oldest first.
+    private var pageNames: [String: String]?
+    private var pageOrder: [String] = []
+    /// Worn and not yet on disk: written together a moment later, so a
+    /// page changing its icon every second writes once in a while.
+    private var pagesPending: [String: NSImage] = [:]
+    private var pagesSaving = false
+    private let keepsPages: Bool
+    nonisolated static let pageLimit = 2_000
+    nonisolated static let pagesDelay: Double = 3
+
+    init(keepsPages: Bool = true) {
+        self.keepsPages = keepsPages
+    }
+
+    /// Whether a tab wears the icon its page named for itself, not its
+    /// site's (`worn`).
+    func wearsOwn(_ tab: Tab) -> Bool {
+        guard let image = worn.object(forKey: tab) else { return false }
+        return image === tab.icon
+    }
 
     /// Icons in memory, those asked for least lately let go past `limit`.
     /// Only the copy here goes: the file stays, read again when its site
@@ -83,6 +131,10 @@ final class Favicons {
             }
         }
 
+        mutating func remove(where gone: (String) -> Bool) {
+            for key in images.keys where gone(key) { images[key] = nil }
+        }
+
         /// Down to nine tenths of the limit at once, not one at every
         /// arrival past it.
         private mutating func trim() {
@@ -106,6 +158,187 @@ final class Favicons {
     /// The name an icon is kept under: the host, with a suffix for the dark
     /// variant a site offered. Sites without one keep one file for both.
     private static func key(_ host: String, dark: Bool) -> String { dark ? host + "@dark" : host }
+
+    /// The name a page's icon is kept under: its host, and its port when
+    /// the address names one other than its scheme's. Each port on a host
+    /// is a site of its own, as every browser keys its origins: a NAS's
+    /// services on 192.168.1.2:8080 and :9000, localhost's servers. Under
+    /// the host alone the first one seen was kept for all of them, and the
+    /// others' icons were worn by their own tab only, never kept, so after
+    /// a restart their tabs came back with another's (feedback #1459).
+    nonisolated static func site(_ url: URL) -> String? {
+        guard let host = url.host()?.lowercased(), !host.isEmpty else { return nil }
+        let scheme = url.scheme?.lowercased()
+        let usual = scheme == "https" ? 443 : scheme == "http" ? 80 : nil
+        guard let port = url.port, port != usual else { return host }
+        return "\(host):\(port)"
+    }
+
+    /// What is already known for a page, nothing fetched: the icon it last
+    /// wore (`pageIcon`), its site's (`site`) for a page never seen.
+    func cached(page url: URL) -> NSImage? {
+        pageIcon(url) ?? Favicons.site(url).flatMap(cached)
+    }
+
+    /// The name a page's icon is kept under: its site and its path, as
+    /// Chrome maps a page URL, without the scheme, the query and the
+    /// fragment (a slide's #slide=, a mailbox's #inbox), which name the
+    /// same page. Nil for an address that is not a web page's.
+    nonisolated static func page(_ url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.user == nil, url.password == nil, let site = site(url) else { return nil }
+        let path = URLComponents(url: url, resolvingAgainstBaseURL: true)?.percentEncodedPath ?? ""
+        return site + (path.isEmpty ? "/" : path)
+    }
+
+    /// The icon a page last wore, nil for one never seen (or seen only in a
+    /// private tab). In the dark, its dark variant when it wore one.
+    func pageIcon(_ url: URL) -> NSImage? {
+        guard let page = Favicons.page(url) else { return nil }
+        if Favicons.dark, let hit = pagePicture(Favicons.key(page, dark: true)) { return hit }
+        return pagePicture(page)
+    }
+
+    private func pagePicture(_ key: String) -> NSImage? {
+        if let hit = pageMemory[key] { return hit }
+        guard let name = pageTable()[key] else { return nil }
+        let shelf = "pages/" + name
+        if let hit = memory[shelf] { return hit }
+        // Read when first drawn, as `listed` icons are: a session of two
+        // hundred tabs coming back reads no file before its first frame.
+        let image = NSImage(byReferencing: Favicons.pagesFolder.appendingPathComponent(name + ".png"))
+        memory[shelf] = image
+        return image
+    }
+
+    /// The icon a page's tab wears now, kept as that page's: on its tab
+    /// asleep or after a restart, its pin, its rows. A private tab's is
+    /// kept nowhere.
+    func remember(_ image: NSImage, page url: URL, dark: Bool, shy: Bool) {
+        guard !shy, let page = Favicons.page(url) else { return }
+        let key = Favicons.key(page, dark: dark)
+        if pageMemory[key] === image { return }
+        pageMemory[key] = image
+        guard keepsPages else { return }
+        pagesPending[key] = image
+        guard !pagesSaving else { return }
+        pagesSaving = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Favicons.pagesDelay) { [weak self] in
+            Task { await self?.savePages() }
+        }
+    }
+
+    /// A site's pages forget what they wore, for the site's icon asked
+    /// again (Refresh Site Icon) to go on all of them; every site's with
+    /// none named (the history cleared).
+    func forgetPages(of site: String? = nil) {
+        func of(_ key: String) -> Bool { site.map { key.hasPrefix($0 + "/") } ?? true }
+        pageMemory.remove(where: of)
+        pagesPending = pagesPending.filter { !of($0.key) }
+        var table = pageTable()
+        let gone = table.keys.filter(of)
+        guard !gone.isEmpty else { return }
+        let names = Set(gone.compactMap { table.removeValue(forKey: $0) })
+        pageOrder.removeAll(where: of)
+        pageNames = table
+        writePages(table, dropped: names)
+    }
+
+    nonisolated private static var pagesFolder: URL { folder.appendingPathComponent("pages", isDirectory: true) }
+    nonisolated private static var pagesFile: URL { folder.appendingPathComponent("pages.json") }
+
+    /// Pages and their pictures' names, read once.
+    private func pageTable() -> [String: String] {
+        if let pageNames { return pageNames }
+        var pairs: [[String]] = []
+        if keepsPages {
+            pairs = MainBudget.chunk("favicon.pages") {
+                (try? Data(contentsOf: Favicons.pagesFile)).flatMap { try? JSONDecoder().decode([[String]].self, from: $0) } ?? []
+            }
+        }
+        var table: [String: String] = [:]
+        var order: [String] = []
+        for pair in pairs where pair.count == 2 && table.updateValue(pair[1], forKey: pair[0]) == nil {
+            order.append(pair[0])
+        }
+        pageNames = table
+        pageOrder = order
+        return table
+    }
+
+    /// What was worn lately, written: each picture once under the hash of
+    /// its bytes, then the table, on the queue site icons are written on.
+    func savePages() async {
+        let batch = pagesPending
+        pagesPending = [:]
+        let named = batch.isEmpty ? [] : await withCheckedContinuation { (done: CheckedContinuation<[(String, String)], Never>) in
+            Favicons.writing.async { done.resume(returning: Favicons.file(pages: batch)) }
+        }
+        filed(named)
+        if pagesPending.isEmpty {
+            pagesSaving = false
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Favicons.pagesDelay) { [weak self] in
+                Task { await self?.savePages() }
+            }
+        }
+    }
+
+    /// Quitting: what was worn and not yet written, now, and waited for.
+    func savePagesNow() {
+        let batch = pagesPending
+        pagesPending = [:]
+        guard keepsPages, !batch.isEmpty else { return }
+        filed(Favicons.writing.sync { Favicons.file(pages: batch) })
+        Favicons.writing.sync {}
+    }
+
+    /// The pictures written, put in the table, and the table written.
+    private func filed(_ named: [(String, String)]) {
+        var table = pageTable()
+        var dropped: Set<String> = []
+        var changed = false
+        for (key, name) in named {
+            let old = table.updateValue(name, forKey: key)
+            guard old != name else { continue }
+            changed = true
+            if let old { dropped.insert(old); pageOrder.removeAll { $0 == key } }
+            pageOrder.append(key)
+        }
+        // The pages worn longest ago go past the limit, as Chromium's history
+        // lets its favicons go with the visits.
+        while pageOrder.count > Favicons.pageLimit {
+            if let old = table.removeValue(forKey: pageOrder.removeFirst()) { dropped.insert(old) }
+        }
+        pageNames = table
+        if changed { writePages(table, dropped: dropped) }
+    }
+
+    private func writePages(_ table: [String: String], dropped: Set<String>) {
+        let pairs = pageOrder.compactMap { key in table[key].map { [key, $0] } }
+        let gone = dropped.subtracting(table.values)
+        Favicons.writing.async {
+            try? FileManager.default.createDirectory(at: Favicons.folder, withIntermediateDirectories: true)
+            if let data = try? JSONEncoder().encode(pairs) { try? data.write(to: Favicons.pagesFile, options: .atomic) }
+            for name in gone { try? FileManager.default.removeItem(at: Favicons.pagesFolder.appendingPathComponent(name + ".png")) }
+        }
+    }
+
+    /// Each page's picture as a PNG named for its bytes, written unless
+    /// one of that name is there. On `writing`.
+    nonisolated private static func file(pages batch: [String: NSImage]) -> [(String, String)] {
+        try? FileManager.default.createDirectory(at: pagesFolder, withIntermediateDirectories: true)
+        var named: [(String, String)] = []
+        for (key, image) in batch {
+            guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else { continue }
+            let name = SHA256.hash(data: png).prefix(12).map { String(format: "%02x", $0) }.joined()
+            let file = pagesFolder.appendingPathComponent(name + ".png")
+            guard FileManager.default.fileExists(atPath: file.path) || (try? png.write(to: file, options: .atomic)) != nil else { continue }
+            named.append((key, name))
+        }
+        return named
+    }
 
     /// What is already known, and nothing fetched. In the dark, the dark
     /// variant when there is one, the ordinary icon otherwise.
@@ -224,6 +457,14 @@ final class Favicons {
         frontPageIcons.remove(host)
         Favicons.keep(image, for: host)
         arrived?(host, image)
+        changes.send(host)
+    }
+
+    /// An async icon answer belongs to the document that requested it.
+    /// A new navigation retires that ownership even on the same host.
+    func navigationStarted(for tab: Tab) {
+        asked.setObject(NSNumber(value: (asked.object(forKey: tab)?.intValue ?? 0) &+ 1), forKey: tab)
+        worn.removeObject(forKey: tab)
     }
 
     /// Asks the page which icon it wants to be known by and does what
@@ -232,13 +473,22 @@ final class Favicons {
     /// page's head; the kept icon is worn meanwhile. `changed`: the page's
     /// script changed its icons after it loaded (IconRelay).
     func fetch(for tab: Tab, changed: Bool = false, tries: Int = 0) {
-        guard let url = tab.address, let host = url.host()?.lowercased(),
+        // Until commit the live DOM is still the previous document's.
+        // Reading it under the destination's URL would cache that old icon
+        // as the new page's, even after retiring earlier request tickets.
+        guard !tab.awaitingDocumentMetadata,
+              let url = tab.address, let host = Favicons.site(url),
               url.scheme?.hasPrefix("http") == true
         else { return }
+        tab.countIconFetchStarted()
         let dark = Favicons.dark
-        tab.page.run(Favicons.probe, gesture: false) { [weak self, weak tab] result in
+        let ticket = (asked.object(forKey: tab)?.intValue ?? 0) &+ 1
+        asked.setObject(NSNumber(value: ticket), forKey: tab)
+        // In Yab's world, where IconRelay wrote down the icons the page
+        // came with, for `set`.
+        tab.page.run(Favicons.probe, in: .yab, gesture: false) { [weak self, weak tab] result in
             MainActor.assumeIsolated {
-                guard let self, let tab else { return }
+                guard let self, let tab, self.latest(ticket, of: tab) else { return }
                 let declared = ((try? result.get()) as? [[String: String]]) ?? []
                 // In the dark, a dark variant the site offers is its own
                 // icon, kept apart from the light one.
@@ -249,6 +499,12 @@ final class Favicons {
                 // A page that declares none, a PDF or an error, names only
                 // the file at the root every site is guessed to have.
                 let names = declared.isEmpty ? nil : candidates.first?.absoluteString
+                // One the page's script put in after it loaded is its own
+                // state, Notion's page icon, even asked at the load's end:
+                // it doesn't take the place of the icon kept for the site.
+                let scripted = changed || (names != nil && declared.contains {
+                    $0["set"] == "1" && $0["href"].flatMap { Favicons.address($0)?.absoluteString } == names
+                })
                 // The kept icon's file, where it came from and its age are
                 // read off the main thread, and the plan made back on it.
                 let inMemory = self.memory[key]
@@ -256,7 +512,7 @@ final class Favicons {
                 let knownSource = self.sources[key]
                 Task { [weak self, weak tab] in
                     let disk = await Favicons.look(key, image: readImage, source: knownSource == nil)
-                    guard let self, let tab, tab.address?.host()?.lowercased() == host else { return }
+                    guard let self, let tab, self.latest(ticket, of: tab), tab.address.flatMap(Favicons.site) == host else { return }
                     var kept = self.memory[key] ?? inMemory
                     if kept == nil, readImage {
                         if let image = disk.image { self.memory[key] = image; kept = image } else { self.absentOnDisk.insert(key) }
@@ -264,12 +520,17 @@ final class Favicons {
                     let source = self.sources[key] ?? knownSource ?? disk.source ?? ""
                     self.sources[key] = source
                     self.follow(Favicons.plan(kept: kept != nil, source: source, fresh: disk.fresh, names: names,
-                                              changed: changed, shy: tab.shy, rechecked: self.rechecked.contains(key)),
-                                tab: tab, url: url, host: host, key: key, kept: kept, candidates: candidates, names: names,
-                                changed: changed, tries: tries)
+                                              changed: scripted, shy: tab.shy, rechecked: self.rechecked.contains(key)),
+                                tab: tab, url: url, host: host, key: key, dark: wantDark, kept: kept, candidates: candidates,
+                                names: names, changed: changed, tries: tries, ticket: ticket)
                 }
             }
         }
+    }
+
+    /// Whether `ticket` is the tab's latest ask (`asked`).
+    private func latest(_ ticket: Int, of tab: Tab) -> Bool {
+        asked.object(forKey: tab)?.intValue == ticket
     }
 
     /// The kept icon's file read as `known` reads it, where it came from as
@@ -285,13 +546,20 @@ final class Favicons {
     }
 
     /// What `plan` said, done for the tab.
-    private func follow(_ plan: Plan, tab: Tab, url: URL, host: String, key: String, kept: NSImage?, candidates: [URL],
-                        names: String?, changed: Bool, tries: Int) {
+    private func follow(_ plan: Plan, tab: Tab, url: URL, host: String, key: String, dark: Bool, kept: NSImage?,
+                        candidates: [URL], names: String?, changed: Bool, tries: Int, ticket: Int) {
+        // The page no longer names an icon of its own: the site's goes on
+        // it, kept now or arriving (`worn`).
+        if plan != .own { worn.removeObject(forKey: tab) }
         switch plan {
         case .wear:
             tab.icon = kept
+            tab.countIconLoaded()
+            // The page's too, for its tab and rows before it is next in:
+            // the site's icon may become another page's (`plan`'s week).
+            if let kept { remember(kept, page: url, dark: dark, shy: tab.shy) }
         case .own:
-            self.wearOwn(candidates, on: tab, at: url, otherwise: kept)
+            self.wearOwn(candidates, on: tab, at: url, dark: dark, otherwise: kept, refresh: changed, ticket: ticket)
         case .keep:
             guard !self.busy.contains(host) else {
                 // Another icon of the site on its way, a front
@@ -306,7 +574,18 @@ final class Favicons {
             }
             guard Favicons.asks(missed: self.missed[host], names: names, changed: changed) else { return }
             self.busy.insert(host)
-            Task { [weak web = tab.page] in await self.download(candidates, host: host, key: key, source: names ?? "", page: web) }
+            Task { [weak self, weak tab, weak web = tab.page] in
+                guard let self else { return }
+                await self.download(candidates, host: host, key: key, source: names ?? "", refresh: true, page: web)
+                // The site's new icon is this page's: worn and kept as its
+                // own, over what the page wore before (`arrived` leaves a
+                // page wearing what it last wore).
+                guard let tab, self.latest(ticket, of: tab), tab.address.flatMap(Favicons.page) == Favicons.page(url),
+                      let image = self.memory[key] else { return }
+                tab.icon = image
+                tab.countIconLoaded()
+                self.remember(image, page: url, dark: dark, shy: tab.shy)
+            }
         }
     }
 
@@ -329,12 +608,21 @@ final class Favicons {
     /// load. Otherwise a page naming another icon wears it on its own tab:
     /// a pull request's state on github.com, a Sheet's on docs.google.com,
     /// Calendar's new day, a private page's unread count.
+    ///
+    /// An icon written into the page (`data:`, or a `blob:` its script
+    /// made) is that page's alone, even where the site has none kept:
+    /// Notion's emoji is one page's, and kept for notion.so it would go on
+    /// every Notion tab, its bookmarks and its row under the field.
     nonisolated static func plan(kept: Bool, source: String, fresh: Bool, names: String?,
                                  changed: Bool, shy: Bool, rechecked: Bool) -> Plan {
+        if let names, Favicons.written(names) { return .own }
         guard kept else { return shy ? .own : .keep }
+        // A root icon still ages when the page has no <link>. A PDF or
+        // error page must not replace a named site icon with that root.
+        if !shy, !changed, !rechecked,
+           (names != nil && (source.isEmpty || !fresh)) || (names == nil && source.isEmpty && !fresh) { return .keep }
         guard let names else { return .wear }
-        if !shy, !changed, !rechecked, source.isEmpty || !fresh { return .keep }
-        return source == names ? .wear : .own
+        return source == names && !changed ? .wear : .own
     }
 
     /// Whether a page's icon is fetched to be kept, given what its site's
@@ -352,25 +640,45 @@ final class Favicons {
     /// A page's own icon on its tab alone, fetched once a session for every
     /// page that names it; the kept one if it can't be had. A private tab's
     /// is fetched for it and kept nowhere.
-    private func wearOwn(_ candidates: [URL], on tab: Tab, at page: URL, otherwise kept: NSImage?) {
-        guard let address = candidates.first?.absoluteString else { return }
-        if let hit = own[address] { tab.icon = hit; return }
-        guard !ownFailed.contains(address) else {
-            if let kept { tab.icon = kept }
+    ///
+    /// One already had this session is worn again without asking, a
+    /// script's change too: a page that switches between two icons (an
+    /// unread count, a timer's) is followed at every switch, as Chromium
+    /// and Arc follow it, and fetches each only once. `refresh`, a
+    /// script's change, asks again for one that failed.
+    private func wearOwn(_ candidates: [URL], on tab: Tab, at page: URL, dark: Bool, otherwise kept: NSImage?, refresh: Bool = false,
+                         ticket: Int) {
+        guard let first = candidates.first else { return }
+        // An icon written into the page is its own address, up to a
+        // quarter of a megabyte: held by its hash instead.
+        let address = Favicons.inline(first) ? "data#\(first.absoluteString.hashValue)" : first.absoluteString
+        if let hit = own[address] { wear(hit, own: true, on: tab, page: page, dark: dark); return }
+        guard refresh || !ownFailed.contains(address) else {
+            if let kept { wear(kept, own: false, on: tab) }
             return
         }
         let shy = tab.shy
         Task { [weak self, weak tab, weak web = tab.page] in
-            let image = await Favicons.first(of: candidates, page: web)
+            let image = await Favicons.first(of: candidates, page: web, refresh: refresh)
             guard let self else { return }
             if !shy {
                 if own.count > 300 { own = [:] }
-                if let image { own[address] = image } else { ownFailed.insert(address) }
+                if let image { own[address] = image; ownFailed.remove(address) } else { ownFailed.insert(address) }
             }
-            // Still on that page.
-            guard let tab, let now = tab.address, now.host() == page.host(), now.path() == page.path() else { return }
-            if let image { tab.icon = image } else if let kept { tab.icon = kept }
+            // Still on that page, and nothing newer asked for since.
+            guard let tab, latest(ticket, of: tab), let now = tab.address,
+                  Favicons.page(now) == Favicons.page(page) else { return }
+            if let image { wear(image, own: true, on: tab, page: page, dark: dark) } else if let kept { wear(kept, own: false, on: tab) }
         }
+    }
+
+    /// `page`: the page that named it, which keeps it as its own
+    /// (`remember`). One that couldn't be had keeps what it wore.
+    private func wear(_ image: NSImage, own: Bool, on tab: Tab, page: URL? = nil, dark: Bool = false) {
+        tab.icon = image
+        tab.countIconLoaded()
+        if own { worn.setObject(image, forKey: tab) } else { worn.removeObject(forKey: tab) }
+        if own, let page { remember(image, page: page, dark: dark, shy: tab.shy) }
     }
 
     /// A site's icon with no page of it open to ask: the icons its front
@@ -390,7 +698,7 @@ final class Favicons {
     /// No path, query, fragment or credentials from the restored page goes
     /// into the request. A custom or private tab never calls this path.
     func fetch(page: URL, again: Bool = false) {
-        guard let page = Favicons.front(of: page), let host = page.host()?.lowercased(),
+        guard let page = Favicons.front(of: page), let host = Favicons.site(page),
               again || cached(host) == nil, !busy.contains(host), !queued.contains(host),
               again || (missed[host] == nil && !unfound.contains(host))
         else { return }
@@ -408,13 +716,14 @@ final class Favicons {
 
     func refresh(_ tab: Tab) {
         guard Self.canRefresh(tab), let page = tab.address else { return }
+        if let site = Favicons.site(page) { forgetPages(of: site) }
         fetch(page: page, again: true)
     }
 
     private func guessNext() {
         while guessing < Favicons.guessLimit, !guesses.isEmpty {
             let (page, again) = guesses.removeFirst()
-            guard let host = page.host()?.lowercased() else { continue }
+            guard let host = Favicons.site(page) else { continue }
             queued.remove(host)
             // An import may have adopted this site's bitmap while its
             // lookup waited behind the other cold tabs. Waiting guesses
@@ -482,7 +791,7 @@ final class Favicons {
         else { return rank(declared, page: page, dark: false) }
         let name = words(bare(asked).split(separator: ".").first.map(String.init) ?? "")
         let named = name.joined().count < 3 ? [] : declared.filter { entry in
-            guard let url = entry["href"].flatMap({ URL(string: $0) }) else { return false }
+            guard let url = entry["href"].flatMap({ Favicons.address($0) }) else { return false }
             return name.isSubset(of: words(url.host() ?? "")) || name.isSubset(of: words(url.lastPathComponent))
         }
         return rank(named, page: page, dark: false)
@@ -536,7 +845,7 @@ final class Favicons {
     func prune(keep: [URL], visited: [String: Date], settings: UserDefaults = Store.settings, now: Date = Date()) async -> Int {
         if let last = settings.object(forKey: Favicons.pruned) as? Date, now.timeIntervalSince(last) < 86_400 { return 0 }
         settings.set(now, forKey: Favicons.pruned)
-        let hosts = Set(keep.compactMap { $0.host()?.lowercased() } + History.knownHosts)
+        let hosts = Set(keep.compactMap(Favicons.site) + History.knownHosts)
         let folder = Favicons.folder
         let gone = await Task.detached(priority: .utility) { () -> [String] in
             let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
@@ -569,7 +878,9 @@ final class Favicons {
         let since = now.addingTimeInterval(-staleDays * 86_400)
         return files.filter { file in
             let host = site(file.key)
-            return file.date < since && !kept.contains(host) && (visited[host] ?? .distantPast) < since
+            // History keeps a visit under the host alone (Address.pretty).
+            let visit = visited[host] ?? host.split(separator: ":").first.flatMap { visited[String($0)] }
+            return file.date < since && !kept.contains(host) && (visit ?? .distantPast) < since
         }.map(\.key)
     }
 
@@ -667,6 +978,9 @@ final class Favicons {
     private func download(_ candidates: [URL], host: String, key: String, source: String, guessed: Bool = false, replace: Bool = true, refresh: Bool = false,
                           page: (any PageHandle)? = nil) async {
         defer { busy.remove(host) }
+        // An icon written into a page is that page's (`plan`), and never
+        // the site's: not on disk, not on its other tabs.
+        let candidates = candidates.filter { !Favicons.written($0.absoluteString) }
         guard let image = await Favicons.first(of: candidates, page: page, refresh: refresh) else {
             // Not asked again this session: hammering a site for an icon it
             // doesn't have is exactly the kind of thing a quiet browser
@@ -693,10 +1007,20 @@ final class Favicons {
         if guessed { frontPageIcons.insert(key) } else { frontPageIcons.remove(key) }
         Favicons.keep(image, for: key, from: source)
         arrived?(host, image)
+        changes.send(host)
     }
 
     private static func first(of candidates: [URL], page: (any PageHandle)? = nil, refresh: Bool = false) async -> NSImage? {
         for candidate in candidates {
+            if Favicons.inline(candidate) {
+                if let data = Favicons.inlineBytes(candidate.absoluteString), let image = await Favicons.square(data) { return image }
+                continue
+            }
+            // A blob: exists only in its page, which reads it for Yab.
+            if Favicons.written(candidate.absoluteString) {
+                if let page, let data = await Favicons.fromPage(candidate, in: page), let image = await Favicons.square(data) { return image }
+                continue
+            }
             var request = URLRequest(url: candidate, cachePolicy: refresh ? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy,
                                      timeoutInterval: 8)
             request.httpShouldHandleCookies = false
@@ -747,6 +1071,17 @@ final class Favicons {
     /// #368). The next icon the page names is taken instead.
     static func square(_ data: Data) async -> NSImage? {
         await Task.detached(priority: .utility) { () -> NSImage? in
+            if let glyph = Favicons.glyph(inSVG: data) {
+                let side: CGFloat = 64
+                let out = NSImage(size: NSSize(width: side, height: side))
+                out.lockFocus()
+                let text = glyph as NSString
+                let font = NSFont.systemFont(ofSize: side * 0.82)
+                let size = text.size(withAttributes: [.font: font])
+                text.draw(at: NSPoint(x: (side - size.width) / 2, y: (side - size.height) / 2), withAttributes: [.font: font])
+                out.unlockFocus()
+                return Favicons.blank(out) ? nil : out
+            }
             guard let image = NSImage(data: data), image.isValid,
                   image.size.width > 0, image.size.height > 0
             else { return nil }
@@ -843,11 +1178,21 @@ final class Favicons {
     /// Best first. A crisp icon around 32–64 pixels is what a tab wants; the
     /// touch icon is a fine second; the file at the root is the fallback every
     /// site has had since 1999.
+    ///
+    /// An icon written into the page itself (`data:`, or a canvas's `blob:`)
+    /// is one its script drew for this page: Notion's page emoji, a count.
+    /// It goes first, ahead of a touch icon the site serves every page, and
+    /// costs no request to the site; a `data:` one only in a picture's types,
+    /// and not over `inlineLimit`. One the page's
+    /// script put in after it loaded (`set`, IconRelay's) goes before all:
+    /// the page wants to be known by it now, the generic files are the
+    /// site's.
     nonisolated static func rank(_ declared: [[String: String]], page: URL, dark: Bool) -> [URL] {
         var scored: [(URL, Int)] = []
         for entry in declared {
-            guard let href = entry["href"], let url = URL(string: href),
-                  url.scheme?.hasPrefix("http") == true
+            guard let href = entry["href"], let url = Favicons.address(href) else { continue }
+            let written = Favicons.written(href)
+            guard inline(url) ? inlineType(href) != nil && href.utf8.count <= inlineLimit : written || url.scheme?.hasPrefix("http") == true
             else { continue }
             let rel = entry["rel"] ?? ""
             let sizes = entry["sizes"] ?? ""
@@ -867,8 +1212,10 @@ final class Favicons {
                 default: score = 20
                 }
             }
-            if sizes == "any" || type.contains("svg") || url.pathExtension.lowercased() == "svg" { score = 35 }
+            if sizes == "any" || type.contains("svg") || (!written && url.pathExtension.lowercased() == "svg") { score = 35 }
+            if written { score = 60 }
             if scheme != .any { score += 40 }
+            if entry["set"] == "1", !rel.contains("apple-touch"), !rel.contains("mask") { score += 100 }
             scored.append((url, score))
         }
         var list = scored.sorted { $0.1 > $1.1 }.map(\.0)
@@ -880,9 +1227,89 @@ final class Favicons {
         return list.filter { seen.insert($0.absoluteString).inserted }
     }
 
+    /// The longest icon written into a page that is taken, its address as
+    /// long as its bytes: Notion's emoji is a few hundred.
+    nonisolated static let inlineLimit = 256 * 1024
+    nonisolated private static let inlineTypes: Set<String> = [
+        "image/svg+xml", "image/png", "image/x-icon", "image/vnd.microsoft.icon", "image/gif", "image/jpeg", "image/webp",
+    ]
+
+    /// A `data:` address's picture type, nil for any other address or a
+    /// type that isn't a picture an icon comes in (a page, a script).
+    nonisolated static func inlineType(_ address: String) -> String? {
+        guard address.prefix(5).lowercased() == "data:", let comma = address.firstIndex(of: ",") else { return nil }
+        let head = address[address.index(address.startIndex, offsetBy: 5)..<comma].lowercased()
+        let type = (head.split(separator: ";", omittingEmptySubsequences: false).first.map(String.init) ?? "")
+            .removingPercentEncoding?.trimmingCharacters(in: .whitespaces) ?? ""
+        return inlineTypes.contains(type) ? type : nil
+    }
+
+    nonisolated static func inline(_ url: URL) -> Bool { url.scheme?.lowercased() == "data" }
+
+    /// Whether an icon's address is one its page wrote for itself: a
+    /// `data:` picture, or a `blob:` its script made (a canvas's, Chrome and
+    /// Arc wear it), which only that page can read. Never the site's.
+    nonisolated static func written(_ address: String) -> Bool {
+        let scheme = address.prefix(5).lowercased()
+        return scheme == "data:" || scheme == "blob:"
+    }
+
+    /// A page's icon href as a URL. A `data:` one is often written bare
+    /// (`<svg …>` with spaces and quotes) beside escapes it already has
+    /// (`%F0%9F%9A%80`); URL(string:) escaping the bare characters escaped
+    /// those `%` too, and the picture came back unreadable. Here only what
+    /// isn't allowed is escaped and `%` stays, so reading undoes it exactly.
+    nonisolated static func address(_ href: String) -> URL? {
+        guard href.prefix(5).lowercased() == "data:" else { return URL(string: href) }
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.insert(charactersIn: "%#")
+        return href.addingPercentEncoding(withAllowedCharacters: allowed).flatMap { URL(string: $0) }
+    }
+
+    /// The bytes of an icon written into the page, read here and never
+    /// fetched: base64 or percent-escaped, the fragment a browser ignores
+    /// left off. Nil for one not a picture or over `inlineLimit`. The
+    /// address as URL has it, which may have escaped what the page left
+    /// bare (`<`, a space), three bytes for one.
+    nonisolated static func inlineBytes(_ address: String) -> Data? {
+        guard inlineType(address) != nil, address.utf8.count <= inlineLimit * 3,
+              let comma = address.firstIndex(of: ",") else { return nil }
+        let head = address[..<comma].lowercased()
+        var body = address[address.index(after: comma)...]
+        if let hash = body.firstIndex(of: "#") { body = body[..<hash] }
+        guard let text = String(body).removingPercentEncoding else { return nil }
+        let data: Data? = head.hasSuffix(";base64")
+            ? Data(base64Encoded: text.filter { !$0.isWhitespace }, options: .ignoreUnknownCharacters)
+            : Data(text.utf8)
+        guard let data, !data.isEmpty, data.count <= inlineLimit else { return nil }
+        return data
+    }
+
+    /// The one character an SVG is drawn of, an emoji in a `<text>`
+    /// (`<svg ...><text y=".9em" font-size="90">🚀</text></svg>`), the way
+    /// pages turn an emoji into an icon. The Mac's SVG drawing leaves text
+    /// out, and such an icon came out empty: it is drawn as text instead.
+    /// Nil for an SVG with shapes, or text of more than a few characters.
+    nonisolated static func glyph(inSVG data: Data) -> String? {
+        guard data.count < 8_192, let svg = String(data: data, encoding: .utf8), svg.contains("<svg"),
+              let open = svg.range(of: "<text"), let start = svg[open.upperBound...].firstIndex(of: ">"),
+              let close = svg.range(of: "</text>", range: start..<svg.endIndex)
+        else { return nil }
+        let shapes = ["<path", "<rect", "<circle", "<ellipse", "<polygon", "<polyline", "<line", "<image", "<use"]
+        guard !shapes.contains(where: { svg.contains($0) }) else { return nil }
+        var text = String(svg[svg.index(after: start)..<close.lowerBound])
+        if text.contains("<") { text = text.replacingOccurrences(of: "<[^>]*>", with: "", options: .regularExpression) }
+        for (entity, character) in [("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&apos;", "'"), ("&amp;", "&")] {
+            text = text.replacingOccurrences(of: entity, with: character)
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count <= 3 else { return nil }
+        return text
+    }
+
     private static let probe = """
     (function () {
-      var out = [];
+      var out = [], born = window.__yabIconBorn;
       var links = document.querySelectorAll('link[rel]');
       for (var i = 0; i < links.length; i++) {
         var l = links[i];
@@ -893,7 +1320,8 @@ final class Favicons {
           rel: rel,
           sizes: (l.getAttribute('sizes') || '').toLowerCase(),
           type: (l.getAttribute('type') || '').toLowerCase(),
-          media: (l.getAttribute('media') || '').toLowerCase()
+          media: (l.getAttribute('media') || '').toLowerCase(),
+          set: born && !born[l.href] ? '1' : ''
         });
       }
       return out;
@@ -904,8 +1332,16 @@ final class Favicons {
 /// A page's icons changed by its script once it loaded, heard in Yab's
 /// world and told when they settle: Calendar draws the day into its icon
 /// after the page is up, Gmail and chats change theirs with what's unread.
-/// Worn by that tab alone (`Favicons.plan`), and at most every 30 seconds,
-/// so an icon that blinks isn't fetched with every blink.
+/// Worn by that tab alone (`Favicons.plan`). Every change is told, as
+/// Chrome's tab follows each one its page makes (FaviconDriver hears every
+/// new list of icons from Blink): a timer's or a count's icon each second,
+/// Notion's page icon as it goes from page to page without loading one.
+/// It was told at most every 30 seconds, so a blinking icon wasn't fetched
+/// with every blink; an icon had once this session is worn again from
+/// memory instead (`Favicons.wearOwn`), and a page changing its icons
+/// without pause is told at most every `settle` milliseconds.
+/// The icons the page came with are written down (`__yabIconBorn`), for
+/// the probe to tell them from those its script put in.
 final class IconRelay: NSObject, PageScriptReceiving {
     static let name = "yabIcon"
     weak var tab: Tab?
@@ -914,9 +1350,19 @@ final class IconRelay: NSObject, PageScriptReceiving {
         guard message.frame.isMain else { return }
         MainActor.assumeIsolated {
             guard let tab else { return }
-            Favicons.shared.fetch(for: tab, changed: true)
+            if let snapshot = message.body as? [String: String],
+               let title = snapshot["title"], let icon = snapshot["icon"] {
+                tab.observedCountIcon(title: title, icon: icon)
+            } else {
+                Favicons.shared.fetch(for: tab, changed: true)
+            }
         }
     }
+
+    /// How long a change waits to be told, in milliseconds: a moment for it
+    /// to settle, a page's new icon often coming in two steps (the old link
+    /// out, the new one in).
+    static let settle = 250
 
     static let script = """
     (function () {
@@ -935,13 +1381,54 @@ final class IconRelay: NSObject, PageScriptReceiving {
         for (var i = 0; i < nodes.length; i++) if (nodes[i].nodeName === 'LINK') return true;
         return false;
       }
-      var seen = icons(), told = 0, timer = 0;
+      var born = Object.create(null), first = document.querySelectorAll('link[rel]');
+      for (var b = 0; b < first.length; b++) {
+        if ((first[b].getAttribute('rel') || '').toLowerCase().indexOf('icon') >= 0) born[first[b].href] = true;
+      }
+      window.__yabIconBorn = born;
+      // Observe title and icon together in the same mutation delivery, not
+      // the engine's independently scheduled title event and icon download.
+      // No settling delay: revoke permission before a new icon can be worn.
+      var revision = 0, proof = '';
+      function prove() {
+        var icon = revision + ':' + icons();
+        var now = JSON.stringify([document.title, icon]);
+        if (now === proof) return;
+        proof = now;
+        h.postMessage({ title: document.title, icon: icon });
+      }
+      function iconLink(node) {
+        return node.nodeName === 'LINK' && /icon/i.test(node.getAttribute('rel') || '');
+      }
+      function iconNodes(nodes) {
+        for (var i = 0; i < nodes.length; i++) {
+          if (iconLink(nodes[i]) || (nodes[i].querySelectorAll &&
+              Array.prototype.some.call(nodes[i].querySelectorAll('link[rel]'), iconLink))) return true;
+        }
+        return false;
+      }
+      new MutationObserver(function (records) {
+        for (var i = 0; i < records.length; i++) {
+          var r = records[i];
+          if (r.type === 'attributes' ? iconLink(r.target) ||
+              (r.target.nodeName === 'LINK' && r.attributeName === 'rel' && /icon/i.test(r.oldValue || '')) :
+              r.type === 'childList' && (iconNodes(r.addedNodes) || iconNodes(r.removedNodes))) {
+            // Even rewriting the same href may replace a server-side icon's
+            // bytes. That is not evidence that its image stayed unchanged.
+            revision++;
+            break;
+          }
+        }
+        prove();
+      }).observe(document.head, { childList: true, subtree: true, characterData: true,
+        attributes: true, attributeOldValue: true, attributeFilter: ['href', 'rel', 'media', 'sizes', 'type'] });
+      prove();
+      var seen = icons(), timer = 0;
       function tell() {
         timer = 0;
         var now = icons();
         if (now === seen) return;
         seen = now;
-        told = Date.now();
         h.postMessage(1);
       }
       new MutationObserver(function (records) {
@@ -949,7 +1436,7 @@ final class IconRelay: NSObject, PageScriptReceiving {
         for (var i = 0; i < records.length; i++) {
           var r = records[i];
           if (r.type === 'attributes' ? r.target.nodeName === 'LINK' : linked(r.addedNodes) || linked(r.removedNodes)) {
-            timer = setTimeout(tell, Math.max(1000, told + 30000 - Date.now()));
+            timer = setTimeout(tell, \(settle));
             return;
           }
         }

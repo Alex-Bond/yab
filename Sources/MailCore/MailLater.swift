@@ -293,7 +293,7 @@ public enum MailLater {
         process.arguments = args
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        try? process.run()
+        try? process.runValidated()
     }
 
     /// Whether any account still has something waiting for its time: a

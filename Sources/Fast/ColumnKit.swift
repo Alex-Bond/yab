@@ -47,6 +47,36 @@ extension EnvironmentValues {
     }
 }
 
+private struct ColumnPointedKey: EnvironmentKey {
+    static let defaultValue: Bool? = nil
+}
+
+extension EnvironmentValues {
+    /// A row of the AppKit column: whether the pointer is on it, as the
+    /// column works it out from where the pointer is and where its rows
+    /// are (ColumnPage.point). Nil anywhere else, where a row hears the
+    /// pointer itself.
+    var columnPointed: Bool? {
+        get { self[ColumnPointedKey.self] }
+        set { self[ColumnPointedKey.self] = newValue }
+    }
+}
+
+/// A row's own hover, only where the column doesn't say (`columnPointed`):
+/// in the AppKit column the row installs no tracking of its own.
+struct RowHover: ViewModifier {
+    let on: Bool
+    let heard: (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        if on {
+            content.onHover(perform: heard)
+        } else {
+            content
+        }
+    }
+}
+
 extension View {
     /// `action` with the view's frame in the window whenever it changes, as
     /// `onGeometryChange` gives it, only if `on`: a row in the AppKit

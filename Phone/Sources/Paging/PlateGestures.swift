@@ -20,6 +20,14 @@ final class PlateGestures: NSObject, UIGestureRecognizerDelegate {
     private var touchTabID: Tab.ID?
     private var beganOnPlate = false
     private var beganOnStack = false
+    /// Up from the plate: All Tabs takes the finger at once, the page shrinking
+    /// under it; let go as a quick flick, it is the spaces
+    /// sidebar instead. With no tab to show, the spaces rise under the finger.
+    private enum Lift { case stack, spaces }
+    private var lift = Lift.spaces
+    private var liftStart: CFTimeInterval = 0
+    /// Where the finger came down, in the window's points (the screen's).
+    private var touchPoint: CGPoint?
 
     /// Installed: the plate's SwiftUI drags (paging, the lift) stand aside.
     private static let installedRecognizers = NSHashTable<UIGestureRecognizer>.weakObjects()
@@ -82,6 +90,7 @@ final class PlateGestures: NSObject, UIGestureRecognizerDelegate {
         if app.chrome.folded, !geometry.back.union(geometry.space).contains(point) { return false }
         guard geometry.back.union(geometry.plateTouch).union(geometry.space).contains(point) else { return false }
         touchOwner = owner
+        touchPoint = owner.convert(point, to: window)
         touchSpaceID = app.browser.spaceID
         touchTabID = app.browser.tab?.id
         beganOnPlate = geometry.plateTouch.contains(point)
@@ -150,13 +159,20 @@ final class PlateGestures: NSObject, UIGestureRecognizerDelegate {
             pager.cancel()
             retireTouch()
         case (.began, .vertical?):
-            // The field follows only a lift it began (FieldModel.lifting).
-            app.field.beginLift()
-            app.field.liftMoved(t.y)
+            liftStart = CACurrentMediaTime()
+            if stack.canPinchGallery {
+                lift = .stack
+                stack.beginPinch(at: touchPoint)
+            } else {
+                lift = .spaces
+                // The field follows only a lift it began (FieldModel.lifting).
+                app.field.beginLift()
+            }
+            plateLift(t)
         case (.changed, .vertical?):
-            app.field.liftMoved(t.y)
+            plateLift(t)
         case (.ended, .vertical?), (.cancelled, .vertical?), (.failed, .vertical?):
-            app.field.liftEnded(t.y, velocity: state == .ended ? v.y : 0)
+            plateLiftEnded(t, velocity: v.y, ended: state == .ended)
             retireTouch()
         case (.began, .flick?):
             if stack.flickBegan() { stack.flickMoved(-t.y) }
@@ -175,12 +191,55 @@ final class PlateGestures: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    private func plateLift(_ t: CGPoint) {
+        switch lift {
+        case .stack: TabStack.of(app).followPinch(CGSize(width: t.x, height: t.y), span: PlateSwipe.span)
+        case .spaces: app.field.liftMoved(t.y)
+        }
+    }
+
+    private func plateLiftEnded(_ t: CGPoint, velocity vy: CGFloat, ended: Bool) {
+        let stack = TabStack.of(app)
+        let travel = max(0, -t.y)
+        switch lift {
+        case .stack:
+            if ended, PlateSwipe.isFlick(travel: travel, speed: -vy, elapsed: CACurrentMediaTime() - liftStart) {
+                // A quick flick: the page goes back and the spaces sidebar comes.
+                stack.endPinch(velocity: 0, cancelled: true)
+                Haptics.play(.light, reason: Haptics.Reason.columnOpened)
+                app.field.openSpaces()
+            } else {
+                stack.endPinch(velocity: -vy / PlateSwipe.span, cancelled: !ended)
+            }
+        case .spaces:
+            app.field.liftEnded(t.y, velocity: ended ? vy : 0)
+        }
+        lift = .spaces
+    }
+
     private func retireTouch() {
         direction = nil
         touchOwner = nil
+        touchPoint = nil
         touchSpaceID = nil
         touchTabID = nil
         beganOnPlate = false
         beganOnStack = false
+    }
+}
+
+/// Up on the plate (the agreed rule, 2026-11-09; Safari's feel, 11-10): the
+/// page follows the finger into All Tabs from its first point; let go as a
+/// quick flick, it is the spaces sidebar instead.
+enum PlateSwipe {
+    /// A flick: let go faster than this, within this travel and time.
+    static let flickSpeed: CGFloat = 1000
+    static let flickTravel: CGFloat = 160
+    static let flickTime: TimeInterval = 0.25
+    /// The finger's travel for All Tabs' whole opening.
+    static let span: CGFloat = 320
+
+    static func isFlick(travel: CGFloat, speed: CGFloat, elapsed: TimeInterval) -> Bool {
+        elapsed <= flickTime && travel <= flickTravel && speed > flickSpeed
     }
 }

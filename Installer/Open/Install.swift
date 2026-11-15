@@ -32,9 +32,9 @@ final class Install: @unchecked Sendable {
     enum Outcome {
         /// Nothing was there, and now yab is.
         case installed(URL)
-        /// An older yab was there and has been replaced.
+        /// A different build was there and has been replaced.
         case replaced(URL)
-        /// The same build, or a newer one, was there already: left as it is.
+        /// The same build was there already: left as it is.
         case present(URL)
     }
 
@@ -143,7 +143,9 @@ final class Install: @unchecked Sendable {
             guard former || (try? Self.validate(destination)) != nil,
                   let present = Self.build(at: destination)
             else { throw Failure.occupied }
-            if !former, present.compare(incoming, options: .numeric) != .orderedAscending {
+            // Opening an installer explicitly selects its build, including Stable
+            // behind Nightly. Only the identical build is already installed.
+            if !former, present.compare(incoming, options: .numeric) == .orderedSame {
                 lock.lock(); defer { lock.unlock() }
                 if canceled { throw Failure.canceled }
                 committed = true

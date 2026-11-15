@@ -100,7 +100,7 @@ extension Browser {
             ? Tab(shy: source.shy, configuration: ArtifactPages.configuration())
             : source.shy
             ? Tab(shy: true, configuration: Web.configuration(shy: true, store: source.store))
-            : blankTab())
+            : takeSpareForPeek(url) ?? blankTab())
         page.from = source.id
         linkBack(page, to: source)
         prepare(page)
@@ -139,12 +139,17 @@ extension Browser {
         guard !source.bench, tabs.contains(where: { $0 === source }),
               let web = source.builtPage, web.magnification == 1 else { return }
         let js = "window.__yabPeekForce && __yabPeekForce(\(point.x), \(point.y), \(web.bounds.width))"
-        web.run(js, in: .yab) { [weak self, weak source] result in
+        let input = web as? ChromiumPage
+        let press = input?.beginForceClick()
+        web.run(js, in: .yab) { [weak self, weak source, weak input] result in
+            var handled = false
+            defer { if let press { input?.finishForceClick(press, handled: handled) } }
             guard let self, let source, case .success(let value) = result,
                   let href = value as? String, let url = URL(string: href) else {
                 self?.peekView?.press(0)
                 return
             }
+            handled = true
             peek(url, from: source)
         }
     }
@@ -303,11 +308,12 @@ extension Browser {
               !source.bench, !MailPage.isMail(source.address), pair(of: source.id) == nil, !Folders.shared.theirs(source)
         else { return keepPeek() }
         // The mark goes as the picture flies: the new tab says where it went.
+        // The peek is down from the press on, as keepPeek's is.
         source.peek = nil
+        peeking = nil
+        peekFrom = nil
         let done = { [weak self] in
             guard let self else { return }
-            peeking = nil
-            peekFrom = nil
             page.page.autoresizingMask = []
             outside.removeAll { $0.id == page.id }
             var row = tabs
@@ -358,18 +364,18 @@ extension Browser {
             routePageLink(url, from: source, foreground: true)
             return
         }
+        // Down from the press on, as Chromium's tab strip takes a WebContents
+        // the moment it is moved: the picture's flight only shows it. A peek
+        // still up while that picture was coming took a second press, an
+        // Escape or a new peek for its own, and the flight's end then put a
+        // page let go meanwhile in the row, a blank tab (register 2538).
         peekSource?.peek = nil
-        guard let view = peekView else {
-            peeking = nil
-            peekFrom = nil
-            return takeIn(page)
-        }
+        peeking = nil
+        peekFrom = nil
+        guard let view = peekView else { return takeIn(page) }
         view.keep(page) { [weak self] in
-            guard let self else { return }
-            peeking = nil
-            peekFrom = nil
             page.page.autoresizingMask = []
-            takeIn(page)
+            self?.takeIn(page)
         }
     }
 }
@@ -480,7 +486,8 @@ final class PeekView: NSView {
     /// The room over the panel up to the window's edge or the band above
     /// the card, its own and the card's margin: the load bar's.
     private var room: CGFloat { top + depth.padding[1] }
-    private var keeping = false
+    /// Kept pages whose picture is still coming for their flight.
+    private var keeping = 0
     /// The dim a firm press on a link has brought (press), for the peek to
     /// come on from rather than from nothing.
     private var pressed: Float = 0
@@ -574,7 +581,7 @@ final class PeekView: NSView {
 
     /// Whether a pinch may take the panel now: a page's, up and still.
     private func pinchStarts() -> Bool {
-        guard up, !keeping, mail == nil, panel != nil else { return false }
+        guard up, keeping == 0, mail == nil, panel != nil else { return false }
         pinch = (0, 0)
         return true
     }
@@ -654,7 +661,7 @@ final class PeekView: NSView {
     /// A firm press on a link, 0 to 1 of the way to a Force Click: the page
     /// dims up to half of a peek's dim with it, and back when it lets go.
     func press(_ amount: CGFloat) {
-        guard !up, !keeping else { return }
+        guard !up, keeping == 0 else { return }
         let to = Float(min(1, max(0, amount)) * 0.5)
         guard to != pressed else { return }
         let from = pressed
@@ -773,6 +780,26 @@ final class PeekView: NSView {
         if up, let holder = holder as? PageHolder {
             found["band"] = bandTall
             found["pageTop"] = content.bounds.height - holder.convert(holder.pageFrame, to: nil).maxY
+            if let band = holder.band {
+                let frame = band.convert(band.bounds, to: nil)
+                found["bandTop"] = content.bounds.height - frame.maxY
+                found["bandBottom"] = content.bounds.height - frame.minY
+                found["bandSafeTop"] = band.safeAreaInsets.top
+                // The site's native click zone follows the SwiftUI caption.
+                // Its host can have the right frame while that content is
+                // displaced by an inherited titlebar safe area.
+                func caption(in view: NSView) -> NSView? {
+                    if view is ClickZone.Zone { return view }
+                    return view.subviews.lazy.compactMap { caption(in: $0) }.first
+                }
+                if let caption = caption(in: band) {
+                    found["bandCaptionMiddle"] = content.bounds.height - caption.convert(caption.bounds, to: nil).midY
+                }
+            }
+            if let page = browser?.peeking?.builtPage, page.superview === holder {
+                found["viewportTop"] = content.bounds.height - page.convert(page.bounds, to: nil).maxY
+            }
+            found["noticeTop"] = found["card"].map { $0 + (browser?.peekCorner.inset?.height ?? 0) }
         }
         return found
     }
@@ -898,6 +925,10 @@ final class PeekView: NSView {
         if browser.prefs.peekAddress {
             let band = NSHostingView(rootView: PeekBand(browser: browser, tab: tab))
             band.sizingOptions = []
+            // PageHolder reserves the band's entire height. Applying the
+            // window's titlebar safe area again pushes its fixed-height
+            // SwiftUI content below that room, over the page's first row.
+            band.safeAreaRegions = []
             band.frame = CGRect(x: 0, y: 0, width: pageRect.width, height: PeekBand.height)
             holder.band = band
         }
@@ -1118,7 +1149,14 @@ final class PeekView: NSView {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { look(tries + 1) }
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { look(0) }
+        if let page = web as? ChromiumPage {
+            // Chromium says when the page has drawn. Its progress is only
+            // ever 0.5 or 1, so the reading above waited for the whole load,
+            // the card standing empty all that while.
+            page.afterFirstPaint { _ in show() }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { look(0) }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { show() }
     }
 
@@ -1307,11 +1345,11 @@ final class PeekView: NSView {
     /// render server; `landed` moves the page under the picture as it starts
     /// flying, so WebKit can draw at the new size during the flight.
     func keep(_ tab: Tab, half: Bool = false, landed: @escaping () -> Void) {
-        guard !keeping else { return }
         guard let panel, let holder, let window, let content = window.contentView else { return landed() }
         dropFind(panel)
-        keeping = true
+        keeping += 1
         turns += 1
+        let turn = turns
         depth.set(false, animated: true)
         up = false
         self.panel = nil
@@ -1322,14 +1360,16 @@ final class PeekView: NSView {
         pinch = nil
         pinchScale = 1
         self.brisk = false
-        tab.page.snapshot(PageShot(afterUpdates: false)) { [weak self] image, _ in
+        let fly: @MainActor (NSImage?) -> Void = { [weak self] image in
             guard let self else { return landed() }
-            self.keeping = false
+            self.keeping -= 1
+            // A peek come up since has the dim: this one's flight leaves it be.
+            let current = self.turns == turn
             // With no picture, transfer directly rather than flying an
             // empty card and exposing the old page when it disappears.
             guard let image else {
                 panel.removeFromSuperview()
-                self.dim.opacity = 0
+                if current { self.dim.opacity = 0 }
                 landed()
                 return
             }
@@ -1392,8 +1432,10 @@ final class PeekView: NSView {
                          to: NSValue(point: picture.position), pace.duration, pace.timing)
             // The panel goes where the card now is; the dim with the flight.
             panel.layer?.opacity = 0
-            self.dim.opacity = 0
-            PeekView.run(self.dim, "opacity", from: 1, to: 0, pace.duration, pace.timing)
+            if current {
+                self.dim.opacity = 0
+                PeekView.run(self.dim, "opacity", from: 1, to: 0, pace.duration, pace.timing)
+            }
             CATransaction.commit()
             CATransaction.flush()
 
@@ -1404,6 +1446,12 @@ final class PeekView: NSView {
                 return tab.gone || !browser.stages.contains(tab.id)
             }
         }
+        // No document of its own committed yet, its server still to answer:
+        // nothing of the page to picture, and none is waited for. A Chromium
+        // page's picture waits for its document, so the press did nothing
+        // until the server had answered (register 2538).
+        guard tab.builtPage?.committedURL != nil else { return fly(nil) }
+        tab.page.snapshot(PageShot(afterUpdates: false)) { image, _ in fly(image) }
     }
 
     /// SwiftUI attaches the page on a later pass. A snapshot requested in
@@ -1555,7 +1603,7 @@ private final class PeekFlightSky: NSView {
 
 /// Where a peeked link is on its page, for the peek to grow out of and go
 /// back into. A script in yab's world of every main frame keeps the link
-/// under a press, plain or with ⇧ (nothing for ⌘, ⌥ or ⌃), and gives
+/// under a press, plain or with ⇧/⌥ (nothing for ⌘ or ⌃), and gives
 /// its box when asked, a few milliseconds' round trip; the page sees none
 /// of it. A Force Click finds its link by where the press is, and, `force`,
 /// the Mac's look at a link is held back for the peek: an <a> (in a shadow
@@ -1669,7 +1717,7 @@ struct PeekOrigin {
         px = e.clientX; py = e.clientY;
         extend = null;
         if (e.button !== 0 || e.metaKey || e.ctrlKey) return;
-        const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+        const a = anchor(e.composedPath()[0]);
         keep(a);
         // Option may be the chosen Peek click. Keep its origin without
         // changing Shift's text-selection behavior below.
@@ -1705,6 +1753,22 @@ struct PeekOrigin {
         e.preventDefault();
         e.stopImmediatePropagation();
       }, true);
+      // Resolve a native modified press even if no hover status arrived.
+      window.__yabPeekLinkAt = (x, y, width, shift) => {
+        const unit = innerWidth / width;
+        const hit = under(x * unit, y * unit), el = anchor(hit);
+        const url = el && address(el);
+        if (!url) {
+          keep(null);
+          return hit && /^(iframe|frame|embed|object)$/.test(hit.localName) ? { embedded: true } : null;
+        }
+        const s = getSelection();
+        if (shift && s && s.rangeCount && s.anchorNode && !el.contains(s.anchorNode) && plainText(s.anchorNode)
+            && (s.type === "Range" || (s.type === "Caret" && s.anchorNode.nodeType === 3 && Date.now() - caretAt < 60000)))
+          return false; // The page's Shift-selection handler owns this press.
+        keep(el);
+        return url;
+      };
       window.__yabPeekForce = (x, y, width) => {
         const unit = innerWidth / width;
         const found = target(under(x * unit, y * unit), x * unit, y * unit);

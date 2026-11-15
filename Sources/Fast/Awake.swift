@@ -1,5 +1,6 @@
 import AppKit
 import ObjectiveC
+import Combine
 
 // A class of our own lets Awake keep the glass lit without changing every
 // NSWindow in the process or replacing a live window's class underneath KVO.
@@ -7,6 +8,21 @@ final class BrowserWindow: NSWindow {
     /// Its pages asked whether they may go, and they may: this close goes
     /// through (LeavePage.swift).
     private var agreed = false
+
+    private var looked: AnyCancellable?
+
+    /// Light or dark as the look of its space has it, the app's Theme on
+    /// Auto, from before its first frame and at every change, as the first
+    /// window wears it. That one is SwiftUI's scene, where the color scheme
+    /// preference (LookModeScheme) is the window's appearance; on a window
+    /// of ours the preference never reached the window, so ⌘N on a space
+    /// with its own Dark opened in the light shades of its colors beside
+    /// the window it came from (R2588, feedback #2029).
+    func wearLookMode(of prefs: Preferences) {
+        looked = prefs.changes(\.lookMode).sink { [weak self] mode in
+            self?.appearance = LookMode(rawValue: mode)?.appearance
+        }
+    }
 
     /// The red button, Close Window, ⌘W with no tab: a page holding
     /// something typed asks first, and a Stay keeps the window.

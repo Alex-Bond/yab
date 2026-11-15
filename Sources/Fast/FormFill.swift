@@ -112,7 +112,7 @@ enum FormFill {
     /// Claude Code or Codex is on this Mac, as last looked.
     @MainActor static var agentsHere: Bool {
         guard let found = Shell.cached else {
-            Task { _ = await Shell.find() }
+            Task { _ = await Shell.find(resolvingLogin: false) }
             return false
         }
         return found.claude != nil || found.codex != nil
@@ -387,7 +387,7 @@ extension Browser {
         // the form of every page it opens is work for nothing.
         guard FormFill.on, FormDraft.on, !tab.shy, tab.agent == nil, FormDraft.shared.usable, !FormDraft.shared.running else { return }
         guard let found = Shell.cached else {
-            Task { _ = await Shell.find() }
+            Task { _ = await Shell.find(resolvingLogin: false) }
             return
         }
         guard found.claude != nil else { return }

@@ -153,7 +153,7 @@ final class BrowserBasicsUITests: XCTestCase {
                                "-YabNoAnim", "YES"]
         app.terminate()
         app.launch()
-        let welcome = app.buttons["welcome.start"], join = app.buttons["join.close"]
+        let welcome = app.buttons["welcome.skip"], join = app.buttons["join.close"]
         let arrived = wait { self.document(app).exists || welcome.exists || join.exists || app.textFields["field.input"].exists }
         if !arrived { record(app, "Links launch did not arrive") }
         XCTAssertTrue(arrived)

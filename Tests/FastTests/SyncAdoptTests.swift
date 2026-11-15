@@ -48,6 +48,39 @@ struct SyncAdoptTests {
         }
     }
 
+    /// Feedback #1877: a tab just opened here, which sync's journal has not
+    /// had yet (opened after a delivery read the rows, or a link's tab with
+    /// no address yet), is not "closed elsewhere". It stays in front, where
+    /// it is in the row; one the journal had and lost still goes.
+    @Test func aTabSyncNeverHadStaysWhereItIs() {
+        world { browser in
+            let a = page(browser, 1), fresh = page(browser, 2), c = page(browser, 3)
+            let blank = Tab()
+            browser.prepare(blank)
+            browser.lay([a, fresh, c, blank])
+            browser.activeID = fresh.id
+            let held: Set<String> = [a.id.uuidString, c.id.uuidString]
+            browser.adopt(.init(tabs: [entry(a), entry(c, url: "https://adopt.test/c-moved")], active: 0), in: browser.spaceID, held: held)
+            #expect(browser.tabs.map(\.id) == [a.id, fresh.id, c.id, blank.id])
+            #expect(!fresh.gone && !blank.gone)
+            #expect(browser.activeID == fresh.id)
+            #expect(c.address?.absoluteString == "https://adopt.test/c-moved")
+        }
+    }
+
+    @Test func aTabTheJournalHadAndLostStillGoes() {
+        world { browser in
+            let a = page(browser, 1), b = page(browser, 2)
+            browser.lay([a, b])
+            browser.activeID = b.id
+            let held: Set<String> = [a.id.uuidString, b.id.uuidString]
+            browser.adopt(.init(tabs: [entry(a)], active: 0), in: browser.spaceID, held: held)
+            #expect(browser.tabs.map(\.id) == [a.id])
+            #expect(b.gone)
+            #expect(browser.activeID == a.id)
+        }
+    }
+
     @Test func thePageInFrontKeepsItsAddress() {
         world { browser in
             let a = page(browser, 1), b = page(browser, 2)

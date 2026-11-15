@@ -166,8 +166,35 @@ TOP_TYPE = re.compile(r'^(?:@\S+\s+|(?:public|private|fileprivate|internal|final
                       r'(?:struct|class|actor|enum|extension)\s+([A-Za-z_][A-Za-z0-9_.]*)')
 
 
-def grep_where(root, commit, pattern, target=None):
+# Release tooling a publish --from takes from today's main over the prepared
+# commit (release.sh); the product and its checks must still be the commit.
+TOOLING_PATHS = (':(exclude)release.sh', ':(exclude)scripts/release', ':(exclude)scripts/runs/deferred_qa.py')
+
+
+@lru_cache(maxsize=8)
+def commit_test_lines(root, commit):
+    """Every line of every test Swift file at commit, read with one git grep.
+    One git grep per suite name cost about five minutes per call over 1100
+    test files, and a release calls this five times."""
+    found = subprocess.run(['git', '-C', str(root), 'grep', '-n', '-I', '-e', '', commit, '--', 'Tests/'],
+                           text=True, errors='replace', stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    prefix = commit + ':'
+    rows = []
+    for line in found.stdout.splitlines():
+        if line.startswith(prefix):
+            file, number, text = line[len(prefix):].split(':', 2)
+            if file.endswith('.swift'):
+                rows.append((file, int(number), text))
+    return tuple(rows)
+
+
+def grep_where(root, commit, pattern, target=None, literal=None):
     """git grep -n over a commit, the index (commit None) or the working tree ('worktree')."""
+    if commit not in (None, 'worktree'):
+        regex = re.compile(pattern.replace('[[:space:]]', r'[ \t\n\r\f\v]'))
+        where = 'Tests/' + (target + '/' if target else '')
+        return [row for row in commit_test_lines(str(root), commit)
+                if (literal is None or literal in row[2]) and row[0].startswith(where) and regex.search(row[2])]
     flags = ['--untracked'] if commit == 'worktree' else ['--cached'] if commit is None else []
     found = subprocess.run(['git', '-C', str(root), 'grep', '-n', '-E', *flags, '-e', pattern,
                             *([] if commit in (None, 'worktree') else [commit]), '--',
@@ -191,7 +218,7 @@ def declaring_files(root, commit, keywords, name, target=None):
     is no proof that the test binary lists a suite of that name.
     """
     pattern = r'(^|[^A-Za-z0-9_])(' + keywords + r')[[:space:]]+' + re.escape(name) + r'([^A-Za-z0-9_]|$)'
-    return sorted({row[0] for row in grep_where(root, commit, pattern, target)})
+    return sorted({row[0] for row in grep_where(root, commit, pattern, target, literal=name)})
 
 
 def file_text(root, commit, name):
@@ -204,7 +231,7 @@ def nested_in(root, commit, name, target=None):
     """The outer type when `name` is only ever declared inside another one, or None.
     Swift lists such a suite as Outer/name, so an exact filter on name finds nothing."""
     pattern = r'(^|[^A-Za-z0-9_])(struct|class|actor|enum)[[:space:]]+' + re.escape(name) + r'([^A-Za-z0-9_]|$)'
-    rows = grep_where(root, commit, pattern, target)
+    rows = grep_where(root, commit, pattern, target, literal=name)
     if not rows or any(not text[:1].isspace() for _, _, text in rows):
         return None
     file, number, _ = rows[0]
@@ -423,7 +450,9 @@ def cards_at(root, commit):
         card = dict(card, suites=normalized, card_hash=raw_hash, scope_hash=view.scope(
                     card['paths'] + test_paths + [p['script'] for p in card.get('probes', [])] +
                     [p['script'] for p in card.get('checks', [])] +
-                    ['scripts/runs/appkit_gate_tests.py']))
+                    ['scripts/runs/appkit_gate_tests.py', 'scripts/runs/deferred_qa.py',
+                     'evals/qa-batch/held_keys.py', 'evals/space-switching/hand.py',
+                     'evals/release-qa/qahand.py', 'evals/window-tiling/pointer.py']))
         if problems:
             card['suite_problems'] = problems
         card['manual_scope_hash'] = view.scope([p for p in card['paths']
@@ -691,16 +720,49 @@ def encoded(value):
         json.dumps(value, separators=(',', ':')).encode())).decode()
 
 
-def decoded(value):
-    raw = base64.urlsafe_b64decode(value[3:] if value.startswith('z1:') else value)
-    if value.startswith('z1:'):
+# A plan travels as one argument through ./farm exec, qa_prepare.py, worker.sh
+# and this script. Carrying every card's whole body made 0.46.33's plan 390 KB,
+# and the farm's exec of python3 failed with "Argument list too long" before
+# anything ran (jobs 8c4a236006e2422a, cb02315b73c14264). The release commit
+# holds the cards, and every reader of a plan runs in a checkout of that commit
+# (the worker refuses any other), so a plan names each card by its identity
+# and the reader takes the body from the commit, refusing a card whose
+# card_hash or scope_hash differ. What only the plan knows stays in it.
+PLAN_CARD_KEYS = ('id', 'card_hash', 'scope_hash', 'manual_ok')
+
+
+def plan_encoded(value):
+    slim = dict(value, cards=[{k: c[k] for k in PLAN_CARD_KEYS if k in c} for c in value.get('cards', [])])
+    return 'z2:' + base64.urlsafe_b64encode(zlib.compress(
+        json.dumps(slim, separators=(',', ':')).encode(), 9)).decode()
+
+
+def plan_cards(root, value):
+    """A z2 plan's cards with their bodies from the plan's own commit."""
+    full = {c['id']: c for c in cards_at(root, value['commit'])}
+    cards = []
+    for slim in value.get('cards', []):
+        card = full.get(slim.get('id'))
+        if not card or (card['card_hash'], card['scope_hash']) != (slim.get('card_hash'), slim.get('scope_hash')):
+            raise ValueError('QA plan card does not match its commit: ' + str(slim.get('id')))
+        cards.append(dict(card, **{k: slim[k] for k in PLAN_CARD_KEYS if k in slim}))
+    return cards
+
+
+def decoded(value, root=None):
+    slim = value.startswith('z2:')
+    raw = base64.urlsafe_b64decode(value[3:] if value.startswith(('z1:', 'z2:')) else value)
+    if value.startswith(('z1:', 'z2:')):
         unpacker = zlib.decompressobj()
         # A failed suite repeats its detail on every card that runs it: 123
         # cards made 2.8 MB (0.42.2), and the cap hid which tests failed.
         raw = unpacker.decompress(raw, 32 * 1024 * 1024)
         if not unpacker.eof:
             raise ValueError('QA envelope exceeds the size limit or is truncated')
-    return json.loads(raw)
+    data = json.loads(raw)
+    if slim:
+        data['cards'] = plan_cards(root or ROOT, data)
+    return data
 
 
 def exit_code(report):
@@ -793,12 +855,12 @@ def unit_batch(root, suites, out, env, commit):
     core = [s for s in suites if s.startswith('MailCoreTests.')]
     result = dict(passed=True, suites=suites, phases=[])
     if fast:
+        rc, text = neutral_modifiers(root, out / 'modifiers.log', env)
+        if rc:
+            return dict(passed=False, phase='console-modifiers', suites=suites, rc=rc, detail=text[-12000:])
         child = out / 'native'
         child.mkdir()
-        # The gate's world stays the job's own (farm-<job>, appkit-gate-farm-<job>):
-        # one named by the commit was shared by every batch of that commit on a
-        # Mac, and suites that write the world's Store and Wallet refuse it
-        # (PDFPageLifetimeTests, failing every hourly batch since 10-29).
+        # Keep the farm job's world; the commit can be tested by several jobs.
         e = dict(env, YAB_FARM_OUT=str(child))
         rc, text = logged([sys.executable, 'scripts/runs/appkit_gate_tests.py', '--commit',
                            git(root, 'rev-parse', 'HEAD'), '--filter', suite_pattern(fast), '--no-parallel'],
@@ -858,6 +920,11 @@ def covered(card, rows, commit, root, toolchain):
     return found
 
 
+def neutral_modifiers(root, log, env):
+    return logged([sys.executable, 'evals/qa-batch/held_keys.py', '--release'],
+                  log, root, env, timeout=10)
+
+
 def run_probe(root, probe, execution, env, app, generic):
     folder = Path(tempfile.mkdtemp(prefix=digest(probe)[:12] + '-', dir=execution / 'probes'))
     # {out} is a fresh empty folder of its own: probe.log lives in
@@ -866,6 +933,11 @@ def run_probe(root, probe, execution, env, app, generic):
     fresh.mkdir()
     argv = [sys.executable if probe['script'].endswith('.py') else '/bin/bash', probe['script']]
     argv += [a.replace('{app}', str(app)).replace('{out}', str(fresh)) for a in probe.get('args', [])]
+    if not generic or env.get('YAB_QA_NATIVE') == '1':
+        rc, text = neutral_modifiers(root, folder / 'modifiers.log', env)
+        if rc:
+            return dict(passed=False, script=probe['script'], rc=rc, complete=False,
+                        detail='console modifiers not neutral: ' + text[-12000:])
     rc, text = logged(argv, folder / 'probe.log', root, dict(env, YAB_FARM_OUT=str(folder)),
                       timeout=probe.get('timeout', 120))
     complete = not generic or generic_complete(text)
@@ -877,7 +949,7 @@ def worker(root, commit, payload, app, output, channel=None, only=None):
     """only='windows': the scheduled batch, real-window parts alone, blocks nothing."""
     if os.environ.get('YAB_FARM_WORKER') != '1':
         raise ValueError('run checks inside the existing release farm worker')
-    expected = decoded(payload)
+    expected = decoded(payload, root)
     commit = git(root, 'rev-parse', commit + '^{commit}')
     if expected.get('commit') != commit:
         raise ValueError('QA plan belongs to another source commit')
@@ -888,7 +960,9 @@ def worker(root, commit, payload, app, output, channel=None, only=None):
     # channel (its release flags) can only make it stricter.
     blocks = expected.get('manual_blocks') is not False or (channel is not None and manual_blocks(channel))
     # A farm snapshot may add its own commit; its tracked product must agree.
-    if git(root, 'diff', '--name-only', commit, '--', '.', ':(exclude)work'):
+    # A publish --from runs today's release tooling over the commit
+    # (release.sh), so those paths alone may differ.
+    if git(root, 'diff', '--name-only', commit, '--', '.', ':(exclude)work', *TOOLING_PATHS):
         raise ValueError('worker source does not match the release commit')
     if git(root, 'ls-files', '--others', '--exclude-standard', '--', 'Sources', 'Tests', 'qa', 'evals'):
         raise ValueError('worker has unfrozen test or product inputs')
@@ -921,7 +995,7 @@ def worker(root, commit, payload, app, output, channel=None, only=None):
     output.mkdir(parents=True, exist_ok=True)
     execution = Path(tempfile.mkdtemp(prefix='attempt-', dir=output))
     (execution / 'probes').mkdir()
-    env = dict(os.environ, YAB_QA_APP=str(app), YAB_QA_PROBE_ONLY='1')
+    env = runtime_environment(dict(os.environ, YAB_QA_APP=str(app), YAB_QA_PROBE_ONLY='1'))
     suites = sorted({s for c in cards if c['id'] in run_units for s in c.get('suites', [])})
     units = unit_batch(root, suites, execution / 'units', env, commit)
     probes = {}
@@ -929,7 +1003,8 @@ def worker(root, commit, payload, app, output, channel=None, only=None):
         for generic, probe in ([(True, p) for p in headless_checks(c) if c['id'] in run_units] +
                                [(p in c.get('checks', []), p) for p in windowed(c) if c['id'] in run_windows]):
             if digest(probe) not in probes:
-                probes[digest(probe)] = run_probe(root, probe, execution, env, app, generic)
+                probes[digest(probe)] = run_probe(root, probe, execution,
+                    dict(env, YAB_QA_NATIVE='1') if probe in windowed(c) else env, app, generic)
     if only is None:
         smoke = next((r for r in receipts if r.get('kind') == 'smoke' and r.get('commit') == commit
                       and r.get('passed') is True), None)
@@ -991,7 +1066,7 @@ def worker(root, commit, payload, app, output, channel=None, only=None):
         report['failures'].append(dict(id='artifact-mutated', paths=[], checks=['probe modified the prepared app']))
         for row in report['cards']:
             row.update(passed=False, unit_passed=False, windows_passed=False)
-    if (git(root, 'diff', '--name-only', commit, '--', '.', ':(exclude)work') or
+    if (git(root, 'diff', '--name-only', commit, '--', '.', ':(exclude)work', *TOOLING_PATHS) or
             git(root, 'ls-files', '--others', '--exclude-standard', '--', 'Sources', 'Tests', 'qa', 'evals')):
         report['failures'].append(dict(id='source-mutated', paths=[], checks=['a check modified frozen source']))
         for row in report['cards']:
@@ -1101,7 +1176,7 @@ def ingest(root, text, store, output):
 
 
 def build_failed(root, commit, payload, text, output):
-    value = decoded(payload)
+    value = decoded(payload, root)
     commit = git(root, 'rev-parse', commit + '^{commit}')
     cards = cards_at(root, commit)
     if value.get('commit') != commit:
@@ -1133,6 +1208,42 @@ def stable_ready(root, commit, store):
             manual.append(c['id'])
     return dict(commit=value['commit'], total=value['total'], retired=len(value['retired']),
                 in_plan=len(value['cards']), missing=missing, manual=manual, ready=not missing and not manual)
+
+
+def runtime_environment(env):
+    """Non-login farm workers must expose their installed Node to card children."""
+    result = dict(env)
+    if not shutil.which('node', path=result.get('PATH', '')):
+        candidates = sorted((Path.home() / '.nvm/versions/node').glob('*/bin/node'), reverse=True)
+        candidates += sorted((Path.home() / '.local/share/fnm/node-versions').glob('*/installation/bin/node'), reverse=True)
+        candidates += [Path('/opt/homebrew/bin/node'), Path('/usr/local/bin/node')]
+        for node in candidates:
+            if node.is_file() and os.access(node, os.X_OK):
+                # Expose Node without changing which Python the farm granted.
+                result['PATH'] = os.pathsep.join(filter(None, [result.get('PATH', ''), str(node.parent)]))
+                break
+        else:
+            # Some farm Macs have no installation at all. Provision only this
+            # job's tools, never mutate Homebrew or depend on a login shell.
+            if result.get('YAB_FARM_WORKER') != '1':
+                raise ValueError('Node provisioning requires a farm worker')
+            arch = {'arm64': 'arm64', 'x86_64': 'x64'}[platform.machine()]
+            hashes = {
+                'arm64': '1d7f34ec4c03e12d8b33481e5c4560432d7dc31a0ef3ff5a4d9a8ada7cf6ecc9',
+                'x64': '838d400f7e66c804e5d11e2ecb61d6e9e878611146baff69d6a2def3cc23f4ac',
+            }
+            name = 'node-v22.16.0-darwin-' + arch
+            tools = Path(tempfile.mkdtemp(prefix='qa-node-', dir=result['YAB_FARM_OUT']))
+            archive = urllib.request.urlopen('https://nodejs.org/dist/v22.16.0/' + name + '.tar.gz', timeout=120).read()
+            if hashlib.sha256(archive).hexdigest() != hashes[arch]:
+                raise ValueError('QA Node archive checksum mismatch')
+            zipped = tools / 'node.tar.gz'
+            zipped.write_bytes(archive)
+            subprocess.run(['/usr/bin/tar', '-xzf', str(zipped), '-C', str(tools)], check=True)
+            node = tools / name / 'bin/node'
+            subprocess.run([str(node), '--version'], check=True)
+            result['PATH'] = os.pathsep.join(filter(None, [result.get('PATH', ''), str(node.parent)]))
+    return result
 
 
 def fetch_nightly(version, out, site=None, opener=None):
@@ -1308,6 +1419,7 @@ def main(argv=None):
         s.add_argument('--channel', choices=CHANNELS, help='nightly: manual acceptance does not block')
         if verb == 'host':
             s.add_argument('--preferred', default='m4'); s.add_argument('--fixed', action='store_true')
+            s.add_argument('--only-if-restricted', action='store_true', help='print no pin when either signing host can run the cards')
     ack = sub.add_parser('accept')
     ack.add_argument('ids', nargs='*'); ack.add_argument('--all', action='store_true')
     ack.add_argument('--commit', required=True); ack.add_argument('--note', required=True)
@@ -1356,10 +1468,12 @@ def main(argv=None):
     elif args.command in ('plan', 'payload', 'needs', 'host'):
         value = plan(ROOT, args.commit, store, args.channel)
         if args.command == 'payload':
-            print(encoded(value))
+            print(plan_encoded(value))
         elif args.command == 'needs':
             print(','.join(sorted(set(value['needs']) | set(SMOKE_NEEDS))))
         elif args.command == 'host':
+            if args.only_if_restricted and not (set(value['avoid_hosts']) & {'adhd', 'm4'}):
+                return
             if args.preferred not in value['avoid_hosts']:
                 print(args.preferred)
             elif args.fixed:

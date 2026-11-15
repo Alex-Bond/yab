@@ -3,6 +3,27 @@ import Security
 import YabCoreClient
 
 extension ChromiumPage {
+    func receiveClientCertificate(_ p: [String: JSONValue], finish: @escaping @MainActor ([String: JSONValue]) -> Void) {
+        guard let host = p["host"]?.string, !host.isEmpty,
+              let port = p["port"]?.number, port > 0, port <= 65535,
+              case .array(let encoded) = p["certificates"], !encoded.isEmpty, encoded.count <= 256 else {
+            finish([:]); return
+        }
+        let candidates = encoded.compactMap { $0.string.flatMap { Data(base64Encoded: $0) } }
+        guard candidates.count == encoded.count,
+              candidates.allSatisfy({ !$0.isEmpty && $0.count <= 65536 && SecCertificateCreateWithData(nil, $0 as CFData) != nil }) else {
+            finish([:]); return
+        }
+        questionRequests.presentingPermission?.whenCancelled { [weak self] in
+            if let self { ClientCertificates.cancel(in: self) }
+        }
+        ClientCertificates.choose(in: self, host: host, port: Int(port), candidates: candidates) { identity in
+            guard let identity, let certificate = ClientCertificates.certificate(identity),
+                  let index = candidates.firstIndex(of: certificate) else { finish([:]); return }
+            finish(["index": .number(Double(index))])
+        }
+    }
+
     func receiveCertificate(_ p: [String: JSONValue], finish: @escaping @MainActor ([String: JSONValue]) -> Void) {
         guard let url = p["origin"]?.string.flatMap(URL.init(string:)), url.scheme == "https",
               let host = url.host, case .array(let encoded) = p["chain"], !encoded.isEmpty, encoded.count <= 16 else {

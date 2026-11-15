@@ -184,6 +184,63 @@ struct EmptyFolderDragTests {
         }
     }
 
+    /// Feedback #1981 (R2535): a new folder, empty, carried up step by step
+    /// as a hand does and let go on the line between two shut folders with
+    /// tabs stands between them; it went into one of them, every time.
+    @Test(arguments: Density.allCases)
+    func aNewEmptyFolderGoesBetweenTwoShutFolders(_ density: Density) async throws {
+        try await world(density) { f in
+            let a = Nest(name: "A", open: false), b = Nest(name: "B", open: false)
+            let one = f.tab("One", kept: true, nest: a), two = f.tab("Two", kept: true, nest: b)
+            let fresh = try f.empty("Fresh", open: true)
+            try f.render([a, b, fresh])
+            var drag = try f.begin(fresh, want: 1.7)
+            for step in stride(from: 1.6, through: 0.5, by: -0.1) { try f.move(&drag, want: step) }
+            #expect(!f.drawn(a).hold.aimed && !f.drawn(b).hold.aimed, "between, not into either")
+            try f.end(drag)
+            #expect(fresh.parent == nil && one.nest === a && two.nest === b)
+            #expect(f.page.items.filter { $0.folderKey != nil }.map(\.id) == [a.key, fresh.key, b.key])
+            f.expectReleased()
+        }
+    }
+
+    /// The same hand stopping on a shut folder's middle still files it there.
+    @Test(arguments: Density.allCases)
+    func aNewEmptyFolderHeldOnAShutFoldersMiddleGoesIn(_ density: Density) async throws {
+        try await world(density) { f in
+            let a = Nest(name: "A", open: false), b = Nest(name: "B", open: false)
+            _ = f.tab("One", kept: true, nest: a)
+            _ = f.tab("Two", kept: true, nest: b)
+            let fresh = try f.empty("Fresh", open: true)
+            try f.render([a, b, fresh])
+            var drag = try f.begin(fresh, want: 1.7)
+            for step in stride(from: 1.6, through: 1.0, by: -0.1) { try f.move(&drag, want: step) }
+            #expect(f.drawn(b).hold.aimed)
+            try f.end(drag)
+            #expect(fresh.parent === b)
+        }
+    }
+
+    /// A folder with tabs between two shut ones, from below and from above.
+    @Test(arguments: Density.allCases, [false, true])
+    func aShutFolderGoesBetweenTwoShutFolders(_ density: Density, _ down: Bool) async throws {
+        try await world(density) { f in
+            let a = Nest(name: "A", open: false), b = Nest(name: "B", open: false), c = Nest(name: "C", open: false)
+            let one = f.tab("One", kept: true, nest: a), two = f.tab("Two", kept: true, nest: b), three = f.tab("Three", kept: true, nest: c)
+            try f.render([a, b, c])
+            let held = down ? a : c
+            var drag = try f.begin(held, want: down ? 0.3 : 1.7)
+            for step in stride(from: 0.4, through: 1.4, by: 0.1) { try f.move(&drag, want: down ? step : 2 - step) }
+            try f.move(&drag, want: down ? 1.5 : 0.5)
+            #expect(![a, b, c].contains { $0 !== held && f.drawn($0).hold.aimed }, "between, not into either")
+            try f.end(drag)
+            #expect(held.parent == nil && one.nest === a && two.nest === b && three.nest === c)
+            let order: [Tab.ID] = down ? [two.id, one.id, three.id] : [one.id, three.id, two.id]
+            #expect(f.browser.tabs.map(\.id) == order)
+            f.expectReleased()
+        }
+    }
+
     /// evals/space-switching/drags.py's into-folder take, without the
     /// window server: a loose row of today's carried onto a shut folder of
     /// yours' own row, held there or not, then let go: it goes in.

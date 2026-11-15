@@ -305,7 +305,7 @@ enum ExtensionShims {
     nonisolated static let stamp = ".yab-shim"
     /// Bumped when `prepare` changes what it does to a manifest, so an
     /// extension prepared by an earlier yab is prepared again.
-    nonisolated static let revision = "manifest-19"
+    nonisolated static let revision = "manifest-20"
     nonisolated static let version: String = {
         SHA256.hash(data: Data((script + contentScript + PasskeyRelay.page + idlePage + audioPage + revision + lateSetting).utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
             + (webKitDropsWasmKeyword ? "-safari18" : "") + (Store.testing ? "-test" : "")
@@ -494,7 +494,13 @@ enum ExtensionShims {
                         js.insert(content, at: 0)
                     }
                     let relay = !sites(entries[index]["matches"]).isEmpty && startsInPage.contains(sites(entries[index]["matches"]))
-                    if !main, !sites(entry["matches"]).isEmpty, let late = late(js.filter { $0 != content }, runAt: entry["run_at"] as? String, in: folder,
+                    // A button without a popup dispatches onClicked, commonly
+                    // followed by tabs.sendMessage. There is no readiness
+                    // barrier between that event and a deferred content file.
+                    // Keep its listeners at the manifest's injection point.
+                    let action = manifest["action"] as? [String: Any]
+                    let contentAction = action != nil && ((action?["default_popup"] as? String) ?? "").isEmpty
+                    if !main, !contentAction, !sites(entry["matches"]).isEmpty, let late = late(js.filter { $0 != content }, runAt: entry["run_at"] as? String, in: folder,
                                               manifestV3: (manifest["manifest_version"] as? Int) == 3, relay: relay, entry: index) {
                         let name = "yab-late-\(index).js"
                         if (try? late.write(to: folder.appendingPathComponent(name), atomically: true, encoding: .utf8)) != nil {
@@ -1371,6 +1377,16 @@ enum ExtensionShims {
             return nil
 
         // MARK: downloads
+        case "downloads.filenameListening":
+            ExtensionDownloads.owner = owner
+            ExtensionDownloads.listensForFilename(first as? Bool == true, extension: id, owner: owner)
+            return nil
+        case "downloads.filenameSuggestion":
+            let spec = first as? [String: Any] ?? [:]
+            if let request = spec["request"] as? String {
+                ExtensionDownloads.filenameSuggestion(request, by: id, owner: owner, filename: spec["filename"] as? String)
+            }
+            return nil
         case "downloads.download":
             let spec = first as? [String: Any] ?? [:]
             guard let url = (spec["url"] as? String).flatMap(URL.init(string:)) else { throw Unsupported(what: "No url to download") }
@@ -1388,7 +1404,10 @@ enum ExtensionShims {
             guard let web = source ?? own ?? browser.active?.webKitOnly("Legacy WebKit extension source", build: false) ?? browser.tabs.lazy.compactMap { $0.webKitOnly("Legacy WebKit extension source", build: false) }.first else {
                 throw Unsupported(what: "No page to download through")
             }
-            let name = (spec["filename"] as? String).flatMap { $0.isEmpty ? nil : DownloadRequest.filename($0) }
+            let name = spec["filename"] as? String
+            if let name, DownloadRequest.relativeFilename(name) == nil {
+                throw Unsupported(what: "Invalid relative download filename")
+            }
             ExtensionDownloads.owner = owner
             // Its delegate set in WebKit's own call, before WebKit asks where
             // it goes: awaited, the answer came after the question, and every
@@ -1449,7 +1468,7 @@ enum ExtensionShims {
             let spec = first as? [String: Any] ?? [:]
             if spec["stop"] as? Bool == true { ExtensionDownloads.unheard(id); return nil }
             if spec["now"] as? Bool == true { return ExtensionDownloads.now }
-            return await ExtensionDownloads.events(after: spec["after"] as? Int, worker: spec["worker"] as? Bool == true, extension: id)
+            return await ExtensionDownloads.events(after: spec["after"] as? Int, worker: spec["worker"] as? Bool == true, extension: id, owner: owner)
 
         // MARK: pageCapture, a tab as MHTML (ExtensionPageCapture)
         case "pageCapture.save":
@@ -1626,7 +1645,7 @@ enum ExtensionShims {
             let found = context.webExtension
             return ["id": id, "name": found.displayName ?? "", "shortName": found.displayShortName ?? "",
                     "version": found.version ?? "", "description": found.displayDescription ?? "",
-                    "enabled": true, "type": "extension", "installType": id.hasPrefix("local-") ? "development" : "normal",
+                    "enabled": true, "type": "extension", "installType": (owner.installed.first(where: { $0.id == id })?.source != nil || id.hasPrefix("local-")) ? "development" : "normal",
                     "mayDisable": true, "offlineEnabled": true, "isApp": false, "hostPermissions": [], "permissions": []]
         case "management.getAll":
             return []
@@ -1863,10 +1882,10 @@ enum ExtensionShims {
             let path = first as? String ?? ""
             let index = args.dropFirst().first as? Int ?? -1
             if index >= 0, owner.visibleTabs.indices.contains(index) {
-                popups[id, default: [:]][owner.visibleTabs[index].id.uuidString] = path
+                owner.popupPaths[id, default: [:]][owner.visibleTabs[index].id.uuidString] = path
             } else {
-                popups[id, default: [:]]["*"] = path
-                popups[id] = popups[id]?.filter { $0.key == "*" }
+                owner.popupPaths[id, default: [:]]["*"] = path
+                owner.popupPaths[id] = owner.popupPaths[id]?.filter { $0.key == "*" }
             }
             // The stand-in WebKit is told of next (mendPopup), there before it is.
             let page = (URL(string: path, relativeTo: context.baseURL)?.absoluteURL).flatMap { $0.host == context.baseURL.host ? $0.path : nil }
@@ -2221,9 +2240,6 @@ enum ExtensionShims {
 
     /// The start of every user script file's name, at the extension's root.
     static let userScriptPrefix = "yab-userscript-"
-
-    /// Popups extensions set for their buttons: per tab, or "*" for all.
-    static var popups: [String: [String: String]] = [:]
 
     /// Keep-awake assertions, one per extension that asked.
     static var awake: [String: IOPMAssertionID] = [:]

@@ -125,13 +125,19 @@ final class ChromeSidesTests: XCTestCase {
         XCTAssertFalse(g.plate.intersects(g.space))
     }
 
-    func testPageClearsEitherStatusColumnAndBothNotchSides() {
+    func testPageRunsUnderAStatusColumnAndKeepsANotchsSides() {
         let chrome = PageViewport.Chrome(folded: false, hasNow: false, visible: true)
         let duo = PageViewport(size: wide, hardware: UIEdgeInsets(top: 0, left: 0, bottom: 34, right: 84), chrome: chrome)
-        XCTAssertEqual(duo.maximum.right, 84)
+        XCTAssertEqual(duo.maximum.right, 0)
+        XCTAssertEqual(duo.clear.right, 84)
         let left = PageViewport(size: wide, hardware: UIEdgeInsets(top: 0, left: 84, bottom: 34, right: 0), chrome: chrome)
-        XCTAssertEqual(left.minimum.left, 84)
+        XCTAssertEqual(left.minimum.left, 0)
         XCTAssertEqual(left.maximum.right, 0)
+        XCTAssertEqual(left.clear.left, 84)
+        // A split pane at a notched window's edge keeps that edge.
+        let pane = PageViewport(size: wide, hardware: UIEdgeInsets(top: 0, left: 62, bottom: 21, right: 0), chrome: chrome,
+                                statusColumn: false)
+        XCTAssertEqual(pane.maximum.left, 62)
         let notch = PageViewport(size: wide, hardware: UIEdgeInsets(top: 0, left: 62, bottom: 21, right: 62), chrome: chrome)
         XCTAssertEqual(notch.maximum.left, 62)
         XCTAssertEqual(notch.maximum.right, 62)

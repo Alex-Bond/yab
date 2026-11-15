@@ -223,8 +223,10 @@ extension Browser {
         guard agents.session(id)?.state.live != true else { return false }
         var seen = Set<ObjectIdentifier>()
         for browser in windows ?? ([self] + BrowserWindows.shared.browsers) {
-            guard seen.insert(ObjectIdentifier(browser)).inserted,
-                  browser.panelExtension == nil, !browser.chatHistory,
+            guard seen.insert(ObjectIdentifier(browser)).inserted else { continue }
+            // Nothing of its field is kept once it has gone.
+            browser.chatAttach.forget(id)
+            guard browser.panelExtension == nil, !browser.chatHistory,
                   browser.chatOpen || browser.chatMovement.target == true,
                   browser.chatID(using: agents) == id else { continue }
             let followsTab = browser.chatOfTab(browser.active, agents: agents) == id
@@ -277,6 +279,8 @@ extension Browser {
             ? (tab.shy ? [] : [TaskContext.page(tab)] + (selection.map { [TaskContext.selection($0)] } ?? []))
             : context.filter { item in item.tab.map { id in chatTab(id)?.shy != true } ?? true }
         for item in given { if let tab = item.tab.flatMap(chatTab) { PageWords.warm(tab) } }
+        // The new chat first: the words below are its draft (chatDraft).
+        newChat()
         chatAttach.set(given.compactMap { item -> ChatAttachment? in
             switch item.kind {
             case .page, .tab: return item.tab.map(ChatAttachment.tab)
@@ -286,11 +290,7 @@ extension Browser {
             case .item: return item.text.map(ChatAttachment.quote)
             }
         })
-        if !words.isEmpty {
-            chatAttach.words = words
-            chatDraft = words
-        }
-        newChat()
+        if !words.isEmpty { chatDraft = words }
         moveChat(open: true)
     }
 
@@ -298,8 +298,8 @@ extension Browser {
     /// in it, as Dia's Chat with Group.
     func chatWith(_ nest: Nest) {
         ChatAttachment.warm(nest, in: self)
-        chatAttach.set([.folder(nest.id)])
         newChat()
+        chatAttach.set([.folder(nest.id)])
         moveChat(open: true)
         chatFocus += 1
     }
@@ -773,9 +773,8 @@ final class ChatFeed: ObservableObject {
         }
         let now: String
         if let session {
-            let last = session.items.last
             // Your words sent and not yet heard back count too: they stand in the chat at once.
-            now = "\(session.id)|\(session.state.rawValue)|\(session.items.count)|\(session.saying.count)|\(last?.text.count ?? 0)|\(last?.state.rawValue ?? "")|\(session.title ?? "")|\(Agents.shared.tabs(of: session).count)|\(session.project ?? "")"
+            now = "\(session.id)|\(session.state.rawValue)|\(session.itemsRevision)|\(session.saying.count)|\(session.title ?? "")|\(Agents.shared.tabs(of: session).count)|\(session.project ?? "")"
         } else {
             let kept = Chats.shared.chat(id)
             // Its project too: a move into one changes nothing else, and
@@ -2931,13 +2930,26 @@ extension Agents {
         let quotes = attached.compactMap(\.quote)
         let mail = attached.compactMap(\.mail).map(MailChat.filled)
         let folders = attached.compactMap(\.folder).compactMap { id in browser?.nests.first { $0.id == id } }
-        let message = ChatAttachment.said(tabs: tabs, files: attached.compactMap(\.file), quotes: quotes, mail: mail, folders: folders, in: browser) + (words.isEmpty ? ChatAttachment.noWords : words)
+        let given = ChatAttachment.said(tabs: tabs, files: attached.compactMap(\.file), quotes: quotes, mail: mail, folders: folders, in: browser)
+        let message = given + (words.isEmpty ? ChatAttachment.noWords : words)
         let carried = ChatAttachment.labels(tabs: tabs, files: attached.compactMap(\.file), quotes: quotes, mail: mail, folders: folders, in: browser)
         let sent = tabs.map { ChatAttachment.tab($0.id) } + attached.filter { if case .tab = $0 { return false } else { return true } }
         // Asleep, its page loads while the agent starts: read by a tool
         // before it had, it was empty.
         for tab in tabs where tab.asleep { tab.wake() }
         if let root = session(root(of: id)) { MailChat.took(mail, by: root) }
+        // The tabs it went with are what this message is about: the chat's
+        // target from now on (native_context's taskTargets), and its to
+        // work in without a "use this tab?" first, as a new chat's are.
+        // Left on the page the chat began on, the agent went back there.
+        if let first = tabs.first, let target = session(id) ?? revive(id) {
+            for tab in tabs {
+                tab.allowed.insert(target.id)
+                if let top = root(of: id) { tab.allowed.insert(top) }
+            }
+            target.nativeOriginTab = first.id
+            session(root(of: id))?.nativeOriginTab = first.id
+        }
         if let session = session(id), session.state.live {
             session.saying.append(words)
             session.carrying.append(carried)
@@ -2948,7 +2960,8 @@ extension Agents {
         let session = session(id) ?? revive(id)
         guard let session else { return }
         if session.task {
-            refine(session, message)
+            // Your words alone in the quote; what went with them, after it.
+            refine(session, words.isEmpty ? ChatAttachment.noWords : words, given: given, about: tabs)
             // Its chat shows your words, not the tab said around them.
             if !session.saying.isEmpty { session.saying[session.saying.count - 1] = words }
             session.carrying.append(carried)

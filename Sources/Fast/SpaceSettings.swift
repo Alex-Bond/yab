@@ -149,6 +149,7 @@ private struct SpaceList: View {
             ForEach(Array(list.enumerated()), id: \.element.id) { index, space in
                 SpaceListRow(space: space, index: index, place: browser.turnOrder.firstIndex { $0.id == space.id } ?? index,
                              tabs: browser.pageCount(in: space.id),
+                             profile: list.count > 1 ? profileNote(space, in: list) : nil,
                              paint: space.paint ?? SpacePaint(browser.prefs),
                              lifted: lifted == space.id, made: model.madeSpace == space.id, rule: index > 0 && lifted != space.id,
                              grip: list.count > 1 ? reorder(space, list: list) : nil) {
@@ -165,6 +166,14 @@ private struct SpaceList: View {
                 .overlay(alignment: .top) { Divider().padding(.leading, 22).offset(y: -0.5) } // design: the grip's 14 and the row's gap of 8
                 .settingsAnchor("add-space")
         }
+    }
+
+    private func profileNote(_ space: Space, in list: [Space]) -> (title: String, linked: Bool) {
+        let store = space.profileID
+        if let peer = list.first(where: { $0.id != space.id && $0.profileID == store }) {
+            return ("Same sign-ins as \(peer.name)", true)
+        }
+        return ("Its own sign-ins", false)
     }
 
     /// Where the row in the hand would land.
@@ -210,6 +219,7 @@ private struct SpaceListRow: View {
     /// Its place among them all, Mail's included: what ⌃1 to ⌃9 count.
     let place: Int
     let tabs: Int
+    let profile: (title: String, linked: Bool)?
     let paint: SpacePaint
     let lifted: Bool
     /// Just made: washed as a row the search picked out is.
@@ -229,11 +239,19 @@ private struct SpaceListRow: View {
             SpaceMark(icon: space.icon, size: 11)
                 .frame(width: 22, height: 22)
                 .background(Color(nsColor: color), in: RoundedRectangle(cornerRadius: Radius.small, style: .continuous))
-            Text(space.name).lineLimit(1)
-            Text(detail)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(space.name).lineLimit(1)
+                    Text(detail).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if let profile {
+                    HStack(spacing: 4) {
+                        if profile.linked { Image(systemName: "link") }
+                        Text(profile.title)
+                    }
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
             Spacer(minLength: 0)
             if place < 9 {
                 if let action = Shortcut.numbered("space", place + 1) {
@@ -273,7 +291,7 @@ private struct SpaceListRow: View {
 
     private var detail: String {
         let words = tabs == 0 ? "No tabs" : tabs == 1 ? "1 tab" : "\(tabs) tabs"
-        return space.ownSignIns ? words + " · its own sign-ins" : words
+        return words
     }
 
     /// Two columns of dots, the pointer an open hand over them.
@@ -340,7 +358,7 @@ private final class SpaceForm: ObservableObject {
     /// The space's own light or dark, and glass past the wave's end.
     @Published var mode: String
     @Published var glass: Bool
-    @Published var own: Bool
+    @Published var profile: UUID?
     @Published var search: String?
     @Published var searchCustom: String?
     @Published var downloadFolder: URL?
@@ -366,7 +384,7 @@ private final class SpaceForm: ObservableObject {
         strength = paint.drawingsStrength
         mode = paint.mode
         glass = paint.glass
-        own = space.ownSignIns
+        profile = nil
         search = space.search
         searchCustom = space.searchCustom
         downloadFolder = DownloadFolder.custom(for: space.id)
@@ -393,7 +411,7 @@ private final class SpaceForm: ObservableObject {
         strength = worn.drawingsStrength
         mode = ""
         glass = worn.glass
-        own = false
+        profile = browser.spaces.first?.id
     }
 
     /// The whole look, the card's switches and drawings too: a color
@@ -509,22 +527,15 @@ private struct SpacePage: View {
             }
             SpaceSearchRows(browser: browser, prefs: prefs, space: space, form: form)
             Section {
-                if space?.isFirst == true {
-                    SettingsRow("Sign-ins", detail: "Sign-ins shared with other spaces.") {
-                        Text("Shared").foregroundStyle(.secondary)
-                    }
-                } else {
-                    SettingsRow("Sign-ins", detail: form.own
-                        ? "Separate sign-ins, cookies and extensions. Starts signed out of all sites."
-                        : "Use the same sign-ins as other shared spaces.") {
-                        GlassTrack(title: "Sign-ins", options: [("Shared", false), ("Its own", true)], selection: Binding(
-                            get: { form.own },
-                            set: { own in if fresh { form.own = own } else { ask(own: own) } }
-                        ))
-                        .frame(width: 170)
-                    }
-                    .settingsAnchor("space-sign-ins")
+                SettingsRow("Sign-ins", detail: profilePeer.map { "Shares sign-ins, extensions and history with \($0.name)." }
+                            ?? "Separate sign-ins, cookies and extensions. Starts signed out of all sites.") {
+                    DropMenu("Sign-ins", options: profileOptions, selection: Binding(
+                        get: { profilePeer?.id.uuidString ?? "own" },
+                        set: { chooseProfile(UUID(uuidString: $0)) }
+                    ), trailing: true, faceTitle: profilePeer.map { "Same as \($0.name)" } ?? "Its own", showsCheck: true)
+                    .fixedSize()
                 }
+                .settingsAnchor("space-sign-ins")
             }
             Section {
                 SettingsRow("Save downloads to", detail: "For this Space on this Mac.") {
@@ -664,19 +675,14 @@ private struct SpacePage: View {
     }
 
     private func chooseDownloadFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.directoryURL = form.downloadFolder ?? prefs.downloads
-        panel.prompt = SettingsWords.text("Use This Folder")
-        guard panel.runModal() == .OK, let folder = panel.url else { return }
-        setDownloadFolder(folder)
+        DownloadFolder.chooseFolder(starting: form.downloadFolder ?? prefs.downloads) { folder in setDownloadFolder(folder) }
     }
 
     private func create() {
         let name = form.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let made = browser.addSpace(named: name.isEmpty ? placeholder : name, icon: form.icon, ownSignIns: form.own, paint: form.paint, show: false)
+        let profile = profilePeer?.id
+        let made = browser.addSpace(named: name.isEmpty ? placeholder : name, icon: form.icon, ownSignIns: profile == nil, paint: form.paint, show: false)
+        browser.setSpaceProfile(made, with: profile)
         browser.setSpaceSearch(made, to: form.search, custom: form.searchCustom)
         DownloadFolder.set(form.downloadFolder, for: made)
         model.leaveSpace(SpacePlace.new)
@@ -698,11 +704,39 @@ private struct SpacePage: View {
 
     /// Changing whose sign-ins it has signs it in or out of everything and
     /// opens its tabs again: asked first.
-    private func ask(own: Bool) {
-        guard let space, space.ownSignIns != own else { return }
+    private var profileOptions: [DropOption<String>] {
+        var options = [DropOption(title: "Its own", value: "own")]
+        for peer in browser.spaces where peer.id != form.id {
+            let picture = ImageRenderer(content: SpaceMark(icon: peer.icon, size: 12)).nsImage
+            picture?.isTemplate = !Spaces.isEmoji(peer.icon)
+            options.append(DropOption(title: peer.name, value: peer.id.uuidString,
+                picture: picture,
+                head: options.count == 1 ? "Same sign-ins as" : nil))
+        }
+        return options
+    }
+
+    private var profilePeer: Space? {
+        if fresh { return browser.spaces.first { $0.id == form.profile } }
+        guard let space else { return nil }
+        let peers = browser.spaces.filter { $0.id != space.id && $0.profileID == space.profileID }
+        return peers.first { $0.id == form.profile } ?? peers.first
+    }
+
+    private func chooseProfile(_ peer: UUID?) {
+        if fresh { form.profile = peer; return }
+        guard let space else { return }
+        let previous = space.profileID
+        let target = peer.flatMap { id in browser.spaces.first { $0.id == id } }
         Task { @MainActor in
-            guard await SpaceTray.askSignIns(space, own: own, browser: browser, place: .settings) else { return }
-            form.own = own
+            let question = Question(title: "Change sign-ins for \(space.name)?",
+                detail: "Tabs, pins and look stay. Sign-ins, extensions and history switch" + (target.map { " to those of \($0.name)." } ?? " to its own."),
+                glyph: "person.key", space: space.well(browser.prefs), yes: "Change Sign-ins", place: .settings)
+            guard await Questions.shared.ask(question) else { return }
+            guard browser.spaces.first(where: { $0.id == space.id })?.profileID == previous,
+                  peer == nil || browser.spaces.first(where: { $0.id == peer })?.profileID == target?.profileID else { return }
+            browser.setSpaceProfile(space.id, with: peer)
+            form.profile = peer
         }
     }
 

@@ -19,9 +19,32 @@ def _size(path):
     return [width, height]
 
 
+def capture_allowed():
+    """Whether this farm job may capture here: the farm's own reading of this
+    Mac for the job (YAB_FARM_HAS, what its guard found the Mac meets, the
+    Screen Recording checks of its job python and of a helper it starts
+    among them), not a list of host names that missed each new Mac (m4 on
+    2026-10-28, m2pro on 2026-11-08). adhd's raised blackout leaves outside
+    capture refused there, and its pictures come from the previously
+    authorized SCK recorder (picture() below), so a Mac that keeps that
+    recorder may capture too."""
+    if os.environ.get("YAB_FARM_WORKER") != "1":
+        return False
+    if "YAB_FARM_HAS" not in os.environ:
+        # A farm runtime from before 2026-11-08 doesn't say: its old list.
+        return os.environ.get("WHERE") in ("adhd", "renderer-2", "m2", "m2pro", "main", "m4")
+    if "capture" in os.environ.get("YAB_FARM_HAS", "").split(","):
+        return True
+    return (os.environ.get("WHERE") == "adhd" or bool(os.environ.get("PROBE_CAPTURE_RECORDER"))) and _recorder().is_file()
+
+
+def _recorder():
+    return Path(os.environ.get("PROBE_CAPTURE_RECORDER", "/Users/dev/Documents/GitHub/fast-apps/farm-1620e700b76643a1/blackout-experiment/scfilm"))
+
+
 def picture(pid, path, *, window_id=None):
-    if os.environ.get("YAB_FARM_WORKER") != "1" or os.environ.get("WHERE") not in ("adhd", "renderer-2", "main", "m4"):
-        raise RuntimeError("window capture must run through farm on an authorized host")
+    if not capture_allowed():
+        raise RuntimeError("window capture must run through farm on a Mac the farm says may capture (YAB_FARM_HAS)")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # macOS grants Screen Recording per executable, so a Mac keeps one
@@ -64,7 +87,7 @@ def picture(pid, path, *, window_id=None):
     elif result.returncode:
         # Reuse the previously authorized, unchanged SCK recorder used in
         # blackout verification. No permission, signing or identity changes.
-        stable = Path(os.environ.get("PROBE_CAPTURE_RECORDER", "/Users/dev/Documents/GitHub/fast-apps/farm-1620e700b76643a1/blackout-experiment/scfilm"))
+        stable = _recorder()
         if (os.environ["WHERE"] != "adhd" and not os.environ.get("PROBE_CAPTURE_RECORDER")) or not stable.is_file():
             raise RuntimeError(f"window capture exited {result.returncode}: {result.stderr.strip() or result.stdout.strip()}")
         frames = path.parent / (path.stem + "-sck")

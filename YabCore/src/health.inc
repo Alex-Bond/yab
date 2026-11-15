@@ -15,7 +15,7 @@ static void HealthReset(Tab* t, bool answering) {
 }
 static void HealthArm(Tab& t) {
   if (t.internal || t.closing || !t.visible || !t.browser || t.rendererPID <= 0 ||
-      !t.healthToken.empty() || t.browser->GetHost()->HasDevTools()) return;
+      !t.healthToken.empty() || (t.browser->GetHost()->HasDevTools() || !t.devToolsFront.empty())) return;
   auto frame = t.browser->GetMainFrame();
   if (!frame || !frame->IsValid()) return;
   t.healthToken = Key(NSUUID.UUID.UUIDString);
@@ -39,7 +39,7 @@ static void HealthInput(Tab& t) {
 static void HealthPoll(Tab& t) {
   if (t.healthToken.empty()) return;
   if (t.closing || !t.browser || t.rendererPID != t.healthPID ||
-      t.browser->GetHost()->HasDevTools()) { HealthReset(&t, true); return; }
+      (t.browser->GetHost()->HasDevTools() || !t.devToolsFront.empty())) { HealthReset(&t, true); return; }
   auto frame = t.browser->GetMainFrame();
   if (!frame || !frame->IsValid() || frame->GetIdentifier().ToString() != t.healthFrame) {
     HealthReset(&t, true); return;
@@ -69,15 +69,11 @@ static bool HealthMessage(Tab* t, CefRefPtr<CefFrame> frame,
       frame->GetIdentifier().ToString() != t->healthFrame) return true;
   ++t->healthPongs;
   bool again = t->healthAgain;
-  if (again) {
-    // An older reply cannot dismiss a card for newer unanswered input.
-    bool unresponsive = t->healthUnresponsive;
-    HealthReset(t, false);
-    HealthArm(*t);
-    t->healthUnresponsive = unresponsive;
-    if (t->healthToken.empty()) HealthReset(t, true);
-  } else {
-    HealthReset(t, true);
-  }
+  // This authenticated pong ran on the current renderer's main thread.
+  // Newer input still needs its own challenge, but cannot keep an earlier
+  // hang alive across successful replies. Its fresh deadline detects a
+  // subsequent stall without treating continued input as continued silence.
+  HealthReset(t, true);
+  if (again) HealthArm(*t);
   return true;
 }

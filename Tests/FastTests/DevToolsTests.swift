@@ -129,6 +129,61 @@ struct DevToolsTests {
         browser.listened = nil
     }
 
+    /// #1467: ⌥⌘J is a toggle. With the card out
+    /// in the window, on any pane, it goes; it used to switch to Console
+    /// and stay. In a window of its own it stays and shows Console.
+    @MainActor @Test func consoleKeyAgainPutsTheDockedCardAway() async {
+        let browser = Browser(windowID: UUID())
+        defer { try? FileManager.default.removeItem(at: Store.file("session-window-\(browser.windowID!.uuidString).json")) }
+        let tab = Tab()
+        browser.listened = tab
+        browser.moveDev(open: true, side: .bottom)
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(browser.devOpen)
+        browser.devPane = .network
+        browser.showConsole()
+        #expect(browser.listened == nil)
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(!browser.devOpen && !browser.devComing)
+
+        // Undocked: forward, on Console, not closed.
+        browser.devDetached = true
+        browser.devOpen = true
+        browser.devPane = .network
+        browser.showConsole()
+        #expect(browser.devOpen)
+        #expect(browser.devPane == .console)
+        browser.devDetached = false
+        browser.devOpen = false
+    }
+
+    /// #1467 on the app: ⌥⌘J leaves the keys in Console's prompt, and keys
+    /// typed in the card stay the card's. Pressed again there it went
+    /// nowhere; it must put the card away.
+    @MainActor @Test func consoleKeyFromThePromptPutsTheCardAway() async throws {
+        _ = NSApplication.shared
+        let browser = Browser(windowID: UUID())
+        defer { try? FileManager.default.removeItem(at: Store.file("session-window-\(browser.windowID!.uuidString).json")) }
+        let window = NSWindow(contentRect: NSRect(x: -9000, y: -9000, width: 400, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let prompt = PromptTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        window.contentView?.addSubview(prompt)
+        #expect(window.makeFirstResponder(prompt))
+        defer { window.makeFirstResponder(nil); window.close() }
+        browser.listened = Tab()
+        browser.moveDev(open: true, side: .bottom)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(browser.devOpen)
+        let key = try #require(Keymap.shared.keys(.console))
+        let chord = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: key.flags, timestamp: 1,
+                                                  windowNumber: window.windowNumber, context: nil, characters: key.key,
+                                                  charactersIgnoringModifiers: key.key, isARepeat: false,
+                                                  keyCode: KeyLayout.code(for: key.key) ?? 38))
+        #expect(DevKeys.take(chord, browser: browser))
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(!browser.devOpen && !browser.devComing)
+    }
+
     @Test func webKitsTabsByTheirType() {
         #expect(WebPane(type: "timeline") == .timelines)
         #expect(WebPane(type: "storage") == .storage)

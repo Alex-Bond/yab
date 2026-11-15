@@ -14,6 +14,15 @@ enum ChromiumNativeTextInput {
         return token
     }
 
+    static func usesLegacyHelper(_ capability: JSONValue?) -> Bool {
+        // The Objective-C helper boxes compile-time feature macros as 0/1.
+        capability == .bool(false) || capability == .number(0)
+    }
+
+    static func canForward(_ state: [String: JSONValue]?, legacy: Bool) -> Bool {
+        focusToken(state) != nil || (legacy && state == nil)
+    }
+
     static func range(_ value: JSONValue?) -> NSRange? {
         guard case .object(let row)? = value, row["valid"] == .bool(true),
               let start = row["start"]?.number, let end = row["end"]?.number,
@@ -22,7 +31,6 @@ enum ChromiumNativeTextInput {
               end < Double(Int.max) else { return nil }
         return NSRange(location: Int(start), length: Int(end - start))
     }
-
     /// The wire fields of a replacement range AppKit gave an insert or a
     /// mark: none when it replaces nothing (NSNotFound).
     static func replacementFields(_ range: NSRange) -> [String: JSONValue] {
@@ -70,13 +78,13 @@ struct ChromiumKeyInterpretation: Equatable {
     ///   - typed: the key's own characters.
     ///   - inputMethod: an input method (Kana, Pinyin, Hangul) is selected.
     ///   - taken: what the input context answered for the key.
-    func route(typed: String?, inputMethod: Bool, taken: Bool) -> Route {
+    func route(typed: String?, inputMethod: Bool, taken: Bool, composing: Bool = false) -> Route {
         guard !edits.isEmpty else {
             // A key the context took without typing or a command is one it
             // keeps; passed on, the page would type it after all.
             return taken && commands == 0 ? .kept : .page
         }
-        if !inputMethod, commands == 0, edits.count == 1,
+        if !inputMethod, !composing, commands == 0, edits.count == 1,
            case .insert(let text, let range) = edits[0], range.location == NSNotFound,
            let typed, !typed.isEmpty, text == typed { return .page }
         return .inputMethod
@@ -103,12 +111,13 @@ extension ChromiumPage {
     }
 
     func receiveNativeTextInput(_ state: [String: JSONValue]) {
-        if ChromiumNativeTextInput.focusToken(state) == nil ||
-            nativeText?["focusToken"] != state["focusToken"] {
+        let moved = nativeText?["focusToken"] != state["focusToken"]
+        if ChromiumNativeTextInput.focusToken(state) == nil || moved {
             // No unmark is sent: it would commit into a possibly new target.
             discardNativeComposition()
         }
         nativeText = state
+        if moved { accessibilityFocusMoved() }
         inputContext?.invalidateCharacterCoordinates()
     }
 
@@ -190,16 +199,30 @@ extension ChromiumPage {
                   let w = row["width"]?.number, let h = row["height"]?.number else { return false }
             return [x, y, w, h].allSatisfy(\.isFinite) && w >= 0 && h > 0 && window != nil
         }()
-        return ["schemaVersion": 1, "remote": remoteID as Any? ?? NSNull(),
+        let responder = window?.firstResponder as? NSView
+        let client = responder as? NSTextInputClient
+        let responderCaret = client.map { $0.firstRect(forCharacterRange: $0.selectedRange(), actualRange: nil) } ?? .zero
+        return ["responderClass": responder.map { String(describing: type(of: $0)) } ?? "",
+                "responderInputContext": responder?.inputContext != nil,
+                "inputContextIsCurrent": inputContext != nil && NSTextInputContext.current === inputContext,
+                "inputContextClientClass": inputContext.map { String(describing: type(of: $0.client)) } ?? "",
+                "inputContextClientIsResponder": inputContext.map { ($0.client as AnyObject) === self } ?? false,
+                "responderCaret": [responderCaret.minX, responderCaret.minY, responderCaret.width, responderCaret.height],
+                "contentType": contentType?.rawValue as Any? ?? NSNull(),
+                "automaticPeriodSubstitution": NSSpellChecker.isAutomaticPeriodSubstitutionEnabled,
+                "keyRoutes": keyRoutes,
+                "inputSource": inputContext?.selectedKeyboardInputSource as Any? ?? NSNull(),
+                "schemaVersion": 1, "remote": remoteID as Any? ?? NSNull(),
                 "localTurn": inputMethodTurn, "localGeneration": inputMethodGeneration,
                 "live": inputMethodLive, "focused": inputMethodFocused,
+                "inputContext": inputContext != nil,
                 "focusToken": ChromiumNativeTextInput.focusToken(nativeText) as Any? ?? NSNull(),
                 "nativeRevision": nativeText?["revision"]?.string as Any? ?? NSNull(),
                 "nativeState": state ?? NSNull(), "hasMarkedText": hasMarkedText(),
                 "markedRange": describe(markedRange()), "selectedRange": describe(selectedRange()),
                 "caret": [caret.minX, caret.minY, caret.width, caret.height],
-                "caretCoordinateSpace": "screenBottomLeft", "geometrySource": nativeCaret ? "native" : "fallback",
+                "caretCoordinateSpace": "screenBottomLeft", "geometrySource": nativeCaret && nativeInputEligible ? "native" : "unavailable",
                 "documentProof": "unavailable", "nativeLease": false, "nativeAcknowledged": false,
-                "forwarding": "legacy-cocoa-input-client", "keyRoutes": keyRoutes]
+                "forwarding": "legacy-cocoa-input-client"]
     }
 }

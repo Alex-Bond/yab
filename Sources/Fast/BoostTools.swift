@@ -39,7 +39,7 @@ enum BoostTools {
             if let own = Agents.shared.tabs(of: owner).first(where: { $0.agent == session && $0.address?.host == site }) { tab = own }
             else if let opened = Agents.shared.browse(url, for: session) { tab = opened }
             else { throw BoostPackage.Invalid("Could not open the tool's site.") }
-            guard let web = tab.webKitOnly("Boost tool runtime") else { throw BoostPackage.Invalid("Boost tools are not available on this engine yet.") }
+            let web = tab.page
             for _ in 0..<150 {
                 if !web.isLoading, tab.address?.host == site { break }
                 try await Task.sleep(for: .milliseconds(100))
@@ -62,7 +62,7 @@ enum BoostTools {
             guard owner.state.live, Boosts.shared.records.contains(where: { $0.id == record.id && $0.revision == record.revision && $0.enabled }) else {
                 throw BoostPackage.Invalid("The task or plugin changed before execution.")
             }
-            let world = Boosts.world(package.id)
+            let world = Boosts.pageWorld(package.id)
             guard (try await BoostJavaScript.evaluate(BoostScript.sensitive, on: web, world: world)) as? Bool == false else {
                 throw BoostPackage.Invalid("Plugin tools do not run on sign-in or payment pages.")
             }

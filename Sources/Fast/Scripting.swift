@@ -494,10 +494,9 @@ extension Browser {
             if let session = ChatComposer.begin(words, with: items, in: self) { showChat(session.id) }
             return
         }
-        chatAttach.set(items)
-        chatAttach.words = words
-        chatDraft = words
         newChat()
+        chatAttach.set(items)
+        chatDraft = words
         if !chatOpen { moveChat(open: true) }
     }
 }

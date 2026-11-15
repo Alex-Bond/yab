@@ -1,0 +1,163 @@
+--- a/cef/libcef/browser/net_service/login_delegate.h
++++ b/cef/libcef/browser/net_service/login_delegate.h
+@@ -10,6 +10,7 @@
+ #include "content/public/browser/content_browser_client.h"
+ #include "content/public/browser/login_delegate.h"
+ #include "net/base/auth.h"
++#include "net/http/http_response_headers.h"
+ 
+ namespace content {
+ struct GlobalRequestID;
+@@ -29,7 +30,11 @@
+                 content::WebContents* web_contents,
+                 const content::GlobalRequestID& request_id,
+                 const GURL& origin_url,
+-                content::LoginDelegate::LoginAuthRequiredCallback callback);
++                content::LoginDelegate::LoginAuthRequiredCallback callback,
++                bool extension_auth = false,
++                bool is_request_for_navigation = false,
++                scoped_refptr<net::HttpResponseHeaders> response_headers = nullptr,
++                content::BrowserContext* browser_context = nullptr);
+ 
+   void Continue(const CefString& username, const CefString& password);
+   void Cancel();
+@@ -38,7 +43,15 @@
+   void Start(CefRefPtr<CefBrowserHostBase> browser,
+              const net::AuthChallengeInfo& auth_info,
+              const content::GlobalRequestID& request_id,
+-             const GURL& origin_url);
++             const GURL& origin_url,
++             bool extension_auth,
++             bool is_request_for_navigation,
++             scoped_refptr<net::HttpResponseHeaders> response_headers,
++             base::WeakPtr<content::BrowserContext> browser_context);
++  void Ask(CefRefPtr<CefBrowserHostBase> browser,
++           const net::AuthChallengeInfo& auth_info,
++           const content::GlobalRequestID& request_id,
++           const GURL& origin_url);
+ 
+   content::LoginDelegate::LoginAuthRequiredCallback callback_;
+   base::WeakPtrFactory<LoginDelegate> weak_ptr_factory_;
+--- a/cef/libcef/browser/net_service/login_delegate.cc
++++ b/cef/libcef/browser/net_service/login_delegate.cc
+@@ -11,6 +11,14 @@
+ #include "cef/libcef/browser/thread_util.h"
+ #include "content/public/browser/global_request_id.h"
+ #include "content/public/browser/web_contents.h"
++#include "base/feature_list.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/common/content_features.h"
++#include "extensions/buildflags/buildflags.h"
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++#include "extensions/browser/api/web_request/web_request_api.h"
++#include "extensions/browser/guest_view/web_view/web_view_guest.h"
++#endif
+ 
+ namespace net_service {
+ 
+@@ -116,7 +124,11 @@
+     content::WebContents* web_contents,
+     const content::GlobalRequestID& request_id,
+     const GURL& origin_url,
+-    content::LoginDelegate::LoginAuthRequiredCallback callback)
++    content::LoginDelegate::LoginAuthRequiredCallback callback,
++    bool extension_auth,
++    bool is_request_for_navigation,
++    scoped_refptr<net::HttpResponseHeaders> response_headers,
++    content::BrowserContext* browser_context)
+     : callback_(std::move(callback)), weak_ptr_factory_(this) {
+   CEF_REQUIRE_UIT();
+ 
+@@ -129,7 +141,11 @@
+   // |callback| needs to be executed asynchronously.
+   CEF_POST_TASK(CEF_UIT, base::BindOnce(&LoginDelegate::Start,
+                                         weak_ptr_factory_.GetWeakPtr(), browser,
+-                                        auth_info, request_id, origin_url));
++                                        auth_info, request_id, origin_url, extension_auth,
++                                        is_request_for_navigation,
++                                        std::move(response_headers),
++                                        browser_context ? browser_context->GetWeakPtr()
++                                                        : base::WeakPtr<content::BrowserContext>()));
+ }
+ 
+ void LoginDelegate::Continue(const CefString& username,
+@@ -151,9 +167,64 @@
+ void LoginDelegate::Start(CefRefPtr<CefBrowserHostBase> browser,
+                           const net::AuthChallengeInfo& auth_info,
+                           const content::GlobalRequestID& request_id,
+-                          const GURL& origin_url) {
+-  CEF_REQUIRE_UIT();
+-
++                          const GURL& origin_url,
++                          bool extension_auth,
++                          bool is_request_for_navigation,
++                          scoped_refptr<net::HttpResponseHeaders> response_headers,
++                          base::WeakPtr<content::BrowserContext> browser_context) {
++  CEF_REQUIRE_UIT();
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  // Chrome's normal login coordinator offers the real challenge to webRequest
++  // first. --disable-chrome-login-prompt bypasses that coordinator, but must
++  // not bypass extension authentication as well. Keep request IDs, filters,
++  // permissions, worker wakeup and blocking/asyncBlocking in Chromium's API.
++  // A worker/background request has no WebContents, but still belongs to
++  // the supplied profile. Never infer its profile from another open tab.
++  if (extension_auth && browser_context) {
++    auto* contents = browser ? browser->GetWebContents() : nullptr;
++    auto* context = browser_context.get();
++    auto* api = extensions::BrowserContextKeyedAPIFactory<
++        extensions::WebRequestAPI>::Get(context);
++    auto continuation = base::BindOnce(
++        [](base::WeakPtr<LoginDelegate> self,
++           CefRefPtr<CefBrowserHostBase> browser,
++           net::AuthChallengeInfo auth_info,
++           content::GlobalRequestID request_id, GURL origin_url,
++           const std::optional<net::AuthCredentials>& credentials,
++           bool should_cancel) {
++          if (!self) return;
++          if (credentials) {
++            self->Continue(CefString(credentials->username()),
++                           CefString(credentials->password()));
++          } else if (should_cancel) {
++            self->Cancel();
++          } else {
++            // CEF's sheet is the fallback only. A weak task also makes a
++            // request destroyed while its worker replies a no-op.
++            CEF_POST_TASK(CEF_UIT, base::BindOnce(&LoginDelegate::Ask, self,
++                browser, auth_info, request_id, origin_url));
++          }
++        }, weak_ptr_factory_.GetWeakPtr(), browser, auth_info, request_id,
++        origin_url);
++    extensions::WebViewGuest* web_view_guest = nullptr;
++    if (contents && !base::FeatureList::IsEnabled(features::kGuestViewMPArch)) {
++      web_view_guest = extensions::WebViewGuest::FromWebContents(contents);
++    }
++    if (api->MaybeProxyAuthRequest(context, auth_info, response_headers,
++          request_id, is_request_for_navigation, std::move(continuation),
++          web_view_guest)) {
++      return;
++    }
++  }
++#endif
++  Ask(browser, auth_info, request_id, origin_url);
++}
++
++void LoginDelegate::Ask(CefRefPtr<CefBrowserHostBase> browser,
++                        const net::AuthChallengeInfo& auth_info,
++                        const content::GlobalRequestID& request_id,
++                        const GURL& origin_url) {
++  CEF_REQUIRE_UIT();
+   auto url_request_info = CefBrowserURLRequest::FromRequestID(request_id);
+ 
+   if (browser || url_request_info) {
+--- a/cef/libcef/browser/chrome/chrome_content_browser_client_cef.cc
++++ b/cef/libcef/browser/chrome/chrome_content_browser_client_cef.cc
+@@ -698,7 +698,8 @@
+     // Delegate auth callbacks to GetAuthCredentials.
+     return std::make_unique<net_service::LoginDelegate>(
+         auth_info, web_contents, request_id, url,
+-        std::move(auth_required_callback));
++        std::move(auth_required_callback), !guest,
++        is_request_for_navigation, std::move(response_headers), browser_context);
+   }
+ 
+   return ChromeContentBrowserClient::CreateLoginDelegate(

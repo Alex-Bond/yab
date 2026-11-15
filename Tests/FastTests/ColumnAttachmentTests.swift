@@ -26,6 +26,55 @@ struct ColumnAttachmentTests {
         try await check(browser)
     }
 
+    @Test(arguments: [Flank.left, .right])
+    func hiddenColumnDoesNotClaimPageSwipes(flank: Flank) async throws {
+        try await withBrowser(hidden: true, flank: flank) { browser in
+            let frame = NSRect(x: 0, y: 0, width: 900, height: 650)
+            let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            defer { window.close() }
+            let root = NSView(frame: frame)
+            root.wantsLayer = true
+            window.contentView = root
+            let column = ColumnView(browser: browser)
+            column.frame = root.bounds
+            root.addSubview(column)
+            let catcher = SpaceSwipe.Catch(frame: NSRect(x: flank == .left ? 0 : 660, y: 0, width: 240, height: 650))
+            catcher.browser = browser
+            catcher.column = true
+            root.addSubview(catcher)
+            column.slide(out: false, animated: false)
+            #expect(!catcher.acceptsInput)
+            let local = NSPoint(x: catcher.frame.midX, y: 300)
+            for phase: Int64 in [0, 1, 2, 4] {
+                let cg = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                    wheelCount: 2, wheel1: 0, wheel2: -80, wheel3: 0))
+                cg.flags = []
+                cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+                cg.setIntegerValueField(CGEventField(rawValue: 51)!, value: Int64(window.windowNumber))
+                typealias Place = @convention(c) (CGEvent, CGPoint) -> Void
+                let symbol = try #require(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGEventSetWindowLocation"))
+                unsafeBitCast(symbol, to: Place.self)(cg, CGPoint(x: local.x, y: frame.height - local.y))
+                let event = try #require(NSEvent(cgEvent: cg))
+                try #require(event.window === window)
+                #expect(!SpaceSwipe.claims(event))
+                #expect(catcher.heard(event) === event)
+            }
+            column.slide(out: true, animated: false)
+            #expect(catcher.acceptsInput)
+            catcher.isHidden = true
+            #expect(!catcher.acceptsInput)
+            catcher.isHidden = false
+            column.slide(out: false, animated: false)
+            #expect(!catcher.acceptsInput)
+            // Top tabs have their own catcher and stay usable with the
+            // sidebar put away.
+            catcher.column = false
+            #expect(catcher.acceptsInput)
+        }
+    }
+
     /// The layer's actual position in the column, independent of which
     /// layer carries its drawing. The host's native frame stays full-window.
     private func origin(_ column: ColumnView) throws -> CGFloat {

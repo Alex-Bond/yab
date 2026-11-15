@@ -1,6 +1,8 @@
 import Foundation
 import JavaScriptCore
 import Testing
+import WebKit
+import YabCoreClient
 @testable import Fast
 
 @Suite @MainActor
@@ -13,6 +15,22 @@ struct ChromiumDRMExtensionTests {
         // Browser globals are deliberately not evaluated by this parser check.
         _ = context.evaluateScript("new Function(" + (try ChromiumDRMExtensionScripts.json(grant + manifest + "globalThis.witness=true;")) + ")")
         #expect(context.exception == nil, Comment(rawValue: context.exception?.toString() ?? ""))
+    }
+    /// What a page's content script passes can hold what JSON can't (a Date,
+    /// NaN, Infinity). The call fails with a Swift error. On 0.46.18
+    /// JSONSerialization raised an Objective-C exception out of the task
+    /// instead, which left the main actor's executor record dangling (and
+    /// would abort this test process).
+    @Test func pageValuesJSONCannotHoldFailTheCallWithoutRaising() async throws {
+        let session = ChromiumDRMExtensionSession(profile: "json-test", privateMode: true, store: .nonPersistent())
+        let unserializable: [Any] = [[Date()], [Double.nan], ["deep": [Double.infinity]]]
+        for args in unserializable {
+            await #expect(throws: YabCoreError.self) {
+                _ = try await session.request("ext.bridge.invoke", ["op": "runtime.sendMessage", "args": args])
+            }
+        }
+        let plain = try ChromiumDRMExtensionSession.json(["args": ["text", 1, true, NSNull()]])
+        #expect(String(decoding: plain, as: UTF8.self).contains("text"))
     }
     @Test func matchPatternsKeepDNSBoundariesSchemeAndPath() {
         for url in ["https://spotify.com/play", "https://open.spotify.com/play?x=1"] {

@@ -387,12 +387,19 @@ extension Browser {
         // The card going is the answer, and nothing else says it: a sign-in
         // is done with, and the page is waiting.
         withAnimation(Motion.depart) { tab.offer = nil }
+        // A re-submission must read after this write, including a slow
+        // keychain or manager reply, rather than ask again while Save waits.
+        PasswordSaveDecision.beginSave(login)
         // Into the manager it was offered for, through its own API.
         if let manager = offer.into, let adapter = ManagerVault.adapter(manager) {
             Task { @MainActor [weak self, weak tab] in
+                defer { PasswordSaveDecision.endSave(login) }
                 var kept = true
                 do {
                     try await adapter.save(host: login.host, user: login.user, password: login.password)
+                    if manager == PasswordManagers.apple {
+                        PasswordSaveDecision.remember(host: login.host, user: login.user, password: login.password)
+                    }
                 } catch {
                     kept = false
                     ApplePasswords.log.error("\(manager, privacy: .public) didn't save: \(String(describing: error), privacy: .public)")
@@ -409,6 +416,7 @@ extension Browser {
         DispatchQueue.global(qos: .userInitiated).async {
             let kept = Vault.save(host: login.host, user: login.user, password: login.password, used: Date(), clear: login.clear, space: login.space)
             DispatchQueue.main.async { [weak self, weak tab] in
+                PasswordSaveDecision.endSave(login)
                 if kept {
                     self?.savedPasswordChanged()
                     return

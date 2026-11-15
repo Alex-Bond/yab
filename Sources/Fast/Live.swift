@@ -120,6 +120,10 @@ struct LiveMark: Codable, Equatable {
     /// Moved in rather than brought: the pull request you just made. Its
     /// words are kept up to date, but the folder never takes it away.
     var yours: Bool? = nil
+    /// Yours, but moved in by the folder itself rather than by your hand
+    /// (the pull request you just made, LiveFolders.noticeMove): the
+    /// folder still never takes it away, and it sleeps as today's tabs do.
+    var moved: Bool? = nil
     /// When it came, for a new-for-you folder's week.
     var came: Date? = nil
     /// A routine's folder's own words for it (LiveSaid), and the words it
@@ -501,6 +505,7 @@ enum LiveReader {
 
     @MainActor
     private static func request(_ url: URL, accept: String, store: WKWebsiteDataStore) async throws -> URLRequest {
+        await ChromiumDRMCookies.beforeSending(to: url, from: store)
         let cookies: [HTTPCookie] = try await withCheckedThrowingContinuation { done in
             var answered = false
             store.httpCookieStore.getAllCookies { cookies in

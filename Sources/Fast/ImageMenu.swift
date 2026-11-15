@@ -289,8 +289,10 @@ extension Browser {
     /// The picture's bytes: a blob: read by its own page, the only place it
     /// lives; anything else fetched with the page's cookies and its address
     /// as the referrer, so a picture behind a sign-in comes too.
-    static func imageData(_ url: URL, from tab: Tab) async -> Data? {
-        if let page = tab.builtPage as? ChromiumPage { return await page.imageData(url) }
+    /// `largest`: only to be read, no longer than that many pixels on a
+    /// side (Chromium scales it down in the page's renderer).
+    static func imageData(_ url: URL, from tab: Tab, largest: Int? = nil) async -> Data? {
+        if let page = tab.builtPage as? ChromiumPage { return await page.imageData(url, largest: largest) }
         guard let web = tab.webKitOnly("WebKit image context", build: false) else { return nil }
         if url.scheme?.lowercased() == "data" { return try? ImageDownload.inline(url).data }
         if url.scheme?.lowercased() == "blob" {

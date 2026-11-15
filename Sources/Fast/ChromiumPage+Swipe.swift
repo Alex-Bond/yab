@@ -28,11 +28,30 @@ enum ChromiumWheelPhase {
 final class ChromiumSwipe {
     weak var page: ChromiumPage?
     private var snapshot: ChromiumHistorySnapshot?
-    private var events: Task<Void, Never>?
-    private var turn = 0
+    private var historyTask: Task<Void, Never>?
+    private let history: @MainActor () async throws -> ChromiumHistorySnapshot
+    private let evaluate: @MainActor (String) -> Void
+    private let wheel: @MainActor (NSEvent) -> Void
+    private var observing = false
+    private var lastWheel: NSEvent?
+    private var interrupted = false
     private var stepped: (forward: Bool, swipe: Bool, at: TimeInterval)?
 
-    init(_ page: ChromiumPage) { self.page = page }
+    init(_ page: ChromiumPage?,
+         history: (@MainActor () async throws -> ChromiumHistorySnapshot)? = nil,
+         wheel: (@MainActor (NSEvent) -> Void)? = nil,
+         evaluate: (@MainActor (String) -> Void)? = nil) {
+        self.page = page
+        self.history = history ?? { [weak page] in
+            guard let page else { throw CancellationError() }
+            return try await page.swipeHistory()
+        }
+        self.wheel = wheel ?? { [weak page] in page?.sendWheel($0) }
+        self.evaluate = evaluate ?? { [weak page] source in
+            page?.command("script.evaluate", ["world": .string(ChromiumScripts.world(.yab)),
+                "function": .string("function(){\(source);return true}"), "userGesture": .bool(false)])
+        }
+    }
 
     /// A mouse driver may emit a button and a swipe for the same press.
     func step(forward: Bool, swipe: Bool, at time: TimeInterval) {
@@ -43,36 +62,89 @@ final class ChromiumSwipe {
         else if forward { tab.forward() } else { tab.back() }
     }
 
-    /// Preserve event order while reading native history without blocking AppKit.
-    /// Vertical wheels never read history or arm a page wheel listener.
+    /// Reading history is observational: it must never hold the input stream.
+    /// AppKit already delivers wheels in order on the main actor.
     func receive(_ event: NSEvent) {
-        let previous = events, mine = turn
-        events = Task { @MainActor [weak self] in
-            await previous?.value
-            guard let self, turn == mine, let page else { return }
-            if event.phase == .began || event.phase == .mayBegin { snapshot = nil }
-            if event.phase == .changed, axis == nil,
-               gatheredX + abs(event.scrollingDeltaX) > (gatheredY + abs(event.scrollingDeltaY)) * 1.3,
-               gatheredX + gatheredY + abs(event.scrollingDeltaX) + abs(event.scrollingDeltaY) > 6 {
-                snapshot = try? await page.navigationHistory()
-                guard turn == mine else { return }
-            }
-            read(event)
+        if interrupted {
+            guard event.phase == .began || event.phase == .mayBegin ||
+                (event.phase == [] && event.momentumPhase == []) else { return }
+            interrupted = false
         }
+        read(event)
     }
 
-    /// Navigation, retirement and helper loss invalidate queued wheels and replies.
+    private func forward(_ event: NSEvent) {
+        wheel(event)
+        if event.phase == .began || event.phase == .mayBegin || event.phase == .changed ||
+            event.momentumPhase == .began || event.momentumPhase == .changed {
+            lastWheel = event
+        } else { lastWheel = nil }
+    }
+
+    /// Close Chromium's latched target when replacing its document. Use a
+    /// zero-distance terminal wheel at the original target, never a new notch.
     func invalidate() {
-        turn &+= 1
-        events?.cancel()
-        events = nil
+        interrupted = true
+        if let event = lastWheel, let cg = event.cgEvent?.copy() {
+            let deltas: [CGEventField] = [.scrollWheelEventDeltaAxis1, .scrollWheelEventDeltaAxis2,
+                .scrollWheelEventFixedPtDeltaAxis1, .scrollWheelEventFixedPtDeltaAxis2,
+                .scrollWheelEventPointDeltaAxis1, .scrollWheelEventPointDeltaAxis2]
+            for field in deltas {
+                cg.setDoubleValueField(field, value: 0)
+            }
+            cg.timestamp = DispatchTime.now().uptimeNanoseconds
+            cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: event.momentumPhase == [] ? 8 : 0)
+            cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: event.momentumPhase == [] ? 0 : 3)
+            if let end = NSEvent(cgEvent: cg) { wheel(end) }
+        }
+        lastWheel = nil
+        historyTask?.cancel()
+        historyTask = nil
         snapshot = nil
         cancelSwipe()
     }
 
+    private func readHistory() {
+        if let page, let tab = page.navigationTab {
+            ways = PageNavigationList.immediate(page: page, tab: tab, back: back)
+            rows = ways?.stops ?? []
+        }
+        let mine = swipeGesture
+        // A late snapshot may not suddenly arm navigation after a slow page.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+            guard let self, swipeGesture == mine, snapshot == nil, !spent, rows.isEmpty else { return }
+            historyTask?.cancel()
+            spent = true
+            settle(nil)
+        }
+        historyTask = Task { @MainActor [weak self, history = history] in
+            let start = ProcessInfo.processInfo.systemUptime
+            let snapshot = try? await history()
+            if Store.testing {
+                NSLog("Chromium swipe history %.3f s (cancelled=%@, received=%@)",
+                    ProcessInfo.processInfo.systemUptime - start,
+                    Task.isCancelled ? "yes" : "no", snapshot == nil ? "no" : "yes")
+            }
+            guard let self, !Task.isCancelled, swipeGesture == mine, !spent else { return }
+            guard let snapshot else {
+                if rows.isEmpty { spent = true; settle(nil) }
+                return
+            }
+            self.snapshot = snapshot
+            if let page, let tab = page.navigationTab {
+                ways = snapshot.list(page: page, tab: tab, back: back)
+                rows = ways?.stops ?? []
+            }
+            if rows.isEmpty {
+                nowhere = true
+                spent = true
+                if free == true { still = true }
+            } else { tell() }
+        }
+    }
+
     private func script(_ source: String) {
-        page?.command("script.evaluate", ["world": .string(ChromiumScripts.world(.yab)),
-            "function": .string("function(){\(source);return true}"), "userGesture": .bool(false)])
+        evaluate(source)
     }
     private func note(_ text: @autoclosure () -> String) {}
     private var swipeState: String { "gesture=\(swipeGesture)" }
@@ -155,17 +227,32 @@ final class ChromiumSwipe {
         // list of pages is out, the fingers going up and down pick in it,
         // and the page under it keeps still.
         if event.phase == .mayBegin || event.phase == .began {
+            historyTask?.cancel()
+            historyTask = nil
+            snapshot = nil
             swipeGesture += 1
-            if Swipe.listensEarly, !LinkGap.cut("swipe") { script("window.__yabSwipe && window.__yabSwipe.begin(\(swipeGesture))") }
+            observing = false
             nowhere = false
             still = false
+        }
+        // script.evaluate is a completion barrier in the page's input queue.
+        // A zero-distance touch or a vertical scroll must not wait for a
+        // renderer round trip before its first wheel. Start ownership watching
+        // before the first sideways wheel (including a sideways began), while
+        // keeping begin ahead of that wheel so a quick flick is still observed.
+        let starting = event.phase == .began || event.phase == .mayBegin
+        if !observing, event.phase != [], event.momentumPhase == [],
+           starting || !spent,
+           abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) * 1.3 {
+            observing = true
+            if !LinkGap.cut("swipe") { script("window.__yabSwipe && window.__yabSwipe.begin(\(swipeGesture))") }
         }
         // Nor while the swipe goes towards no page and the page has nothing
         // of its own to scroll that way: it stays put rather than sliding
         // and springing back. Its end still goes, to settle anything begun.
         let listingNow = event.phase == .changed && event.momentumPhase == [] && listing
-        let stillNow = still && (event.phase == .changed || event.momentumPhase != [])
-        if !(listingNow || stillNow) { page?.sendWheel(event) }
+        let stillNow = still && (event.phase == .changed || event.momentumPhase == .began || event.momentumPhase == .changed)
+        if !(listingNow || stillNow) { forward(event) }
         // Only a live trackpad gesture, not its glide afterwards, and not a
         // mouse wheel, which has no beginning or end to speak of.
         guard event.momentumPhase == [] else { return }
@@ -215,15 +302,6 @@ final class ChromiumSwipe {
                     spent = true
                     return
                 }
-                // Only now is the page asked to listen to the wheel: while
-                // any wheel listener is on a page, WebKit holds each
-                // gesture's first event for the page's main thread before
-                // it scrolls, so a busy page (a feed's script, Gmail's,
-                // Reddit's) stood still under the fingers until its script
-                // was done, as it does in Safari only on a page with a
-                // wheel listener of its own (evals/page-scroll-lag). Up and
-                // down, the most of every scroll, now never listens.
-                if !Swipe.listensEarly, !LinkGap.cut("swipe") { script("window.__yabSwipe && window.__yabSwipe.begin(\(swipeGesture))") }
                 // Pinched in, the fingers are moving around inside what was
                 // magnified, the page itself may be no wider than the window.
                 // Reaching its edge there is not a wish to leave.
@@ -233,19 +311,7 @@ final class ChromiumSwipe {
                     return
                 }
                 back = sideways > 0
-                if let page, let tab = page.navigationTab, let snapshot {
-                    ways = snapshot.list(page: page, tab: tab, back: back)
-                    rows = ways?.stops ?? []
-                }
-                // Nowhere to go that way: nothing to pull out.
-                if rows.isEmpty {
-                    note("nothing that way")
-                    spent = true
-                    nowhere = true
-                    if free == true { still = true }
-                    note("nothing that way, page \(still ? "kept still" : "left to scroll")")
-                    return
-                }
+                readHistory()
                 note(event)
                 tell()
                 return
@@ -329,7 +395,7 @@ final class ChromiumSwipe {
     private var travel: CGFloat { max(0, back ? sideways : -sideways) }
 
     private func tell() {
-        guard free == true else { return }
+        guard free == true, ways != nil else { return }
 
         let travel = travel
         // Drawn all the way back, the pill goes; drawn out again, it
@@ -518,6 +584,10 @@ extension ChromiumPage {
         let previous = pressureStage
         pressureStage = stage
         guard !PageView.agentActing, let tab = navigationTab else { return }
+        if forceInput.holdsInput {
+            if stage == 0, previous > 0 { tab.onPress?(tab, 0) }
+            return
+        }
         if stage == 1 { tab.onPress?(tab, amount) }
         else if stage == 0, previous > 0 { tab.onPress?(tab, 0) }
         if stage == 2, previous < 2 { tab.onForceClick?(tab, point) }

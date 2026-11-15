@@ -1,0 +1,81 @@
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -15,6 +15,7 @@
+ #include "cef/libcef/browser/native/cursor_util.h"
+ #include "cef/libcef/common/api_version_util.h"
+ #include "cef/libcef/common/frame_util.h"
++#include "chrome/browser/after_startup_task_utils.h"
+ #include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
+ #include "chrome/common/chrome_result_codes.h"
+ #include "components/input/native_web_keyboard_event.h"
+@@ -655,6 +656,30 @@
+       handler->OnLoadingProgressChange(browser(), progress);
+     }
+   }
++}
++
++// Chrome's startup ends (the after-startup queue and the BEST_EFFORT fence of
++// AfterStartupTaskUtils) on its startup tab: first painted, or loaded and
++// idle. CEF opens no such tab, and an embedder's pages come later, often
++// hidden first, so only a visible page left to settle, or the 3-minute
++// failsafe, ended it: native hosts' kills, CEF's background runner and every
++// other BEST_EFFORT task waited for that. The embedder's first page painted
++// while visible is its startup's end.
++static void MaybeEndStartup(content::WebContents* contents) {
++  if (!AfterStartupTaskUtils::IsBrowserStartupComplete() &&
++      contents->GetVisibility() == content::Visibility::VISIBLE &&
++      contents->CompletedFirstVisuallyNonEmptyPaint()) {
++    AfterStartupTaskUtils::SetEmbedderFirstPagePainted();
++  }
++}
++
++void CefBrowserContentsDelegate::DidFirstVisuallyNonEmptyPaint() {
++  MaybeEndStartup(web_contents());
++}
++
++void CefBrowserContentsDelegate::OnVisibilityChanged(
++    content::Visibility visibility) {
++  MaybeEndStartup(web_contents());
+ }
+ 
+ void CefBrowserContentsDelegate::DidStopLoading() {
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -163,6 +163,8 @@
+   void PrimaryMainDocumentElementAvailable() override;
+   void LoadProgressChanged(double progress) override;
+   void DidStopLoading() override;
++  void DidFirstVisuallyNonEmptyPaint() override;
++  void OnVisibilityChanged(content::Visibility visibility) override;
+   void DidFinishNavigation(
+       content::NavigationHandle* navigation_handle) override;
+   void DidFailLoad(content::RenderFrameHost* render_frame_host,
+--- a/chrome/browser/after_startup_task_utils.cc
++++ b/chrome/browser/after_startup_task_utils.cc
+@@ -425,6 +425,11 @@
+   return ::IsBrowserStartupComplete();
+ }
+ 
++void AfterStartupTaskUtils::SetEmbedderFirstPagePainted() {
++  ::SetBrowserStartupIsComplete(
++      StartupIsCompleteReason::kFirstWebContentsProfiler);
++}
++
+ void AfterStartupTaskUtils::UnsafeResetForTesting() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+   DCHECK(GetAfterStartupTasks().empty());
+--- a/chrome/browser/after_startup_task_utils.h
++++ b/chrome/browser/after_startup_task_utils.h
+@@ -112,6 +112,12 @@
+   // PostTask() API instead.
+   static bool IsBrowserStartupComplete();
+ 
++  // Yab: for an embedder that opens no startup browser (CEF), its first page
++  // painted while visible is the end of startup, as the startup tab's first
++  // paint is in Chrome (FirstWebContentsProfiler) and Java's signal is on
++  // Android. Idempotent; UI thread only.
++  static void SetEmbedderFirstPagePainted();
++
+   // For use by unit tests where we don't have normal content loading
+   // infrastructure and thus BeginMonitoringStartupCompletion() is unsuitable.
+   static void SetBrowserStartupIsCompleteForTesting(

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import JavaScriptCore
 import Testing
 @testable import Fast
 
@@ -84,7 +85,7 @@ struct IconsTests {
 
     @Test func aPageNamingTheKeptIconWearsIt() {
         #expect(plan(names: site) == .wear)
-        #expect(plan(names: site, changed: true) == .wear)
+        #expect(plan(names: site, changed: true) == .own)
         #expect(plan(names: site, shy: true) == .wear)
     }
 
@@ -100,7 +101,7 @@ struct IconsTests {
     @Test func aPageNamingNoneWearsTheSites() {
         // A PDF, a JSON file, an error: not the 16 pixel file at the root.
         #expect(plan(names: nil) == .wear)
-        #expect(plan(source: "", fresh: false, names: nil) == .wear)
+        #expect(plan(source: "", fresh: false, names: nil) == .keep)
         #expect(plan(kept: false, source: "", names: nil) == .keep)
     }
 
@@ -118,6 +119,15 @@ struct IconsTests {
         #expect(plan(fresh: false, names: "https://github.githubassets.com/favicons/favicon-pending.svg", changed: true) == .own)
         // Calendar has none until its script draws the day: that is kept.
         #expect(plan(kept: false, source: "", names: "https://calendar.google.com/x/calendar_7.ico", changed: true) == .keep)
+    }
+
+    @Test func anOldRootIconIsRefreshedOnceOnANormalVisit() {
+        #expect(plan(source: "", fresh: false, names: nil) == .keep)
+        #expect(plan(source: "", fresh: false, names: nil, rechecked: true) == .wear)
+        #expect(plan(source: "", fresh: false, names: nil, shy: true) == .wear)
+        #expect(plan(source: "", fresh: false, names: nil, changed: true) == .wear)
+        #expect(plan(names: nil) == .wear)
+        #expect(plan(fresh: false, names: nil) == .wear)
     }
 
     @Test func aPageNamingAnIconIsAskedAfterABotChecksPageNamedNone() {
@@ -231,5 +241,115 @@ struct IconsTests {
             NSColor.white.setFill(); NSBezierPath(ovalIn: rect.insetBy(dx: 4, dy: 4)).fill(); return true
         }
         #expect(!Favicons.blank(white))
+    }
+
+    // Notion's page icons: an emoji written into the page as an SVG, an
+    // uploaded picture at an address of its own, each put in by its script
+    // as it goes from page to page without loading one.
+    private let emoji = #"data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">%F0%9F%9A%80</text></svg>"#
+
+    @Test func anIconWrittenIntoThePageIsThePagesFirst() {
+        let page = URL(string: "https://www.notion.so/team/Roadmap-0123456789abcdef0123456789abcdef")!
+        let ranked = Favicons.rank([
+            link("https://www.notion.so/images/logo-ios.png", rel: "apple-touch-icon"),
+            link(emoji, rel: "shortcut icon"),
+        ], page: page, dark: false)
+        #expect(ranked.count == 3)
+        #expect(ranked.first.map(Favicons.inline) == true)
+        #expect(ranked.first.flatMap { Favicons.inlineType($0.absoluteString) } == "image/svg+xml")
+        #expect(ranked.dropFirst().map(\.absoluteString) == ["https://www.notion.so/images/logo-ios.png", "https://www.notion.so/favicon.ico"])
+    }
+
+    @Test func onlyAPictureWrittenIntoThePageAndNotTooBigOne() {
+        let page = URL(string: "https://example.com/")!
+        let png = "data:image/png;base64," + Data(repeating: 7, count: 100).base64EncodedString()
+        let huge = "data:image/png;base64," + Data(repeating: 7, count: Favicons.inlineLimit).base64EncodedString()
+        let ranked = Favicons.rank([
+            link("data:text/html,<script>alert(1)</script>"),
+            link("data:application/octet-stream;base64,AAAA"),
+            link("javascript:alert(1)"),
+            link(huge),
+            link(png),
+        ], page: page, dark: false).map(\.absoluteString)
+        #expect(ranked == [png, "https://example.com/favicon.ico"])
+        #expect(Favicons.inlineType("data:IMAGE/X-ICON;base64,AAAA") == "image/x-icon")
+        #expect(Favicons.inlineType("data:image/svg+xml;charset=utf-8,<svg/>") == "image/svg+xml")
+        #expect(Favicons.inlineType("data:text/plain,hi") == nil)
+        #expect(Favicons.inlineType("https://example.com/data:image/png,") == nil)
+    }
+
+    @Test func anIconTheScriptPutInGoesBeforeTheSitesFiles() {
+        // Notion's uploaded icon in place of its favicon.ico, which a
+        // touch icon outranked.
+        let page = URL(string: "https://www.notion.so/team/Roadmap")!
+        var mine = link("https://www.notion.so/image/https%3A%2F%2Fprod-files.example%2Fowl.png?table=block&id=1&width=64", rel: "shortcut icon")
+        mine["set"] = "1"
+        var touch = link("https://www.notion.so/images/logo-ios.png", rel: "apple-touch-icon")
+        touch["set"] = "1"
+        let ranked = Favicons.rank([touch, mine], page: page, dark: false).map(\.absoluteString)
+        #expect(ranked.first == mine["href"])
+        #expect(Favicons.rank([touch, link(mine["href"]!, rel: "shortcut icon")], page: page, dark: false).first?.absoluteString == touch["href"])
+    }
+
+    @Test func anIconWrittenIntoThePageIsNeverKept() {
+        let uri = Favicons.address(emoji)!.absoluteString
+        #expect(plan(names: uri) == .own)
+        #expect(plan(names: uri, changed: true) == .own)
+        #expect(plan(kept: false, source: "", names: uri) == .own)
+        #expect(plan(kept: false, source: "", names: uri, changed: true) == .own)
+        #expect(plan(source: "", names: uri) == .own)
+        #expect(plan(fresh: false, names: uri) == .own)
+        #expect(plan(source: "", fresh: false, names: uri, rechecked: true) == .own)
+        #expect(plan(kept: false, source: "", names: uri, shy: true) == .own)
+        // A page naming the site's icon again wears the kept one.
+        #expect(plan(source: "https://www.notion.so/images/favicon.ico", names: "https://www.notion.so/images/favicon.ico") == .wear)
+    }
+
+    @Test func anIconWrittenIntoThePageIsReadHere() throws {
+        let svg = try #require(Favicons.inlineBytes(Favicons.address(emoji)!.absoluteString))
+        #expect(String(decoding: svg, as: UTF8.self).contains(">🚀</text>"))
+        #expect(Favicons.glyph(inSVG: svg) == "🚀")
+        let bytes = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
+        #expect(Favicons.inlineBytes("data:image/png;base64," + bytes.base64EncodedString()) == bytes)
+        #expect(Favicons.inlineBytes("data:image/svg+xml,%3Csvg%2F%3E#frag") == Data("<svg/>".utf8))
+        #expect(Favicons.inlineBytes("data:text/html,<b>hi</b>") == nil)
+        #expect(Favicons.inlineBytes("data:image/png;base64,") == nil)
+        // Shapes are drawn as the Mac draws an SVG; only a lone character
+        // is drawn as text.
+        #expect(Favicons.glyph(inSVG: Data(#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="9" height="9"/><text>A</text></svg>"#.utf8)) == nil)
+        #expect(Favicons.glyph(inSVG: Data(#"<svg xmlns="http://www.w3.org/2000/svg"><text>Roadmap</text></svg>"#.utf8)) == nil)
+        #expect(Favicons.glyph(inSVG: Data("not an svg".utf8)) == nil)
+    }
+
+    @MainActor @Test func anEmojiIconIsAPicture() async throws {
+        let svg = try #require(Favicons.inlineBytes(Favicons.address(emoji)!.absoluteString))
+        #expect(await Favicons.square(svg) != nil)
+    }
+
+    /// Every change is told once it settles, as Chromium's tab follows each
+    /// one its page makes: a timer's or a count's icon each second, not
+    /// once in half a minute (register R2573).
+    @MainActor @Test func everyIconChangeIsTold() {
+        #expect(IconRelay.settle <= 250)
+        #expect(IconRelay.script.contains("timer = setTimeout(tell, \(IconRelay.settle));"))
+        #expect(!IconRelay.script.contains("30000"))
+    }
+
+    /// A canvas's icon handed over as a blob: (Chrome and Arc wear it) is
+    /// the page's own, first, and never fetched for the site or kept.
+    @Test func aBlobIconIsThePagesOwn() {
+        let page = URL(string: "https://app.example.com/inbox")!
+        let blob = "blob:https://app.example.com/6f1c2d3e-0a1b-4c5d-8e9f-0123456789ab"
+        #expect(Favicons.written(blob))
+        #expect(Favicons.written("data:image/png;base64,AAAA"))
+        #expect(!Favicons.written("https://app.example.com/favicon.ico"))
+        var mine = link(blob, rel: "icon")
+        mine["set"] = "1"
+        let ranked = Favicons.rank([link("https://app.example.com/icon-192.png", rel: "icon", sizes: "192x192"), mine],
+                                   page: page, dark: false).map(\.absoluteString)
+        #expect(ranked.first == blob)
+        #expect(plan(names: blob) == .own)
+        #expect(plan(kept: false, source: "", names: blob, changed: true) == .own)
+        #expect(plan(source: "", fresh: false, names: blob) == .own)
     }
 }

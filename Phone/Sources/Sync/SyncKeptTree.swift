@@ -48,18 +48,22 @@ enum SyncKeptTree {
             var order: String
             var node: Node
         }
+        // Each level's folders and tabs, sorted out once: a walk of every
+        // folder and every kept tab for each folder made a sync of a space
+        // with many kept tabs quadratic on the main thread (#547).
+        var subfolders: [String?: [SyncFolder]] = [:]
+        for folder in folders.values { subfolders[parent[folder.id], default: []].append(folder) }
+        var tabsIn: [String?: [SyncTab]] = [:]
+        for tab in row.kept { tabsIn[tab.folder.flatMap { folders[$0] == nil ? nil : $0 }, default: []].append(tab) }
         func level(_ owner: String?) -> [Node] {
             var entries: [Entry] = []
-            for folder in folders.values where parent[folder.id] == owner {
+            for folder in subfolders[owner] ?? [] {
                 let children = level(folder.id)
                 let order = folder.order ?? children.flatMap(\.tabs).compactMap(\.order).min() ?? "\u{10FFFF}"
                 entries.append(Entry(id: "folder:" + folder.id, order: order, node: .folder(folder, children)))
             }
-            for tab in row.kept {
-                let direct = tab.folder.flatMap { folders[$0] == nil ? nil : $0 }
-                if direct == owner {
-                    entries.append(Entry(id: "tab:" + tab.id, order: tab.order ?? "", node: .tab(tab)))
-                }
+            for tab in tabsIn[owner] ?? [] {
+                entries.append(Entry(id: "tab:" + tab.id, order: tab.order ?? "", node: .tab(tab)))
             }
             return entries.sorted { ($0.order, $0.id) < ($1.order, $1.id) }.map(\.node)
         }

@@ -22,6 +22,12 @@ public enum Store {
         return path.contains("/.build/") || !path.contains(".app/Contents/MacOS/")
     }
 
+    /// A test world on a Mac with nobody at it: take macOS to have said yes
+    /// about Yab, for the camera, the microphone and where you are.
+    public nonisolated static var macSaysYes: Bool {
+        testing && ProcessInfo.processInfo.environment["YAB_MAC_SAYS_YES"] == "1"
+    }
+
     /// Which test world a test run lives in. YAB_PROBE=1, or a run from
     /// the build folder, is the test world, "Yab (test)". YAB_PROBE=
     /// <name> is a world of its own, "Yab (<name>)", with settings and

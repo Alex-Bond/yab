@@ -6,6 +6,17 @@ import YabCoreClient
 @Suite(.serialized)
 @MainActor
 struct ChromiumPageTests {
+    @Test func undoReturnsFromNonEditingPagesButKeepsNativeTextEditing() {
+        #expect(ChromiumPage.offersCommandToPage("z", typing: false))
+        #expect(!ChromiumPage.offersCommandToPage("z", typing: true))
+        for letter in ["a", "c", "v", "x", "w", "t", "n", "q"] {
+            #expect(!ChromiumPage.offersCommandToPage(letter, typing: false))
+        }
+        #expect(ChromiumPage.offersCommandToPage("f", typing: false))
+    }
+
+    private final class FlippedContent: NSView { override var isFlipped: Bool { true } }
+
     @Test func forceClickUsesTheStageEdgeAndAgentInputCannotOpenPeek() {
         let tab = Tab(shy: true)
         let page = ChromiumPage(tab: tab)
@@ -28,6 +39,30 @@ struct ChromiumPageTests {
         page.receivePressure(stage: 0, amount: 0, point: point)
         #expect(presses == [0.6, 0] && points == [point])
         #expect(page.remoteID == nil)
+    }
+
+    @Test func hoverBelongsToTheHitPageRatherThanItsTrackingRectangle() {
+        let tab = Tab(shy: true)
+        let page = ChromiumPage(tab: tab)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { page.removeFromSuperview(); page.retire(call: false, pictureInPicture: false); tab.close(); window.close() }
+        window.isReleasedWhenClosed = false
+        window.contentView = FlippedContent(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let content = window.contentView!
+        page.frame = content.bounds
+        content.addSubview(page)
+        let overlay = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        content.addSubview(overlay)
+        #expect(!page.ownsHover(at: NSPoint(x: 100, y: 350)))
+        #expect(page.ownsHover(at: NSPoint(x: 100, y: 50)))
+        #expect(page.ownsHover(at: NSPoint(x: 300, y: 100)))
+        overlay.isHidden = true
+        #expect(page.ownsHover(at: NSPoint(x: 100, y: 100)))
+        page.isHidden = true
+        #expect(!page.ownsHover(at: NSPoint(x: 100, y: 100)))
+        page.receiveTooltip("late page tooltip")
+        #expect(page.tipText.isEmpty)
     }
 
     @Test func ordinaryFactoryStaysWebKitWithoutSwitch() {
@@ -92,6 +127,40 @@ struct ChromiumPageTests {
         page.navigate(to: request)
         #expect(page.diagnosticFailure == nil)
         #expect(page.remoteID == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func nativeDocumentCloseClosesItsSmallWindow(kept: Bool) throws {
+        _ = NSApplication.shared
+        let browser = Browser(windowID: UUID())
+        let factory = PageEngineFactory(kinds: [.chromium]) { tab, _ in ChromiumPage(tab: tab) }
+        let tab = Tab(shy: true, engine: .chromium, factory: factory)
+        tab.restore(url: URL(string: "https://close.example/small")!, title: "Small")
+        browser.prepare(tab)
+        browser.outside.append(tab)
+        let page = try #require(tab.page as? ChromiumPage)
+        let remote = "small-close-" + UUID().uuidString
+        page.adoptRemote(remote)
+        LinkWindow.present(tab, for: browser)
+        let link = try #require(LinkWindow.owning(page: page))
+        defer {
+            link.window.close()
+            page.retire(call: false, pictureInPicture: false)
+            ChromiumProcess.shared.detach(remote)
+            browser.letGo()
+        }
+        // A foreign endpoint must not close this window.
+        page.receive(YabCoreEvent(name: "tab.closed", params: ["tab": .string("foreign")]))
+        #expect(LinkWindow.owning(page: page) === link)
+        if kept {
+            link.keep()
+            #expect(browser.tabs.contains(where: { $0 === tab }))
+        }
+        page.receive(YabCoreEvent(name: "tab.closed", params: ["tab": .string(remote)]))
+        #expect(LinkWindow.owning(page: page) == nil, "Native document close must close its Small Window shell")
+        #expect(!link.window.isVisible)
+        #expect(!browser.outside.contains(where: { $0 === tab }))
+        #expect(!browser.tabs.contains(where: { $0 === tab }), "A kept page must also leave its receiving row")
     }
 
     @Test func nativeCloseWithoutOwnedApprovalCancelsLeaveWaitOnce() {

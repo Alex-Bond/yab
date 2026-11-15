@@ -609,7 +609,8 @@ extension Browser {
     }
 
     /// Tab, or a place's row: the field becomes that place's.
-    func enterPlace(_ place: FieldPlace) {
+    func enterPlace(_ place: FieldPlace, filter: Int = 0, remember: Bool = true) {
+        let fromField = remember && fresh
         if place != .selection { endAnswer() }
         if query.place == .files && place != .files {
             cancelFileAnswer()
@@ -617,7 +618,11 @@ extension Browser {
         }
         dropScope()
         query.acting = nil
+        // Set the destination's category before typed's setter can ask for
+        // rows, and before stockPlace starts its initial asynchronous read.
+        query.placeFilter = filter
         query.place = place
+        query.placeFromField = fromField
         query.spot = 0
         picked = nil
         query.pointed = nil
@@ -651,10 +656,10 @@ extension Browser {
         return true
     }
 
-    /// ⌫ in the empty field returns to the plain field; Escape can return
-    /// straight to the page's form once the place's nested steps are gone.
+    /// ⌫ or Escape returns to the plain field once nested steps are gone.
     @discardableResult
-    func leavePlace(returnToForm: Bool = false) -> Bool {
+    func leavePlace() -> Bool {
+        query.returnPlace = nil
         if query.place == .files { dropFiles(); return true }
         if mailStepBack() { return true }
         if query.acting != nil {
@@ -707,13 +712,6 @@ extension Browser {
             query.place = nil
             query.spot = 0
             typed = Address.whole(here)
-            return true
-        }
-        // Escape from a place opened over a page's input returns its keys
-        // at once. Backspace still goes to the plain address field.
-        if returnToForm, query.form != nil, !fresh, active?.isBlank == false {
-            close()
-            dismiss()
             return true
         }
         query.place = nil
@@ -1143,7 +1141,25 @@ extension Browser {
             return true
         case .within(let place):
             // The place, searching the words already typed.
-            openPlace(place, words: typed.trimmingCharacters(in: .whitespacesAndNewlines))
+            let words = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+            enterPlace(place)
+            typed = words
+            if place == .history { askHistory() }
+            return true
+        case .command(let command):
+            // The Actions list is a field entry too; a command run by its
+            // menu or shortcut still uses openPlace's direct route.
+            let place: FieldPlace
+            switch command {
+            case .history: place = .history
+            case .downloads: place = .downloads
+            case .bookmarks: place = .bookmarks
+            case .passwords: place = .passwords
+            case .autofill: place = .autofill
+            case .boostStore: place = .store
+            default: return false
+            }
+            if command.available(in: self) { enterPlace(place) }
             return true
         case .clip(let id):
             guard let clip = Clips.shared.items.first(where: { $0.id == id }) else { return true }
@@ -1393,8 +1409,18 @@ extension Browser {
         if selectionCommands.answering { selectionCommands.close() }
     }
 
+    /// Keep the destination when a pick or a click puts the field away.
+    func rememberPlace() {
+        // Selection and Files are requests from a specific page, not
+        // standalone destinations. Their old request must never be replayed.
+        guard let place = query.place else { return }
+        query.returnPlace = query.placeFromField && place != .selection && place != .files
+            ? (place, query.placeFilter) : nil
+    }
+
     /// The field put away, whatever it was doing, a command's answer too.
     func close() {
+        rememberPlace()
         if query.place == .files { cancelFileAnswer() }
         endAnswer()
         fileSelected.removeAll()

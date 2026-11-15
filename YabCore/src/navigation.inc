@@ -46,15 +46,15 @@ static void CancelFilePick(const std::string& tab) {
   if (owner != tabs.end()) Event(@"file.closed", &owner->second, @{@"request": token, @"reason": @"cancelled"});
   callback->Cancel();
 }
-static bool OpenFilePick(Tab* tab, cef_file_dialog_mode_t mode, CefRefPtr<CefFileDialogCallback> callback, NSDictionary* native = nil) {
-  // Save dialogs belong to downloads, not the upload chooser.
-  if (!tab || mode == FILE_DIALOG_SAVE) { callback->Cancel(); return true; }
+static bool OpenFilePick(Tab* tab, cef_file_dialog_mode_t mode, CefRefPtr<CefFileDialogCallback> callback, NSDictionary* native = nil, NSString* defaultPath = nil) {
+  if (!tab) { callback->Cancel(); return true; }
   CancelFilePick(tab->id);
   NSString* token = native ? S(native, @"request") : NSUUID.UUID.UUIDString;
   if (!token.length) { callback->Cancel(); return true; }
   filePicks.emplace(tab->id, FilePick{callback, token, mode == FILE_DIALOG_OPEN_MULTIPLE, native});
   NSMutableDictionary* params = [@{@"request": token, @"directories": @(mode == FILE_DIALOG_OPEN_FOLDER),
-                                    @"multiple": @(mode == FILE_DIALOG_OPEN_MULTIPLE)} mutableCopy];
+                                    @"multiple": @(mode == FILE_DIALOG_OPEN_MULTIPLE), @"save": @(mode == FILE_DIALOG_SAVE),
+                                    @"name": defaultPath.lastPathComponent.length ? defaultPath.lastPathComponent : @"Untitled"} mutableCopy];
   if (NSDictionary* source = NativeFileSource(*tab, filePicks.at(tab->id))) params[@"source"] = source;
   Event(@"file.open", tab, params);
   return true;
@@ -66,6 +66,14 @@ static bool NavigationRequest(Tab& tab, NSString* method, NSDictionary* p, NSStr
     }
     Reply(request);
     CDP(tab, @"Page.crash", @{}, Ignore);
+    return true;
+  }
+  if ([method isEqual:@"page.cdpForTesting"]) {
+    if (!CefCommandLine::GetGlobalCommandLine()->HasSwitch("use-mock-keychain")) {
+      Reply(request, nil, @"Raw DevTools commands are test-only"); return true;
+    }
+    CDP(tab, S(p, @"command"), [p[@"params"] isKindOfClass:NSDictionary.class] ? p[@"params"] : @{},
+        [request](NSDictionary* value, NSString* error) { Reply(request, value, error); }, S(p, @"session"));
     return true;
   }
   if ([method isEqual:@"page.zoom"]) {
@@ -105,7 +113,9 @@ static bool NavigationRequest(Tab& tab, NSString* method, NSDictionary* p, NSStr
 #endif
   id paths = p[@"paths"];
   if (paths && ![paths isKindOfClass:NSArray.class]) { Reply(request, nil, @"paths must be an array"); return true; }
-  if ([paths count] > (found->second.multiple ? 1024 : 1)) { Reply(request, nil, @"Too many selected paths"); return true; }
+  // Any number a person picks for a multiple chooser, as Chromium's
+  // FileChooser: 1500 photos to an upload failed past a fixed 1024.
+  if (!found->second.multiple && [paths count] > 1) { Reply(request, nil, @"Too many selected paths"); return true; }
   std::vector<CefString> selected;
   for (id path in paths) {
     if (![path isKindOfClass:NSString.class] || ![path isAbsolutePath]) {

@@ -96,6 +96,21 @@ final class SiteIconsTests: XCTestCase {
         XCTAssertEqual(one.paths.count, 1)
     }
 
+    /// Pins a space shows from Personal (shared pins) or from the Mac alone are
+    /// not its own tabs; entering it loads their icons too, not their letters.
+    func testEnteringASpaceLoadsThePinsItShowsFromElsewhere() async throws {
+        let shared = try await site()
+        let privateSite = try await site()
+        let icons = cache()
+        let pin = tab("shared-pin", shared.url("/inbox"))
+        let secret = tab("secret-pin", privateSite.url("/secret"), isPrivate: true)
+        let space = Space(id: "work", name: "Work", emoji: "", tint: RGB(1, 2, 3))
+        await icons.prefetch(space, shown: [pin, secret])
+        XCTAssertEqual(shared.paths, ["/favicon.ico"])
+        XCTAssertNotNil(icons.image(for: pin.navigationURL!))
+        XCTAssertTrue(privateSite.paths.isEmpty, "a private tab is never fetched")
+    }
+
     func testFailedRootIconCanRetryAndConcurrentLoadsCoalesce() async throws {
         let server = try await site()
         server.set("/favicon.ico", status: 503, body: Data())
@@ -167,7 +182,7 @@ final class SiteIconsTests: XCTestCase {
         XCTAssertNil(SiteIcons.origin(of: URL(string: "file:///favicon.png")!))
     }
 
-    func testAppSpaceEntryHydratesColdSyncedRowsWithoutCreatingWebViews() async throws {
+    func testVisibleColdPinHydratesWithoutEnteringItsSpaceOrCreatingWebViews() async throws {
         let current = try await site()
         let entering = try await site()
         let privateSite = try await site()
@@ -191,8 +206,8 @@ final class SiteIconsTests: XCTestCase {
         app.browser.showSpace("first")
         try await eventually { SiteIcons.shared.image(for: first.navigationURL!) != nil }
         XCTAssertTrue(entering.paths.isEmpty, "an unentered space stays cold")
-        // The cold space's pin as the spaces draw it (Favicon), its pixels
-        // waiting for the space to be entered.
+        // A visible pin now fetches even before its owning space is entered.
+        XCTAssertNil(SiteIcons.shared.image(for: second.navigationURL!))
         let host = UIHostingController(rootView: Favicon(icon: second.icon, host: second.addressHost, size: 44, url: second.navigationURL)
             .frame(maxWidth: .infinity, maxHeight: .infinity).environment(app))
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
@@ -203,16 +218,13 @@ final class SiteIconsTests: XCTestCase {
         host.view.backgroundColor = AppearanceColors.ui(0xFFFFFF, 0x121214)
         window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil; previousKey?.makeKey() }
-        try await Task.sleep(for: .milliseconds(100))
-        window.layoutIfNeeded()
-        let before = recordColumn(window, name: "Synced work cold icons")
-        app.browser.showSpace("second")
         try await eventually { SiteIcons.shared.image(for: second.navigationURL!) != nil }
+        XCTAssertEqual(app.browser.spaceID, "first", "the visible pin must not need its owning space entered")
+        app.browser.showSpace("second")
         // Give SwiftUI's observation invalidation a layout pass after download.
         try await Task.sleep(for: .milliseconds(100))
         window.layoutIfNeeded()
-        let after = recordColumn(window, name: "Synced work hydrated icons")
-        XCTAssertNotEqual(before.pngData(), after.pngData(), "hydration must update the drawn pin's pixels")
+        _ = recordColumn(window, name: "Visible synced pin hydrated without entering its space")
         XCTAssertEqual(entering.paths, ["/favicon.ico"])
         XCTAssertFalse(app.pages.isLive(first.id))
         XCTAssertFalse(app.pages.isLive(second.id))
@@ -291,6 +303,83 @@ final class SiteIconsTests: XCTestCase {
         XCTAssertTrue(server.paths.contains("/favorite.png"))
         XCTAssertFalse(server.paths.contains("/first.svg"), "unsupported SVG is skipped before fetching")
         XCTAssertFalse(server.headers.contains { $0.lowercased().contains("\r\ncookie:") || $0.lowercased().contains("\r\nauthorization:") })
+    }
+
+    func testDeclaredIconsPreferLargestWithinEachKind() {
+        let page = URL(string: "https://example.test")!
+        let html = """
+        <link rel="icon" sizes="16x16" href="/small.png">
+        <link rel="icon" sizes="128x128" href="/large.png">
+        <link rel="apple-touch-icon" sizes="180x180" href="/touch.png">
+        """
+        XCTAssertEqual(SiteIcons.declaredIcons(in: html, page: page).map(\.lastPathComponent),
+                       ["touch.png", "large.png", "small.png"])
+    }
+
+    func testManifestUsesItsOwnBaseAndLargestRaster() {
+        let page = URL(string: "https://example.test/app/manifest.json")!
+        let data = Data(#"{"icons":[{"src":"small.png","sizes":"48x48"},{"src":"large.png","sizes":"512x512"},{"src":"mark.svg","sizes":"any"}]}"#.utf8)
+        XCTAssertEqual(SiteIcons.manifestIcons(in: data, page: page).map(\.absoluteString),
+                       ["https://example.test/app/large.png", "https://example.test/app/small.png"])
+        XCTAssertEqual(SiteIcons.manifestIcons(in: data, page: page, vectors: true).map(\.lastPathComponent), ["mark.svg"])
+        XCTAssertEqual(SiteIcons.manifest(in: #"<link rel="manifest" href="app/manifest.json">"#,
+                                         page: URL(string: "https://example.test")!), page)
+    }
+
+    func testDeclaredIconUpgradesAnAlreadyCachedRoot() async throws {
+        let server = try await site()
+        let icons = cache()
+        let page = server.url("/page")
+        _ = await icons.load(for: page)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let large = UIGraphicsImageRenderer(size: CGSize(width: 180, height: 180), format: format).pngData { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 180, height: 180))
+        }
+        server.set("/touch.png", body: large)
+        _ = await icons.load(for: page, declaredIcon: server.url("/touch.png"))
+        XCTAssertEqual(icons.image(for: page)?.size.width, 180)
+        _ = await icons.load(for: page, declaredIcon: server.url("/touch.png"))
+        XCTAssertEqual(server.paths.filter { $0 == "/touch.png" }.count, 1)
+    }
+
+    func testFailedDeclarationKeepsThePreviouslyLoadedIcon() async throws {
+        let server = try await site()
+        let icons = cache()
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let large = UIGraphicsImageRenderer(size: CGSize(width: 180, height: 180), format: format).pngData { context in
+            UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 180, height: 180))
+        }
+        server.set("/touch.png", body: large)
+        server.set("/missing.png", status: 404, body: Data())
+        _ = await icons.load(for: server.url("/page"), declaredIcon: server.url("/touch.png"))
+        _ = await icons.load(for: server.url("/page"), declaredIcon: server.url("/missing.png"))
+        XCTAssertEqual(icons.image(for: server.url("/page"))?.size.width, 180)
+        XCTAssertFalse(server.paths.contains("/favicon.ico"))
+    }
+
+    func testInlineSVGIconIsDiscoveredRenderedAndKeptAsPixels() async throws {
+        let server = try await site()
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='#2255ff'/></svg>"
+        let url = "data:image/svg+xml;base64," + Data(svg.utf8).base64EncodedString()
+        let html = "<link rel='icon' type='image/svg+xml' href='\(url)'>"
+        let candidates = SiteIcons.declaredIcons(in: html, page: server.url("/page"), vectors: true)
+        XCTAssertEqual(candidates.count, 1)
+        let icons = cache()
+        let loaded = await icons.load(for: server.url("/page"), declaredIcons: candidates)
+        XCTAssertTrue(loaded)
+        let image = try XCTUnwrap(icons.image(for: server.url("/page")))
+        XCTAssertGreaterThanOrEqual(image.size.width, 128)
+        var pixel = [UInt8](repeating: 0, count: 4)
+        pixel.withUnsafeMutableBytes { bytes in
+            let context = CGContext(data: bytes.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            context.draw(image.cgImage!, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        XCTAssertGreaterThan(Int(pixel[2]), Int(pixel[0]) + 100, "the snapshot contains the SVG's blue pixels")
+        XCTAssertGreaterThan(pixel[3], 200)
+        XCTAssertTrue(server.paths.isEmpty, "inline SVG does not fetch its page or favicon.ico")
     }
 
     private func cache(now: @escaping () -> Date = Date.init) -> SiteIcons {

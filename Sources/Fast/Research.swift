@@ -165,15 +165,15 @@ extension Tab {
         return short
     }
 
-    /// The label without the title's count, while its mark shows it
-    /// (Corner.swift).
+    /// The label without the title's count when this row uses unread counts.
+    /// Favicon ownership or an API zero must not revive a stale title number.
     private func counted(_ label: String) -> String {
         guard name == nil else { return label }
         // A live folder's pull request: its own title, not the page's.
         if live != nil { return LiveGitHub.shortTitle(label) }
         // A kept tab: its short name (ShortNames.swift).
         if let short = ShortNames.shared.name(for: self) { return short }
-        guard countCorner != nil else { return label }
+        guard countsTitle else { return label }
         return Counts.untitled(label)
     }
 }

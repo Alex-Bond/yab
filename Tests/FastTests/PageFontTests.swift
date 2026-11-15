@@ -152,17 +152,74 @@ struct PageFontTests {
         #expect(context.evaluateScript("document.sheet === null && !observers[0].active")?.toBool() == true)
     }
 
-    @Test func genericRemappingUsesTheEscapedStackAndRestoresTheOriginal() throws {
+    /// The sheet is the whole of it (#1889): no observer stays, and nothing is
+    /// read or set on the page's elements. What an older copy of the script
+    /// named on an element is put back.
+    @Test func theSheetIsTheWholeOfItAndNoElementIsTouched() throws {
         let context = try context(root: true)
         var fonts = PageFonts()
         fonts.serif = "Example \"Text\""
+        fonts.sans = "Helvetica Neue"
+        context.evaluateScript("""
+        globalThis.reads = 0;
+        const realStyle = globalThis.getComputedStyle;
+        globalThis.getComputedStyle = node => { reads += 1; return realStyle(node); };
+        """)
         context.evaluateScript(PageAppearance.script(fonts))
         try #require(context.exception == nil)
-        #expect(context.evaluateScript("document.documentElement.style.getPropertyValue('font-family')")?.toString()
-                == PageFonts.family(fonts.serif, fallback: "serif"))
+        #expect(context.evaluateScript("document.sheet.textContent")?.toString() == fonts.css)
+        #expect(context.evaluateScript("reads")?.toInt32() == 0)
+        #expect(context.evaluateScript("observers.every(o => !o.active)")?.toBool() == true)
+        #expect(context.evaluateScript("document.documentElement.style.getPropertyValue('font-family')")?.toString() == "")
+        context.evaluateScript("""
+        const old = new HTMLElement();
+        old.style.setProperty('font-family', 'Palatino');
+        __yabPageDefaults.changed = new Map([[old, {font:'serif', priority:''}]]);
+        """)
         context.evaluateScript(PageAppearance.script(PageFonts()))
         try #require(context.exception == nil)
-        #expect(context.evaluateScript("document.documentElement.style.getPropertyValue('font-family')")?.toString() == "")
+        #expect(context.evaluateScript("old.style.getPropertyValue('font-family')")?.toString() == "serif")
+        #expect(context.evaluateScript("document.sheet === null")?.toBool() == true)
+    }
+
+    /// The four generic families on WebKit's own preferences, each only where
+    /// it differs, and WebKit's defaults back when a name is taken away.
+    @MainActor @Test func webKitGetsTheFamiliesAsItsOwnSettings() {
+        let preferences = WKPreferences()
+        let defaults = PageFamilies.current(preferences)
+        #expect(defaults.count == 4 && defaults.allSatisfy { !$0.isEmpty })
+        var fonts = PageFonts()
+        fonts.serif = "Palatino"
+        fonts.sans = "Helvetica Neue"
+        fonts.fixed = "Menlo"
+        PageFamilies.apply(fonts, to: preferences)
+        #expect(PageFamilies.current(preferences) == ["Palatino", "Palatino", "Helvetica Neue", "Menlo"])
+        fonts.standard = "Georgia"
+        PageFamilies.apply(fonts, to: preferences)
+        #expect(PageFamilies.current(preferences) == ["Georgia", "Palatino", "Helvetica Neue", "Menlo"])
+        PageFamilies.apply(PageFonts(), to: preferences)
+        #expect(PageFamilies.current(preferences) == defaults)
+        #expect(PageFamilies.names(fonts).all == ["Georgia", "Palatino", "Helvetica Neue", "Menlo"])
+    }
+
+    /// Text asking for monospace keeps the default size while a fixed-width
+    /// face is chosen, as when that face was named on it: the engines' own
+    /// size for the generic family is smaller.
+    @MainActor @Test func monospaceKeepsTheDefaultSizeWithAFaceOfOnesOwn() {
+        let preferences = WKPreferences()
+        let engines = PageFamilies.fixedSize(preferences)
+        #expect(engines == 13)
+        var fonts = PageFonts()
+        fonts.serif = "Georgia"
+        #expect(PageFamilies.names(fonts).fixedSize == nil)
+        PageFamilies.apply(fonts, to: preferences)
+        #expect(PageFamilies.fixedSize(preferences) == engines)
+        fonts.fixed = "Menlo"
+        #expect(PageFamilies.names(fonts).fixedSize == 16)
+        PageFamilies.apply(fonts, to: preferences)
+        #expect(PageFamilies.fixedSize(preferences) == 16)
+        PageFamilies.apply(PageFonts(), to: preferences)
+        #expect(PageFamilies.fixedSize(preferences) == engines)
     }
 
     @MainActor @Test func documentStartDefaultsPreserveAuthorTypeAndSize() async throws {
@@ -172,6 +229,7 @@ struct PageFontTests {
         fonts.fixed = "Menlo"
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        PageFamilies.apply(fonts, to: configuration.preferences)
         let script = PageScripts.fonts(fonts)
         #expect(script.injectionTime == .atDocumentStart)
         #expect(!script.isForMainFrameOnly)
@@ -185,6 +243,10 @@ struct PageFontTests {
         <p id=plain>Ordinary text \u{1F600} \u{1F44D}\u{1F3FD} \u{1F469}\u{200D}\u{1F4BB}</p>
         <p id=authored>Site text</p><pre id=code>Code \u{1F600}</pre>
         <p id=generic style="font-family:serif">Generic text \u{1F600}</p>
+        <span id=asked style="font-family:serif">The generic face, measured</span>
+        <span id=chosen style="font-family:Palatino">The generic face, measured</span>
+        <span id=stock style="font-family:Times">The generic face, measured</span>
+        <p id=mono style="font-family:monospace">Monospace by its generic name</p>
         </body>
         """, baseURL: URL(string: "https://fonts.example.test/"))
         for _ in 0..<100 {
@@ -202,10 +264,20 @@ struct PageFontTests {
         """) as? [[String: String]])
         #expect(styled[0]["font"] == early)
         #expect(styled[0]["size"] == "16px")
+        // The generic monospace family at the default size, as when the
+        // chosen face was named on it, not the engine's smaller 13 px.
+        #expect(try await web.evaluateJavaScript("getComputedStyle(document.getElementById('mono')).fontSize") as? String == "16px")
         #expect(styled[1]["font"] == "Helvetica")
         #expect(styled[1]["size"] == "11px")
         #expect(Self.fixtureFamilies(styled[2]["font"]) == ["Menlo", PageFonts.emojiFamily, "monospace"])
-        #expect(Self.fixtureFamilies(styled[3]["font"]) == ["Palatino", PageFonts.emojiFamily, "serif"])
+        // The page's own "serif" stays as it wrote it, and WebKit draws it in
+        // the chosen face: the same width as Palatino named outright, not Times'.
+        #expect(styled[3]["font"] == "serif")
+        let widths = try #require(try await web.evaluateJavaScript("""
+        ['asked','chosen','stock'].map(id => document.getElementById(id).getBoundingClientRect().width)
+        """) as? [Double])
+        #expect(abs(widths[0] - widths[1]) < 0.5)
+        #expect(abs(widths[0] - widths[2]) > 2)
         try await web.evaluateJavaScript(PageAppearance.script(PageFonts()), in: nil, contentWorld: Web.world)
         #expect(try await web.evaluateJavaScript("document.getElementById('generic').style.fontFamily") as? String == "serif")
     }

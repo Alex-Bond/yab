@@ -4,22 +4,24 @@ import Testing
 
 /// ⌘T over text selected on a page lists the selection's commands, the
 /// enabled ones ⌘J would offer, and those the typed words name; ⌘L's field
-/// stays the address's. The commands go to an agent, and since d885455a
-/// none is offered without one connected, so the world has one; the Macs
-/// that run the tests may have no agent signed in.
+/// stays the address's. Pin the agent path: Apple Intelligence can run
+/// some built-in commands without an agent, and differs across farm Macs.
+@Suite(.serialized)
 struct FieldSelectionRowsTests {
     /// What an earlier suite may have left in the shared test settings:
     /// the Commands default (whose Auto falls to Gemini or Agents.preferred)
     /// and AI in Yab. Pinned here and put back in forget().
-    @MainActor private static var saved: (commands: ModelChoice, aiUse: Any?)?
+    @MainActor private static var saved: (commands: ModelChoice, aiUse: Any?, macDisabled: Any?, agent: Bool?)?
 
     @MainActor private func world() throws -> (Browser, UUID, SelectionSnapshot) {
+        // Exercise the Commands agent on every host. Otherwise an available
+        // Mac model still offers its commands with Agents.ready == false,
+        // and an earlier suite can change the fallback agent or AI setting.
+        Self.saved = (ModelDefaults.shared[.commands], Store.settings.object(forKey: AIUse.key),
+                      Store.settings.object(forKey: AppleModelAccess.disabledKey), Agents.assumedInTests)
         Agents.assumedInTests = true
-        // On a Mac without Apple Intelligence (m4) these commands go to the
-        // Commands default's agent, not this Mac's model, so the result
-        // depended on whatever an earlier suite left there (0.44.0 QA: no
-        // rows in the full batch, all four alone). The agent is Claude here.
-        Self.saved = (ModelDefaults.shared[.commands], Store.settings.object(forKey: AIUse.key))
+        Store.settings.set(true, forKey: AppleModelAccess.disabledKey)
+        #expect(!FormModel.ready)
         ModelDefaults.shared[.commands] = ModelChoice(cli: "claude")
         Store.settings.set(AIUse.Level.on.rawValue, forKey: AIUse.key)
         let id = UUID()
@@ -34,8 +36,9 @@ struct FieldSelectionRowsTests {
     }
 
     @MainActor private func forget(_ id: UUID) {
-        Agents.assumedInTests = nil
         if let saved = Self.saved {
+            Agents.assumedInTests = saved.agent
+            Store.settings.set(saved.macDisabled, forKey: AppleModelAccess.disabledKey)
             ModelDefaults.shared[.commands] = saved.commands
             Store.settings.set(saved.aiUse, forKey: AIUse.key)
             Self.saved = nil
@@ -78,7 +81,7 @@ struct FieldSelectionRowsTests {
         #expect(commandIDs(browser.offers).isEmpty)
     }
 
-    @MainActor @Test func noAgentConnectedListsNoCommands() throws {
+    @MainActor @Test func noRunnerAvailableListsNoCommands() throws {
         let (browser, id, snap) = try world()
         defer { forget(id) }
         Agents.assumedInTests = false

@@ -43,6 +43,14 @@ final class AppModel {
     var showsDesignSheet = false
     /// Tasks on the Mac: sending them, what the Mac says, the code and the yes (Tasks/).
     @ObservationIgnored lazy var taskDesk = TaskDesk(app: self)
+    /// Browser actions share UIKit’s shake-to-undo responder route. Text editors
+    /// keep their own UndoManager ahead of this one in the responder chain.
+    @ObservationIgnored let actionUndo: UndoManager = {
+        let manager = UndoManager()
+        manager.groupsByEvent = false
+        return manager
+    }()
+
     @ObservationIgnored lazy var tabClear = TabClearCoordinator(app: self)
     /// Going back: who opened which tab, the pull from the left edge, Undo
     /// after a close (Back/).
@@ -53,6 +61,13 @@ final class AppModel {
     @ObservationIgnored lazy var voice = VoiceSearch(app: self)
     @ObservationIgnored lazy var scanner = CodeScanner(app: self)
     @ObservationIgnored private var lastRecordedURL: [Tab.ID: String] = [:]
+    #if DEBUG
+    /// How many times the field's rows were made (tests). Each making walks
+    /// every tab; a view asking for them once per row made an iPad with many
+    /// tabs miss its launch (#546-#561). Not observed: a write here in a
+    /// view's body would draw it again for ever.
+    @ObservationIgnored var fieldRowsMade = 0
+    #endif
 
     /// Unit tests that construct a world keep their local fixture pages.
     init(world: World, fixturesEnabled: Bool = true, profile: BrowserProfile? = nil,
@@ -300,6 +315,8 @@ final class AppModel {
         withObservationTracking {
             _ = browser.spaces
             _ = browser.spaceID
+            // Shared pins with Personal gone live in sync alone.
+            _ = sync.pinsStamp
         } onChange: { [weak self] in
             Task { @MainActor in self?.watchProfile() }
         }
@@ -308,9 +325,11 @@ final class AppModel {
         lastRecordedURL = lastRecordedURL.filter { ids.contains($0.key) }
         if !fixturesEnabled, websiteDataStore.isPersistent, !browser.space.isPrivate {
             let space = browser.space
+            // The pins its page draws, shared ones included (Seyfullah, 0.1.39).
+            let pins = sync.pins(in: space)
             Task {
                 await SiteIcons.shared.restoreKept()
-                await SiteIcons.shared.prefetch(space)
+                await SiteIcons.shared.prefetch(space, shown: pins)
             }
         }
     }

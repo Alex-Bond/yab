@@ -12,6 +12,16 @@ struct PhoneAskRegressionTests {
         #expect(!AssistantApprovals.travels(.unlockManager(provider: "1password")))
     }
 
+    @Test func aMailOperationHasACompatibleAddressWithoutABrowserTab() throws {
+        let place = AssistantApprovals.Place.mail(UUID().uuidString.lowercased())
+        #expect(AssistantApprovalRecords.Request.validPlace(place.wire))
+        let request = try AssistantApprovalRecords.Request(
+            id: UUID().uuidString.lowercased(), account: "account", mac: "mac", assistant: "local.external",
+            session: "mail-caller", tab: place.wire, permit: "mail:immutable-outgoing", title: "Claude: Send this mail?",
+            lines: ["To person@example.com"], expires: Date().addingTimeInterval(300))
+        try request.validate()
+    }
+
     @Test func chatQuestionsHaveAnAddressWithoutATab() throws {
         let request = try AssistantApprovalRecords.Request(
             id: UUID().uuidString.lowercased(), account: "account", mac: "mac", assistant: "local.external",

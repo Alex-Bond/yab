@@ -223,7 +223,14 @@ final class Links: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { BrowserWindows.shared.prepareToQuit() }
+        LaunchJournal.record("browser.terminate")
+        MainActor.assumeIsolated {
+            BrowserWindows.shared.prepareToQuit()
+            // The icons pages wore in the last seconds, for their tabs
+            // coming back (Favicons.pageIcon).
+            Favicons.shared.savePagesNow()
+            CrashSessions.finish()
+        }
     }
 
     /// A run straight from the SwiftPM binary has no Info.plist, and macOS
@@ -255,26 +262,14 @@ final class Links: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Every uncaught exception written down before it ends the process:
+    /// Every reported or uncaught exception written down before a later crash:
     /// its time, name, reason and stack, appended, so it survives the
     /// crash. When crash reports are sent (Crashes), the one just before a
     /// crash goes with its report, cleaned; nothing else here leaves the Mac.
     /// Crashes.thrown reads it back: keep the time first and the empty line
     /// after.
-    static func watchForTrouble() {
-        NSSetUncaughtExceptionHandler { exception in
-            let line = "\(Date()): \(exception.name.rawValue): \(exception.reason ?? "?")\n"
-                + exception.callStackSymbols.joined(separator: "\n") + "\n\n"
-            let file = Store.file("crash.log")
-            if let handle = FileHandle(forWritingAtPath: file.path) {
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: Data(line.utf8))
-                try? handle.close()
-            } else {
-                try? FileManager.default.createDirectory(at: Store.folder, withIntermediateDirectories: true)
-                try? line.write(to: file, atomically: true, encoding: .utf8)
-            }
-        }
+    @MainActor static func watchForTrouble() {
+        AppKitExceptionLog.install(file: Store.file("crash.log"))
     }
 
     /// Addresses come in as Apple Events, one each. Taking them straight
@@ -286,9 +281,14 @@ final class Links: NSObject, NSApplicationDelegate {
         Browser.clearLeftoverDownloads()
         MainActor.assumeIsolated { Startup.mark("will launch") }
         defer { MainActor.assumeIsolated { Startup.mark("will launch done") } }
+        MainActor.assumeIsolated {
+            ChromiumAccessibilityClient.install()
+            ChromiumProcess.startAhead()
+        }
         // Boosts' safe mode is ⌥ held as Yab opens, read now.
         MainActor.assumeIsolated { Boosts.optionAtLaunch = NSEvent.modifierFlags.contains(.option) }
         // Yab's page scripts and the presses around them, for evals/activation.
+        WebKitIPCBoundary.install()
         EvalTrace.install()
         // The Mac's own window tabs: yab's tabs are its own, so macOS adds
         // no New Tab and no Show Tab Bar to the Window and View menus.
@@ -633,15 +633,20 @@ final class Links: NSObject, NSApplicationDelegate {
             browser?.arrive(first.url)
             for (n, url) in early.dropFirst().enumerated() {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15 * Double(n + 1)) { [weak browser] in
-                    if let browser,
-                       LinkRoutes.shared.defaultSpace != nil || LinkRoutes.best(LinkRoutes.shared.routes, for: url.url)?.space == LinkRoutes.recentSpaceID,
-                       let home = LinkRoutes.shared.externalSpace(for: url.url, in: browser, recent: url.recent) {
-                        browser.switchSpace(to: home)
-                    }
-                    browser?.open(url.url, foreground: false, atEnd: true)
+                    if let browser { openQueued(url.url, in: browser, recent: url.recent) }
                 }
             }
         }
+    }
+
+    /// Every external URL received during launch uses the same destination
+    /// policy. Fixed rules count even when no fallback space is configured.
+    @MainActor
+    static func openQueued(_ url: URL, in browser: Browser, recent: UUID?) {
+        if let home = LinkRoutes.shared.externalSpace(for: url, in: browser, recent: recent) {
+            browser.switchSpace(to: home)
+        }
+        browser.open(url, foreground: false, atEnd: true)
     }
 
     /// Runs once a window is actually showing, and one turn of the run loop

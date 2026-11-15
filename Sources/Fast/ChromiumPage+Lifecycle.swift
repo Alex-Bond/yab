@@ -42,17 +42,18 @@ final class ChromiumCloseBatch {
         // own callback and can never progress the browser's close machinery.
         Task { @MainActor in await cancelNative() }
     }
-    func cancelNative(includingDispatched: Bool = false) async {
+    func cancelNative(includingDispatched: Bool = false, quitting: Bool = false) async {
         guard ChromiumProcess.shared.isCurrent(core) else { return }
         for entry in entries where includingDispatched || !entry.committing {
             _ = try? await core.request("tab.close.cancel", params: [
-                "tab": .string(entry.remote), "owner": .string(entry.owner)])
+                "tab": .string(entry.remote), "owner": .string(entry.owner), "quitting": .bool(quitting)])
         }
     }
     func finish(_ leave: Bool) {
         for entry in entries {
             let id = ObjectIdentifier(entry.page)
             if Self.active[id] === entry { Self.active[id] = nil }
+            if leave, entry.committing { entry.page.closeCommitted = true }
             if leave { Leaving.finish(entry.page, true) }
             else { Leaving.withdrawChromium(entry.page) }
         }
@@ -65,7 +66,7 @@ final class ChromiumCloseBatch {
             else { browser.closeElsewhere(entry.tab) }
         }
     }
-    func prepare(_ tabs: [Tab]) async -> Bool {
+    func prepare(_ tabs: [Tab], stoppingLoads: Bool = false) async -> Bool {
         // Reserve every local page before the first native question. A second
         // overlapping close cannot take ownership of another batch's token.
         for tab in tabs where !tab.gone {
@@ -90,11 +91,28 @@ final class ChromiumCloseBatch {
             for (index, entry) in entries.enumerated() {
                 group.addTask { @MainActor in
                     do {
-                        let reply = try await entry.page.prepareNativeClose(owner: entry.owner, core: core, remote: entry.remote)
+                        guard self.valid, entry.live, ChromiumProcess.shared.isCurrent(core) else { return (index, nil, false) }
+                        let reply: JSONValue
+                        do {
+                            reply = try await entry.page.prepareNativeClose(owner: entry.owner, core: core, remote: entry.remote, allowUnresponsive: true)
+                        } catch YabCoreError.remote(let message) where stoppingLoads && entry.page.isLoading
+                            && message == "Native close preflight cancelled" && self.valid && entry.live
+                            && ChromiumProcess.shared.isCurrent(core) {
+                            // A pending navigation prevents native preflight
+                            // from starting. Cancel it and ask again. Accepted
+                            // preflights do not need an explicit stop request.
+                            _ = try await core.request("tab.stop", params: ["tab": .string(entry.remote)])
+                            guard self.valid, entry.live, ChromiumProcess.shared.isCurrent(core) else { return (index, nil, false) }
+                            reply = try await entry.page.prepareNativeClose(owner: entry.owner, core: core, remote: entry.remote, allowUnresponsive: true)
+                        }
                         return (index, ChromiumCloseApproval(reply, owner: entry.owner), false)
                     } catch YabCoreError.remote(let message) where message == Self.noPreflight {
                         return (index, nil, true)
-                    } catch { return (index, nil, false) }
+                    } catch {
+                        // Which page kept a quit or a close from going, and why (#2021).
+                        if Store.testing { FileHandle.standardError.write(Data("yab: close preflight refused host=\(entry.tab.address?.host() ?? "") loading=\(entry.page.isLoading) error=\(error)\n".utf8)) }
+                        return (index, nil, false)
+                    }
                 }
             }
             var found = [(ChromiumCloseApproval?, Bool)](repeating: (nil, false), count: entries.count)
@@ -109,6 +127,9 @@ final class ChromiumCloseBatch {
         let approvals = answers.map(\.0)
         for (entry, approval) in zip(entries, approvals) {
             guard valid, entries.allSatisfy(\.live), let approval else {
+                if Store.testing {
+                    FileHandle.standardError.write(Data("yab: close preflight not approved host=\(entry.tab.address?.host() ?? "") valid=\(valid) live=\(entries.filter { !$0.live }.count == 0) approval=\(approval != nil)\n".utf8))
+                }
                 await cancelNative(); finish(false); return false
             }
             entry.request = approval.request; entry.document = approval.document; entry.token = approval.token
@@ -116,6 +137,20 @@ final class ChromiumCloseBatch {
         guard valid, entries.allSatisfy(\.live), ChromiumProcess.shared.isCurrent(core) else {
             await cancelNative(); finish(false); return false
         }
+        return true
+    }
+    /// Yab quitting: every page asked, none closed. The quit can still be called
+    /// off at its own question, and a quit that goes through ends the pages with
+    /// the process.
+    /// A page still loading can't be asked until its navigation stops (the
+    /// helper refuses a pending entry), as on ⌘W: without stopping it, one
+    /// loading tab answered for every page, and ⌘Q did nothing, no card and
+    /// no word, as often as it was pressed (#2021). Chrome never lets a load
+    /// keep it from quitting; only a page's Stay does.
+    func ask(_ tabs: [Tab]) async -> Bool {
+        guard await prepare(tabs, stoppingLoads: true) else { return false }
+        if !unavailable { await cancelNative(quitting: true) }
+        finish(true)
         return true
     }
     /// The native beforeunload asked and then released: the document stays,
@@ -140,7 +175,7 @@ final class ChromiumCloseBatch {
         return verdict
     }
     func run(_ tabs: [Tab]) async -> Bool {
-        guard await prepare(tabs) else { return false }
+        guard await prepare(tabs, stoppingLoads: true) else { return false }
         guard !entries.isEmpty else { return true }
         // A helper without the native preflight has no question to put: a
         // refusal by nobody is not a person's Stay. The pages close the plain
@@ -168,9 +203,9 @@ final class ChromiumCloseBatch {
 extension ChromiumPage {
     /// Never starts/recreates a helper or waits behind a suspended script.
     /// Native beforeunload asks have their own bounded request lifetime.
-    fileprivate func prepareNativeClose(owner: String, core: YabCoreClient, remote: String) async throws -> JSONValue {
+    fileprivate func prepareNativeClose(owner: String, core: YabCoreClient, remote: String, allowUnresponsive: Bool = false) async throws -> JSONValue {
         guard remoteID == remote, ChromiumProcess.shared.isCurrent(core) else { throw CancellationError() }
-        return try await core.request("tab.close.prepare", params: ["tab": .string(remote), "owner": .string(owner)], timeout: 240)
+        return try await core.request("tab.close.prepare", params: ["tab": .string(remote), "owner": .string(owner), "allowUnresponsive": .bool(allowUnresponsive)], timeout: 240)
     }
 
     /// Listener census is diagnostic only; it never authorizes a close.
@@ -212,9 +247,12 @@ extension ChromiumPage {
 }
 
 extension Leaving {
-    static func eachChromium(_ tabs: [Tab], done: @escaping (Bool) -> Void) {
+    static func eachChromium(_ tabs: [Tab], closing: Bool, done: @escaping (Bool) -> Void) {
         guard let core = ChromiumProcess.shared.connectedClient else { return done(false) }
-        Task { @MainActor in done(await ChromiumCloseBatch(core: core).run(tabs)) }
+        Task { @MainActor in
+            let batch = ChromiumCloseBatch(core: core)
+            done(await (closing ? batch.run(tabs) : batch.ask(tabs)))
+        }
     }
 
     static func askChromiumForSwitch(_ tab: Tab, _ page: ChromiumPage) async -> EngineSwitchApproval.Page {
@@ -225,6 +263,9 @@ extension Leaving {
     }
 
     @discardableResult static func chromiumClosed(_ page: ChromiumPage, closedRemote: String? = nil) -> Bool {
+        // The batch's reply can beat some of its tab.closed events. A late one
+        // is the batch's close, not a page closing itself: its row stays.
+        if page.closeCommitted { return true }
         if let entry = ChromiumCloseBatch.active[ObjectIdentifier(page)] {
             // helperExited also arrives here; only an authenticated tab.closed
             // for this original wire endpoint confirms endpoint death.

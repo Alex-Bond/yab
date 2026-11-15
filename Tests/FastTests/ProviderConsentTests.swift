@@ -27,6 +27,42 @@ struct ProviderConsentTests {
         }
     }
 
+    /// R1831: ChatGPT connected in the welcome before 0.36.3, never chatted
+    /// with. The first consent migration counted chats only, so the update
+    /// left "No plan connected"; Connect's own record brings it back, once.
+    @Test func aPlanConnectPutInPlaceBeforeConsentStaysConnected() {
+        let domain = "consent-connect-" + UUID().uuidString
+        let settings = UserDefaults(suiteName: domain)!
+        defer { settings.removePersistentDomain(forName: domain) }
+        settings.set(true, forKey: "agents.consent-migrated.v1")
+        let consent = ProviderConsent(settings: settings, history: [], connected: ["codex"])
+        #expect(consent.allows("codex"))
+        #expect(!consent.allows("claude"))
+        consent.revoke("codex")
+        let later = ProviderConsent(settings: settings, history: [], connected: ["codex", "claude"])
+        #expect(!later.allows("codex"))
+        #expect(!later.allows("claude"))
+    }
+
+    @Test func aDisconnectedPlanIsNotBroughtBackByItsFiles() {
+        let domain = "consent-connect-" + UUID().uuidString
+        let settings = UserDefaults(suiteName: domain)!
+        defer { settings.removePersistentDomain(forName: domain) }
+        settings.set(["codex"], forKey: "agents.revoked-connections.v1")
+        #expect(!ProviderConsent(settings: settings, history: [], connected: ["codex"]).allows("codex"))
+    }
+
+    @Test func connectsRecordIsYabsSetUpNotASignIn() {
+        var status = AgentSetup.Status()
+        #expect(ProviderConsent.connectedByConnect(status).isEmpty)
+        status.codex = true
+        status.gemini = true
+        #expect(ProviderConsent.connectedByConnect(status) == ["codex"])
+        status.claude = true
+        status.cursor = true
+        #expect(ProviderConsent.connectedByConnect(status) == ["claude", "codex", "cursor"])
+    }
+
     @Test func completedManualQuietFieldChatCountsButAutomaticContextDoesNot() {
         let asked = ChatItem(id: "a", kind: .asked, text: "Explain these words", state: .done)
         let answer = ChatItem(id: "b", kind: .message, text: "An explanation.", state: .done)
@@ -141,6 +177,24 @@ struct ProviderConsentTests {
             #expect(preflight("agent-profile") != nil && preflight("open") != nil)
             consent.revoke("claude")
             #expect(preflight("agent-caps") != nil)
+        }
+    }
+
+    @Test func anEndedTaskStillReportsItsResultToWhoeverStartedIt() throws {
+        try isolated { consent, _ in
+            consent.grant("claude")
+            let session = Agents.Session(id: "ended-fixture", cli: "claude", name: "Fixture", prompt: "", state: .running)
+            session.providerPermit = try #require(consent.permit("claude"))
+            let lookup: (String) -> Agents.Session? = { $0 == session.id ? session : nil }
+            @MainActor func preflight(_ verb: String) -> String? { ContextConsent.preflight(["session": session.id, "do": verb], lookup: lookup) }
+            #expect(preflight("agent-wait") == nil && preflight("agent-history") == nil)
+            session.state = .done
+            consent.revoke("claude")
+            #expect(!session.admission.valid)
+            #expect(preflight("agent-wait") == nil, "yab \"…\" and session resume read the finished task's result")
+            #expect(preflight("agent-history") != nil && preflight("open") != nil)
+            session.knowing = true
+            #expect(preflight("agent-wait") != nil, "A context pass keeps its own rules")
         }
     }
 

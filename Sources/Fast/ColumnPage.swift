@@ -100,9 +100,99 @@ final class ColumnPage: NSView {
         hand = ColumnHand(page: self, browser: browser)
         hand.grip.view = self
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        pointerWatch.heard = { [weak self] event in self?.point(event) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: pointerWatch, userInfo: nil))
     }
 
     required init?(coder: NSCoder) { nil }
+
+    // MARK: - the row the pointer is on
+
+    /// The row the pointer is on, by its item's id: the column's to say, as
+    /// Chrome's tab strip says which tab is hot. Each row heard the pointer
+    /// for itself, and AppKit tells a view the pointer came or went only as
+    /// the pointer moves: a row that slid under a still pointer (the next
+    /// tab, after one was closed from its cross) stayed dark with no cross,
+    /// and after a wheel's step the row lit was the one the pointer had
+    /// been on (register 1239, 6 people). One tracking area over the page,
+    /// and the row worked out again from where the pointer is whenever the
+    /// pointer moves or the rows are laid, a scroll's step included.
+    private(set) var pointedID: String?
+    private let pointerWatch = PointerWatch()
+    /// Where the pointer was last heard over the page, in the window; nil
+    /// once it left. Where it still is after the rows move under it.
+    private var pointer: NSPoint?
+
+    /// The pointer heard (`event`), or the rows laid again under it (nil).
+    func point(_ event: NSEvent? = nil) {
+        // Sliding the column moves its layers, not these native frames or
+        // tracking areas. Only an on-screen column can own a row's hover.
+        let visible = browser.map { browser in
+            browser.prefs.sidebar && browser.column.map { $0.shown && isDescendant(of: $0) } == true
+        } == true && !isHiddenOrHasHiddenAncestor
+        if !visible { pointer = nil }
+        else if let event { pointer = event.type == .mouseExited ? nil : event.locationInWindow }
+        var next: String?
+        if let window, let browser, let at = pointer, window.isVisible, !away, !hand.holding {
+            let inRows = document.convert(at, from: nil)
+            if bounds.contains(convert(at, from: nil)), shownRows.contains(inRows),
+               let moved = event ?? NSEvent.mouseEvent(with: .mouseMoved, location: at, modifierFlags: [], timestamp: 0,
+                                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0),
+               // Under a pin's or a folder's preview hanging over the rows,
+               // none of them is lit (TabGlance.covers).
+               !browser.glance.covers(moved) {
+                next = cells.first { id, cell in
+                    !cell.isHidden && cell.frame.contains(inRows) && byID[id].map { ColumnCell.pointable(items[$0]) } == true
+                }?.key
+            }
+        }
+        guard next != pointedID else { return }
+        let was = pointedID
+        pointedID = next
+        // The card of the row left, even one gone from the rows (a tab
+        // closed from its cross), put away first.
+        if let told = toldGlance {
+            toldGlance = nil
+            switch told {
+            case .tab(let id): browser?.glance.hover(id, false)
+            case .folder(let key): browser?.glance.hoverFolder(key, false)
+            }
+        }
+        tellPointed(was, false)
+        tellPointed(next, true)
+    }
+
+    /// A column put away ends its hover even without a mouse-exit event.
+    /// Forget the position too: input over the hidden rows cannot replay
+    /// when the column is revealed or its rows are laid again.
+    func stopPointing() {
+        pointer = nil
+        point()
+    }
+
+    private enum Told { case tab(Tab.ID), folder(String) }
+    /// The row whose card or preview the pointer was last said to be on.
+    private var toldGlance: Told?
+
+    /// A row the pointer came to or left: drawn so, and, come to, the tab's
+    /// card or the folder's preview told, as the row's own hover told them.
+    private func tellPointed(_ id: String?, _ on: Bool) {
+        guard let id, let browser, let index = byID[id], let context else { return }
+        let item = items[index]
+        let hold = hand.drawn(item).hold
+        cells[id]?.bind(item, context, hold: hold, force: false)
+        guard on else { return }
+        switch item.kind {
+        case .tab(let tab):
+            browser.glance.hover(tab.id, true)
+            toldGlance = .tab(tab.id)
+        case .nest(let nest, _, _):
+            browser.glance.hoverFolder(nest.key, browser.folderBook.naming != nest.id && !hold.lifted)
+            toldGlance = .folder(nest.key)
+        default: break
+        }
+    }
 
     /// Laid as the column stands now: the rows moved, made, rebound or let
     /// go as what they show changed.
@@ -309,6 +399,12 @@ final class ColumnPage: NSView {
         let id = browser.activeID
         defer { activeLast = id }
         guard id != activeLast, let id, let index = byID[id.uuidString], !hand.holding else { return }
+        // Landed on by closing the tab in front (Browser.close): not a tab
+        // you went to, so the rows stay where you are in them. Closing a
+        // page opened from the middle of a long folder took the column to
+        // its foot, the tab ⌘W goes back to, and the place in the folder
+        // was lost (feedback #1916).
+        if activeLast != nil, browser.closedOnto == id { return }
         let item = items[index]
         let shown = shownRows
         guard item.y < shown.minY || item.y + item.height > shown.maxY else { return }
@@ -361,7 +457,7 @@ final class ColumnPage: NSView {
         // A space not on screen lights the tab it was left on, as its page
         // beside the one on screen shows it (PagedSpace's `row.active`).
         let live = space == browser.spaceID ? (browser.newTabLit ? nil : browser.activeID) : restingActive
-        return ColumnCell.Context(browser: browser, look: look, liveID: live)
+        return ColumnCell.Context(browser: browser, look: look, liveID: live, pointedID: pointedID)
     }
 
     /// The tab in front in this space's row as it was parked.
@@ -463,6 +559,8 @@ final class ColumnPage: NSView {
             cells[id] = nil
             recycle(cell)
         }
+        // The rows moved, came or went under the pointer.
+        point()
         if crossing {
             edgeTurn += 1
             let turn = edgeTurn
@@ -850,7 +948,9 @@ final class ColumnPage: NSView {
         // drag and its settling motion; its hit target stays in place.
         if nameBehindRows != rowInFront {
             nameBehindRows = rowInFront
-            addSubview(nameView, positioned: rowInFront ? .below : .above, relativeTo: box)
+            // The blurs also stand above box. Restoring just above box
+            // leaves the name behind them after the first drag (#1602).
+            addSubview(nameView, positioned: .below, relativeTo: rowInFront ? box : head)
         }
         for (id, cell) in heads {
             guard let item = headItems.first(where: { $0.id == id }) else { continue }
@@ -1124,7 +1224,8 @@ final class ColumnPage: NSView {
 
     /// What the page shows and how, for the bench.
     var state: [String: Any] {
-        ["space": space.uuidString, "items": items.count, "lead": Double(frame_.lead),
+        let order = subviews
+        return ["space": space.uuidString, "items": items.count, "lead": Double(frame_.lead),
          "laid": items.prefix(8).map { [$0.id, Double($0.y), Double($0.indent)] as [Any] }, "headLaid": headItems.map { [$0.id, Double($0.y), Double($0.x ?? 0), Double($0.width ?? 0)] as [Any] }, "cells": cells.count, "heads": heads.count,
          "pooled": pool.values.map(\.count).reduce(0, +), "offset": Double(offset), "height": Double(rowsHeight),
          "hidden": away, "lit": (Array(cells) + Array(heads)).filter { $0.value.current?.live == true }.map(\.key).sorted(), "binds": (Array(cells.values) + Array(heads.values)).map(\.binds).reduce(0, +), "hand": hand.state,
@@ -1133,6 +1234,9 @@ final class ColumnPage: NSView {
          "newTab": cells.first { byID[$0.key].map { if case .newTab = items[$0].kind { true } else { false } } ?? false }
             .flatMap { drawnRect($0.value) }.map(Self.values) ?? [],
          "name": headItems.first { if case .name = $0.kind { true } else { false } }.flatMap { heads[$0.id] }.flatMap(drawnRect).map(Self.values) ?? [],
+         "nameAboveBlur": order.firstIndex(where: { $0 === nameView }).map { name in
+             order.enumerated().allSatisfy { index, view in type(of: view) != EdgeBlurView.self || index < name }
+         } ?? false,
          "geometry": geometry]
     }
 
@@ -1377,7 +1481,8 @@ private final class RowsBox: NSView {
 }
 
 /// The pins and the name: only their cells take the pointer.
-private final class HeadView: NSView {
+final class HeadView: NSView {
+    private var testingHit = false
     override var isFlipped: Bool { true }
 
     /// The pins row by row, then the name, as they stand.
@@ -1387,6 +1492,12 @@ private final class HeadView: NSView {
             .sorted { ($0.frame.minY, $0.frame.minX) < ($1.frame.minY, $1.frame.minX) }
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
+        // SwiftUI's responder-based hit test can route back through this
+        // container (macOS 27.2, #960/#961). End that synchronous cycle;
+        // later independent hit tests must still reach the cells.
+        guard !testingHit else { return nil }
+        testingHit = true
+        defer { testingHit = false }
         let hit = super.hitTest(point)
         return hit === self ? nil : hit
     }
@@ -1522,4 +1633,14 @@ extension ColumnMotion.Curve {
         case .timing(let a, let b, let c, let d, let duration): return .timingCurve(Double(a), Double(b), Double(c), Double(d), duration: duration)
         }
     }
+}
+
+/// The column page's pointer, heard through its own tracking area rather
+/// than the responder chain the rows' hosts pass their moves up
+/// (ColumnPage.point).
+private final class PointerWatch: NSResponder {
+    var heard: (NSEvent) -> Void = { _ in }
+    override func mouseMoved(with event: NSEvent) { heard(event) }
+    override func mouseEntered(with event: NSEvent) { heard(event) }
+    override func mouseExited(with event: NSEvent) { heard(event) }
 }

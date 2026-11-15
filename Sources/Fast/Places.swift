@@ -87,6 +87,9 @@ enum PlaceThing {
 enum PlaceTile {
     /// A site's icon, or its first letter.
     case site(String)
+    /// A kept page's icon (Bookmarks): the one it last wore, its site's for
+    /// a page never open here, its site's letter until one is fetched.
+    case page(URL)
     /// Three sites' icons, one over another: a thread's (History's By Thread).
     case stack([String])
     /// The Mac's own icon for a file.
@@ -253,19 +256,26 @@ extension Browser {
     /// the words given. The same key again, in the place, puts it away, as
     /// ⌘T again does.
     func openPlace(_ place: FieldPlace, words: String = "", form: PageForm? = nil) {
+        // Clear before the same-place toggle can close it. Direct entry
+        // cannot inherit a previous field destination, even while it shows.
+        query.placeFromField = false
+        query.returnPlace = nil
         if fieldShowing, query.place == place, words.isEmpty {
             close()
             if active?.isBlank == false { dismiss() }
             return
         }
+        // A card target was captured before the field took focus. Switching
+        // from Cmd+T to Cards must not try to discover it again in edit().
+        let heldForm = fieldShowing && query.form?.wallet?.group == .card ? query.form : nil
         if !fieldShowing || fresh { if active?.isBlank == false { edit() } else { openFresh() } }
         // From a list hanging under a box on the page: the click took the
         // caret out of the box, but that box is still what a pick fills.
-        if let form {
+        if let form = form ?? heldForm {
             query.form = form
             query.pageTyping = true
         }
-        if query.place != place { enterPlace(place) }
+        if query.place != place { enterPlace(place, remember: false) }
         if !words.isEmpty {
             typed = words
             if place == .history { askHistory() }
@@ -290,7 +300,8 @@ extension Browser {
 
     /// What a place reads once as it opens.
     func stockPlace(_ place: FieldPlace) {
-        query.placeFilter = 0
+        // enterPlace sets the category before asking for rows, including
+        // when Cmd-T restores the destination kept by close().
         query.revealed = nil
         query.shown = [:]
         switch place {
@@ -299,6 +310,9 @@ extension Browser {
             query.stock.codes = Set(OneTime.ids())
             if query.stock.logins.isEmpty { countSources(.passwords) } else { weighPasswords() }
         case .autofill:
+            // Return from a card field fills a card, rather than the profile
+            // row that leads Everything and supplies an address.
+            if query.form?.wallet?.group == .card { query.placeFilter = 2 }
             query.stock.cards = Wallet.cards()
             query.stock.addresses = Wallet.addresses()
             query.stock.profile = Profile.load()
@@ -354,14 +368,20 @@ extension Browser {
         // that none came: the field's Return is never a pick.
         if query.place != .files && !fileOpening { dropFiles() }
         if query.place == .files, query.form?.file != nil { return }
-        guard let tab = active, tab.typing else {
+        // Payment frames report their card target through WalletRelay. The
+        // sign-in relay's generic typing flag need not be set for that frame.
+        guard let tab = active,
+              tab.typing || (walletList?.tab == tab.id && walletList?.group == .card) else {
             query.form = nil
             return
         }
+        let wallet = walletList?.tab == tab.id ? walletList : nil
+        if wallet?.group == .card { query.pageTyping = true }
+        let box = tab.caretBox ?? (wallet?.group == .card ? Tab.CaretBox(password: false, lines: false, label: "", signIn: false) : nil)
         query.form = PageForm(tab: tab.id,
                               login: suggesting?.tab == tab.id ? suggesting?.site : nil,
-                              wallet: walletList?.tab == tab.id ? walletList : nil,
-                              box: tab.caretBox, host: curtain.host(of: tab.address) ?? "",
+                              wallet: wallet,
+                              box: box, host: curtain.host(of: tab.address) ?? "",
                               origin: Tab.originOf(tab.address))
         // The list hanging under the box goes: the field has the keyboard
         // now, and its arrows are the field's.
@@ -1175,23 +1195,13 @@ extension Browser {
         if place == .bookmarks { return countBookmarkSources() }
         query.stock.sources = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            var wallets: [(source: Chromium.Source, cards: Int, addresses: Int)] = []
-            let found: [(Chromium.Source, Int)] = Chromium.installed().compactMap { source in
-                if place == .passwords {
-                    let count = Chromium.loginCount(source)
-                    return count > 0 ? (source, count) : nil
-                }
-                let count = Chromium.walletCount(source)
-                guard count.cards + count.addresses > 0 else { return nil }
-                wallets.append((source, count.cards, count.addresses))
-                return (source, count.cards + count.addresses)
-            }.sorted { $0.1 > $1.1 }
-            wallets.sort { $0.cards + $0.addresses > $1.cards + $1.addresses }
+            let found = Chromium.installed()
+            let wallets = found.map { (source: $0, cards: 0, addresses: 0) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.query.place == place else { return }
                 if place == .autofill { self.query.stock.wallets = wallets }
-                self.query.stock.sources = found.map { source, count in
-                    PlaceSource(name: source.name, icon: source.icon, detail: "\(count)",
+                self.query.stock.sources = found.map { source in
+                    PlaceSource(name: source.name, icon: source.icon, detail: "",
                                 take: FieldAction(id: "bring", title: "Bring In from \(source.name)", symbol: "tray.and.arrow.down") {
                                     if place == .passwords { self.bringPasswords(source) } else { self.bringWallet(source) }
                                 })
@@ -1203,6 +1213,7 @@ extension Browser {
     /// Passwords from a browser on this Mac: its key asked for once, the
     /// count said as they are kept, and what went wrong if it did.
     private func bringPasswords(_ source: Chromium.Source) {
+        let source = source.authorizingImport()
         query.stock.bringing = source.name
         query.stock.keeping = nil
         let retry = FieldAction(id: "retry", title: "Try Again", symbol: "yab.reload") {
@@ -1245,29 +1256,8 @@ extension Browser {
         }
     }
 
-    /// A search in Passwords that finds nothing here looks in the other
-    /// browsers on this Mac, read quietly, only those whose key yab
-    /// already has, once a minute at most.
-    func lookElsewhere() {
-        guard query.place == .passwords, typed.trimmingCharacters(in: .whitespaces).count >= 2, placeItems.isEmpty else { return }
-        if let at = query.stock.elsewhereAt, Date().timeIntervalSince(at) < 60 { return }
-        let readID = UUID()
-        query.stock.elsewhereReadID = readID
-        query.stock.elsewhereAt = Date()
-        DispatchQueue.global(qos: .userInitiated).async {
-            var logins: [(login: Login, from: String)] = []
-            for source in Chromium.installed() {
-                guard let found = try? Chromium.read(source, quiet: true) else { continue }
-                logins += found.logins.map { ($0, source.name) }
-            }
-            let reply = PasswordElsewhereReply(readID: readID, logins: logins)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.query.place == .passwords,
-                      let current = reply.applying(to: self.query.stock) else { return }
-                self.query.stock = current
-            }
-        }
-    }
+    /// Searching Yab's passwords is not permission to read another browser.
+    func lookElsewhere() {}
 
     /// Logins the other browsers hold that the words find and yab doesn't.
     private func elsewhereFound(_ words: String) -> [(login: Login, from: String)] {
@@ -1523,7 +1513,7 @@ extension Browser {
                 self.open(page, foreground: true)
             })
         }
-        out.append(FieldAction(id: "delete", title: fetch.failed ? "Remove from List" : "Stop Download", keys: Keymap.shared.text(.fieldDelete), symbol: fetch.failed ? "xmark" : "stop", group: 3) {
+        out.append(FieldAction(id: "delete", title: fetch.failed ? "Remove from List" : "Cancel Download", keys: Keymap.shared.text(.fieldDelete), symbol: "xmark", group: 3) {
             if fetch.failed { self.hoard.dismiss(fetch) } else { self.hoard.cancel(fetch) }
         })
         out.append(contentsOf: downloadsKit())
@@ -1739,8 +1729,6 @@ extension Browser {
         var out: [FieldAction] = []
         if !card.expired, let list = fillsWallet(.card) {
             out.append(FieldAction(id: "fill", title: "Fill Card", symbol: "creditcard") {
-                self.close()
-                if let tab = self.autofillTab(list.tab) { self.handBack(to: tab) }
                 self.walletList = Browser.WalletChoices(tab: list.tab, spot: list.spot, group: .card, cards: [card], addresses: [], origin: list.origin)
                 self.chooseWallet(0)
             })
@@ -1749,24 +1737,24 @@ extension Browser {
             // Wallet.prove asks every time, as a card on the page does.
             Wallet.prove("copy the number of \(card.title)") { proven in
                 guard proven == .yes, let number = Wallet.number(of: card.id) else { return }
-                self.copySecret(number)
+                self.putSecret(number)
             }
         })
         if card.keepsCode {
             out.append(FieldAction(id: "code", title: "Copy Security Code", symbol: "yab.copyframe.lock", group: 1) {
                 Wallet.prove("copy the security code of \(card.title)") { proven in
                     guard proven == .yes, let code = Wallet.securityCode(of: card.id) else { return }
-                    self.copySecret(code)
+                    self.putSecret(code)
                 }
             })
         }
         out.append(FieldAction(id: "second", title: "Copy Expiry", keys: Keymap.shared.text(.fieldSecond), symbol: "yab.copyframe.calendar", group: 1) {
-            self.copyPlain(card.expiry, transient: true)
+            self.put(card.expiry, passing: true)
         })
         let addresses = query.stock.addresses
         if let billing = Wallet.billing(of: card, among: addresses) {
             out.append(FieldAction(id: "billing", title: "Copy Billing Address", symbol: "yab.copyframe.home", group: 1) {
-                self.copyPlain(Browser.lines(of: billing), transient: true)
+                self.put(Browser.lines(of: billing), passing: true)
             })
         }
         // Another kept address to bill it to: one row each, as a list of
@@ -2198,7 +2186,9 @@ enum ActionIcons {
 
     /// A site's own icon, if it has been fetched.
     static func site(_ url: URL?) -> NSImage? {
-        guard let host = url?.host()?.lowercased() else { return nil }
+        guard let url, let host = url.host()?.lowercased() else { return nil }
+        // A port's own site has its own icon, and none of the host's.
+        if let site = Favicons.site(url), site != host { return Favicons.shared.cached(site) }
         let bare = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
         return Favicons.shared.cached(host) ?? Favicons.shared.cached(bare) ?? Favicons.shared.cached("www." + bare)
     }

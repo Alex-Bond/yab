@@ -273,7 +273,7 @@ struct OutsideAutofillTests {
             if f.browser.codeList?.codes.map(\.code) == ["246801"] { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(f.browser.codeList?.codes.map(\.code) == ["246801"])
+        #expect(f.browser.codeList?.codes.map(\.code) == ["246801"], "\(codeState(f))")
         // The same box can become an email challenge without navigating.
         _ = try await web.fixtureExpression("document.getElementById('prompt').textContent = 'An email with a 6-digit verification code was sent.'; document.getElementById('code').dispatchEvent(new InputEvent('input', {bubbles:true})); true")
         for _ in 0..<400 {
@@ -281,7 +281,15 @@ struct OutsideAutofillTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(f.tab.fieldCodeRequest == CodeRequest(source: .mail, digits: 6))
-        #expect(f.browser.codeList?.codes.map(\.code) == ["135790"])
+        #expect(f.browser.codeList?.codes.map(\.code) == ["135790"], "\(codeState(f))")
+    }
+
+    private func codeState(_ fixture: Fixture) -> String {
+        let tab = fixture.tab, watch = fixture.browser.codeWatch
+        return "key=\(fixture.window.isKeyWindow), eligible=\(fixture.browser.offersAutofill(tab)), "
+            + "empty=\(tab.fieldEmpty), code=\(tab.fieldCode), watching=\(watch.tab == tab.id), "
+            + "reading=\(watch.reading), sameDocument=\(watch.document == tab.fieldDocument), "
+            + "sameField=\(watch.field == tab.fieldIdentity), sameRequest=\(watch.request == tab.fieldCodeRequest)"
     }
 
     @Test func codeInstructionsStayWithTheirOwnField() async throws {

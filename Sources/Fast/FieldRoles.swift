@@ -106,7 +106,7 @@ enum FieldRoles {
         let checker = NSSpellChecker.shared
         var out: [String: String] = [:]
         for word in words where word.count >= 4 {
-            guard MailDesk.shared.people(matching: word, limit: 1).isEmpty, History.shared.host(named: word) == nil else { continue }
+            guard MailDesk.shared.people(matching: word, limit: 1).isEmpty, History.current.host(named: word) == nil else { continue }
             let language = word.unicodeScalars.contains { (0x0400...0x04FF).contains($0.value) } ? "ru" : "en"
             let range = NSRange(location: 0, length: (word as NSString).length)
             let wrong = checker.checkSpelling(of: word, startingAt: 0, language: language, wrap: false,

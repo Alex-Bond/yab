@@ -46,7 +46,7 @@ struct PasswordBringer: View {
                     Divider()
                 }
                 ForEach(logins, id: \.source.id) { login in
-                    Button("\(login.source.name) · \(Self.passwords(login.count))") { bring([login.source]) }
+                    Button(login.source.name) { bring([login.source]) }
                 }
                 if !logins.isEmpty { Divider() }
                 Button("Safari…") {
@@ -73,9 +73,7 @@ struct PasswordBringer: View {
         case .said(let text): return text
         case .idle:
             guard !logins.isEmpty else { return "From Chrome, Arc, Safari or a CSV file." }
-            let names = logins.map(\.source.name)
-            let where_ = names.count == 1 ? names[0] : names.count == 2 ? "\(names[0]) and \(names[1])" : "\(names.count) browsers"
-            return "\(Self.passwords(logins.reduce(0) { $0 + $1.count })) in \(where_). Existing passwords are kept."
+            return "Choose a browser to import from. Existing items are kept."
         }
     }
 
@@ -83,14 +81,10 @@ struct PasswordBringer: View {
         "\(count.formatted()) password\(count == 1 ? "" : "s")"
     }
 
-    /// The browsers with some, counted without their keys, off the main
-    /// thread.
+    /// Discover browser names without inspecting their credential stores.
     private func count() {
         DispatchQueue.global(qos: .userInitiated).async {
-            let found = Chromium.installed().compactMap { source -> (source: Chromium.Source, count: Int)? in
-                let count = Chromium.loginCount(source)
-                return count > 0 ? (source, count) : nil
-            }.sorted { $0.count > $1.count }
+            let found = Chromium.installed().map { (source: $0, count: 0) }
             DispatchQueue.main.async {
                 logins = found
                 if stage == .counting { stage = .idle }
@@ -106,7 +100,8 @@ struct PasswordBringer: View {
         DispatchQueue.global(qos: .userInitiated).async {
             var kept = 0
             var refused: [String] = []
-            for source in sources {
+            for discovered in sources {
+                let source = discovered.authorizingImport()
                 DispatchQueue.main.async { stage = .bringing(source.name) }
                 guard let found = try? Chromium.read(source) else { refused.append(source.name); continue }
                 var said = Date.distantPast

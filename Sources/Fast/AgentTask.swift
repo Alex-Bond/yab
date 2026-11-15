@@ -117,13 +117,15 @@ enum TaskWords {
         // Every setting native_apply can change (NativeSetting.all), by the
         // words its row in Settings uses: one missing here was answered with
         // the steps to change it by hand (feedback #84).
-        let subjects = ["theme", "dark", "light", "sidebar", "space", "spaces", "tabs", "tab", "font", "zoom", "gmail", "mail", "bookmark",
+        let subjects = ["profile", "sign-ins", "sign ins", "ctrl-tab", "ctrl tab", "recent tabs", "switcher", "theme", "dark", "light", "sidebar", "space", "spaces", "tabs", "tab", "font", "zoom", "gmail", "mail", "bookmark",
                         "setting", "search engine", "address bar", "full url", "background", "grain", "transparen", "peek", "player",
                         "picture in picture", "float", "developer", "devtools", "quit", "animation",
                         // Small Window and Air Traffic Control (links.*).
                         "small window", "window", "link", "domain", "site", "open in", "opens in",
                         // A site's own (site.*) and Reading Mode's.
-                        "awake", "sleep", "chromium", "webkit", "reading", "reader", "tidy", "preview"]
+                        "awake", "sleep", "chromium", "webkit", "reading", "reader", "tidy", "preview",
+                        // Energy Saver (EnergySaver), as Chromium and macOS name it.
+                        "energy saver", "battery saver", "power saving", "battery"]
         return subjects.contains { text.contains($0) }
     }
 
@@ -200,8 +202,10 @@ extension Agents {
 
     /// Whether an agent is there to ask at all.
     /// Gemini counts once signed in: its CLI alone can't take anything.
+    /// Where a task would find it (AgentLaunch.here): files alone don't
+    /// rule out a connected Claude or Codex on the login shell's PATH.
     static var installed: Bool {
-        Shell.cached.map { $0.claude != nil || $0.codex != nil || $0.cursor != nil } == true
+        ["claude", "codex", "cursor"].contains { AgentLaunch.here($0) == true }
             || (GeminiSupport.toolsProven && GeminiAccount.shared.ready)
     }
 
@@ -210,9 +214,14 @@ extension Agents {
     /// no buttons on sites, no chat to start; ⌘J says where to connect one.
     /// With AI in Yab Off (AIUse) none is: nothing goes to a model.
     static var ready: Bool {
-        guard AIUse.allows(.asked) else { return false }
-        if let assumed = assumedInTests, Store.testing { return assumed }
-        return AgentSetupModel.shared.canTakeTasks()
+        if let assumed = assumedInTests, Store.testing { return AIUse.allows(.asked) && assumed }
+        return ready(asked: AIUse.allows(.asked), setup: .shared)
+    }
+
+    /// `ready` for a setup: AI asked for, and a task on a connected plan
+    /// would start (AgentSetupModel.canTakeTasks, AgentLaunch).
+    static func ready(asked: Bool, setup: AgentSetupModel) -> Bool {
+        asked && setup.canTakeTasks()
     }
 
     /// A unit test's say on whether an agent is connected, for what only
@@ -326,7 +335,9 @@ extension Agents {
                                    bypass: browser.prefs.agentsAsking == .bypass)
         let session = run(prompt: prompt, cli: choice?.cli, model: choice?.model, effort: choice?.effort, access: "browser", resume: nil,
                               project: Projects.shared.project(project)?.id)
-        session.nativeOriginTab = browser.chatPage.flatMap { $0.shy ? nil : $0.id }
+        // The tab it was pointed at is its target, before the page in front:
+        // a chip of a tab other than the one shown is what the words mean.
+        session.nativeOriginTab = pointed.first(where: { !$0.shy })?.id ?? browser.chatPage.flatMap { $0.shy ? nil : $0.id }
         session.nativeOriginSpace = browser.spaceID
         session.nativeWindowID = browser.windowID ?? BrowserWindows.primaryID
         if TaskWords.undoRequest(words) { session.nativeUndoChange = NativeControl.shared.latestUndoable(in: browser) }
@@ -389,7 +400,10 @@ extension Agents {
 
     /// Ask more, on the answer's page: the same task, only what the words
     /// change looked at again.
-    func refine(_ session: Session, _ words: String) {
+    /// `given`: what went with the words (ChatAttachment.said), said after
+    /// them, not inside the quote of their own words. `about`: the tabs
+    /// among it, which make the message theirs, not the earlier work's.
+    func refine(_ session: Session, _ words: String, given: String = "", about tabs: [Tab] = []) {
         let words = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return }
         if !session.result.isEmpty { session.earlier = session.result }
@@ -397,8 +411,10 @@ extension Agents {
         session.read = false
         session.asked.append(words)
         session.saying.append(words)
-        let prompt = """
-        The user writes again after your last answer, in their own words: «\(words)». If that is a question, or \
+        // Without tabs, files, quotes and mail go in as they always did.
+        let quoted = tabs.isEmpty ? given + words : words
+        let prompt = !tabs.isEmpty ? Agents.aboutTabsPrompt(words, given: given, bypass: browser?.prefs.agentsAsking == .bypass) : """
+        The user writes again after your last answer, in their own words: «\(quoted)». If that is a question, or \
         says they didn't follow, just answer it, as you would to someone beside you: one to three plain sentences \
         in their language, about what they asked, with no `# ` line, no counts, nothing repeated from before and \
         nothing about what you didn't do. If it changes the task, check again only what that needs, on the tabs \
@@ -407,6 +423,21 @@ extension Agents {
         """
         _ = run(prompt: prompt, cli: nil, access: "browser", resume: session.id)
         objectWillChange.send()
+    }
+
+    /// A message in a chat with tabs of theirs attached: about those tabs,
+    /// not the work of the chat's earlier turns. Told only to refine that
+    /// work "on the tabs you already have open", an agent asked to give
+    /// people Full Access on an attached Figma members page went to the
+    /// Notion page the chat began on and asked where to do it (2026-11-14).
+    static func aboutTabsPrompt(_ words: String, given: String, bypass: Bool) -> String {
+        """
+        The user writes again in this chat, in their own words: «\(words)». \(given)
+        Earlier turns of this chat may have been about other pages; this message is not. Work in the tab they \
+        attached: read it, and click and fill in it, to do what they ask; open a tab of your own only for what \
+        needs another site. \(bypass ? Agents.bypassLine : Agents.askFirstLine)
+        Finish with a short plain answer in their language: what you did there, or plainly what stopped you.
+        """
     }
 
     /// What it was given to see, in a sentence for the prompt.
@@ -438,7 +469,8 @@ extension Agents {
                 if let text = item.text { lines.append("They selected this on the page: «\(text.prefix(4000))».") }
             case .tab:
                 guard let id = item.tab, let tab = browser.chatTab(id), !tab.shy else { continue }
-                lines.append("They gave you their tab \(Bench.short(tab)) to read (\(tab.address?.absoluteString ?? ""), \(tab.label)). " + PageWords.said(tab))
+                lines.append("They gave you their tab \(Bench.short(tab)) (\(tab.address?.absoluteString ?? ""), \(tab.label)): what they ask is about it, "
+                    + "and what is to be done on it you do there, not on another page. " + PageWords.said(tab))
             case .file:
                 if let url = item.url, url.isFileURL {
                     lines.append("The user attached a file on this Mac: \(url.path). Give it to a page with `upload` when the task needs it.")
@@ -534,6 +566,16 @@ final class TaskLine: ObservableObject {
     @Published var context: [TaskContext] = []
     @Published var focusRequest = 0
     let attach = ChatAttach()
+    lazy var away = ClickAway { [weak self] in self?.close() }
+
+    /// The whole line owns Escape, including while the answer or page has
+    /// focus. The text field's onExitCommand alone cannot cover that.
+    func take(_ event: NSEvent, on tab: Tab?) -> Bool {
+        guard let tab, self.tab == tab.id, event.keyCode == 53,
+              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else { return false }
+        close()
+        return true
+    }
     /// No agent connected: the line says where to get one, or answers on
     /// this Mac (here).
     @Published private(set) var alone = false
@@ -552,6 +594,8 @@ final class TaskLine: ObservableObject {
     func open(on tab: Tab, selection: String? = nil) {
         // Nothing to ask, or AI off: ⌘J and Ask About This aren't there.
         guard !tab.isBlank, AIUse.offers else { return }
+        // A person asks: readiness is looked at where tasks run, now.
+        AgentSetupModel.shared.asked()
         let alone = !Agents.ready
         // Mail's page is drawn by Yab over an empty one: the line is given
         // what mail shows instead, the open email or the list (MailChat),
@@ -609,6 +653,7 @@ final class TaskLine: ObservableObject {
 
     func close() {
         guard tab != nil else { return }
+        away.watch(false)
         attach.menu = false
         reset()
         withAnimation(Motion.depart) { tab = nil }
@@ -639,7 +684,7 @@ final class TaskLine: ObservableObject {
             let page = given ? await PageWords.read(tab) : ""
             do {
                 try await MacAnswer.stream(words, page: page, selection: selection) { said in
-                    guard self?.answering == true else { return }
+                    guard !Task.isCancelled, self?.answering == true else { return }
                     self?.answer = said
                 }
             } catch {
@@ -829,7 +874,7 @@ final class TaskLine: ObservableObject {
             if command.hasPrefix("send:") {
                 let chat = Chats.shared.chat(browser.chatID)
                 let items = browser.chatAttach.current(chat: chat, browser: browser)
-                browser.chatAttach.clear()
+                browser.chatAttach.clear(for: chat?.id)
                 if let chat { Agents.shared.followUp(chat.id, String(command.dropFirst(5)), with: items) }
                 else { ChatComposer.begin(String(command.dropFirst(5)), with: items, in: browser) }
             }
@@ -916,16 +961,23 @@ struct TaskLineView: View {
         }
         .frame(width: 480, alignment: .leading)
         .agentCardFrame()
+        .background(ClickZone(away: line.away))
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
         .overlay(alignment: .bottomLeading) {
             if attach.menu, let browser {
                 ChatAddMenu(browser: browser, chat: nil, attach: attach, line: line)
+                    .background(ClickZone(away: line.away))
                     .padding(.leading, CardFrame.inset)
                     .padding(.bottom, cardHeight + 6)
             }
         }
         .padding(.bottom, 14) // design: the dock's own lift off the page's foot (AgentDock)
-        .onAppear { DispatchQueue.main.async { typing = true } }
+        .onAppear {
+            line.away.within = { [weak tab] in tab?.builtPage?.window }
+            line.away.watch(true)
+            DispatchQueue.main.async { typing = true }
+        }
+        .onDisappear { line.away.watch(false) }
         .onChange(of: attach.menu) { _, open in if open { typing = false } }
         .onChange(of: line.focusRequest) { _, _ in typing = true }
         .transition(.move(edge: .bottom).combined(with: .opacity))

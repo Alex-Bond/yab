@@ -311,7 +311,7 @@ extension Browser {
         let tab = Startup.flag("LAZY_CONFIG")
             ? Tab(id: id, later: Spaces.store(for: space), engine: entry.restoredEngine)
             : Tab(id: id, configuration: Web.configuration(store: Spaces.store(for: space)), engine: entry.restoredEngine)
-        if tab.id != key { tab.keptKey = key }
+        if tab.id != key { tab.keptKey = key } else { tab.takeCopiesMute() }
         prepare(tab)
         tab.restore(url: url, title: entry.title)
         tab.visits = entry.visits ?? 0
@@ -557,5 +557,20 @@ extension Browser {
         var nests = nestsByID(tabs)
         takeKept(entry, into: copy, nests: &nests)
         return copy
+    }
+}
+
+extension Tab {
+    /// The other windows' tabs for the same entry: a shared pin by its key
+    /// in every window (`everywhere`), a space's own pin or kept tab by the
+    /// list's key, any space's row and a tab parked aside included. None
+    /// for a tab of this window's own. The handing over of a page
+    /// (BrowserWindows.handOff) and a test's windows count them the same.
+    var copies: [Tab] {
+        let windows = BrowserWindows.shared.handOffWindows ?? BrowserWindows.shared.normalBrowsers
+        let key = KeptEverywhere.key(self)
+        return windows.flatMap(\.everyTab).filter { other in
+            other !== self && (everywhere.map { other.everywhere == $0 } ?? (other.everywhere == nil && KeptEverywhere.key(other) == key))
+        }
     }
 }

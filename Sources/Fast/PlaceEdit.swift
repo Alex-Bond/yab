@@ -604,7 +604,7 @@ extension Browser {
         // Cards in more than one browser: all of them, first and chosen.
         if place == .autofill, let wallets = stock.wallets, wallets.count > 1 {
             let all = wallets.map(\.source)
-            sources.insert(PlaceSource(name: "All Browsers", symbol: "square.stack", detail: "\(wallets.reduce(0) { $0 + $1.cards + $1.addresses })",
+            sources.insert(PlaceSource(name: "All Browsers", symbol: "square.stack", detail: "",
                                        take: FieldAction(id: "bringall", title: "Bring In from All Browsers", symbol: "tray.and.arrow.down") {
                                            self.bringWallets(all)
                                        }), at: 0)
@@ -637,7 +637,8 @@ extension Browser {
         query.stock.bringing = first.name
         DispatchQueue.global(qos: .userInitiated).async {
             var failed: [(Chromium.Source, Error)] = []
-            for (index, source) in sources.enumerated() {
+            for (index, discovered) in sources.enumerated() {
+                let source = discovered.authorizingImport()
                 if index > 0 {
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.query.place == .autofill, self.query.stock.bringing != nil else { return }
@@ -682,6 +683,8 @@ extension Browser {
         let stock = query.stock
         guard stock.cards.isEmpty, stock.addresses.isEmpty, let wallets = stock.wallets, !wallets.isEmpty else { return nil }
         let cards = wallets.reduce(0) { $0 + $1.cards }, addresses = wallets.reduce(0) { $0 + $1.addresses }
+        // Discovery knows browser names, not whether they have cards or addresses.
+        guard cards + addresses > 0 else { return nil }
         if filter == 2 && cards == 0 || filter == 3 && addresses == 0 { return nil }
         let names = wallets.map(\.source.name)
         return PlaceItem(id: "bring", section: filter == 3 || cards == 0 ? "Addresses" : "Cards",

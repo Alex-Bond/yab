@@ -11,6 +11,21 @@ final class BrowserProfileTests: XCTestCase {
         PageFixtures.liveTab(for: URL(string: address)!, id: id, isPrivate: isPrivate)
     }
 
+    func testLinkedSpacesUseOneWebsiteStoreAndSurviveCoding() throws {
+        let directory = folder()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profile = BrowserProfile(folder: directory)
+        let owner = Space(id: UUID().uuidString, name: "Owner", emoji: "💼", tint: RGB(128, 128, 128), ownSignIns: true)
+        var member = owner
+        member.id = UUID().uuidString
+        member.signInWith = owner.id
+        let third = Space(id: UUID().uuidString, name: "Own", emoji: "✈️", tint: owner.tint, ownSignIns: true)
+        let back = try JSONDecoder().decode(Space.self, from: JSONEncoder().encode(member))
+        XCTAssertEqual(back.signInWith, owner.id)
+        XCTAssertEqual(profile.websiteStoreID(for: owner), profile.websiteStoreID(for: back))
+        XCTAssertNotEqual(profile.websiteStoreID(for: owner), profile.websiteStoreID(for: third))
+    }
+
     func testNormalLaunchRestoresAProfileAndNamedWorldsKeepFixtures() async throws {
         let directory = folder()
         defer { try? FileManager.default.removeItem(at: directory) }

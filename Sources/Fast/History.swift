@@ -17,6 +17,9 @@ struct Suggestion: Identifiable, Equatable {
     var tab: UUID?
     /// The space whose row holds that tab, when it is not the one on screen.
     var space: UUID? = nil
+    /// The ordinary destination paired with a remote tab's explicit jump.
+    /// It belongs to the Space asking for it, even if the site has a rule.
+    var opensHere = false
     /// Listed under Favorites in the empty field (FieldFavorites), whatever
     /// its kind.
     var favorite = false
@@ -37,6 +40,10 @@ struct Suggestion: Identifiable, Equatable {
     var seen: Date? = nil
     /// A setting found on a page: preserve its row after the field is dismissed.
     var settingAnchor: String? = nil
+    /// A site the search engine named for the words (Google's NAVIGATION
+    /// result, SearchSuggestions): drawn as a known site, listed with the
+    /// engine's words.
+    var engine = false
 
     enum Kind: Equatable {
         /// A page that is open right now.
@@ -109,6 +116,9 @@ struct Suggestion: Identifiable, Equatable {
         switch kind {
         case .command(let command): return "do:" + command.rawValue
         case .setting(let page): return "set:" + page.rawValue
+        // A destination and an explicit jump to its existing tab can share
+        // an address and title. They remain separate keyboard selections.
+        case .open: return tab.map { "tab:" + $0.uuidString } ?? key
         // One search row, whatever it is asking: its words change with every
         // key, and a row that is still the search should stay the same row.
         case .suggested: return "suggest:" + key
@@ -155,6 +165,21 @@ struct SpaceVisits: Codable {
 @MainActor
 final class History: ObservableObject {
     static let shared = History()
+    private static var profiles: [String: History] = [:]
+
+    /// History belongs to a logical profile, as cookies and extensions do.
+    /// The original file remains the original shared profile's history.
+    static func profile(_ id: UUID) -> History {
+        guard id != Space.firstID else { return shared }
+        let file = Store.file("history-" + id.uuidString + ".json")
+        if let kept = profiles[file.path] { return kept }
+        let made = History(file: file)
+        profiles[file.path] = made
+        return made
+    }
+
+    static var current: History { BrowserWindows.shared.activeBrowser?.history ?? shared }
+    static let anyIndexReady = PassthroughSubject<History, Never>()
     private static let writes = DispatchQueue(label: "yab.history", qos: .utility)
     /// Changed in place: an observer that read `oldValue` would copy the
     /// whole dictionary, tens of thousands of places brought in from
@@ -496,6 +521,7 @@ final class History: ObservableObject {
                     guard let self, self.indexGeneration == generation else { return }
                     MainBudget.chunk("history.index.apply") { self.apply(index) }
                     self.indexReady.send(())
+                    Self.anyIndexReady.send(self)
                 }
             }
         }
@@ -850,6 +876,9 @@ final class History: ObservableObject {
     func forget() {
         visits = [:]
         save()
+        // The icons pages wore name the pages: they go with the visits, as
+        // Chrome's favicons go with its history (Favicons.pageIcon).
+        Favicons.shared.forgetPages()
     }
 
     /// In-memory visits for the omnibox performance bench. One assignment
@@ -995,6 +1024,8 @@ final class History: ObservableObject {
     func forget(since: Date) {
         visits = visits.filter { $0.value.last < since }
         save()
+        // Which pages were worn since is not written down: all of them.
+        Favicons.shared.forgetPages()
     }
 
     /// Whether a place is in the history, not only among the bookmarks.

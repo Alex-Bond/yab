@@ -99,4 +99,42 @@ struct PageShareTests {
         #expect(RelayGuard.share(main, on: tab) == .yab)
         #expect(RelayGuard.share(main, on: tab) == nil)
     }
+
+    /// Slack's huddle window: an about:blank popup its opener fills. Share
+    /// Screen is clicked there and the opener asks for the screen; the
+    /// click counts, once, and the box comes over the window clicked.
+    @Test func aClickInTheWindowAPageDrawsStandsBehindItsAsk() {
+        let browser = Browser(windowID: UUID())
+        let opener = Tab(shy: true, bench: true), huddle = Tab(shy: true, bench: true), signIn = Tab(shy: true, bench: true)
+        defer { opener.close(); huddle.close(); signIn.close() }
+        opener.setAddressOptimistically(URL(string: "https://app.example.com/client")!)
+        for window in [huddle, signIn] {
+            window.popup = true; window.opener = opener.id; window.scripted = Date()
+            browser.outside.append(window)
+        }
+        huddle.setAddressOptimistically(URL(string: "about:blank")!)
+        signIn.setAddressOptimistically(URL(string: "https://accounts.elsewhere.invalid/")!)
+        #expect(RelayGuard.drawn(huddle, by: opener))
+        #expect(!RelayGuard.drawn(signIn, by: opener))
+        let main = PageFrame(isMain: true, url: nil, token: NSObject())
+
+        RelayGuard.felt(huddle.page)
+        let asked = browser.shareHand(main, on: opener)
+        #expect(asked?.0 == .page)
+        #expect(asked?.1 === huddle)
+        #expect(browser.shareHand(main, on: opener) == nil)
+
+        // A click on another site's window is not the page's.
+        RelayGuard.felt(signIn.page)
+        #expect(browser.shareHand(main, on: opener) == nil)
+        // Nor a window another page opened.
+        huddle.opener = UUID()
+        RelayGuard.felt(huddle.page)
+        #expect(browser.shareHand(main, on: opener) == nil)
+        // The page's own click still stands behind its own ask, on its tab.
+        RelayGuard.felt(opener.page)
+        let own = browser.shareHand(main, on: opener)
+        #expect(own?.0 == .page)
+        #expect(own?.1 == nil)
+    }
 }

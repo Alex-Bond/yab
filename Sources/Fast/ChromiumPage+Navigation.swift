@@ -51,7 +51,8 @@ extension ChromiumPage {
                 if fileRequests.finish(token, lifetime) { continueNativeQuestion("file.reply", remote: remoteID, ["request": .string(token), "paths": .array([])]) }
                 return
             }
-            let picker = PageFilePicker(allowsDirectories: p["directories"] == .bool(true),
+            let picker = PageFilePicker(saveName: p["save"] == .bool(true) ? (p["name"]?.string ?? "Untitled") : nil,
+                                        allowsDirectories: p["directories"] == .bool(true),
                                         allowsMultiple: p["multiple"] == .bool(true),
                                         frame: scripts.fileFrame(p, tab: event.tab), lifetime: lifetime)
             let remote = remoteID
@@ -71,5 +72,21 @@ extension ChromiumPage {
             navigationTab?.finder.heard(body)
         default: break
         }
+    }
+}
+
+extension ChromiumPage {
+    /// A link for another app, which the helper stopped (Chrome would ask from
+    /// a window nobody sees). Yab's own policy decides, as on a WebKit tab.
+    func receiveExternal(_ p: [String: JSONValue]) {
+        guard let url = p["url"]?.string.flatMap(URL.init(string:)) else { return }
+        let asker = p["asker"]?.string.flatMap(URL.init(string:))
+        let gesture = p["gesture"] == .bool(true)
+        let action = PageAction(request: URLRequest(url: url), kind: gesture ? .linkActivated : .other,
+            targetIsMainFrame: p["main"] == .bool(true),
+            source: .init(isMainFrame: p["askerMain"] == .bool(true), scheme: asker?.scheme ?? "",
+                          host: asker?.host ?? "", port: asker?.port ?? 0),
+            modifierFlags: [], buttonNumber: 0, shouldPerformDownload: false, userInitiated: gesture)
+        events?.page(self, decide: action) { _ in }
     }
 }

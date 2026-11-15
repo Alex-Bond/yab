@@ -31,7 +31,7 @@ settings:
     # equal its app's). A build
     # uploaded to TestFlight is tagged iphone-<version>-<build>, and the next
     # commit raises this: Phone/AGENTS.md, "Versions".
-    MARKETING_VERSION: "0.1.40"
+    MARKETING_VERSION: "0.1.48"
     CURRENT_PROJECT_VERSION: "1"
   configs:
     Debug:

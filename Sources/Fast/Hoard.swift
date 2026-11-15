@@ -2461,7 +2461,7 @@ struct HoardList: View {
                     if fetch.failed {
                         Tool(symbol: "arrow.clockwise", help: fetch.paused ? "Resume" : "Try Again") { hoard.retry(fetch) }
                     }
-                    Tool(symbol: "xmark", help: fetch.failed ? "Remove" : "Stop") {
+                    Tool(symbol: "xmark", help: fetch.failed ? "Remove" : "Cancel") {
                         fetch.failed ? hoard.dismiss(fetch) : hoard.cancel(fetch)
                     }
                 }

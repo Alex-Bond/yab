@@ -266,6 +266,10 @@ enum AskPhase: Equatable {
     /// Answered elsewhere, or the chat stopped: what happened, in place of
     /// the buttons, for a moment before the card goes.
     case said(String, good: Bool)
+
+    var acceptsAnswer: Bool {
+        switch self { case .ready, .failed: return true; case .going, .said: return false }
+    }
 }
 
 /// What a card's buttons do, given by whoever holds the question.

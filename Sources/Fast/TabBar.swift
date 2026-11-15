@@ -71,6 +71,10 @@ struct TabBar: View {
     /// folder of the two (Kept.swift); and their clocks.
     @State private var sprung: UUID?
     @State private var combine: Tab.ID?
+    @State private var choice: TabDropChoice?
+    @State private var dragCancelled = false
+    @State private var movingWindow = false
+    @State private var choicePreviousActive: Tab.ID?
     @State private var clocks = Clocks()
     /// A folder lifted by its pill: all its tabs fold under it while the
     /// other kept pills make room for the folder as one thing.
@@ -113,15 +117,17 @@ struct TabBar: View {
         var spring: DispatchWorkItem?
         var springFor: UUID?
         var dwell: DispatchWorkItem?
-        var dwellAt: CGFloat?
+        var hold: DispatchWorkItem?
+        var escape: Any?
 
         func stop() {
             spring?.cancel()
             spring = nil
             springFor = nil
+            hold?.cancel()
+            hold = nil
             dwell?.cancel()
             dwell = nil
-            dwellAt = nil
         }
     }
 
@@ -158,13 +164,20 @@ struct TabBar: View {
     /// title bar it brings down with the menu bar.
     private var lit: Bool { !browser.fullScreen }
 
+    /// The row's start moves on the turn's spring when the space changes.
+    private var slides: Bool { !(reduceMotion || SpaceTurn.still || !StripTurn.swiftUI("slide")) }
+
     /// Where the row starts: after the lights, or, without them, just in
     /// from the edge.
-    /// The capsule's width is the space it is drawn for (SpaceShown), and
-    /// the row moves on with it, in the same frame and on its curve. Ahead
-    /// of the capsule, the pins every space shares.
-    private var lead: CGFloat { corner + (browser.spacesShown ? aheadWidth + capsuleWidth + Metrics.tabGap : 0) }
-    private var capsuleWidth: CGFloat { CapsulePlan.strip(name: shown.space(in: browser).name).width ?? 0 }
+    /// The capsule's width is the space on screen's, and the row moves on
+    /// with it, on its curve (LeadSlide). Ahead of the capsule, the pins
+    /// every space shares.
+    private var lead: CGFloat { corner + (browser.spacesShown ? aheadWidth + capsuleWidth + CapsulePlan.stripAfter : 0) }
+    /// The space on screen's, in the switch's own pass: the capsule's plate
+    /// and the tabs after it are laid out for it at once and drawn there on
+    /// the turn's spring (CapsulePlate, LeadSlide). Laid a frame behind, as
+    /// it was, the strip took a whole second pass of the window each switch.
+    private var capsuleWidth: CGFloat { CapsulePlan.strip(name: browser.space.name).width ?? 0 }
 
     /// The pins every space shares, while the space on screen shows them:
     /// first in the strip, then the space's capsule, then its own tabs, the
@@ -196,7 +209,6 @@ struct TabBar: View {
     /// A pin ahead of the capsule edited as an address: the field it grows
     /// into, whatever the strip's width, which is worked out from it.
     private static let fieldRoom: CGFloat = 340
-    @ObservedObject private var shown = SpaceShown.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Where the row would start with no space's icon before it.
     /// The doors, when here, start just past the lights, with no room kept
@@ -219,10 +231,18 @@ struct TabBar: View {
             let room = self.room(in: geo.size.width)
             let run = min(content, room)
             let overflow = content > room + 0.5
+            // Where the plate, the run and the doors stand, for a change of
+            // space to picture them (StripView).
+            let _ = StripGeometry.note(browser, StripGeometry(
+                capsuleX: corner + (browser.spacesShown ? aheadWidth : 0), plate: browser.spacesShown ? capsuleWidth : 0,
+                lead: lead, doorsStart: geo.size.width - Metrics.rim - (browser.bandDoors ? 0 : doors), width: geo.size.width))
             ZStack(alignment: .leading) {
                 // The empty half of the strip is what you grab to move the
-                // window; the tabs keep the run they sit on.
-                DragStrip(reserved: lead + run + Metrics.tabGap + Metrics.plusWidth, trailing: browser.bandDoors ? 0 : 26 + 24)
+                // window; the tabs keep the run they sit on. Refuse only
+                // the measured doors, leaving the existing right rim as a
+                // minimum handle even when the run overflows.
+                DragStrip(reserved: lead + run + Metrics.tabGap + Metrics.plusWidth,
+                          notch: browser.bandDoors ? .zero : CGRect(x: StripPress.endGap, y: 0, width: doors, height: Metrics.row))
                 // And the corner the lights sit in, which is title bar too,
                 // the one stretch left to take hold of when tabs fill the row.
                 DragStrip()
@@ -245,7 +265,7 @@ struct TabBar: View {
                             aheadPins(pins)
                             KeptDivider()
                         }
-                        SpaceCapsule(browser: browser, plan: CapsulePlan.strip(name: shown.space(in: browser).name), up: false)
+                        SpaceCapsule(browser: browser, plan: CapsulePlan.strip(name: browser.space.name), up: false)
                             // Two fingers sideways over it: the next space, or
                             // back, as over the column. Over the tabs they still
                             // scroll the row.
@@ -266,6 +286,8 @@ struct TabBar: View {
                     // it takes the room there is and scrolls inside its own
                     // edges, never under the lights, never over the doors,
                     // keeping the tab you are on in view.
+                    // With the + after them, one slide (LeadSlide).
+                    HStack(spacing: Metrics.tabGap) {
                     ScrollViewReader { reader in
                         ThreadScrollView(.horizontal, showsIndicators: false) {
                             // The row holds still under the hand: the widths it
@@ -351,7 +373,7 @@ struct TabBar: View {
                                         close: { browser.shut(tab) }
                                     )
                                     .equatable()
-                                    .opacity(grouped && !held ? 0 : becoming == nil ? decked == tab.id || torn == tab.id ? 0.5 : 1 : 0)
+                                    .opacity((choice?.target == tab.id || held) && choice?.revealed == true ? 0 : grouped && !held ? 0 : becoming == nil ? decked == tab.id || torn == tab.id ? 0.5 : 1 : 0)
                                     .frame(width: becoming.map { $0 ? Metrics.pinWidth : tabWidth(tab, place: place, widths: widths) }, alignment: .leading)
                                     .overlay(alignment: .leading) {
                                         if let becoming {
@@ -369,15 +391,19 @@ struct TabBar: View {
                                             .allowsHitTesting(false)
                                         }
                                     }
+                                    .overlay(alignment: .leading) {
+                                        if held, choice?.revealed == true {
+                                            Mark(icon: tab.displayIcon, letter: tab.monogram, size: 16)
+                                                .frame(width: 28, height: 28)
+                                                .background(Palette.wash(on: tone), in: RoundedRectangle(cornerRadius: Radius.control))
+                                                .offset(x: grabAt + 10)
+                                                .allowsHitTesting(false)
+                                        }
+                                    }
                                     // Stayed over by a held tab: it offers a folder of the two.
                                     .overlay {
-                                        if combine == tab.id {
-                                            Text("New Folder")
-                                                .font(.system(size: titleSize))
-                                                .foregroundStyle(Palette.ink)
-                                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                                .background(Palette.wash(on: tone), in: RoundedRectangle(cornerRadius: SideBar.radius, style: .continuous))
-                                                .transition(.opacity)
+                                        if let choice, choice.target == tab.id, choice.revealed {
+                                            TabDropChoices(choice: choice, iconsOnly: true)
                                         }
                                     }
                                     .overlay(alignment: .topTrailing) {
@@ -403,6 +429,13 @@ struct TabBar: View {
                                     // or unfolds while the pointer keeps moving it.
                                     .offset(x: held || alongside ? -grabAt : 0)
                                     .zIndex(lift ? 1 : 0)
+                                    .overlay(alignment: .trailing) {
+                                        // FolderPillPlace includes the empty gap after the pill.
+                                        // Keep it a title-bar handle, outside the tab's gesture.
+                                        if place?.shown != false {
+                                            DragStrip().frame(width: Metrics.tabGap)
+                                        }
+                                    }
                                     .gesture(reorder(tab: tab, index: index,
                                                      each: tabWidth(tab, place: place, widths: widths), widths: widths))
                                     // In a window behind another, the press
@@ -441,6 +474,9 @@ struct TabBar: View {
                             .coordinateSpace(name: "run")
                             .frame(height: Metrics.row)
                             .background(WheelAcross(enabled: dragging == nil))
+                            // A new space's tabs come up from the side it
+                            // lies on (StripTurn).
+                            .modifier(StripArrival(space: browser.spaceID, step: browser.spaceStep))
                             // Two fingers over the capsule: the tabs go with
                             // them, cut at the row's own edge (StripPull).
                             .modifier(StripPull(space: browser.spaceID))
@@ -454,6 +490,11 @@ struct TabBar: View {
                         .scrollClipDisabled(!overflow)
                         .modifier(HardEdges())
                         .frame(width: run)
+                        .overlay {
+                            // Pills are centered in a row twelve points taller.
+                            // These transparent handles do not change their layout.
+                            DragStrip(tabAir: true)
+                        }
                         // And the next space's tabs coming up where they
                         // will stand, as in the column (PagedSpace).
                         .overlay(alignment: .leading) {
@@ -495,6 +536,12 @@ struct TabBar: View {
                     .modifier(StripPlus(browser: browser, run: run) {
                         coming($0, in: geo.size.width)
                     })
+                    }
+                    // After the capsule, on the turn's spring (LeadSlide):
+                    // the slide alone, nothing in the run laid out again.
+                    .transaction(value: lead) { $0.animation = nil }
+                    .modifier(LeadSlide(drawn: lead, lead: lead))
+                    .transaction(value: lead) { StripTurn.carry(&$0, on: slides) }
 
                     Spacer(minLength: 0)
 
@@ -523,8 +570,11 @@ struct TabBar: View {
                 // The traffic lights come first, and the row starts after
                 // them. Full screen has none but under the menu bar, and the
                 // row starts at the edge.
+                // Laid out at once: the tabs and the + get there on the
+                // turn's spring by LeadSlide, drawn and not laid out again
+                // each frame, as the capsule's plate does (StripTurn).
                 .padding(.leading, lead)
-                .animation(reduceMotion || SpaceTurn.still ? nil : SpaceCapsule.change, value: lead)
+                .transaction(value: lead) { $0.animation = nil }
                 .padding(.trailing, Metrics.rim)
                 .coordinateSpace(name: "strip")
             }
@@ -547,11 +597,39 @@ struct TabBar: View {
         // this: each row puts its own down at once (see `.animation(nil,
         // value: live)` on the row).
         .animation(browser.tabsGrew ? Motion.room : Motion.leave, value: browser.tabs.count)
+        .onDisappear {
+            if let escape = clocks.escape { NSEvent.removeMonitor(escape); clocks.escape = nil }
+            clearChoice()
+            clocks.stop()
+        }
         .onChange(of: holding) { _, still in
             // Let go properly, the drag has already put everything away by
             // the time this hears of it; broken off, it is left to do here,
             // everything back where it was, nothing moved.
-            guard !still else { return }
+            if still {
+                dragCancelled = false
+                clocks.escape = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    guard event.keyCode == 53 else { return event }
+                    return MainActor.assumeIsolated {
+                        guard dragging != nil, event.window === BrowserWindows.shared.window(for: browser) else { return event }
+                        dragCancelled = true
+                        clearChoice()
+                        clocks.stop()
+                        if decked != nil { SplitDeck.shared.leave(); decked = nil }
+                        SpaceDrop.shared.cancel()
+                        TearOff.shared.cancel()
+                        dragging = nil
+                        groupIDs = []
+                        plan = nil
+                        travel = 0
+                        heldWidths = nil
+                        return nil
+                    }
+                }
+                return
+            }
+            movingWindow = false
+            if let escape = clocks.escape { NSEvent.removeMonitor(escape); clocks.escape = nil }
             DispatchQueue.main.async {
                 if carrying != nil { endCarry(cancelled: true) }
                 if aheadHeld != nil {
@@ -568,6 +646,7 @@ struct TabBar: View {
                     SplitDeck.shared.leave()
                     decked = nil
                 }
+                clearChoice()
                 clocks.stop()
                 withAnimation(Motion.settle) {
                     dragging = nil
@@ -1045,6 +1124,14 @@ struct TabBar: View {
         DragGesture(minimumDistance: 5, coordinateSpace: .named("run"))
             .updating($holding) { _, state, _ in state = true }
             .onChanged { value in
+                guard !dragCancelled, !movingWindow else { return }
+                if dragging == nil,
+                   StripPress.verticalTab(value.translation.width, value.translation.height),
+                   let window = BrowserWindows.shared.window(for: browser),
+                   WindowDrag.dragTab(in: window) {
+                    movingWindow = true
+                    return
+                }
                 if dragging != tab.id {
                     // Where it stands as the row draws it: the widths the
                     // row has now, which the hand keeps (heldWidths, not yet
@@ -1080,6 +1167,7 @@ struct TabBar: View {
                             SplitDeck.shared.leave()
                             decked = nil
                         }
+                        clearChoice()
                         clocks.stop()
                         withAnimation(Motion.settle) {
                             torn = tab.id
@@ -1097,11 +1185,13 @@ struct TabBar: View {
                 // is its alone, nothing of the row's changes. Back up in the
                 // row, the drag goes on here.
                 let out = value.translation.height > Metrics.row + 8
+                if out { clearChoice() }
                 if decked != nil {
                     if out { SplitDeck.shared.move(); return }
                     SplitDeck.shared.leave()
                     decked = nil
                 } else if out, groupIDs.count < 2, tab.pin == nil, SplitDeck.shared.begin(tab, in: browser) {
+                    clearChoice()
                     decked = tab.id
                     withAnimation(Motion.settle) {
                         plan = Plan(index: from, pinned: false, kept: tab.kept, nest: tab.nest?.id)
@@ -1118,6 +1208,7 @@ struct TabBar: View {
                 let moving = members.count > 1
                     ? browser.tabs.filter { members.contains($0.id) } : [tab]
                 if SpaceDrop.shared.track(moving, browser: browser) {
+                    clearChoice()
                     let home = Plan(index: from, pinned: tab.pin != nil, kept: tab.kept, nest: tab.nest?.id)
                     if plan != home { withAnimation(Motion.settle) { plan = home } }
                     return
@@ -1134,6 +1225,7 @@ struct TabBar: View {
                     // Over the pins, past their end, or, once folded, past
                     // the end of the room they have made for it.
                     if value.location.x < pinsEnd + (plan.pinned ? pinStride + 6 : -6) {
+                        clearChoice()
                         next.pinned = true
                         if value.location.x < 0, lead > 0, joinsAhead(tab) {
                             // Out past the capsule, over the pins ahead of
@@ -1152,7 +1244,7 @@ struct TabBar: View {
                         if groupIDs.count < 2 {
                             dwell(tab, x: value.location.x, leading: value.location.x - grabAt, each: each)
                         }
-                        if combine != nil { return }
+                        if choice != nil { return }
                         // By pills as drawn, folders' and the stroke's
                         // (Folders.landing): the held one's leading edge, in
                         // slots, a neighbor making way once it is half over it.
@@ -1204,8 +1296,11 @@ struct TabBar: View {
                 }
             }
             .onEnded { value in
+                if movingWindow { movingWindow = false; return }
+                guard !dragCancelled, dragging == tab.id else { return }
                 // Let go out of the window: it went to another, or a new one.
                 if TearOff.shared.finish(browser) {
+                    clearChoice()
                     clocks.stop()
                     var still = Transaction()
                     still.disablesAnimations = true
@@ -1223,6 +1318,7 @@ struct TabBar: View {
                 torn = nil
                 // Let go over a space in the tray: it went there.
                 if SpaceDrop.shared.finish(browser) {
+                    clearChoice()
                     var still = Transaction()
                     still.disablesAnimations = true
                     withTransaction(still) {
@@ -1234,10 +1330,13 @@ struct TabBar: View {
                     }
                     return
                 }
+                if choice != nil, decked == nil {
+                    dwell(tab, x: value.location.x, leading: value.location.x - grabAt, each: each)
+                }
                 // Let go down over the pages with nothing there to take it:
                 // back to its place, no folder made of a pill it crossed.
                 if decked != tab.id, value.translation.height > Metrics.row + 8 {
-                    combine = nil
+                    clearChoice()
                     plan = Plan(index: from, pinned: tab.pin != nil, kept: tab.kept, nest: tab.nest?.id)
                 }
                 finish(tab, each: each)
@@ -1267,15 +1366,23 @@ struct TabBar: View {
                 sprung = nil
                 guard dragging == tab.id, let plan else { return }
                 let visual = pointer - grabAt
+                let splitTarget = choice.flatMap { value -> Tab? in
+                    value.revealed && value.side == .split ? browser.tab(id: value.target) : nil
+                }
+                choicePreviousActive = nil
+                choice = nil
                 let other = combine.flatMap { id in browser.tabs.first { $0.id == id } }
                 combine = nil
                 var still = Transaction()
                 still.disablesAnimations = true
                 var stays = false
                 withTransaction(still) {
-                    if let other {
+                    if let splitTarget {
+                        browser.split(tab, with: splitTarget)
+                        stays = true
+                    } else if let other {
                         // Stayed over another pill: a new folder of the two.
-                        browser.newFolder(with: [other, tab], around: other)
+                        browser.newFolder(with: [other, tab], today: !other.kept, around: other)
                     } else if plan.pinned != (tab.pin != nil) {
                         // A half of a pair leaves a square on its page (`pin`),
                         // the half staying in the pair.
@@ -1398,19 +1505,73 @@ struct TabBar: View {
     /// The pointer staying 0.5 s over another pill, one outside your
     /// folders: that pill offers a folder of the two. Moving on takes it back.
     private func dwell(_ tab: Tab, x: CGFloat, leading: CGFloat, each: CGFloat) {
-        if let at = clocks.dwellAt, abs(x - at) <= (combine == nil ? 8 : 24) { return }
-        clocks.dwell?.cancel()
-        clocks.dwellAt = x
-        if combine != nil { withAnimation(Motion.settle) { combine = nil } }
-        guard tab.keepable else { return }
+        guard tab.keepable, plan?.into == nil, plan?.pinned == false,
+              let over = overlapped(tab, leading: leading, each: each),
+              over.by >= 0.3, over.by <= 0.7,
+              let start = places(each: each, planned: true)[over.tab.id] else { return clearChoice() }
+        let canSplit = browser.canCarry(tab, beside: over.tab)
+        let side: TabDropChoice.Side = canSplit && x >= start + each / 2 ? .split : .folder
+        if choice?.target == over.tab.id {
+            if choice?.side != side {
+                choice?.side = side
+                choice?.fill = 0
+                choice?.ready = false
+                combine = nil
+                clocks.hold?.cancel()
+                if choice?.revealed == true { choose(tab, other: over.tab) }
+            }
+            return
+        }
+        clearChoice()
+        choice = TabDropChoice(target: over.tab.id, side: side, canSplit: canSplit)
         let work = DispatchWorkItem { [self] in
-            guard dragging == tab.id, plan?.into == nil, plan?.pinned == false else { return }
-            guard let over = overlapped(tab, leading: leading, each: each), over.by >= 0.3, over.by <= 0.7 else { return }
-            NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
-            withAnimation(Motion.settle) { combine = over.tab.id }
+            guard dragging == tab.id, choice?.target == over.tab.id else { return }
+            choice?.revealed = true
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            choose(tab, other: over.tab)
         }
         clocks.dwell = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + TabDropChoice.revealDelay, execute: work)
+    }
+
+    private func choose(_ tab: Tab, other: Tab) {
+        guard choice?.revealed == true else { return }
+        if choice?.side == .split {
+            if choicePreviousActive == nil { choicePreviousActive = browser.activeID }
+            browser.select(other)
+            browser.previewSplit(.right)
+        } else {
+            restoreChoicePreview()
+            choice?.fill = 0
+            DispatchQueue.main.async {
+                guard choice?.target == other.id, choice?.side == .folder else { return }
+                choice?.fill = 1
+            }
+            let work = DispatchWorkItem { [self] in
+                guard dragging == tab.id, choice?.target == other.id, choice?.side == .folder else { return }
+                choice?.count = (browser.partner(of: other) == nil ? 1 : 2) + (browser.partner(of: tab) == nil ? 1 : 2)
+                choice?.ready = true
+                combine = other.id
+                NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+            }
+            clocks.hold = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + TabDropChoice.folderHold, execute: work)
+        }
+    }
+
+    private func restoreChoicePreview() {
+        guard choice?.side == .split || choicePreviousActive != nil else { return }
+        browser.previewSplit(nil)
+        if let id = choicePreviousActive, let previous = browser.tab(id: id) { browser.select(previous) }
+        choicePreviousActive = nil
+    }
+
+    private func clearChoice() {
+        clocks.dwell?.cancel()
+        clocks.hold?.cancel()
+        restoreChoicePreview()
+        choice = nil
+        combine = nil
     }
 
     /// The pill the held one is most over as drawn, and by how much of its
@@ -1424,7 +1585,7 @@ struct TabBar: View {
             let by = (min(leading, start) + each - max(leading, start)) / each
             if by > (best?.by ?? 0) { best = (other, by) }
         }
-        guard let best, best.tab.keepable, best.tab.nest?.today != true,
+        guard let best, best.tab.keepable,
               folders.place(of: best.tab).map({ Nest.isKey($0.folder) }) ?? true else { return nil }
         return best
     }
@@ -1477,7 +1638,7 @@ struct TabBar: View {
     /// a door's width stands in for them.
     private func room(in strip: CGFloat, bar: Bool? = nil) -> CGFloat {
         let far = bar ?? browser.bandDoors ? 0 : doors > 0 ? doors : 26
-        return max(0, strip - lead - 12 - Metrics.plusWidth - far - 3 * Metrics.tabGap)
+        return max(0, strip - lead - StripPress.endGap - Metrics.plusWidth - far - 3 * Metrics.tabGap)
     }
 
     /// How the next space's row will lie, as this one's is counted: the
@@ -1951,63 +2112,150 @@ private struct StripComing: View {
         return spans.filter { $0.value.1 > $0.value.0 }
     }
 
+    @ObservedObject private var turns = StripTurns.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         if let row = pull.coming(in: browser) {
             let lay = lay(row)
-            let widths = lay.widths
-            let tabs = row.tabs + browser.tabs.filter(browser.travels)
-            let items = Array(StripItem.items(tabs, active: row.active, open: folders.open, whole: folders.whole).prefix(24))
-            HStack(spacing: Metrics.tabGap) {
-                // As the switch will lay it, the tabs that go with you from
-                // space to space included.
-                // The kept, the folders and the stroke after them, as the
-                // row will draw them (Kept.swift, Folders).
-                ForEach(items) { item in
-                    switch item {
-                    case .stroke:
-                        KeptDivider()
-                    case .folder(let folder):
-                        let width = itemWidth(item, widths: widths, active: row.active)
-                        if let nest = folder.nest {
-                            NestPill(browser: browser, nest: nest, count: folder.members.count, width: width, over: folder.over, still: true)
-                        } else {
-                            FolderPill(browser: browser, folder: folder, open: Folders.isOpen(folder, among: folders.open),
-                                       width: width, among: tabs)
+            // Coming up only once the old ones are mostly gone, so the two
+            // rows never stand half seen over each other (StripTurn).
+            picture(row, lay: lay)
+                .offset(x: CGFloat(pull.dir) * StripTurn.arrival * (1 - pull.progress))
+                .frame(width: run + (lay.run - run) * pull.progress, alignment: .leading)
+                .clipped()
+                .modifier(StripCross(progress: pull.progress, coming: true, on: true))
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        } else if !(reduceMotion || SpaceTurn.still || !StripTurn.swiftUI("leaving")) {
+            // The space just left: its tabs go 16 points the other way and
+            // fade, gone by a little past half the new ones' arrival.
+            let dir = CGFloat(browser.spaceStep)
+            let row = turns.left.flatMap { $0 == browser.spaceID ? nil : browser.parked[$0] }
+            Color.clear
+                .frame(width: 0, height: Metrics.row)
+                .keyframeAnimator(initialValue: CGFloat(1), trigger: turns.started) { _, r in
+                    Group {
+                        if let row, r < 1 / CGFloat(StripTurn.leaveSpeed) {
+                            picture(row, lay: lay(row))
+                                .offset(x: -dir * StripTurn.leave * r)
+                                .opacity(Double(1 - CGFloat(StripTurn.leaveSpeed) * r))
                         }
-                    case .more(let folder, let count):
-                        FolderMore(folder: folder, count: count, width: StripWidths.moreWidth)
-                    case .tab(let tab, _):
-                        TabPill(browser: browser, prefs: browser.prefs, tab: tab, live: tab.id == row.active,
-                                width: itemWidth(item, widths: widths, active: row.active),
-                                room: room, row: row, close: {})
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                } keyframes: { _ in
+                    KeyframeTrack {
+                        MoveKeyframe(turns.start)
+                        LinearKeyframe(1, duration: StripTurn.arrivalTime, timingCurve: StripTurn.arrivalCurve)
                     }
                 }
-            }
-            .background(alignment: .leading) {
-                let spans = comingCapsules(items, widths: widths, active: row.active)
-                    .map { NestedWash.Span(id: $0.key, start: $0.value.0, end: $0.value.1) }
-                ZStack(alignment: .leading) {
-                    ForEach(NestedWash.lay(spans, parent: comingParents(items))) { wash in
-                        RoundedRectangle(cornerRadius: wash.radius, style: .continuous)
-                            .fill(Palette.wash(on: tone))
-                            .frame(width: wash.end - wash.start, height: wash.height)
-                            .offset(x: wash.start)
-                    }
-                }
-            }
-            .frame(height: Metrics.row)
-            .fixedSize()
-            // Pills contain AppKit views (rings, menu anchors and click
-            // zones). Rasterizing them with drawingGroup replaces those
-            // views with SwiftUI's yellow unsupported-view placeholders.
-            // Keep their layers live while the preview moves and fades.
-            .offset(x: CGFloat(pull.dir) * SpacePull.arrival * (1 - pull.progress))
-            .frame(width: run + (lay.run - run) * pull.progress, alignment: .leading)
-            .clipped()
-            .opacity(Double(min(1, pull.progress * 1.35)))
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
         }
+    }
+
+    /// How much of the next space's row shows, `p` of the way there.
+    static func comingOpacity(_ p: CGFloat) -> CGFloat { StripTurn.coming(p) }
+
+    /// A space's row as the strip lays it, drawn as one picture.
+    private func picture(_ row: Parked, lay: Lay) -> some View {
+        let widths = lay.widths
+        let tabs = row.tabs + browser.tabs.filter(browser.travels)
+        let items = Array(StripItem.items(tabs, active: row.active, open: folders.open, whole: folders.whole).prefix(24))
+        return HStack(spacing: Metrics.tabGap) {
+            // As the switch will lay it, the tabs that go with you from
+            // space to space included.
+            // The kept, the folders and the stroke after them, as the
+            // row will draw them (Kept.swift, Folders).
+            ForEach(items) { item in
+                switch item {
+                case .stroke:
+                    KeptDivider()
+                case .folder(let folder):
+                    let width = itemWidth(item, widths: widths, active: row.active)
+                    if let nest = folder.nest {
+                        NestPill(browser: browser, nest: nest, count: folder.members.count, width: width, over: folder.over, still: true)
+                    } else {
+                        FolderPill(browser: browser, folder: folder, open: Folders.isOpen(folder, among: folders.open),
+                                   width: width, among: tabs)
+                    }
+                case .more(let folder, let count):
+                    FolderMore(folder: folder, count: count, width: StripWidths.moreWidth)
+                case .tab(let tab, _):
+                    TabPill(browser: browser, prefs: browser.prefs, tab: tab, live: tab.id == row.active,
+                            width: itemWidth(item, widths: widths, active: row.active),
+                            room: room, row: row, close: {})
+                }
+            }
+        }
+        .background(alignment: .leading) {
+            let spans = comingCapsules(items, widths: widths, active: row.active)
+                .map { NestedWash.Span(id: $0.key, start: $0.value.0, end: $0.value.1) }
+            ZStack(alignment: .leading) {
+                ForEach(NestedWash.lay(spans, parent: comingParents(items))) { wash in
+                    RoundedRectangle(cornerRadius: wash.radius, style: .continuous)
+                        .fill(Palette.wash(on: tone))
+                        .frame(width: wash.end - wash.start, height: wash.height)
+                        .offset(x: wash.start)
+                }
+            }
+        }
+        .frame(height: Metrics.row)
+        .fixedSize()
+        // One layer to fade, not each pill: a drawing group drew a pill's
+        // AppKit parts as a crossed-out yellow box.
+        .compositingGroup()
+    }
+}
+
+/// The tabs after the capsule laid out at the new space's place at once,
+/// and drawn from the old one's on the way there: `drawn` is animated,
+/// `lead` is where they are laid. A padding animated instead laid the whole
+/// strip out again every frame of the turn, twice the main thread's time.
+private struct LeadSlide: GeometryEffect {
+    var drawn: CGFloat
+    let lead: CGFloat
+    var animatableData: CGFloat {
+        get { drawn }
+        set { drawn = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        ProjectionTransform(CGAffineTransform(translationX: drawn - lead, y: 0))
+    }
+}
+
+/// A new space's tabs across the top: there in the switch's own pass, 24
+/// points in from the side the space lies on and faded, coming up over
+/// 140 ms as the old row goes (StripTurn); after two fingers, from as far
+/// as they had brought the next row (StripComing).
+private struct StripArrival: ViewModifier {
+    let space: UUID
+    let step: Int
+    @ObservedObject private var turns = StripTurns.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private struct Arrival {
+        var x: CGFloat = 0
+        var opacity: CGFloat = 1
+    }
+
+    func body(content: Content) -> some View {
+        let still = reduceMotion || SpaceTurn.still || !StripTurn.swiftUI("arrival")
+        let start = turns.start
+        let from = Arrival(x: StripTurn.arrival * CGFloat(step) * (1 - start), opacity: StripComing.comingOpacity(start))
+        content
+            .keyframeAnimator(initialValue: Arrival(), trigger: still ? nil : turns.started) { view, arrival in
+                view.offset(x: arrival.x).opacity(Double(arrival.opacity))
+            } keyframes: { _ in
+                KeyframeTrack(\.x) {
+                    MoveKeyframe(from.x)
+                    LinearKeyframe(0, duration: StripTurn.arrivalTime, timingCurve: StripTurn.arrivalCurve)
+                }
+                KeyframeTrack(\.opacity) {
+                    MoveKeyframe(from.opacity)
+                    LinearKeyframe(1, duration: StripTurn.arrivalTime, timingCurve: StripTurn.arrivalCurve)
+                }
+            }
     }
 }
 
@@ -2353,7 +2601,7 @@ private struct TabPill: View, Equatable {
     private var titled: some View {
         HStack(spacing: 6) {
             if editing {
-                TabAddressField(browser: browser)
+                TabAddressField(browser: browser, tab: tab.id)
                     .frame(height: 16)
             } else {
                 if glyph == .icons {
@@ -2540,12 +2788,16 @@ private struct TabPill: View, Equatable {
 /// this size is the loudest thing in the window. Here it is a tenth of the ink.
 struct TabAddressField: NSViewRepresentable {
     @ObservedObject var browser: Browser
+    /// The tab whose row this field is in: a row drawn again for another
+    /// tab (a column cell reused) never takes the keys for this one's edit.
+    let tab: Tab.ID
 
     func makeCoordinator() -> Coordinator { Coordinator(browser: browser) }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
-        field.delegate = context.coordinator
+        let field = TabNameField()
+        context.coordinator.editing = tab
+        context.coordinator.hold(field)
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
@@ -2572,47 +2824,100 @@ struct TabAddressField: NSViewRepresentable {
         }
         let coordinator = context.coordinator
         coordinator.browser = browser
+        coordinator.editing = tab
         field.appearance = context.environment.tone?.appearance
         if !coordinator.typing, field.stringValue != browser.tabDraft {
             field.stringValue = browser.tabDraft
         }
-        guard !coordinator.claimed, !coordinator.claiming else { return }
-        coordinator.claiming = true
-        coordinator.editing = browser.editingTab
-        Self.claim(field, coordinator, tries: 5)
+        coordinator.claim()
     }
 
-    /// The keys for the field. Not in a window yet, or another view kept
-    /// them: tried again a moment later rather than left shown unfocused,
-    /// with an edit open that no click could begin again.
-    private static func claim(_ field: NSTextField, _ coordinator: Coordinator, tries: Int) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + (tries == 5 ? 0 : 0.05)) {
-            guard !coordinator.claimed else { return }
-            guard field.window?.makeFirstResponder(field) == true,
-                  let editor = field.currentEditor() as? NSTextView else {
-                if tries > 1 { claim(field, coordinator, tries: tries - 1) } else { coordinator.claiming = false }
-                return
+    /// The field itself, which takes the keys when it comes into a window
+    /// rather than on a clock. A long session's column can take a second
+    /// to put the row on screen (#1899's own report: paint p95 1.2 s); a
+    /// claim timed out at 0.2 s gave up first and left the edit open in a
+    /// field with no keys, which no double-click or Rename… could start
+    /// again, the same tab's edit asked for once more changing nothing
+    /// (feedback #1899, #1902).
+    final class TabNameField: NSTextField {
+        weak var coordinator: Coordinator?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil, let coordinator {
+                TabAddressField.arrived = CACurrentMediaTime() - coordinator.browser.editBeganAt
             }
-            coordinator.claiming = false
-            coordinator.claimed = true
-            editor.selectedTextAttributes = [
-                .backgroundColor: NSColor(Palette.ink.opacity(0.11)),
-                .foregroundColor: Palette.NS.ink,
-            ]
-            editor.selectAll(nil)
+            coordinator?.claim()
         }
     }
 
+    /// Seconds from the last begin to its field in a window, and to its
+    /// keys taken: what the old 0.2 s claim had to beat (bench `kept`).
+    static var arrived: Double?
+    static var keyed: Double?
+
+    @MainActor
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var browser: Browser
-        var claimed = false
-        var claiming = false
         var typing = false
         /// The tab this field was for: its end puts down only that edit,
         /// never a newer one begun as this row was drawn again.
         var editing: UUID?
+        private weak var field: NSTextField?
+        private var claiming = false
+        /// The begin (Browser.editRound) the keys were last taken for: once
+        /// for each, so a click away (a page's field) is never answered by
+        /// the keys taken back before the edit is put down.
+        private var served: Int?
 
         init(browser: Browser) { self.browser = browser }
+
+        func hold(_ field: TabNameField) {
+            self.field = field
+            field.delegate = self
+            field.coordinator = self
+            // Rename asked for again, the same tab's included: the field
+            // takes the keys back even though nothing it shows changed.
+            NotificationCenter.default.addObserver(self, selector: #selector(editBegan(_:)), name: Browser.tabEditBegan, object: nil)
+        }
+
+        @objc private func editBegan(_ note: Notification) {
+            guard note.object as? Browser === browser else { return }
+            claim()
+        }
+
+        /// Whether the field has the window's keys now.
+        var hasKeys: Bool {
+            guard let field, let editor = field.currentEditor() else { return false }
+            return field.window?.firstResponder === editor
+        }
+
+        /// The keys for the field, once it is in a window: the moment it
+        /// arrives there (TabNameField), and again at each begin. Refused
+        /// in its window, the edit is put down rather than left open in a
+        /// field nobody can type in.
+        func claim(tries: Int = 5) {
+            guard let field, field.window != nil, !field.isHiddenOrHasHiddenAncestor, !claiming,
+                  served != browser.editRound, !hasKeys, let editing, browser.editingTab == editing else { return }
+            claiming = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + (tries == 5 ? 0 : 0.05)) { [weak self] in
+                guard let self else { return }
+                self.claiming = false
+                guard let field = self.field, let window = field.window, self.served != self.browser.editRound,
+                      self.browser.editingTab == editing, !self.hasKeys else { return }
+                guard window.makeFirstResponder(field), let editor = field.currentEditor() as? NSTextView else {
+                    if tries > 1 { return self.claim(tries: tries - 1) }
+                    return self.browser.cancelTabEdit()
+                }
+                self.served = self.browser.editRound
+                TabAddressField.keyed = CACurrentMediaTime() - self.browser.editBeganAt
+                editor.selectedTextAttributes = [
+                    .backgroundColor: NSColor(Palette.ink.opacity(0.11)),
+                    .foregroundColor: Palette.NS.ink,
+                ]
+                editor.selectAll(nil)
+            }
+        }
 
         func controlTextDidChange(_ note: Notification) {
             guard let field = note.object as? NSTextField else { return }
@@ -2694,7 +2999,7 @@ struct SpaceSend: View {
     /// saying. Others are sent, and the corner says where. A shared pin on
     /// screen is in the other space's pins already: the window goes there
     /// and it stays in front.
-    private func send(to target: UUID) {
+    func send(to target: UUID) {
         let hand = Browser.handMade
         let follow = tabs.contains { $0.id == browser.activeID }
         DispatchQueue.main.asyncAfter(deadline: .now() + Browser.folderLeavesAfter) { [browser, tabs] in
@@ -2707,7 +3012,10 @@ struct SpaceSend: View {
             Browser.pretendHand = was
             if follow, moved != nil || there {
                 browser.switchSpace(to: target)
-                if there, let front, browser.tabs.contains(where: { $0 === front }) { browser.select(front) }
+                // Separate sign-ins replace the moved tab. Follow the arrival
+                // returned by the transfer, rather than the old tab's id.
+                let arrived = moved?.tabs.first { $0.original == front?.id }?.now ?? (there ? front : nil)
+                if let arrived, browser.tabs.contains(where: { $0 === arrived }) { browser.select(arrived) }
             }
         }
     }
@@ -3859,7 +4167,7 @@ enum NestedWash {
         func place(_ id: String, height: CGFloat) {
             guard let span = byID[id] else { return }
             washes.append(Wash(id: id, start: span.start, end: ends[id] ?? span.end, height: height,
-                               radius: max(Radius.small, Radius.control + (height - tab) / 2)))
+                               radius: max(Radius.small, Density.current.radius + (height - tab) / 2)))
             for child in inner[id] ?? [] { place(child, height: max(2 * Radius.small, height - 2 * rim)) }
         }
         for span in spans where outer[span.id] == nil {

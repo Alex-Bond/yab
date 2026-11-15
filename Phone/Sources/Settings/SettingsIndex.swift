@@ -70,7 +70,7 @@ enum SettingsIndex {
 
     private static func keywords(_ page: SettingsPageID) -> String {
         switch page {
-        case .general: "browser default links notifications swipe back forward gestures"
+        case .general: "browser default links notifications swipe back forward gestures welcome first run onboarding"
         case .search: "engine google web address url guess questions ask task return"
         case .appearance: "theme light dark system color colour look websites pages"
         case .appIcon: "icon icons home screen logo"

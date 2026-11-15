@@ -1217,10 +1217,12 @@ public final class MailStore: @unchecked Sendable {
     }
 
     /// Mail that may be a purchase: robots' mail since `since`, not Sent,
-    /// Spam or Trash, newest first, with bodies where kept (old mail has
-    /// only its snippet). A few words in the subject or snippet keep the
-    /// walk cheap; MailPurchases.read tells robots from people.
-    public func purchaseCandidates(since: Date, limit: Int = 4000) -> [MailMessage] {
+    /// Spam or Trash, newest first (old mail has only its snippet). A few
+    /// words in the subject or snippet keep the walk cheap;
+    /// MailPurchases.read tells robots from people. Heads only, never a
+    /// body: thousands of whole mails held in memory to learn that nearly
+    /// all were read before cost hundreds of megabytes every ten minutes.
+    public func purchaseHeads(since: Date, limit: Int = 4000) -> [MailPurchaseHead] {
         let words = ["receipt", "invoice", "order", "subscription", "renew", "payment", "charged", "shipped", "delivery",
                      "tracking", "billing", "Rechnung", "Bestellung",
                      // SQLite's LIKE folds case for ASCII only.
@@ -1228,10 +1230,25 @@ public final class MailStore: @unchecked Sendable {
         let any = words.map { _ in "m.subject LIKE ? OR m.snippet LIKE ?" }.joined(separator: " OR ")
         let args: [Any] = [since.timeIntervalSince1970] + words.flatMap { ["%\($0)%", "%\($0)%"] } + [limit]
         return queue.sync {
-            messages(where: """
-            m.at > ? AND m.labels NOT LIKE '%|SENT|%' AND m.labels NOT LIKE '%|SPAM|%' AND m.labels NOT LIKE '%|TRASH|%'
+            query("""
+            SELECT m.id AS id, m.labels AS labels, length(m.snippet) AS snippet,
+              b.id IS NOT NULL AS body, b.html IS NOT NULL AS html
+            FROM messages m LEFT JOIN bodies b ON b.id = m.id
+            WHERE m.at > ? AND m.labels NOT LIKE '%|SENT|%' AND m.labels NOT LIKE '%|SPAM|%' AND m.labels NOT LIKE '%|TRASH|%'
               AND (\(any)) ORDER BY m.at DESC LIMIT ?
-            """, args)
+            """, args).compactMap { row in
+                guard let id = row.string("id") else { return nil }
+                return MailPurchaseHead(id: id, labels: MailStore.labels(row.string("labels") ?? ""), snippet: Int(row.int64("snippet") ?? 0),
+                                        body: row.bool("body") ?? false, html: row.bool("html") ?? false)
+            }
+        }
+    }
+
+    /// These mails whole, for the few a purchases pass hasn't read yet.
+    public func messages(ids: [String]) -> [MailMessage] {
+        guard !ids.isEmpty else { return [] }
+        return queue.sync {
+            messages(where: "m.id IN (\(ids.map { _ in "?" }.joined(separator: ",")))", ids)
         }
     }
 

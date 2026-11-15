@@ -62,7 +62,7 @@ final class PrivateLockUITests: XCTestCase {
         app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
         app.terminate()
         app.launch()
-        let notNow = app.buttons["welcome.start"]
+        let notNow = app.buttons["welcome.skip"]
         XCTAssertTrue(notNow.waitForExistence(timeout: 10))
         app.passWelcome()
         XCTAssertTrue(app.textFields["field.input"].waitForExistence(timeout: 5))

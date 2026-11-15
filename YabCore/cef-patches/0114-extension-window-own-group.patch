@@ -1,0 +1,54 @@
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -1385,8 +1385,10 @@ ExtensionFunction::ResponseValue WindowsCreateFunction::OnBrowserWindowCreated(
+       ExternalExtensionWindow::Mark(external_page.get(), create_data_->left,
+                                     create_data_->top, create_data_->width,
+                                     create_data_->height);
+-      if (hooks.tab_model_created(external_page.get(), owner, nullptr, false,
+-                                  -1)) {
++      // Its own window, the one the response names, not the owner's.
++      if (ExternalTabModel::BindOwnWindow(
++              external_page.get(), owner,
++              ExtensionTabUtil::GetWindowId(new_window))) {
+         hooks.tab_created(external_page.get(), nullptr, false, -1,
+                           extension()->id());
+       }
+--- a/chrome/browser/extensions/external_tab_model.h
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -125,6 +125,36 @@ class ExternalTabModel : public base::SupportsUserData::Data {
+         new ExternalTabModel(contents, std::move(group), opener, requested_owner)));
+     return true;
+   }
++  // Yab: a page an extension's windows.create made, beside its owner tab: a
++  // group of its own, named by the window Chrome made and answered to the
++  // extension, so tabs.query reports that window and windows.remove of it
++  // reaches this page only, never the owner's window (Bitwarden's passkey
++  // popout closed the site's tab with windowId). The owner stays the page's
++  // owner, for the embedder's placement; the group is the embedder's when the
++  // owner's is.
++  static bool BindOwnWindow(content::WebContents* contents,
++                            content::WebContents* owner,
++                            int native_window_id) {
++    if (!contents || !owner || contents->IsBeingDestroyed() ||
++        owner->IsBeingDestroyed() || native_window_id < 0 ||
++        contents->GetBrowserContext() != owner->GetBrowserContext())
++      return false;
++    // Chrome may have put it in its owner's window as it navigated it.
++    if (auto* current = Get(contents)) {
++      std::erase_if(current->group_->tabs,
++                    [contents](const auto& tab) { return tab.get() == contents; });
++      if (current->group_->active.get() == contents)
++        current->group_->active.reset();
++    }
++    auto group = std::make_shared<Group>();
++    group->window = native_window_id;
++    group->embedded = Get(owner) && Get(owner)->embedded();
++    group->active = contents->GetWeakPtr();
++    group->tabs.push_back(contents->GetWeakPtr());
++    contents->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
++        new ExternalTabModel(contents, std::move(group), nullptr, owner)));
++    return true;
++  }
+   // The embedder lists its window: every page in its order, one active.
+   // `activated` says the active page changed. A page moves between windows
+   // here, unlike Bind. Native session ID of the first lead stays the window's.

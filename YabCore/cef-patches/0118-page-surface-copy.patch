@@ -1,0 +1,132 @@
+
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -68,6 +68,7 @@
+ #define CEF_YAB_EXTENSION_ACTION_STATE_VERSION 1
+ #define CEF_YAB_EXTENSION_SIDE_PANEL_VERSION 1
+ #define CEF_YAB_EXTENSION_COMMAND_VERSION 1
++#define CEF_YAB_PAGE_SURFACE_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -292,6 +293,23 @@ class CefDownloadImageCallback : public virtual CefBaseRefCounted {
+                                        CefRefPtr<CefImage> image) = 0;
+ };
+ 
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++///
++/// Callback interface for CefBrowserHost::CopyPageSurface. The method of this
++/// class will be called on the browser process UI thread.
++///
++/*--cef(source=client,added=experimental)--*/
++class CefPageSurfaceCallback : public virtual CefBaseRefCounted {
++ public:
++  ///
++  /// |image| is the page as it is shown, at the asked size, or empty if no
++  /// picture could be copied (no surface, the page gone, a timeout).
++  ///
++  /*--cef(optional_param=image)--*/
++  virtual void OnPageSurface(CefRefPtr<CefImage> image) = 0;
++};
++#endif
++
+ ///
+ /// Class used to represent the browser process aspects of a browser. The
+ /// methods of this class can only be called in the browser process. They may be
+@@ -1416,6 +1434,19 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
+   /*--cef(added=experimental)--*/
+   virtual bool RunExtensionCommand(const CefString& extension_id,
+                                    const CefString& command_name) = 0;
++
++  ///
++  /// A picture of the page as it is shown now, copied from its compositor
++  /// surface and scaled by the GPU to |width| x |height| pixels before it is
++  /// read back (0 x 0 for the surface's own size), as Chrome's tab thumbnails
++  /// are (RenderWidgetHostView::CopyFromSurface). Neither draws the page again
++  /// nor counts as capturing it: no wake lock, no visibility change. The
++  /// result reaches |callback| on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void CopyPageSurface(int width,
++                               int height,
++                               CefRefPtr<CefPageSurfaceCallback> callback) = 0;
+ #endif
+ };
+ 
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -47,6 +47,8 @@
+ #include "content/public/common/content_features.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/render_view_host.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/render_widget_host.h"
+ #include "ui/base/resource/resource_scale_factor.h"
+ #include "ui/gfx/image/image_skia.h"
+@@ -1295,6 +1297,54 @@ bool CefBrowserHostBase::RunExtensionCommand(const CefString& extension_id,
+ #endif
+ }
+ 
++void CefBrowserHostBase::CopyPageSurface(
++    int width,
++    int height,
++    CefRefPtr<CefPageSurfaceCallback> callback) {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    CEF_POST_TASK(CEF_UIT, base::BindOnce(&CefBrowserHostBase::CopyPageSurface,
++                                          this, width, height, callback));
++    return;
++  }
++  if (!callback) {
++    return;
++  }
++  auto web_contents = GetWebContents();
++  auto* view = web_contents ? web_contents->GetRenderWidgetHostView() : nullptr;
++  if (!view || !view->IsSurfaceAvailableForCopy()) {
++    callback->OnPageSurface(nullptr);
++    return;
++  }
++  const gfx::Size output = width > 0 && height > 0 ? gfx::Size(width, height)
++                                                   : gfx::Size();
++  // As ThumbnailTabHelper does: the whole view, scaled before readback.
++  view->CopyFromSurface(
++      gfx::Rect(), output, base::Seconds(5),
++      base::BindOnce(
++          [](CefRefPtr<CefPageSurfaceCallback> callback,
++             const content::CopyFromSurfaceResult& result) {
++            SkBitmap bitmap;
++            if (result.has_value() && !result->bitmap.drawsNothing()) {
++              bitmap = result->bitmap;
++            }
++            // Not always run on the UI thread: answered there.
++            CEF_POST_TASK(
++                CEF_UIT,
++                base::BindOnce(
++                    [](CefRefPtr<CefPageSurfaceCallback> callback,
++                       SkBitmap bitmap) {
++                      CefRefPtr<CefImageImpl> image;
++                      if (!bitmap.drawsNothing()) {
++                        image = new CefImageImpl();
++                        image->AddBitmaps(0, {bitmap});
++                      }
++                      callback->OnPageSurface(image.get());
++                    },
++                    callback, std::move(bitmap)));
++          },
++          callback));
++}
++
+ void CefBrowserHostBase::ReplaceMisspelling(const CefString& word) {
+   if (!CEF_CURRENTLY_ON_UIT()) {
+     CEF_POST_TASK(
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -321,6 +321,8 @@ class CefBrowserHostBase : public CefBrowserHost,
+       const CefString& extension_id) override;
+   bool RunExtensionCommand(const CefString& extension_id,
+                            const CefString& command_name) override;
++  void CopyPageSurface(int width, int height,
++                       CefRefPtr<CefPageSurfaceCallback> callback) override;
+ 
+   // CefBrowser methods:
+   bool IsValid() override;

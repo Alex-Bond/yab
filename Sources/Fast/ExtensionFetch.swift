@@ -117,6 +117,7 @@ enum ExtensionFetch {
     private static let byURL = NSSelectorFromString("_getCookiesForURL:completionHandler:")
 
     private static func cookies(for url: URL) async -> [HTTPCookie] {
+        await ChromiumDRMCookies.beforeSending(to: url, from: Store.websites)
         let store = Store.websites.httpCookieStore
         if store.responds(to: byURL) {
             return await withCheckedContinuation { done in

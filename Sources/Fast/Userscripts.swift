@@ -288,8 +288,7 @@ final class Userscripts: ObservableObject {
     func dismiss(_ tab: Tab) {
         guard let offer = offers.removeValue(forKey: tab.id) else { return }
         if offer.tried {
-            guard let web = tab.webKitOnly("Userscript document-start registration") else { return }
-            attach(to: web.configuration.userContentController, tab: tab, host: PageScripts.host(of: tab.address))
+            arm(tab)
             tab.reloadForChange(.userscript)
         }
     }
@@ -321,15 +320,16 @@ final class Userscripts: ObservableObject {
                 if owner.active?.id != target.id { owner.focus(target) }
             }
         }
-        guard let web = target.webKitOnly("Userscript document-start registration") else { return }
         if target !== tab { offers[tab.id] = nil }
         offer.tried = true
         offers[target.id] = Offer(tabID: target.id, url: offer.url, script: offer.script, facts: offer.facts, tried: true, ready: true, problem: nil, replaces: offer.replaces)
-        let controller = web.configuration.userContentController
-        attach(to: controller, tab: target, host: PageScripts.host(of: target.address))
-        if !web.isLoading, target.address.map(offer.script.matches) == true {
+        arm(target)
+        if !target.page.isLoading, target.address.map(offer.script.matches) == true {
             let inPage = offer.script.inPage
-            _ = try? await BoostJavaScript.evaluate(source(offer.script, id: offer.script.id, inPage: inPage, signIn: AddonProfiles.of(target)), on: web, world: world(offer.script.id, inPage: inPage))
+            // On Chromium a script in the page's world talks through its
+            // bridge, which only a new document has: a reload runs it.
+            if inPage, target.builtPage is ChromiumPage { target.reloadForChange(.userscript); return }
+            _ = try? await BoostJavaScript.evaluate(source(offer.script, id: offer.script.id, inPage: inPage, signIn: AddonProfiles.of(target)), on: target.page, world: pageWorld(offer.script.id, inPage: inPage))
         }
     }
 
@@ -375,6 +375,10 @@ final class Userscripts: ObservableObject {
         try write(script, to: folder)
         try? FileManager.default.removeItem(at: folder.appendingPathComponent("pending"))
         if let seed {
+            // Moved from another manager's storage, read off its page: an
+            // IndexedDB Date or a NaN would raise in JSONSerialization here
+            // and on every page the script runs on after (SafeJSON).
+            let seed = SafeJSON.keepable(seed)
             values[cacheKey(id, in: nil)] = seed
             try? JSONSerialization.data(withJSONObject: seed).write(to: folder.appendingPathComponent("values.json"), options: .atomic)
         }
@@ -523,6 +527,8 @@ final class Userscripts: ObservableObject {
     // MARK: - running
 
     func world(_ id: String, inPage: Bool) -> WKContentWorld { inPage ? .page : Self.world(id) }
+    /// The same world through a tab's page, on either engine.
+    func pageWorld(_ id: String, inPage: Bool) -> PageWorld { inPage ? .page : .named("yab-us-" + id) }
     private static var worlds: [String: WKContentWorld] = [:]
     static func world(_ id: String) -> WKContentWorld {
         if let world = worlds[id] { return world }
@@ -593,6 +599,63 @@ final class Userscripts: ObservableObject {
         wanted.forEach { controller.addUserScript($0.2) }
     }
 
+    /// A new document: the old one's commands are gone with it.
+    func newDocument(_ tab: Tab) { if commands[tab.id] != nil { commands[tab.id] = nil } }
+
+    /// A tab told again what its scripts are, on either engine.
+    func arm(_ tab: Tab) {
+        if let chromium = tab.builtPage as? ChromiumPage { chromium.refreshFeatureScripts() }
+        else if let web = tab.webKitOnly("WebKit userscript runtime", build: false) {
+            attach(to: web.configuration.userContentController, tab: tab, host: PageScripts.host(of: tab.address))
+        }
+    }
+
+    /// A Chromium tab's scripts, for every document: a link's navigation
+    /// asks nobody first, and each script tests its own address. A script in
+    /// the page's world can't hold a relay there (`window.webkit` is no thing
+    /// to show a site), so a small one in its own world carries its calls.
+    func chromiumScripts(for tab: Tab) -> (scripts: [PageScriptRegistration], relays: [(id: String, inPage: Bool)]) {
+        guard !Boosts.shared.safeMode, !tab.shy, !tab.isDev else { return ([], []) }
+        var chosen: [Userscript] = []
+        let trial = offers[tab.id].flatMap { $0.tried ? $0.script : nil }
+        for record in records(in: AddonProfiles.of(tab)) where record.enabled && record.id != trial?.id {
+            if let script = scripts[record.id] { chosen.append(script) }
+        }
+        if let trial { chosen.append(trial) }
+        var made: [PageScriptRegistration] = []
+        var relays: [(id: String, inPage: Bool)] = []
+        for script in chosen {
+            let id = script.id, inPage = script.inPage
+            relays.append((id, inPage))
+            let atEnd = script.runAt != "document-start"
+            if inPage {
+                made.append(PageScriptRegistration(source: UserscriptRuntime.bridge(id, token: token), world: pageWorld(id, inPage: false), atEnd: false, mainOnly: script.noframes))
+            }
+            let source = UserscriptRuntime.source(script, id: id, values: script.storesValues || script.uses("GM_getValue") || script.uses("GM.getValue") ? storedValues(id, in: AddonProfiles.of(tab)) : [:],
+                                                  inPage: inPage, token: token, appVersion: Self.appVersion, piped: inPage)
+            made.append(PageScriptRegistration(source: source, world: pageWorld(id, inPage: inPage), atEnd: atEnd, mainOnly: script.noframes))
+        }
+        return (made, relays)
+    }
+
+    /// A script's call from its page on a Chromium tab.
+    func heard(_ id: String, inPage: Bool, message: PageScriptMessage, tab: Tab, _ reply: @escaping (Any?, String?) -> Void) {
+        guard let body = message.body as? [String: Any], let op = body["op"] as? String else {
+            reply(["error": "Invalid userscript request."], nil); return
+        }
+        let found = owner(of: tab).map { (tab, $0) }
+        Task {
+            do {
+                let value = try await call(id, inPage: inPage, op: op, args: body["args"] as? [String: Any] ?? [:],
+                                           token: body["token"] as? String, frame: message.frame.url, main: message.frame.isMain, found: found)
+                reply(["value": value ?? NSNull()], nil)
+            } catch { reply(["error": error.localizedDescription], nil) }
+        }
+    }
+    private func owner(of tab: Tab) -> Browser? {
+        (BrowserWindows.shared.browsers + [Agents.shared.browser].compactMap { $0 }).first { ($0.tabs + $0.parkedTabs).contains { $0 === tab } }
+    }
+
     /// One handler per script's world; in the page's world, one per script.
     private func relay(_ controller: WKUserContentController, _ wanted: [(String, Bool)]) {
         let names = Set(wanted.map { $0.0 + ($0.1 ? "@page" : "") })
@@ -614,8 +677,10 @@ final class Userscripts: ObservableObject {
     func refreshTabs(reloading id: String? = nil, profile: String? = nil) {
         for tab in allTabs {
             if let profile, AddonProfiles.key(AddonProfiles.of(tab)) != profile { continue }
-            guard let web = tab.webKitOnly("WebKit userscript runtime", build: false) else { continue }
-            attach(to: web.configuration.userContentController, tab: tab, host: PageScripts.host(of: tab.address), document: false)
+            if let chromium = tab.builtPage as? ChromiumPage { chromium.refreshFeatureScripts() }
+            else if let web = tab.webKitOnly("WebKit userscript runtime", build: false) {
+                attach(to: web.configuration.userContentController, tab: tab, host: PageScripts.host(of: tab.address), document: false)
+            } else { continue }
             if let id, let script = scripts[id], tab.address.map(script.matches) == true, !tab.shy, !tab.isDev { tab.reloadForChange(.userscript) }
         }
     }
@@ -625,7 +690,7 @@ final class Userscripts: ObservableObject {
         return (BrowserWindows.shared.browsers + [Agents.shared.browser].compactMap { $0 })
             .flatMap { $0.tabs + $0.parkedTabs }.filter { seen.insert($0.id).inserted }
     }
-    private func tab(of web: WKWebView?) -> (Tab, Browser)? {
+    fileprivate func tab(of web: WKWebView?) -> (Tab, Browser)? {
         guard let web else { return nil }
         for browser in BrowserWindows.shared.browsers + [Agents.shared.browser].compactMap({ $0 }) {
             if let tab = (browser.tabs + browser.parkedTabs).first(where: { $0.webKitOnly("WebKit userscript runtime", build: false) === web }) { return (tab, browser) }
@@ -654,7 +719,8 @@ final class Userscripts: ObservableObject {
                 Task {
                     do {
                         let value = try await Userscripts.shared.call(self.id, inPage: self.inPage, op: op, args: body["args"] as? [String: Any] ?? [:],
-                                                                      token: body["token"] as? String, frame: frame, main: message.frameInfo.isMainFrame, web: message.webView)
+                                                                      token: body["token"] as? String, frame: frame, main: message.frameInfo.isMainFrame,
+                                                                      found: Userscripts.shared.tab(of: message.webView))
                         replyHandler(["value": value ?? NSNull()], nil)
                     } catch { replyHandler(["error": error.localizedDescription], nil) }
                 }
@@ -662,8 +728,8 @@ final class Userscripts: ObservableObject {
         }
     }
 
-    private func call(_ id: String, inPage: Bool, op: String, args: [String: Any], token: String?, frame: URL?, main: Bool, web: WKWebView?) async throws -> Any? {
-        guard let found = tab(of: web), !found.0.shy, !found.0.isDev else { throw Userscript.Invalid("This page can't use userscripts.") }
+    private func call(_ id: String, inPage: Bool, op: String, args: [String: Any], token: String?, frame: URL?, main: Bool, found: (Tab, Browser)?) async throws -> Any? {
+        guard let found, !found.0.shy, !found.0.isDev else { throw Userscript.Invalid("This page can't use userscripts.") }
         let (tab, browser) = found
         let trial = offers[tab.id].flatMap { $0.tried && $0.script.id == id ? $0.script : nil }
         guard let script = trial ?? (isEnabled(id, in: AddonProfiles.of(tab)) ? scripts[id] : nil) else { throw Userscript.Invalid("This userscript is off.") }
@@ -687,8 +753,8 @@ final class Userscripts: ObservableObject {
             try data.write(to: file, options: .atomic)
             // Other tabs running it hear the change (GM_addValueChangeListener, remote).
             let call = "window.__yabUserscripts && window.__yabUserscripts[\(BoostScript.json(id))] && window.__yabUserscripts[\(BoostScript.json(id))].changed(\(BoostScript.json(key)), \(BoostScript.json(args["value"] ?? NSNull())), \(removed))"
-            for other in allTabs where AddonProfiles.of(other) == signIn && isEnabled(id, in: signIn) && other.webKitOnly("WebKit userscript runtime", build: false) != nil && other.webKitOnly("WebKit userscript runtime", build: false) !== web && other.address.map(script.matches) == true {
-                other.webKitOnly("WebKit userscript runtime", build: false)?.evaluateJavaScript(call, in: nil, in: world(id, inPage: script.inPage)) { _ in }
+            for other in allTabs where AddonProfiles.of(other) == signIn && isEnabled(id, in: signIn) && other !== tab && other.address.map(script.matches) == true {
+                other.builtPage?.run(call, in: pageWorld(id, inPage: script.inPage), gesture: false) { _ in }
             }
             return true
         case "menu":
@@ -723,10 +789,13 @@ final class Userscripts: ObservableObject {
             NSPasteboard.general.setString(text, forType: .string)
             return true
         case "download":
-            guard let url = (args["url"] as? String).flatMap(URL.init(string:)), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let web = tab.webKitOnly("WebKit userscript runtime", build: false) else {
+            guard let url = (args["url"] as? String).flatMap(URL.init(string:)), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                 throw Userscript.Invalid("GM_download takes web addresses only.")
             }
-            web.startDownload(using: URLRequest(url: url)) { [weak browser] download in browser?.keep(download) }
+            if let chromium = tab.builtPage as? ChromiumPage { chromium.startDownload(url) }
+            else if let web = tab.webKitOnly("WebKit userscript runtime", build: false) {
+                web.startDownload(using: URLRequest(url: url)) { [weak browser] download in browser?.keep(download) }
+            }
             return true
         case "error":
             let line = (frame.host() ?? "") + ": " + String((args["message"] as? String ?? "").prefix(300))
@@ -786,6 +855,7 @@ final class Userscripts: ObservableObject {
         let anonymous = args["anonymous"] as? Bool == true
         let page = frame.host()
         let signs = { (target: URL) in !anonymous && Self.signs(target.host() ?? "", script: script, page: page, inPage: inPage) }
+        if !anonymous, !inPage, tab.engineKind == .chromium { await (try? ChromiumDRMCookies.of(tab))?.current(for: url) }
         let cookies: [HTTPCookie] = anonymous || inPage ? [] : await withCheckedContinuation { done in
             tab.store.httpCookieStore.getAllCookies { done.resume(returning: $0) }
         }
@@ -834,9 +904,9 @@ final class Userscripts: ObservableObject {
     /// A command the page registered, chosen in Site Controls or ⌘T.
     func run(_ command: String, of id: String, in tab: Tab) {
         guard isEnabled(id, in: AddonProfiles.of(tab)) || offers[tab.id]?.tried == true,
-              let web = tab.webKitOnly("WebKit userscript runtime", build: false), let script = scripts[id] ?? offers[tab.id]?.script else { return }
+              let page = tab.builtPage, let script = scripts[id] ?? offers[tab.id]?.script else { return }
         let call = "window.__yabUserscripts && window.__yabUserscripts[\(BoostScript.json(id))] ? window.__yabUserscripts[\(BoostScript.json(id))].menu(\(BoostScript.json(command))) : false"
-        web.evaluateJavaScript(call, in: nil, in: world(id, inPage: script.inPage)) { _ in }
+        page.run(call, in: pageWorld(id, inPage: script.inPage)) { _ in }
     }
 
     /// Off on this site: turned off, as Site Controls' toggle does.
@@ -916,7 +986,7 @@ final class Userscripts: ObservableObject {
         guard let tab = browser.active, let offer = offers[tab.id], !tab.typing else { return false }
         // From the page, or nothing in particular: never from the field.
         let responder = event.window?.firstResponder
-        guard responder === event.window || responder == nil || tab.webKitOnly("WebKit userscript runtime", build: false).map({ web in (responder as? NSView)?.isDescendant(of: web) == true }) == true else { return false }
+        guard responder === event.window || responder == nil || tab.builtPage.map({ page in (responder as? NSView)?.isDescendant(of: page) == true }) == true else { return false }
         let rest = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if [36, 76].contains(event.keyCode), rest == .command {
             if offer.ready, offer.problem == nil { Task { await keep(tab) } }

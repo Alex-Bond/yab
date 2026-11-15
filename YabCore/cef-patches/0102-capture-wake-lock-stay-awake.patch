@@ -1,0 +1,15 @@
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -2864,7 +2864,11 @@
+     }
+   }
+ 
+-  if (capture_wake_lock_) {
++  // Only a capturer that asked to keep the display awake takes the lock. The
++  // lock object outlives the capture that made it: requested here for every
++  // capturer, a screenshot's once, then any later one (focus emulation,
++  // thumbnails) held the display awake for as long as it stayed (Yab #1909).
++  if (capture_wake_lock_ && stay_awake_capturer_count_) {
+     capture_wake_lock_->RequestWakeLock();
+   }
+ 

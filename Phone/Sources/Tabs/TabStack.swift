@@ -57,11 +57,16 @@ final class TabStack {
         /// since the tap, while it comes or goes (TabGalleryMotion).
         var phase: Phase = .opening
         var time: Double = 0
+        var pinchProgress: CGFloat?
+        /// The front card's offset from its path while a finger holds it
+        /// (Safari's: the page shrinks under the finger, wherever it goes).
+        var pinchShift: CGSize = .zero
         /// A card a finger is taking up, and how far (negative is up).
         var lifted: Tab.ID?
         var lift: CGFloat = 0
         /// Cards flying away, closed.
         var leaving: Set<Tab.ID> = []
+        var flightOffsets: [Tab.ID: CGFloat] = [:]
         /// The card tapped; where each card was then and what it does now;
         /// the bar's share then (a tap while it still opens goes from there).
         var chosen: Tab.ID?
@@ -88,7 +93,7 @@ final class TabStack {
         /// chrome's row) shows: the page's chrome has the rest.
         var bar: CGFloat {
             switch phase {
-            case .opening: TabGalleryTiming.barProgress(time)
+            case .opening: pinchProgress ?? TabGalleryTiming.barProgress(time)
             case .open: 1
             case .closing: barFrom * (1 - TabGalleryTiming.barProgress(time))
             }
@@ -126,11 +131,30 @@ final class TabStack {
     @ObservationIgnored private let file: TabRecencyFile?
     @ObservationIgnored private var saving: Task<Void, Never>?
     @ObservationIgnored private var leavingForField: Task<Void, Never>?
-    /// The last card is on its way up, with search rising beside it.
-    @ObservationIgnored private var lastCardLeaving = false
     @ObservationIgnored private var litStatusBar = false
     @ObservationIgnored private var chromeFrom: Double = 1
     @ObservationIgnored private let clock = TabGalleryClock()
+    @ObservationIgnored lazy var pinchGesture = TabOverviewPinch(stack: self)
+    /// All Tabs turning, in place, into the spaces sidebar (its computer tapped).
+    var toSidebar = false
+    @ObservationIgnored private var flights: [Tab.ID: TabCardFlight] = [:]
+    @ObservationIgnored private var scrollStep: CGFloat = 1
+    @ObservationIgnored private var pinchProgress: CGFloat?
+    @ObservationIgnored private var pinchEnd: (commit: Bool, velocity: CGFloat)?
+    /// Up from the plate: where the finger touched the page, and how far it went.
+    /// When the foot's capsule last turned All Tabs to another space.
+    @ObservationIgnored private(set) var pagedAt: CFTimeInterval = 0
+    @ObservationIgnored private var pinchAnchor: CGPoint?
+    @ObservationIgnored private var pinchFinger: CGSize = .zero
+    /// Let go: the card's offset then, and the progress it had, which the
+    /// spring takes to nothing as it settles.
+    @ObservationIgnored private var pinchRelease: (shift: CGSize, progress: CGFloat)?
+    @ObservationIgnored private lazy var pinchSpring = spring { [weak self] value in self?.updatePinch(value / 1000) }
+    @ObservationIgnored private lazy var scrollSpring = spring { [weak self] value in
+        guard let self, self.gallery?.phase == .open else { return }
+        self.gallery?.focus = value / self.scrollStep
+    }
+    @ObservationIgnored private lazy var cardSpring = spring { [weak self] value in self?.gallery?.lift = value }
     @ObservationIgnored private lazy var liftSpring = spring { [weak self] v in self?.control?.stackView.lift = v }
     @ObservationIgnored private lazy var growSpring = spring { [weak self] v in self?.grew(v / 1000) }
 
@@ -290,7 +314,7 @@ final class TabStack {
         if s.settings && !app.privateContentBlocked && s.field == nil && s.chat == nil && s.menu == nil { return }
         if app.surfaces.field != nil && !app.privateContentBlocked {
             // The last card goes up beside the sheet, and closes its tab when it is gone.
-            guard leavingForField == nil, !lastCardLeaving else { return }
+            guard leavingForField == nil else { return }
             leavingForField = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(Motion.disabled ? 0 : Motion.plusToField.duration))
                 self?.leavingForField = nil
@@ -474,6 +498,13 @@ final class TabStack {
         let stack = stackGeometry
         switch gallery.phase {
         case .opening:
+            if let progress = gallery.pinchProgress {
+                var pose = TabGalleryMotion.interactiveOpening(i, layout: layout, stack: stack, progress: progress)
+                if i == gallery.order.count - 1 {
+                    pose.rect = pose.rect.offsetBy(dx: gallery.pinchShift.width, dy: gallery.pinchShift.height)
+                }
+                return pose
+            }
             return TabGalleryMotion.opening(i, layout: layout, stack: stack, t: gallery.time)
         case .closing:
             let from = gallery.from[tab.id] ?? TabGalleryMotion.rest(i, layout: layout, focus: gallery.focus)
@@ -486,9 +517,8 @@ final class TabStack {
                 pose.icon *= away
                 pose.title *= away
             }
-            if gallery.leaving.contains(tab.id) {
-                pose.rect.origin.y = -pose.rect.height - Metrics.TabGallery.labelIcon * 2
-                pose.opacity = 0
+            if let offset = gallery.flightOffsets[tab.id] {
+                pose.rect.origin.y += offset
                 pose.icon = 0
                 pose.title = 0
             }
@@ -526,16 +556,25 @@ final class TabStack {
     func openGallery() {
         // All Tabs takes the whole spread: the spaces' column gives way.
         if app.surfaces.fieldBeside { app.field.close() }
-        guard gallery == nil, flick == nil, sourceFree, !order.isEmpty else { return }
+        guard gallery == nil, flick == nil, sourceFree || pinchProgress != nil, !order.isEmpty else { return }
         let front = app.browser.tab
         let space = app.browser.spaceID
+        // Every recent tab, latest in front, as the Mac's Control-Tab row has them.
         let order = self.order.reversed().map(\.id)
         if app.workspace.tabletControls, let pair = app.workspace.savedPair {
             for id in pair.ids { app.pages.picture(id) { _ in } }
         }
         let present: @MainActor () -> Void = { [weak self] in
-            guard let self, self.gallery == nil, self.flick == nil, self.sourceFree,
+            guard let self, self.gallery == nil, self.flick == nil, self.sourceFree || self.pinchProgress != nil,
+                  !self.covered, !self.app.surfaces.pageSwiping, self.app.backStack.swipe == nil,
                   self.app.browser.spaceID == space, self.app.browser.tab?.id == front?.id else { return }
+            if self.pinchEnd?.commit == false {
+                self.pinchProgress = nil
+                self.pinchEnd = nil
+                self.pinchAnchor = nil
+                self.pinchRelease = nil
+                return
+            }
             var next = Gallery(space: space, order: order)
             if self.app.workspace.tabletControls, let pair = self.app.workspace.savedPair,
                pair.ids.allSatisfy({ self.app.browser.space.tab($0) != nil }) {
@@ -550,6 +589,11 @@ final class TabStack {
             }
             // The circle and its cards are All Tabs' now (TabGalleryLayer).
             self.control?.lent = true
+            if let progress = self.pinchProgress {
+                self.updatePinch(progress)
+                if let end = self.pinchEnd { self.finishPinch(commit: end.commit, velocity: end.velocity) }
+                return
+            }
             self.clock.run(.tabsOpen, for: TabGalleryTiming.openDuration) { [weak self] t in
                 self?.openedFor(t)
             } end: { [weak self] in
@@ -570,6 +614,12 @@ final class TabStack {
         guard gallery?.phase == .opening else { return }
         gallery?.phase = .open
         gallery?.time = 0
+        gallery?.pinchProgress = nil
+        gallery?.pinchShift = .zero
+        pinchProgress = nil
+        pinchEnd = nil
+        pinchAnchor = nil
+        pinchRelease = nil
         app.surfaces.chromeOpacity = 0
         refreshWarmup()
     }
@@ -590,6 +640,7 @@ final class TabStack {
         guard var next = gallery, next.phase != .closing else { return }
         let cards = cards(of: next)
         guard let chosen = cards.firstIndex(where: { $0.id == id }) else { return }
+        stopGalleryGestures()
         // Pages warming up go now; one for the card tapped comes in front.
         warmup.stop(keeping: id)
         let layout = layout(next)
@@ -628,7 +679,10 @@ final class TabStack {
     func chooseFront() {
         guard let shown = gallery else { return }
         let cards = cards(of: shown)
-        if let front = app.browser.tab?.id, cards.contains(where: { $0.id == front }) { choose(front) }
+        if let front = app.browser.tab?.id {
+            if cards.contains(where: { $0.id == front }) { choose(front) }
+            else { dismissGallery() } // A kept page stays in front outside the mobile Today gallery.
+        }
         else if let newest = cards.last { choose(newest.id) }
         else { dismissGallery() }
     }
@@ -647,6 +701,8 @@ final class TabStack {
     /// Gone, the page and the chrome as they are, the stack showing its cards.
     func dismissGallery() {
         guard gallery != nil else { return }
+        toSidebar = false
+        stopGalleryGestures()
         warmup.stop()
         touching = false
         clock.stop()
@@ -667,25 +723,32 @@ final class TabStack {
     /// resisted past the ends.
     func scrollGallery(to focus: CGFloat) {
         guard gallery?.phase == .open else { return }
+        scrollSpring.stop()
         touching = true
         gallery?.focus = focus
     }
 
     /// Let go of a scroll: the cards glide on to the card nearest where the
     /// finger threw them, never past the first or the last.
-    func settleScroll(_ projected: CGFloat) {
+    func settleScroll(_ projected: CGFloat, velocity: CGFloat = 0) {
         touching = false
         guard let shown = gallery, shown.phase == .open else { return }
         let end = min(max(projected.rounded(), 0), layout(shown).maxFocus)
-        Motion.tabsScroll.run { gallery?.focus = end }
-        // Other cards are near the focus now: theirs first.
-        refreshWarmup()
+        scrollStep = layout(shown).step
+        scrollSpring.set(shown.focus * scrollStep)
+        scrollSpring.animate(to: end * scrollStep, .tabsScroll, velocity: velocity) { [weak self] finished in
+            if finished { self?.refreshWarmup() }
+        }
     }
 
     /// A finger takes a card up (dy negative); down it hardly moves.
     func liftCard(_ id: Tab.ID, by dy: CGFloat) {
-        guard var next = gallery, next.phase == .open, !next.leaving.contains(id),
+        guard var next = gallery, next.phase == .open,
               cards(of: next).contains(where: { $0.id == id }) else { return }
+        cardSpring.stop()
+        flights.removeValue(forKey: id)?.stop()
+        next.leaving.remove(id)
+        next.flightOffsets.removeValue(forKey: id)
         next.lifted = id
         next.lift = dy < 0 ? dy : ColumnMath.rubber(dy, Metrics.TabGallery.rubber) * 0.3
         gallery = next
@@ -695,11 +758,12 @@ final class TabStack {
     func releaseCard(_ id: Tab.ID, dy: CGFloat, velocity: CGFloat) {
         typealias G = Metrics.TabGallery
         guard gallery?.lifted == id else { return }
-        if -(dy + min(0, velocity) * G.closeProjection) >= G.closeDistance {
-            closeCard(id)
+        if -(dy + velocity * G.closeProjection) >= G.closeDistance {
+            closeCard(id, velocity: velocity)
         } else {
-            Motion.tabsCardBack.run({ gallery?.lift = 0 }) { [weak self] in
-                guard let self, self.gallery?.lifted == id, self.gallery?.lift == 0 else { return }
+            cardSpring.set(gallery?.lift ?? 0)
+            cardSpring.animate(to: 0, .tabsCardBack, velocity: velocity) { [weak self] finished in
+                guard finished, let self, self.gallery?.lifted == id else { return }
                 self.gallery?.lifted = nil
             }
         }
@@ -709,21 +773,31 @@ final class TabStack {
     /// offering it back as the spaces' Close does), or leaves the open tabs
     /// (a kept or pinned one, which stays where it is kept); the other cards
     /// close the gap. The last one closed leaves the empty page, with Undo.
-    func closeCard(_ id: Tab.ID) {
+    func closeCard(_ id: Tab.ID, velocity: CGFloat = 0) {
         guard let shown = gallery, shown.phase == .open, !shown.leaving.contains(id),
               cards(of: shown).contains(where: { $0.id == id }) else { return }
         Haptics.play(.soft, reason: Haptics.Reason.cardThrown)
-        Motion.tabsCardFly.run({ gallery?.leaving.insert(id) }) { [weak self] in self?.removeCard(id) }
-        // Nothing will be left to look at: search comes up as the card goes.
-        if cards(of: shown).count == 1, app.field.sheetAllowed, !app.browser.space.isPrivate, app.browser.tab?.isPrivate != true {
-            lastCardLeaving = true
-            app.openNewTab(from: TabGalleryLayout(screen: app.screenSize, count: 0, verticalControls: app.workspace.verticalControls,
-                                                  leadingRail: app.workspace.leadingRail).plus)
+        let layout = layout(shown)
+        let index = cards(of: shown).firstIndex(where: { $0.id == id })!
+        let start = shown.lifted == id ? shown.lift : 0
+        if shown.lifted == id { gallery?.lifted = nil; gallery?.lift = 0 }
+        gallery?.leaving.insert(id)
+        gallery?.flightOffsets[id] = start
+        let flight = TabCardFlight(TabCardTrajectory(start: start, velocity: velocity,
+                                                     bottom: layout.card(index, focus: shown.focus).maxY)) { [weak self] offset in
+            self?.gallery?.flightOffsets[id] = offset
+        } completion: { [weak self] in
+            self?.flights.removeValue(forKey: id)
+            self?.removeCard(id)
         }
+        flights[id] = flight
+        flight.run()
+        // Even the last card can be caught. Search waits until it has left.
     }
 
     private func removeCard(_ id: Tab.ID) {
-        guard let shown = gallery else { lastCardLeaving = false; return }
+        guard let shown = gallery else { return }
+        scrollSpring.stop()
         let before = cards(of: shown)
         guard let index = before.firstIndex(where: { $0.id == id }) else { return }
         let wasFront = app.browser.tab?.id == id
@@ -735,6 +809,7 @@ final class TabStack {
             }
             closed = closeTab(id, in: shown.space)
             gallery?.leaving.remove(id)
+            gallery?.flightOffsets.removeValue(forKey: id)
             if gallery?.lifted == id { gallery?.lifted = nil; gallery?.lift = 0 }
             // The card at the focus stays there; the focus card closed, the
             // next older one comes to the focus, the tab in front still beside it.
@@ -747,7 +822,6 @@ final class TabStack {
         guard let newest = rest.last else {
             // A pin or a kept tab in front lets go of the page too.
             if app.browser.spaceID == shown.space, let front = app.browser.tab { app.browser.letGo(of: front.id) }
-            lastCardLeaving = false
             Motion.tabsReflow.run { dismissGallery() }
             // Nothing left to look at: search, at once.
             if app.surfaces.field == nil { app.openNewTab() }
@@ -781,6 +855,26 @@ final class TabStack {
         return closed
     }
 
+    /// Switch the visible gallery without closing either space's tabs.
+    func selectGallerySpace(_ id: Space.ID) {
+        guard let shown = gallery, shown.phase == .open, shown.space != id, shown.leaving.isEmpty,
+              shown.lifted == nil, !app.workspace.tabletControls, app.browser.space(id)?.isPrivate == false else { return }
+        warmup.stop()
+        clock.stop()
+        touching = false
+        app.browser.showSpace(id)
+        if litStatusBar { app.surfaces.statusBarLight = TabGalleryGround.isDark(app) }
+        let order = TabRecency.order(of: app.browser.space, recent: recency.recent(in: id)).reversed().map(\.id)
+        var next = Gallery(space: id, order: order)
+        next.phase = .open
+        next.focus = layout(next).initialFocus
+        // The new space's cards come in beside the old ones' place, following
+        // the capsule's lens to its name (TabGalleryLayer.pageShift).
+        pagedAt = CACurrentMediaTime()
+        gallery = next
+        refreshWarmup()
+    }
+
     /// New Tab from All Tabs' +: the field grows from it, over the cards,
     /// which go once it has (watchSurfaces).
     func galleryNewTab(from origin: CGRect) {
@@ -794,6 +888,29 @@ final class TabStack {
         guard let shown = gallery, shown.phase == .open else { return }
         NewTabPager.shared.startAt = NewTabPager.chatsPage
         app.openNewTab(from: origin)
+    }
+
+    /// The spaces sidebar from All Tabs' computer button: the plate's swipe up,
+    /// on the space the gallery shows; the cards go once it has (watchSurfaces).
+    func gallerySidebar(from origin: CGRect) {
+        guard let shown = gallery, shown.phase == .open, !toSidebar else { return }
+        Haptics.play(.light, reason: Haptics.Reason.columnOpened)
+        app.chrome.unfold()
+        // The sidebar's pages start on the gallery's space, its capsule's lens where it is.
+        let pages = [NewTabPager.chatsPage] + app.browser.spaces.filter { !$0.isPrivate }.map(\.id)
+        let pager = NewTabPager.shared
+        pager.startAt = shown.space
+        pager.spaceID = shown.space
+        pager.onChats = false
+        if let i = pages.firstIndex(of: shown.space) { pager.position = CGFloat(i) }
+        // In place: the controls stay, the cards blur out as the space blurs in.
+        app.field.sidebarBlur = 1
+        app.field.openSpacesInPlace()
+        let turn = Motion.disabled ? nil : Animation.easeOut(duration: Motion.plusToField.duration)
+        withAnimation(turn) {
+            toSidebar = true
+            app.field.sidebarBlur = 0
+        }
     }
 
     /// Settings from All Tabs' gear, over the cards (watchSurfaces keeps them).
@@ -956,7 +1073,101 @@ final class TabStack {
     /// All Tabs is up and no finger is on its cards.
     private var still: Bool {
         guard let shown = gallery else { return false }
-        return shown.phase == .open && shown.lifted == nil && !touching
+        return shown.phase == .open && shown.lifted == nil && !touching && !scrollSpring.isMoving && flights.isEmpty
+    }
+
+    private func stopGalleryGestures() {
+        scrollSpring.stop()
+        cardSpring.stop()
+        pinchSpring.stop()
+        pinchProgress = nil
+        pinchEnd = nil
+        pinchAnchor = nil
+        pinchRelease = nil
+        for flight in flights.values { flight.stop() }
+        flights.removeAll()
+    }
+
+    var canPinchGallery: Bool {
+        gallery == nil && flick == nil && !covered && !app.surfaces.pageSwiping
+            && app.backStack.swipe == nil && !order.isEmpty
+    }
+
+    func beginPinch(at anchor: CGPoint? = nil) {
+        guard canPinchGallery else { return }
+        pinchProgress = 0
+        pinchEnd = nil
+        pinchAnchor = anchor
+        pinchFinger = .zero
+        pinchRelease = nil
+        openGallery()
+    }
+
+    /// A finger up from the plate, `finger` from where it touched: the page
+    /// shrinks toward its card as it rises, held where the finger holds it.
+    func followPinch(_ finger: CGSize, span: CGFloat) {
+        guard pinchProgress != nil, pinchEnd == nil else { return }
+        pinchFinger = CGSize(width: finger.width, height: min(finger.height, 0))
+        updatePinch(-pinchFinger.height / span)
+    }
+
+    /// Where the front card stands off its path at `progress`: the point of
+    /// the page the finger took stays under the finger; let go, that offset
+    /// fades as the spring carries the card home (or back to the page).
+    private func pinchShift(_ progress: CGFloat) -> CGSize {
+        if let release = pinchRelease {
+            let k: CGFloat
+            if let end = pinchEnd, end.commit {
+                k = release.progress >= 1 ? 0 : max(0, (1 - progress) / (1 - release.progress))
+            } else {
+                k = release.progress <= 0 ? 0 : max(0, progress / release.progress)
+            }
+            return CGSize(width: release.shift.width * min(k, 1), height: release.shift.height * min(k, 1))
+        }
+        guard let anchor = pinchAnchor, let shown = gallery, !shown.order.isEmpty else { return .zero }
+        let layout = layout(shown)
+        let n = shown.order.count
+        let path = TabGalleryMotion.interactiveOpening(n - 1, layout: layout, stack: stackGeometry, progress: progress).rect
+        let page = layout.page
+        guard page.width > 0, page.height > 0 else { return .zero }
+        let fx = (anchor.x - page.minX) / page.width, fy = (anchor.y - page.minY) / page.height
+        let finger = CGPoint(x: anchor.x + pinchFinger.width, y: anchor.y + pinchFinger.height)
+        let x = finger.x - (fx - 0.5) * path.width, y = finger.y - (fy - 0.5) * path.height
+        return CGSize(width: x - path.midX, height: y - path.midY)
+    }
+
+    func updatePinch(_ progress: CGFloat) {
+        guard pinchProgress != nil else { return }
+        let p = min(max(progress, 0), 1)
+        pinchProgress = p
+        guard gallery?.phase == .opening else { return }
+        guard !Motion.reduced else { return }
+        let shift = pinchShift(p)
+        gallery?.pinchProgress = p
+        gallery?.pinchShift = shift
+        app.surfaces.chromeOpacity = Double(1 - p)
+    }
+
+    func endPinch(velocity: CGFloat, cancelled: Bool) {
+        guard let progress = pinchProgress else { return }
+        let commit = !cancelled && progress + velocity * 0.15 >= Metrics.TabGallery.pinchCommit
+        pinchEnd = (commit, velocity)
+        pinchRelease = (gallery?.pinchShift ?? .zero, progress)
+        if gallery != nil { finishPinch(commit: commit, velocity: velocity) }
+    }
+
+    private func finishPinch(commit: Bool, velocity: CGFloat) {
+        if Motion.reduced {
+            clock.run(.tabsOpen, for: TabGalleryTiming.openDuration, tick: { _ in }) { [weak self] in
+                if commit { self?.opened() } else { self?.dismissGallery() }
+            }
+            return
+        }
+        pinchSpring.set((pinchProgress ?? 0) * 1000)
+        pinchSpring.animate(to: commit ? 1000 : 0, .tabsOpen, velocity: velocity * 1000) { [weak self] finished in
+            guard finished, let self else { return }
+            if commit { self.opened() } else { self.dismissGallery() }
+        }
     }
 
     /// One card's page loaded out of sight under the cards, pictured as soon

@@ -1,0 +1,37 @@
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -470,11 +470,13 @@
+     return -1;
+   }
+ 
+-  // TODO(crbug.com/40638654): Rather than calling checking against
+-  // TYPE_NORMAL, should this call
+-  // SupportsWindowFeature(Browser::kFeatureTabstrip)?
++  // Match the window kind exposed by windows.get/query. An externally
++  // hosted ordinary window has concealed TYPE_POPUP producers; that
++  // physical implementation detail must not reject its tab operations.
++  // Actual extension popup windows still report kPopup and are refused.
+   if (!allow_other_window_types &&
+-      target_browser->GetType() != BrowserWindowInterface::TYPE_NORMAL) {
++      BrowserExtensionWindowController::From(target_browser)->GetWindowTypeText() !=
++          api::tabs::ToString(api::tabs::WindowType::kNormal)) {
+     *error = ExtensionTabUtil::kCanOnlyMoveTabsWithinNormalWindowsError;
+     return -1;
+   }
+--- a/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
++++ b/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
+@@ -406,10 +406,10 @@
+       return false;
+     }
+ 
+-    // TODO(crbug.com/40638654): Rather than calling GetType() ==
+-    // BrowserWindowInterface::Type::TYPE_NORMAL, should this call
+-    // SupportsWindowFeature(Browser::kFeatureTabstrip)?
+-    if (target_browser->GetType() != BrowserWindowInterface::TYPE_NORMAL) {
++    // Use the same logical kind as windows.get/query and tabs.move, not
++    // the type of the concealed native producer used by an embedder.
++    if (target_window->GetWindowTypeText() !=
++        api::tabs::ToString(api::tabs::WindowType::kNormal)) {
+       *error = ExtensionTabUtil::kCanOnlyMoveTabsWithinNormalWindowsError;
+       return false;
+     }

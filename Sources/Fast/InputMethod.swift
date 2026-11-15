@@ -39,20 +39,19 @@ extension InputMethod {
         @ObservationIgnored private weak var view: NSTextView?
         @ObservationIgnored private var watchers: [NSObjectProtocol] = []
 
-        private init() {
-            // On the main queue: a text view can post from another thread, and
-            // assumeIsolated traps there (crash #221).
-            let center = NotificationCenter.default
+        init(center: NotificationCenter = .default) {
+            // A text view may post from another thread (crash #221).
+            // Deliver on main before touching AppKit or observable state.
             for name in [NSText.didChangeNotification, NSTextView.didChangeSelectionNotification, NSText.didEndEditingNotification] {
                 watchers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                     let ended = note.name == NSText.didEndEditingNotification
                     let view = note.object as? NSTextView
-                    MainActor.assumeIsolated { self?.saw(view, ended: ended) }
+                    AppKitMainThread.sync { self?.saw(view, ended: ended) }
                 })
             }
             // Once an event is handled: only a check while composing.
             watchers.append(center.addObserver(forName: NSApplication.didUpdateNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.recheck() }
+                AppKitMainThread.sync { self?.recheck() }
             })
         }
 

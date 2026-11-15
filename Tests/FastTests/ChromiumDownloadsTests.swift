@@ -96,6 +96,10 @@ struct ChromiumDownloadsTests {
         #expect(ChromiumDownload.byteCount(.number(.infinity), unknown: 0) == 0)
         #expect(ChromiumDownload.byteCount(.number(-8), unknown: 0) == 0)
         #expect(ChromiumDownload.byteCount(.number(12345), unknown: -1) == 12345)
+        #expect(ChromiumDownload.nativeIdentifier(.number(1)) == 1)
+        for value in [0.0, -1, 1.5, .infinity, Double(UInt32.max) + 1] {
+            #expect(ChromiumDownload.nativeIdentifier(.number(value)) == nil)
+        }
     }
 
 }

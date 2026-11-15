@@ -38,6 +38,29 @@ struct ExtensionLateContentTests {
         #expect(ExtensionShims.originPattern("<all_urls>") == "<all_urls>")
     }
 
+    @Test func actionMessageListenersKeepTheirManifestInjectionPoint() throws {
+        guard ExtensionShims.lateIdleKB > 0 else { return }
+        let source = "chrome.runtime.onMessage.addListener(() => {});/*" + String(repeating: "x", count: (ExtensionShims.lateIdleKB + 1) * 1024) + "*/"
+        let folder = try package(["js/action.js": source], entries: #"{"matches":["<all_urls>"],"js":["js/action.js"]}"#)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var original = try manifest(folder)
+        original["action"] = ["default_popup": "popup.html"]
+        let url = folder.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: original).write(to: url)
+        try ExtensionShims.prepare(folder, fresh: true)
+        #expect(try entries(folder).contains { $0.contains("yab-late-0.js") })
+
+        // Updating the package from a popup to onClicked must also unwrap a
+        // previous preparation, so the real listener is ready before a click.
+        var updated = try manifest(folder)
+        updated["action"] = [:] as [String: String]
+        try JSONSerialization.data(withJSONObject: updated).write(to: url)
+        try "stale".write(to: folder.appendingPathComponent(ExtensionShims.stamp), atomically: true, encoding: .utf8)
+        try ExtensionShims.prepare(folder)
+        #expect(try entries(folder).contains { $0.contains("js/action.js") })
+        #expect(try entries(folder).allSatisfy { !$0.contains(where: { $0.hasPrefix("yab-late-") }) })
+    }
+
     /// MetaMask's shape: a provider in the page's world and a heavy relay in
     /// its own, both at document_start over the same sites. The relay waits
     /// (`lateRelay`); a heavy document_start script with no such partner

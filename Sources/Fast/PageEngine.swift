@@ -156,6 +156,8 @@ enum PageDialogReply: Equatable, Codable, Sendable {
 }
 
 struct PageFilePicker {
+    /// A native save request, rather than an upload chooser.
+    var saveName: String? = nil
     let allowsDirectories: Bool
     let allowsMultiple: Bool
     var frame: PageFrame? = nil
@@ -242,6 +244,10 @@ protocol PageEvents: AnyObject {
               reply: @escaping @MainActor (PagePermission) -> Void)
     func page(_ page: any PageHandle, notify origin: PageOrigin,
               reply: @escaping @MainActor (Bool) -> Void)
+    func page(_ page: any PageHandle, permission kind: SitePermission, origin: PageOrigin,
+              reply: @escaping @MainActor (Bool) -> Void)
+    func page(_ page: any PageHandle, localNetwork kind: LocalNetwork.Kind, origin: PageOrigin,
+              reply: @escaping @MainActor (Bool) -> Void)
     func page(_ page: any PageHandle, navigation event: PageNavigationEvent)
     func page(_ page: any PageHandle, decide action: PageAction,
               reply: @escaping @MainActor (PagePolicy) -> Void)
@@ -269,6 +275,10 @@ extension PageEvents {
               reply: @escaping @MainActor (PagePermission) -> Void) { reply(.deny) }
     func page(_ page: any PageHandle, notify origin: PageOrigin,
               reply: @escaping @MainActor (Bool) -> Void) { reply(false) }
+    func page(_ page: any PageHandle, permission kind: SitePermission, origin: PageOrigin,
+              reply: @escaping @MainActor (Bool) -> Void) { reply(false) }
+    func page(_ page: any PageHandle, localNetwork kind: LocalNetwork.Kind, origin: PageOrigin,
+              reply: @escaping @MainActor (Bool) -> Void) { reply(false) }
     /// Listeners interested only in lifecycle events keep the engine's
     /// ordinary navigation behavior.
     func page(_ page: any PageHandle, decide action: PageAction,
@@ -283,6 +293,7 @@ protocol PageDownload: AnyObject {
     var downloadID: UUID { get }
     var originalRequest: URLRequest? { get }
     var isUserInitiated: Bool { get }
+    var isExtensionDownload: Bool { get }
     var progress: Progress { get }
     var page: (any PageHandle)? { get }
     /// Native origin surface, including a separate extension surface that
@@ -294,6 +305,14 @@ protocol PageDownload: AnyObject {
     func cancelDownload(_ done: @escaping @MainActor (Data?) -> Void)
     func restartDownload(from resumeData: Data?, fallback: (any PageHandle)?,
                          done: @escaping @MainActor ((any PageDownload)?) -> Void)
+    /// Yab has atomically published the complete file. An engine with its own
+    /// download journal must acknowledge the final path before it is recorded.
+    func didPublish(to file: URL) async throws
+}
+
+extension PageDownload {
+    var isExtensionDownload: Bool { false }
+    func didPublish(to file: URL) async throws {}
 }
 
 @MainActor
@@ -322,6 +341,9 @@ struct PageShot {
     /// Waits for what is about to be drawn, as WebKit's snapshot does by
     /// default; false takes what is on screen now.
     var afterUpdates = true
+    /// Shown for a moment, never kept or handed on: Chromium needn't encode a
+    /// whole window losslessly for it (ten times the bytes and the time).
+    var brief = false
 }
 
 /// One key as both ways need it: the event's key code and characters

@@ -331,6 +331,11 @@ final class SettingsContentTests: XCTestCase {
 /// Sheets grow from what summoned them, or rise; the first launch welcomes.
 @MainActor
 final class SettingsMotionTests: XCTestCase {
+    // An earlier suite may leave motion off; these tests read the motion.
+    override func setUp() {
+        Motion.disabled = false
+    }
+
     override func tearDown() {
         Motion.disabled = false
     }
@@ -475,6 +480,51 @@ final class SettingsMotionTests: XCTestCase {
         // the first run up to its end; an earlier join never brings it back.
         XCTAssertTrue(FirstLaunch.shows(hasMac: true, welcomed: false, forced: nil, held: true))
         XCTAssertFalse(FirstLaunch.shows(hasMac: true, welcomed: true, forced: nil, held: true))
+        // Begun on this launch, it runs to its end even once answered.
+        XCTAssertTrue(FirstLaunch.shows(hasMac: false, welcomed: true, forced: nil, running: true))
+        XCTAssertFalse(FirstLaunch.shows(hasMac: false, welcomed: true, forced: false, running: true))
+    }
+
+    /// 1813: Use Without a Mac, then a quit on a later page (Open links in
+    /// Yab?) brought the whole welcome back over every launch, as only its
+    /// last page wrote it down as answered.
+    func testUsingYabWithoutAMacAnswersTheWelcomeForLaterLaunches() throws {
+        let store = SettingsStore.shared
+        let saved = (store.welcomed, store.withoutMac, SettingsUI.shared.welcomeForced, Motion.disabled)
+        let run = FirstRun.shared
+        defer {
+            run.reset()
+            store.welcomed = saved.0; store.withoutMac = saved.1
+            SettingsUI.shared.welcomeForced = saved.2; Motion.disabled = saved.3
+        }
+        Motion.disabled = true
+        store.welcomed = false; store.withoutMac = false; SettingsUI.shared.welcomeForced = nil
+        let app = AppModel(world: try World.load(named: "empty"))
+        run.reset()
+        XCTAssertTrue(FirstLaunch.shows(app))
+        run.begin(app)
+        run.forward(app)
+        XCTAssertEqual(run.step, .noMac)
+        run.forward(app)
+        XCTAssertEqual(run.step, .field)
+        XCTAssertTrue(store.welcomed, "Use Without a Mac answers the welcome")
+        XCTAssertTrue(FirstLaunch.shows(app), "its later pages still run on this launch")
+        run.forward(app)
+        XCTAssertEqual(run.step, .incognito)
+        XCTAssertTrue(FirstLaunch.shows(app))
+        // Yab quit here: the next launch has no flow running, and no welcome.
+        run.reset()
+        XCTAssertFalse(FirstLaunch.shows(app), "a later launch opens the browser")
+
+        // "Yab is on my Mac" after all: unanswered again until it joins.
+        run.begin(app)
+        run.forward(app)
+        run.forward(app)
+        XCTAssertTrue(store.welcomed)
+        run.back(app)
+        XCTAssertEqual(run.step, .noMac)
+        run.chooseMac(app)
+        XCTAssertFalse(store.welcomed, "a quit before joining brings the welcome back")
     }
 
     func testTheEmptyWorldHasNoMacAndNoTabs() throws {

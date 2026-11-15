@@ -1,0 +1,15 @@
+--- a/cef/libcef/browser/file_dialog_manager.cc
++++ b/cef/libcef/browser/file_dialog_manager.cc
+@@ -126,6 +126,12 @@
+ 
+   std::optional<FileChooserParams::Mode> mode;
+   switch (type) {
++    // Yab: a folder picker, as showDirectoryPicker() (File System Access)
++    // and DevTools' workspace folder ask for it, reaches the dialog handler
++    // as FILE_DIALOG_OPEN_FOLDER. Unmapped, it fell to the default below,
++    // FILE_DIALOG_OPEN, and the embedder's panel offered files only.
++    case ui::SelectFileDialog::Type::SELECT_FOLDER:
++    case ui::SelectFileDialog::Type::SELECT_EXISTING_FOLDER:
+     case ui::SelectFileDialog::Type::SELECT_UPLOAD_FOLDER:
+       mode = FileChooserParams::Mode::kUploadFolder;
+       break;

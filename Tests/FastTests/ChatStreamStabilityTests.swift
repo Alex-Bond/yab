@@ -211,6 +211,51 @@ struct ChatStreamStabilityTests {
         }
     }
 
+    @Test(.enabled("needs a farm test screen") { await TestScreen.available })
+    func partialChunksAreNotWrittenOutASecondTime() async throws {
+        let browser = Browser(windowID: UUID())
+        let id = "partial-no-replay-" + UUID().uuidString
+        Agents.shared.benchTask(id, state: .running)
+        let session = try #require(Agents.shared.session(id))
+        session.cli = "claude"
+        defer { session.state = .done; browser.everyTab.forEach { $0.close() } }
+        session.items.put(ChatItem(id: "q", kind: .asked, text: "Read the documents", state: .done), at: Date())
+        let conversation = Conversation(Agents.shared.chat(of: session))
+        let rendered = RenderedWords()
+        let host = Host(Transcript(browser: browser, conversation: conversation)
+            .onPreferenceChange(ChatWords.Rendered.self) { rendered.words = $0 })
+        defer { host.close() }
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(!host.typing.isEmpty)
+        let chunk = String(repeating: "one more word ", count: 10)
+        for _ in 0..<8 {
+            session.items.grow("answer.text", by: chunk, at: Date())
+            conversation.chat = Agents.shared.chat(of: session)
+            try await Task.sleep(for: .milliseconds(120))
+            host.view.layoutSubtreeIfNeeded()
+        }
+        #expect(host.typing.isEmpty, "the real partial answer replaced the typing indicator")
+        #expect(!conversation.writing.contains(true), "partial chunks must not enter a second WriteOut")
+        try host.save("partial-no-replay-running")
+        let expected = String(repeating: chunk, count: 8)
+        #expect(session.items.last?.text == expected)
+        let index = try #require(session.items.lastIndex(where: { $0.id == "answer.text" }))
+        session.items[index].state = .done
+        session.state = .done
+        conversation.chat = Agents.shared.chat(of: session)
+        conversation.live = false
+        let deadline = Date().addingTimeInterval(3)
+        while !rendered.words.contains(expected), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            host.view.layoutSubtreeIfNeeded()
+        }
+        #expect(rendered.words.contains(expected), "the completed native view shows every received word")
+        #expect(!conversation.writing.contains(true), "completion does not replay the stream")
+        try host.save("partial-no-replay-finished")
+    }
+
+    final class RenderedWords { var words: Set<String> = [] }
+
     @MainActor final class Host {
         let view: NSHostingView<AnyView>
         let window: NSWindow

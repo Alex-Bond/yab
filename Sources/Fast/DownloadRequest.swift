@@ -3,6 +3,29 @@ import Foundation
 /// The context of an explicit save is the page that supplied the file,
 /// never the active tab at the time the network replies.
 enum DownloadRequest {
+    /// Extension names are relative to Downloads. Keep their subdirectories,
+    /// while ordinary server-supplied names remain single leaf names.
+    nonisolated static func relativeFilename(_ value: String) -> String? {
+        guard !value.isEmpty, !value.hasPrefix("/"), !value.contains("\\"),
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
+        return parts.map { filename(String($0)) }.joined(separator: "/")
+    }
+
+    nonisolated static func extensionFolder(for name: String, in root: URL) throws -> URL {
+        guard relativeFilename(name) == name else { throw CocoaError(.fileWriteInvalidFileName) }
+        let base = root.resolvingSymlinksInPath().standardizedFileURL
+        var folder = root
+        for component in name.split(separator: "/").dropLast() {
+            folder.appendPathComponent(String(component), isDirectory: true)
+            let resolved = folder.resolvingSymlinksInPath().standardizedFileURL
+            guard resolved.path.hasPrefix(base.path + "/") else { throw CocoaError(.fileWriteInvalidFileName) }
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        return folder
+    }
+
     nonisolated static func filename(_ value: String) -> String {
         let leaf = value.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init) ?? ""
         let name = leaf.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }

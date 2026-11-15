@@ -155,9 +155,8 @@ enum MailCodes {
     /// A real browser-cookie feed still needs its authenticated backend.
     @MainActor static func unread(on tab: Tab, done: @escaping ([Mailed]) -> Void) {
         if let fake = fakeMail.withLock({ $0 }) { done(fake); return }
-        guard let store = tab.webKitOnly("Authenticated browser mail code feed", build: false)?.configuration.websiteDataStore
-        else { done([]); return }
-        unread(store: store, done: done)
+        // A Chromium tab's sign-ins reach this jar through the cookie bridge.
+        unread(store: tab.pageStore, done: done)
     }
 
     /// Gmail's unread mail with the cookies of the store the tab signs in

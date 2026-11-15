@@ -20,14 +20,16 @@ struct FaviconRefreshTests {
         initial.type = "image/png"; initial.body = try png(.systemRed)
         fixture.route("/old.png", initial)
         let icons = Favicons()
+        // The fixture's port is its own site, kept under host and port.
+        let site = try #require(Favicons.site(URL(string: fixture.root)!))
         // An explicit successful seed also makes this test independent of
-        // other methods' on-disk 127.0.0.1 icon in the same probe world.
+        // other methods' on-disk icon for this site in the same probe world.
         icons.fetch(page: URL(string: fixture.root + "/")!, again: true)
-        try await settled(icons)
+        try await settled(icons, host: site)
         fixture.route("/", .init("No icon"))
         fixture.route("/favicon.ico", .init("Unavailable", status: "503 Unavailable"))
         await icons.adopt(try png(.systemGreen), for: "sibling.example.test")
-        let old = try #require(icons.cached("127.0.0.1"))
+        let old = try #require(icons.cached(site))
         let oldBitmap = try #require(old.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
         let oldColor = try #require(oldBitmap.colorAt(x: 16, y: 16)?.usingColorSpace(.deviceRGB))
         #expect(oldColor.redComponent > oldColor.blueComponent)
@@ -44,12 +46,12 @@ struct FaviconRefreshTests {
         #expect(Favicons.canRefresh(tab))
         icons.refresh(tab)
         let failedUntil = Date().addingTimeInterval(4)
-        while icons.busy.contains("127.0.0.1"), Date() < failedUntil {
+        while icons.busy.contains(site), Date() < failedUntil {
             try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(!icons.busy.contains("127.0.0.1"))
+        #expect(!icons.busy.contains(site))
         #expect(fixture.requests.contains { $0.path == "/favicon.ico" })
-        #expect(icons.cached("127.0.0.1") === old)
+        #expect(icons.cached(site) === old)
         var response = LocalNetworkFixture.Reply("")
         response.type = "image/png"
         response.body = try png(.systemBlue)
@@ -57,10 +59,10 @@ struct FaviconRefreshTests {
         fixture.route("/new.png", response)
         icons.refresh(tab)
         let refreshedUntil = Date().addingTimeInterval(4)
-        while icons.cached("127.0.0.1") === old, Date() < refreshedUntil {
+        while icons.cached(site) === old, Date() < refreshedUntil {
             try await Task.sleep(for: .milliseconds(20))
         }
-        let refreshed = try #require(icons.cached("127.0.0.1"))
+        let refreshed = try #require(icons.cached(site))
         #expect(refreshed !== old)
         let bitmap = try #require(refreshed.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
         let color = try #require(bitmap.colorAt(x: 16, y: 16)?.usingColorSpace(.deviceRGB))
@@ -73,11 +75,11 @@ struct FaviconRefreshTests {
         fixture.stop()
         icons.refresh(tab)
         let stoppedUntil = Date().addingTimeInterval(4)
-        while icons.busy.contains("127.0.0.1"), Date() < stoppedUntil {
+        while icons.busy.contains(site), Date() < stoppedUntil {
             try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(!icons.busy.contains("127.0.0.1"))
-        #expect(icons.cached("127.0.0.1") === refreshed)
+        #expect(!icons.busy.contains(site))
+        #expect(icons.cached(site) === refreshed)
         #expect(icons.cached("sibling.example.test") === sibling)
     }
 
@@ -101,7 +103,7 @@ struct FaviconRefreshTests {
         #expect(custom.customMark == "A")
     }
 
-    private func settled(_ icons: Favicons, host: String = "127.0.0.1") async throws {
+    private func settled(_ icons: Favicons, host: String) async throws {
         let until = Date().addingTimeInterval(4)
         while icons.busy.contains(host), Date() < until {
             try await Task.sleep(for: .milliseconds(20))
@@ -109,7 +111,7 @@ struct FaviconRefreshTests {
         #expect(!icons.busy.contains(host))
     }
 
-    private func color(_ icons: Favicons, key: String = "127.0.0.1") throws -> NSColor {
+    private func color(_ icons: Favicons, key: String) throws -> NSColor {
         let image = try #require(icons.cached(key))
         let bitmap = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
         return try #require(bitmap.colorAt(x: 16, y: 16)?.usingColorSpace(.deviceRGB))
@@ -135,9 +137,10 @@ struct FaviconRefreshTests {
         fixture.route("/", cacheable("<link rel='icon' href='/site.png' sizes='32x32'>"))
         fixture.route("/site.png", cacheable("", body: try png(.systemRed)))
         let icons = Favicons()
+        let site = try #require(Favicons.site(page))
         icons.fetch(page: page, again: true)
-        try await settled(icons)
-        let red = try color(icons)
+        try await settled(icons, host: site)
+        let red = try color(icons, key: site)
         #expect(red.redComponent > red.blueComponent)
 
         fixture.route("/site.png", cacheable("", body: try png(.systemBlue)))
@@ -152,8 +155,8 @@ struct FaviconRefreshTests {
 
         // Explicit refresh must go back to the same cacheable icon URL.
         icons.fetch(page: page, again: true)
-        try await settled(icons)
-        let blue = try color(icons)
+        try await settled(icons, host: site)
+        let blue = try color(icons, key: site)
         #expect(blue.blueComponent > blue.redComponent)
         #expect(fixture.requests.filter { $0.path == "/site.png" }.count == 2)
 
@@ -161,8 +164,8 @@ struct FaviconRefreshTests {
         fixture.route("/", cacheable("<link rel='icon' href='/changed.png' sizes='32x32'>"))
         fixture.route("/changed.png", cacheable("", body: try png(.systemGreen)))
         icons.fetch(page: page, again: true)
-        try await settled(icons)
-        let green = try color(icons)
+        try await settled(icons, host: site)
+        let green = try color(icons, key: site)
         #expect(green.greenComponent > green.redComponent && green.greenComponent > green.blueComponent)
         #expect(fixture.requests.filter { $0.path == "/" }.count == 3)
         #expect(fixture.requests.contains { $0.path == "/changed.png" })
@@ -179,9 +182,10 @@ struct FaviconRefreshTests {
         valid.type = "image/png"; valid.body = try png(.systemBlue)
         fixture.route("/valid.png", valid)
         let icons = Favicons()
+        let site = try #require(Favicons.site(URL(string: fixture.root)!))
         icons.fetch(page: URL(string: fixture.root + "/")!, again: true)
-        try await settled(icons)
-        let blue = try color(icons)
+        try await settled(icons, host: site)
+        let blue = try color(icons, key: site)
         #expect(blue.blueComponent > blue.redComponent)
         let publicRequests = fixture.requests.filter { ["/", "/invalid.png", "/valid.png"].contains($0.path) }
         #expect(publicRequests.count == 3)

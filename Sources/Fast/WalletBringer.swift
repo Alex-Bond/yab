@@ -43,7 +43,7 @@ struct WalletBringer: View {
                     Divider()
                 }
                 ForEach(wallets, id: \.source.id) { wallet in
-                    Button("\(wallet.source.name) · \(Browser.walletCount(wallet.cards, wallet.addresses))") { bring([wallet.source]) }
+                    Button(wallet.source.name) { bring([wallet.source]) }
                 }
                 if !wallets.isEmpty { Divider() }
                 Button("Safari…") {
@@ -69,20 +69,14 @@ struct WalletBringer: View {
         case .idle:
             guard !wallets.isEmpty else { return "From Chrome, Arc, Safari or your card in Contacts." }
             let cards = wallets.reduce(0) { $0 + $1.cards }, addresses = wallets.reduce(0) { $0 + $1.addresses }
-            let names = wallets.map(\.source.name)
-            let where_ = names.count == 1 ? names[0] : names.count == 2 ? "\(names[0]) and \(names[1])" : "\(names.count) browsers"
-            return "\(Browser.walletCount(cards, addresses)) in \(where_). Existing cards and addresses are kept."
+            return "Choose a browser to import from. Existing items are kept."
         }
     }
 
-    /// The browsers with some, counted without their keys, off the main
-    /// thread.
+    /// Discover browser names without inspecting their credential stores.
     private func count() {
         DispatchQueue.global(qos: .userInitiated).async {
-            let found = Chromium.installed().compactMap { source -> (source: Chromium.Source, cards: Int, addresses: Int)? in
-                let count = Chromium.walletCount(source)
-                return count.cards + count.addresses > 0 ? (source, count.cards, count.addresses) : nil
-            }.sorted { $0.cards + $0.addresses > $1.cards + $1.addresses }
+            let found = Chromium.installed().map { (source: $0, cards: 0, addresses: 0) }
             DispatchQueue.main.async {
                 wallets = found
                 if stage == .counting { stage = .idle }
@@ -98,7 +92,8 @@ struct WalletBringer: View {
         DispatchQueue.global(qos: .userInitiated).async {
             var kept = (cards: 0, addresses: 0)
             var refused: [String] = []
-            for source in sources {
+            for discovered in sources {
+                let source = discovered.authorizingImport()
                 DispatchQueue.main.async { stage = .bringing(source.name) }
                 guard let found = try? Chromium.wallet(source) else { refused.append(source.name); continue }
                 let took = Wallet.take(cards: found.cards, addresses: found.addresses)

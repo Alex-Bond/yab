@@ -9,7 +9,12 @@ enum ChromiumDRMExtensionScripts {
       const nonce=crypto.randomUUID(),ports=new Map();let serial=0;
       const event=()=>{const listeners=new Set();return {addListener:f=>listeners.add(f),removeListener:f=>listeners.delete(f),hasListener:f=>listeners.has(f),hasListeners:()=>!!listeners.size,listeners}};
       const ready=handler.postMessage({op:'hello',nonce,epoch:config.epoch,url:location.href});
-      const call=(op,args)=>ready.then(()=>handler.postMessage({op,args,nonce,epoch:config.epoch,url:location.href}));
+      // An extension's messages and stored values reach Yab as plain data,
+      // as Chromium's JSON-serialized messaging has them: a DOMRect posted
+      // whole crashed WebKit of macOS 15 in Yab's own JavaScript context
+      // (WebKitIPCBoundary.plainScript).
+      const plain=\#(WebKitIPCBoundary.plainScript);
+      const call=(op,args)=>ready.then(()=>handler.postMessage({op,args:plain(args),nonce,epoch:config.epoch,url:location.href}));
       const runtime={id:config.id,getManifest:()=>config.manifest,getURL:path=>'chrome-extension://'+config.id+'/'+String(path||'').replace(/^\//,''),onMessage:event(),onConnect:event()};
       const callback=(promise,cb)=>{if(typeof cb!=='function')return promise;promise.then(x=>cb(x),e=>{runtime.lastError={message:String(e.message||e)};try{cb()}finally{delete runtime.lastError}})};
       runtime.sendMessage=(...args)=>{const cb=typeof args.at(-1)==='function'?args.pop():null;if(args.length>1&&typeof args[0]==='string'&&/^[a-p]{32}$/.test(args[0])){if(args.shift()!==config.id)return callback(Promise.reject(Error('Cross-extension messaging is unavailable')),cb)}return callback(call('runtime.sendMessage',[args[0]]),cb)};
@@ -27,7 +32,7 @@ enum ChromiumDRMExtensionScripts {
         if(op==='storage.changed'){storage.onChanged.listeners.forEach(f=>f(args.changes,args.area));storage[args.area]?.onChanged.listeners.forEach(f=>f(args.changes));return null}
         throw Error('Unsupported content event');
       };
-      globalThis.__yabWK={nonce,receive,ready,epoch:config.epoch};
+      globalThis.__yabWK={nonce,receive:async(op,args)=>plain(await receive(op,args)),ready,epoch:config.epoch};
     })();
     """#
 

@@ -23,7 +23,8 @@ extension Chromium {
 
     /// Every profile's Web Data.
     static func webData(_ source: Source) -> [URL] {
-        source.profiles
+        guard source.credentialAccess else { return [] }
+        return source.profiles
             .map { $0.appendingPathComponent("Web Data") }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }

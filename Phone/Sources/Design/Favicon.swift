@@ -21,6 +21,10 @@ struct Favicon: View {
     @Environment(\.syncedArtwork) private var syncedArtwork
     @Environment(\.colorScheme) private var scheme
 
+    private var resolvedURL: URL? {
+        url ?? (host ?? FaviconImages.host(for: icon)).flatMap { URL(string: "https://" + $0) }
+    }
+
     var body: some View {
         Group {
             if let mark, mark.hasPrefix("icon:"), let image = MacIconMarks.image(String(mark.dropFirst(5))) {
@@ -33,11 +37,12 @@ struct Favicon: View {
                 Glyph(.email1, size: size, color: Color(red: 0x8E / 255, green: 0x8E / 255, blue: 0x93 / 255))
             } else if icon == "face" {
                 AgentFace(size: size)
-            } else if let image = FaviconImages.image(icon, host: host, url: url, isPrivate: isPrivate) {
+            } else if let image = (artwork ?? syncedArtwork)?.siteImage(for: resolvedURL, isPrivate: isPrivate)
+                ?? FaviconImages.image(icon, host: host, url: resolvedURL, isPrivate: isPrivate) {
                 Image(uiImage: image)
                     .resizable()
                     .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: .fit)
                     .frame(width: size, height: size)
                     // A black mark on clear (GitHub's) is lost on a dark
                     // ground: it stands on a light plate there.
@@ -51,6 +56,11 @@ struct Favicon: View {
         }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
+        .task(id: resolvedURL?.absoluteString) {
+            guard !isPrivate, icon != "mail", icon != "face",
+                  let page = resolvedURL else { return }
+            await SiteIcons.shared.load(for: page)
+        }
     }
 
     /// Round for the sites whose marks are round, else a rounded square (23%).
@@ -105,6 +115,8 @@ enum FaviconImages {
               let entries = try? JSONDecoder().decode([Entry].self, from: data) else { return [:] }
         return Dictionary(entries.map { ($0.key, $0.host) }, uniquingKeysWith: { a, _ in a })
     }()
+
+    static func host(for icon: String) -> String? { hosts[icon] }
 
     private static var darkMarks: [ObjectIdentifier: Bool] = [:]
 

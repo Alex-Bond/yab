@@ -76,6 +76,8 @@ struct PageAsk: Identifiable, Equatable {
         /// The page's beforeunload: leaving it, closed or taken elsewhere,
         /// may lose what was typed in it (LeavePage.swift).
         case leave
+        /// Something else a Chromium page asks for (SitePermissions.swift).
+        case site(SitePermission)
     }
 
     enum Barred: Equatable { case camera, microphone, location, notifications }
@@ -122,6 +124,12 @@ struct PageAsk: Identifiable, Equatable {
 
     var fromPage: Bool { kind == .alert || kind == .confirm || kind == .prompt }
 
+    /// One site decision, shared by all pending device requests. Allow is
+    /// remembered across tabs and launches; dismissal and denial keep nothing.
+    static func capture(_ type: PageCapture, host: String) -> PageAsk {
+        PageAsk(kind: .capture(type), host: host)
+    }
+
     var signingIn: Bool {
         if case .signIn = kind { return true }
         return false
@@ -149,9 +157,9 @@ struct PageAsk: Identifiable, Equatable {
     var box: String? {
         switch kind {
         case .alert, .confirm, .prompt: return persistent ? "Don’t show more from this page" : nil
-        case .capture, .location: return "Remember for this site"
+        case .location: return "Remember for this site"
         case .app: return "Always from this site"
-        case .barred, .devMode, .share, .stuck, .reload, .leave, .notifications, .localNetwork, .download, .downloads: return nil
+        case .capture, .barred, .devMode, .share, .stuck, .reload, .leave, .notifications, .localNetwork, .download, .downloads, .site: return nil
         case .signIn: return kept ? nil : "Keep in Passwords"
         }
     }
@@ -187,6 +195,27 @@ enum Asks {
     static var owed: [UUID: (AskReply, PageAsk) -> Void] = [:]
     /// What to do if the card is canceled while macOS is asking.
     static var waiting: [UUID: (Bool) -> Void] = [:]
+    static var captures: [UUID: CaptureQuestion] = [:]
+}
+
+/// Device callbacks belong to one page and origin, not to separate cards.
+/// Membership lasts until the person answers, without a coalescing timer.
+@MainActor
+final class CaptureQuestion {
+    let page: NSView
+    let site: String
+    var requests: [UUID: (PageCapture, (PagePermission) -> Void)] = [:]
+    init(page: NSView, site: String) { self.page = page; self.site = site }
+    var type: PageCapture {
+        let types = requests.values.map { $0.0 }
+        return types.allSatisfy { $0 == .camera } ? .camera
+            : types.allSatisfy { $0 == .microphone } ? .microphone : .cameraAndMicrophone
+    }
+    func finish(_ permission: PagePermission) {
+        let pending = requests.values.map { $0.1 }
+        requests.removeAll()
+        for reply in pending { reply(permission) }
+    }
 }
 
 // MARK: - asking and answering
@@ -225,17 +254,23 @@ extension Browser {
 
     /// The question on the tab, answered. What follows a yes to the camera,
     /// macOS asked, is the asker's to show.
-    func answer(_ tab: Tab, _ reply: AskReply) {
+    /// `remember`: kept for the site (true) or for this time only (false),
+    /// as the button pressed says; nil is the box's say, and for the camera
+    /// and the microphone Return keeps Allow for the site; Escape keeps nothing.
+    func answer(_ tab: Tab, _ reply: AskReply, remember: Bool? = nil) {
         guard let question = tab.asks.first else { return }
         switch question.stage {
         case .asking:
             var question = question
+            if let remember { question.ticked = remember }
+            else if case .capture = question.kind, case .yes = reply { question.ticked = true }
             if case .barred(let what) = question.kind, case .yes = reply { Self.openPrivacy(what) }
             if question.fromPage, question.persistent, question.ticked { tab.hushed = question.host }
             // A site's notifications and downloads are remembered whatever
             // is pressed, with no box: only a card taken away by leaving
             // says nothing.
             if question.kind == .notifications || question.kind == .download || question.kind == .downloads { question.ticked = true }
+            if case .site = question.kind { question.ticked = true }
             let paid = settle(question, reply)
             if case .yes = reply, paid, question.kind.stays { return }
             dismissAsk(tab)
@@ -393,7 +428,7 @@ extension Browser {
     }
 
     /// The question with this id, changed wherever it is in the queue.
-    private func changeAsk(_ id: UUID?, on tab: Tab, _ edit: (inout PageAsk) -> Void) {
+    func changeAsk(_ id: UUID?, on tab: Tab, _ edit: (inout PageAsk) -> Void) {
         guard let index = tab.asks.firstIndex(where: { $0.id == id }) else { return }
         var question = tab.asks[index]
         edit(&question)
@@ -450,8 +485,11 @@ extension Browser {
             ? Self.origin(of: owner?.address)
             : Self.origin(scheme: origin.scheme, host: origin.host, port: origin.port)
         let key = Self.captureKey(site ?? host, type)
-        // Remembered for the site when the box was ticked.
-        if let remembered = Self.remembered(key, host: host, type) {
+        // Remembered for the site when the box was ticked, or allowed on
+        // this visit: a call asks again for its microphone alone, its camera
+        // alone, at every join and device change, and each was a new card.
+        if let remembered = Self.remembered(key, host: host, type) ?? Self.covered(site ?? host, host: host, type)
+            ?? owner.flatMap({ Self.allowedThisVisit($0, site ?? host, type) }) {
             decisionHandler(remembered ? .grant : .deny)
             return
         }
@@ -461,54 +499,74 @@ extension Browser {
         }
         let media: [AVMediaType] = type == .camera ? [.video] : type == .microphone ? [.audio] : [.video, .audio]
         // macOS said no to yab itself: the site's question can't be kept.
-        if let refused = media.first(where: { [.denied, .restricted].contains(AVCaptureDevice.authorizationStatus(for: $0)) }) {
+        if let refused = media.first(where: { [.denied, .restricted].contains(Self.macSaid($0)) }) {
             decisionHandler(.deny)
             ask(PageAsk(kind: .barred(refused == .video ? .camera : .microphone), host: host), on: tab) { _, _ in }
             return
         }
-        let question = PageAsk(kind: .capture(type), host: host)
-        nativeLifetime?.whenCancelled { [weak self, weak tab] in
-            guard let self, let tab else { return }
-            self.withdrawAsk(question.id, on: tab)
+        let requestID = UUID()
+        let existing = tab.asks.first { question in
+            question.stage == .asking && Asks.captures[question.id].map {
+                $0.page === webView && $0.site == (site ?? host)
+            } == true
+        }
+        let question = existing ?? PageAsk.capture(type, host: host)
+        let group = Asks.captures[question.id] ?? CaptureQuestion(page: webView, site: site ?? host)
+        group.requests[requestID] = (type, decisionHandler)
+        Asks.captures[question.id] = group
+        nativeLifetime?.whenCancelled { [weak self, weak tab, weak group] in
+            guard let self, let tab, let group,
+                  let request = group.requests.removeValue(forKey: requestID) else { return }
+            request.1(.deny)
+            if group.requests.isEmpty {
+                self.withdrawAsk(question.id, on: tab)
+            } else if tab.asks.first(where: { $0.id == question.id })?.stage == .asking {
+                self.changeAsk(question.id, on: tab) { $0.kind = .capture(group.type) }
+            }
+        }
+        if existing != nil {
+            changeAsk(question.id, on: tab) { $0.kind = .capture(group.type) }
+            return
         }
         ask(question, on: tab) { [weak self, weak tab] reply, question in
-            guard nativeLifetime?.isActive != false else { decisionHandler(.deny); return }
-            guard case .yes = reply else {
-                if question.ticked { Store.settings.set(false, forKey: key) }
-                decisionHandler(.deny)
+            guard case .yes = reply, let self, let tab, !group.requests.isEmpty else {
+                Asks.captures[question.id] = nil
+                group.finish(.deny)
                 return
             }
-            guard let self, let tab else {
-                decisionHandler(.deny)
-                return
+            let type = group.type
+            let media: [AVMediaType] = type == .camera ? [.video] : type == .microphone ? [.audio] : [.video, .audio]
+            let asking = media.filter { Self.macSaid($0) == .notDetermined }
+            let complete: (Bool) -> Void = { granted in
+                Asks.captures[question.id] = nil
+                guard !group.requests.isEmpty else { return }
+                if granted {
+                    // Persist each device, so both engines and new tabs read
+                    // the same site answer, including separately asked devices.
+                    let kept = group.type
+                    for device in media where kept == .cameraAndMicrophone || (device == .video ? kept == .camera : kept == .microphone) {
+                        Store.settings.set(true, forKey: Self.captureKey(site ?? host, device == .video ? .camera : .microphone))
+                    }
+                    group.finish(.grant)
+                    self.allowed(question.id, on: tab)
+                } else {
+                    group.finish(.deny)
+                    let no = media.first { Self.macSaid($0) != .authorized } ?? .video
+                    self.refused(question.id, no == .video ? .camera : .microphone, on: tab)
+                }
             }
-            // What macOS hasn't been asked about yab yet is asked now, one
-            // after another, while the card says what to press.
-            let asking = media.filter { AVCaptureDevice.authorizationStatus(for: $0) == .notDetermined }
-            guard !asking.isEmpty else {
-                if question.ticked { Store.settings.set(true, forKey: key) }
-                decisionHandler(.grant)
-                self.allowed(question.id, on: tab)
-                return
-            }
+            guard !asking.isEmpty else { complete(true); return }
             self.changeAsk(question.id, on: tab) { $0.stage = .waiting }
-            let once = Once(decisionHandler)
-            Asks.waiting[question.id] = { yes in once(yes ? .grant : .deny) }
+            let once = OnceBool { granted in complete(granted) }
+            Asks.waiting[question.id] = { _ in
+                Asks.captures[question.id] = nil
+                group.finish(.deny)
+                once(false)
+            }
             Self.request(asking) { granted in
                 guard !once.done else { return }
                 Asks.waiting[question.id] = nil
-                // A retired original request cannot remember a late TCC
-                // grant or settle a new document's question.
-                guard nativeLifetime?.isActive != false else { once(.deny); return }
-                if granted {
-                    if question.ticked { Store.settings.set(true, forKey: key) }
-                    once(.grant)
-                    self.allowed(question.id, on: tab)
-                } else {
-                    once(.deny)
-                    let no = asking.first { AVCaptureDevice.authorizationStatus(for: $0) != .authorized } ?? .video
-                    self.refused(question.id, no == .video ? .camera : .microphone, on: tab)
-                }
+                once(granted)
             }
         }
     }
@@ -527,6 +585,13 @@ extension Browser {
         return origin(scheme: scheme, host: host, port: url.port ?? 0)
     }
 
+    /// What macOS said about Yab and this device. A test world on a Mac with
+    /// nobody at it can be told macOS said yes, so a card's Allow reaches the
+    /// page instead of a macOS window nobody will answer (Store.macSaysYes).
+    static func macSaid(_ media: AVMediaType) -> AVAuthorizationStatus {
+        Store.macSaysYes ? .authorized : AVCaptureDevice.authorizationStatus(for: media)
+    }
+
     static func captureKey(_ site: String, _ type: PageCapture) -> String {
         "capture.\(site)|\(type.rawValue)"
     }
@@ -541,6 +606,104 @@ extension Browser {
         guard key == captureKey(origin(scheme: "https", host: host, port: 443), type),
               let said = Store.settings.object(forKey: old) as? Bool
         else { return nil }
+        Store.settings.set(said, forKey: key)
+        Store.settings.removeObject(forKey: old)
+        return said
+    }
+
+    /// A yes kept for the camera and the microphone answers either alone,
+    /// and a yes for each answers both: Meet asks for them together, then
+    /// one at a time. A no is only ever the question's own.
+    static func covered(_ site: String, host: String, _ type: PageCapture) -> Bool? {
+        func yes(_ other: PageCapture) -> Bool { remembered(captureKey(site, other), host: host, other) == true }
+        switch type {
+        case .camera, .microphone: return yes(.cameraAndMicrophone) ? true : nil
+        case .cameraAndMicrophone: return yes(.camera) && yes(.microphone) ? true : nil
+        }
+    }
+
+    /// An Allow with the box unticked holds for the tab while it stays on
+    /// the site, as Chromium's "Allow this time": closing the tab or leaving
+    /// the site asks again.
+    private struct Visit { weak var tab: Tab?; var site: String; var types: Set<PageCapture> }
+    private static var visits: [Tab.ID: Visit] = [:]
+
+    static func allowThisVisit(_ tab: Tab, _ site: String, _ type: PageCapture) {
+        visits = visits.filter { $0.value.tab.map { !$0.gone } ?? false }
+        var visit = visits[tab.id].flatMap { $0.site == site ? $0 : nil } ?? Visit(tab: tab, site: site, types: [])
+        visit.types.insert(type)
+        visits[tab.id] = visit
+        ChromiumPermissions.changed()
+    }
+
+    /// What Chromium holds of each live visit's yes, for the pages of one of
+    /// its profiles: Chrome keeps "Allow this time" in its own settings while
+    /// it lasts, and its media code reads only those. Without it a call's
+    /// page that was given the microphone was still, to Chromium, a site
+    /// without it: enumerateDevices listed no speaker, and a speaker picked
+    /// with setSinkId or an AudioContext's sinkId was refused (register 2319).
+    static func visitGrants(profile: String) -> [(site: String, types: Set<PageCapture>)] {
+        visits.values.compactMap { visit in
+            guard let tab = visit.tab, !tab.gone, !tab.shy, tab.engineKind == .chromium,
+                  origin(of: tab.address) == visit.site,
+                  ((tab.builtPage as? ChromiumPage)?.profile ?? tab.chromiumProfile) == profile else { return nil }
+            return (visit.site, visit.types)
+        }
+    }
+
+    /// The tab closed or left the site: its visit's yes is over, here and in
+    /// Chromium, where a one-time grant ends the same way.
+    static func visitMoved(_ tab: Tab) {
+        guard let visit = visits[tab.id], tab.gone || origin(of: tab.address) != visit.site else { return }
+        visits[tab.id] = nil
+        ChromiumPermissions.changed()
+    }
+
+    static func allowedThisVisit(_ tab: Tab, _ site: String, _ type: PageCapture) -> Bool? {
+        guard let visit = visits[tab.id] else { return nil }
+        // Gone to another site since: that yes is over.
+        if let now = origin(of: tab.address), now != site {
+            visits[tab.id] = nil
+            return nil
+        }
+        guard visit.site == site else { return nil }
+        let types = visit.types
+        let covered = types.contains(type) || types.contains(.cameraAndMicrophone)
+            || (type == .cameraAndMicrophone && types.contains(.camera) && types.contains(.microphone))
+        return covered ? true : nil
+    }
+
+    static func locationKey(_ site: String) -> String { "location.\(site)" }
+
+    /// A Chromium page's Allow with the box unticked holds for the tab while
+    /// it stays on the site, as the camera's does and as Chromium's "Allow this
+    /// time": Chromium asks again for every connection a page opens (a
+    /// watchPosition after a getCurrentPosition was a second card nobody
+    /// expected, and the page timed out). WebKit asks once a document.
+    private static var locationVisits: [Tab.ID: Visit] = [:]
+
+    static func allowLocationThisVisit(_ tab: Tab, _ site: String) {
+        locationVisits = locationVisits.filter { $0.value.tab.map { !$0.gone } ?? false }
+        locationVisits[tab.id] = Visit(tab: tab, site: site, types: [])
+    }
+
+    static func allowedLocationThisVisit(_ tab: Tab, _ site: String) -> Bool {
+        guard let visit = locationVisits[tab.id] else { return false }
+        if let now = origin(of: tab.address), now != site {
+            locationVisits[tab.id] = nil
+            return false
+        }
+        return visit.site == site
+    }
+
+    /// What was said for the site. Said before the scheme and the port
+    /// counted, it was kept under the bare host: read as https's on its
+    /// usual port, as the camera's is, and moved there.
+    static func locationSaid(_ site: String, host: String) -> Bool? {
+        let key = locationKey(site)
+        if let said = Store.settings.object(forKey: key) as? Bool { return said }
+        let old = locationKey(host)
+        guard site == origin(scheme: "https", host: host, port: 443), let said = Store.settings.object(forKey: old) as? Bool else { return nil }
         Store.settings.set(said, forKey: key)
         Store.settings.removeObject(forKey: old)
         return said
@@ -583,9 +746,10 @@ extension Browser {
         guard nativeLifetime?.isActive != false else { decisionHandler(.deny); return }
         let owner = (webView as? any PageHandle).flatMap({ self.tab(owning: $0) })
         let host = origin.host.isEmpty ? (owner?.address?.host() ?? "This page") : origin.host
-        let key = "location.\(host)"
+        let site = origin.host.isEmpty ? Self.origin(of: owner?.address) : Self.origin(scheme: origin.scheme, host: origin.host, port: origin.port)
+        let key = Self.locationKey(site ?? host)
         let place = Whereabouts.shared
-        let remembered = Store.settings.object(forKey: key) as? Bool
+        let remembered = Self.locationSaid(site ?? host, host: host)
         if remembered == false {
             decisionHandler(.deny)
             return
@@ -600,7 +764,8 @@ extension Browser {
         }
         // Allowed for the site before: macOS is asked about Yab, if it
         // never was, as that yes said it would be.
-        if remembered == true {
+        let thisVisit = nativeLifetime != nil && tab.map { Self.allowedLocationThisVisit($0, site ?? host) } == true
+        if remembered == true || thisVisit {
             place.authorize { [weak self, weak tab] yes in
                 guard nativeLifetime?.isActive != false else { decisionHandler(.deny); return }
                 guard yes else {
@@ -635,6 +800,7 @@ extension Browser {
             }
             guard place.status == .notDetermined else {
                 if question.ticked { Store.settings.set(true, forKey: key) }
+                else if nativeLifetime != nil { Self.allowLocationThisVisit(tab, site ?? host) }
                 place.install()
                 decisionHandler(.grant)
                 self.allowed(question.id, on: tab)
@@ -651,6 +817,7 @@ extension Browser {
                 guard nativeLifetime?.isActive != false else { once(.deny); return }
                 if yes {
                     if question.ticked { Store.settings.set(true, forKey: key) }
+                    else if nativeLifetime != nil { Self.allowLocationThisVisit(tab, site ?? host) }
                     place.install()
                     once(.grant)
                     self.allowed(question.id, on: tab)
@@ -965,7 +1132,11 @@ struct AskLayer: View {
 
         /// The page, in the window's own space.
         private var pageFrame: CGRect {
-            guard let web = tab.builtPage, let content = web.window?.contentView else {
+            // A page out in the call's window is in another window: its rect
+            // there put the share box from that window's Share off the
+            // middle of this one (Meet, 0.46.10). The whole window then.
+            guard let web = tab.builtPage, let content = web.window?.contentView,
+                  web.window === BrowserWindows.shared.window(for: browser) else {
                 return CGRect(origin: .zero, size: window)
             }
             let rect = web.convert(web.bounds, to: nil)
@@ -1160,6 +1331,17 @@ final class AskView: NSView {
         placed?(covered ? nil : card)
     }
     var showing: Bool { card != nil && !covered && window != nil }
+
+    /// For the bench: the card on the screen without its shadow's room, its
+    /// window, and what has the keys there.
+    var probe: [String: Any]? {
+        guard let card, let window else { return nil }
+        let inner = window.convertToScreen(convert(card.frame.insetBy(dx: Self.margin, dy: Self.margin), to: nil))
+        return ["screen": [inner.minX, inner.minY, inner.width, inner.height],
+                "window": [window.frame.minX, window.frame.minY, window.frame.width, window.frame.height],
+                "class": "\(type(of: window))", "key": window.isKeyWindow, "covered": covered,
+                "responder": window.firstResponder.map { "\(type(of: $0))" } ?? "none"]
+    }
 
     init() {
         super.init(frame: .zero)
@@ -1523,6 +1705,7 @@ struct AskCard: View {
         case .notifications: return "bell"
         case .devMode: return "chevron.left.forwardslash.chevron.right"
         case .localNetwork: return "devices"
+        case .site(let kind): return kind.symbol
         case .download, .downloads: return "arrow.down.to.line"
         case .barred(let what):
             switch what {
@@ -1551,6 +1734,7 @@ struct AskCard: View {
         case (.app(_, let app), _): return "\(host) wants to open \(Self.name(of: app))"
         case (.devMode, _): return "Turn on Developer Mode for \(host)?"
         case (.localNetwork(let here), _): return here ? "\(host) wants to connect to apps on this Mac" : "\(host) wants to connect to devices on your network"
+        case (.site(let kind), _): return "\(host) wants to \(kind.words)"
         case (.download, _): return "\(host) wants to download a file"
         case (.downloads, _): return "\(host) wants to download multiple files"
         case (.stuck, _): return "This page stopped answering"
@@ -1576,7 +1760,8 @@ struct AskCard: View {
         case (.capture(let type), _):
             return Self.macOSAsks(type) ? "macOS will ask about Yab once, next." : ""
         case (.location, _):
-            return Whereabouts.shared.status == .notDetermined ? "macOS will ask about Yab once, next." : ""
+            // Only a Whereabouts a site's question made: drawing a card starts no CoreLocation.
+            return !Whereabouts.made || Whereabouts.shared.status == .notDetermined ? "macOS will ask about Yab once, next." : ""
         case (.barred(let what), _):
             switch what {
             case .camera: return "It’s in System Settings › Privacy › Camera."
@@ -1607,7 +1792,7 @@ struct AskCard: View {
 
     private static func macOSAsks(_ type: PageCapture) -> Bool {
         let media: [AVMediaType] = type == .camera ? [.video] : type == .microphone ? [.audio] : [.video, .audio]
-        return media.contains { AVCaptureDevice.authorizationStatus(for: $0) == .notDetermined }
+        return media.contains { Browser.macSaid($0) == .notDetermined }
     }
 
     /// The Finder's name for the app, found off the main thread when the
@@ -1691,20 +1876,24 @@ struct AskCard: View {
 
     private var buttons: some View {
         HStack(spacing: 6) {
-            ForEach(choices) { choice in
-                Button(action: choice.act) {
-                    HStack(spacing: 6) {
-                        Text(choice.title)
-                        if let key = shown(choice) {
-                            KeyGlyphs(keys: key, size: CardFrame.words, tint: nil, rest: 0.9)
-                                .transaction { $0.animation = nil }
-                        }
-                    }
-                }
-                .buttonStyle(.yab(choice.kind, CardFrame.button))
-                .fixedSize()
-            }
+            ForEach(choices) { choice in button(choice, wide: false) }
         }
+    }
+
+    @ViewBuilder
+    private func button(_ choice: Choice, wide: Bool) -> some View {
+        let pressed = Button(action: choice.act) {
+            HStack(spacing: 6) {
+                Text(choice.title)
+                if let key = shown(choice) {
+                    KeyGlyphs(keys: key, size: CardFrame.words, tint: nil, rest: 0.9)
+                        .transaction { $0.animation = nil }
+                }
+            }
+            .frame(maxWidth: wide ? .infinity : nil)
+        }
+        .buttonStyle(.yab(choice.kind, CardFrame.button))
+        if wide { pressed.fixedSize(horizontal: false, vertical: true) } else { pressed.fixedSize() }
     }
 
     private struct Choice: Identifiable {
@@ -1727,7 +1916,7 @@ struct AskCard: View {
         case .confirm, .prompt:
             return [Choice(id: "no", title: "Cancel", key: "esc", act: no),
                     Choice(id: "yes", title: "OK", kind: .primary, key: "⏎", act: yes)]
-        case .capture, .location, .notifications, .localNetwork, .download, .downloads:
+        case .capture, .location, .notifications, .localNetwork, .site, .download, .downloads:
             return [Choice(id: "no", title: "Don’t Allow", key: "esc", act: no),
                     Choice(id: "yes", title: "Allow", kind: .primary, key: "⏎", act: yes)]
         case .app(_, let app):

@@ -4,7 +4,15 @@
   var mark = Symbol.for('__YAB_MARK__');
   if (proto[mark]) return;
   var own = proto.getDisplayMedia;
-  var waiting = new Map(), live = new Map(), system = new Map();
+  var waiting = new Map(), live = new Map(), system = new Map(), quiet = new WeakSet();
+  // A page that asks for the shown tab not to come forward: the box's
+  // answer reads this, the engine's own method still runs.
+  var Controller = window.CaptureController, focus = Controller && Controller.prototype.setFocusBehavior;
+  if (focus) Controller.prototype.setFocusBehavior = function (behavior) {
+    if (behavior === 'no-focus-change' || behavior === 'focus-capturing-application') quiet.add(this);
+    else quiet.delete(this);
+    return focus.apply(this, arguments);
+  };
   function token() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
   function ask(message) { window.dispatchEvent(new CustomEvent('__YAB_ASKED__', { detail: JSON.stringify(message) })); }
   // Only JSON crosses script worlds. The native MediaStream crosses
@@ -223,6 +231,29 @@
       }, w.reject); } catch (e) { w.reject(e); }
       return true;
     },
+    // Chromium's own capture of what Yab's box chose (Share.swift): the
+    // browser already holds the source, so this asks nobody. The track, its
+    // sound and its stop are the engine's own. The page's constraints go
+    // as they came; Yab's call into the page counts as the click.
+    native: function (t, id) {
+      var w = waiting.get(t);
+      if (!w) return false;
+      waiting.delete(t);
+      try { own.apply(w.self, [w.constraints]).then(function (s) {
+        var track = s.getVideoTracks()[0];
+        system.set(id, s);
+        function over() { if (system.delete(id)) ask({ kind: 'stop', id: id }); }
+        if (track) {
+          track.addEventListener('ended', over);
+          var stop = track.stop;
+          track.stop = function () { over(); return stop.call(this); };
+        }
+        var controller = w.constraints && w.constraints.controller;
+        ask({ kind: 'native', id: id, stay: !!controller && quiet.has(controller) });
+        w.resolve(s);
+      }, function (e) { ask({ kind: 'stop', id: id }); w.reject(e); }); } catch (e) { ask({ kind: 'stop', id: id }); w.reject(e); }
+      return true;
+    },
     // An extension's page with a stream id it was given
     // (chromeMediaSourceId, ExtensionCapture.swift): no picker and no
     // click; Yab checks the id belongs to this page's extension.
@@ -268,7 +299,10 @@
       // more frames a second for a smaller one.
       var v = c.video && typeof c.video === 'object' ? c.video : {};
       function most(x) { return typeof x === 'number' ? x : x && (x.max || x.exact || x.ideal) || 0; }
-      ask({ kind: 'ask', token: t, audio: !!c.audio, width: most(v.width), height: most(v.height) });
+      function word(x) { return typeof x === 'string' ? x : x && (x.exact || x.ideal) || ''; }
+      ask({ kind: 'ask', token: t, audio: !!c.audio, width: most(v.width), height: most(v.height),
+            surface: word(v.displaySurface), own: c.selfBrowserSurface || '', screens: c.monitorTypeSurfaces || '',
+            current: !!c.preferCurrentTab });
     });
   } });
 })();

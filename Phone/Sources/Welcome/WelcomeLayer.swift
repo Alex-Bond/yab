@@ -20,30 +20,22 @@ struct WelcomeLayer: View {
         .onChange(of: shows ? dark : nil, initial: true) { _, light in
             app.surfaces.statusBarLight = light
         }
-        // Welcome gone with no tab: New Tab's field, as a launch with none
-        // has. The chain's last step opens it itself, growing it from the box
-        // the app icon stretched to, so an open field is left alone: opening
-        // it twice takes the keyboard away from it.
-        .onChange(of: shows) { _, showing in
-            guard !showing, app.browser.tab == nil, app.surfaces.field == nil, !FirstRun.shared.handsOver,
-                  LaunchKeyboard.opens(app.launchKeyboardSituation(.back, asked: false, away: nil)) else { return }
-            Motion.fieldOpen.run { app.surfaces.openField(.newTab) }
-        }
     }
 }
 
 /// When the welcome stands over the app.
 enum FirstLaunch {
     /// Without a Mac, or with one just found through iCloud Keychain, until
-    /// the person answers it; once begun it runs to its end whatever joining
-    /// does underneath. A named state may say otherwise.
-    static func shows(hasMac: Bool, welcomed: Bool, forced: Bool?, held: Bool = false) -> Bool {
-        forced ?? (!welcomed && (!hasMac || held))
+    /// the person answers it; once begun (`running`) it runs to its end
+    /// whatever joining or the answer written down does underneath. A named
+    /// state may say otherwise.
+    static func shows(hasMac: Bool, welcomed: Bool, forced: Bool?, held: Bool = false, running: Bool = false) -> Bool {
+        forced ?? (running || (!welcomed && (!hasMac || held)))
     }
 
     @MainActor
     static func shows(_ app: AppModel) -> Bool {
         shows(hasMac: app.hasMac, welcomed: SettingsStore.shared.welcomed, forced: SettingsUI.shared.welcomeForced,
-              held: FirstRun.shared.started || app.sync.joinedByICloud)
+              held: app.sync.joinedByICloud, running: FirstRun.shared.started)
     }
 }

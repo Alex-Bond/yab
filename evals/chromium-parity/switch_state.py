@@ -20,8 +20,10 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'evals'), str(ROOT / 'evals/chromium-scripts')]
 
+# Not here, as docs/chromium-switch.md says: CacheStorage and the back/forward
+# stack, which neither a live switch nor EngineStorageCarry takes.
 FIELDS = ('cookie', 'httpOnly', 'localStorage', 'sessionStorage', 'indexedDB',
-          'cache', 'form', 'scroll', 'history', 'tab', 'tabs', 'url', 'title', 'zoom')
+          'form', 'scroll', 'tab', 'tabs', 'url', 'title', 'zoom')
 
 PAGE = b'''<!doctype html><meta charset=utf-8><title>Switch state fixture</title>
 <style>body{margin:30px;background:#164b38;color:white;font:22px system-ui;min-height:4000px}
@@ -143,7 +145,9 @@ def run(app, out):
                                 fail=lambda req, reply: RuntimeError(f'{req}: {reply}'))
         require_window(ask)
         report['spaceIsolation'] = isolated_space(ask, world)
-        sibling = ask(do='usage-open', url=base + '/other')['id']
+        # Another origin: a page of this one left on the old engine would stop
+        # EngineStorageCarry writing there, on purpose, and IndexedDB stays behind.
+        sibling = ask(do='usage-open', url=base.replace('127.0.0.1', 'localhost') + '/other')['id']
         tab = ask(do='usage-open', url=base + '/page')['id']
         report['tabs'] = [sibling, tab]
 

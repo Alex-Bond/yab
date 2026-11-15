@@ -5,11 +5,18 @@ sites: []
 keywords: [yab settings, browser settings, manage tabs, настройки yab, настройки браузера, организуй вкладки, управление чатами]
 ---
 
-# Yab itself
+# Change Yab settings and organize tabs
 
-For a product question, answer from Yab's guide and product reference. To perform a change, use
-`native_context` and `native_actions` to inspect the actual targets, then `native_apply` with a listed
-action and the current snapshot token. Read the tool schemas; never invent action IDs or settings.
+For a product question, use Yab's guide and product reference. For a change:
+
+1. Read `native_context` for current settings, spaces and tabs.
+2. Read `native_actions` for supported actions and their argument schemas.
+3. Call `native_apply` with a listed action and the current snapshot token.
+
+For example, to turn off Energy Saver, find `settings.set.energy-saver` in the catalog and use its
+schema to choose `off`. To group tabs, inspect their ids and use the listed `tabs.group` action.
+To undo a change, use `native_undo` with the returned undo.changeId, when undo is available.
+Read the tool schemas; never invent action IDs or settings.
 Respect the user's current permission mode and check the returned operation/state before claiming
 success. For asynchronous work, inspect `native_operation` until its outcome is known.
 

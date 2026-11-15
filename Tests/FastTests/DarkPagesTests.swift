@@ -560,6 +560,81 @@ struct DarkPagesTests {
         #expect(try await state(web, until: ["engine"]) == "engine")
     }
 
+    /// Icons each carrying the same <style> get one override after the last
+    /// of them, colored as each copy's own would have been, and it moves
+    /// when that copy goes.
+    @MainActor @Test func identicalStylesShareOneOverrideAfterTheLast() async throws {
+        let icon = "<svg width=20 height=20><defs><style>.tw{fill:#e17055}</style></defs><rect class=tw width=20 height=20/></svg>"
+        let (web, _) = try await page("""
+        <!doctype html><style>body{background:#fff;color:#111}</style><body>
+        <p id=icons>\(String(repeating: icon, count: 12))</p>
+        <svg width=20 height=20><defs><style>.ref{fill:#e17055}</style></defs><rect id=ref class=ref width=20 height=20/></svg>
+        </body>
+        """)
+        #expect(try await state(web, until: ["engine"]) == "engine")
+        let look = """
+        (() => { const syncs = [...document.querySelectorAll('#icons style.darkreader--sync')];
+          const own = [...document.querySelectorAll('#icons style:not(.darkreader)')];
+          const fills = new Set([...document.querySelectorAll('#icons rect')].map(r => getComputedStyle(r).fill));
+          return [syncs.length, syncs.length === 1 && syncs[0].previousElementSibling === own[own.length - 1],
+                  [...fills].join('|'), getComputedStyle(document.getElementById('ref')).fill].join(';'); })()
+        """
+        var seen = ""
+        for _ in 0..<40 {
+            seen = try await js(web, look) as? String ?? ""
+            if seen.hasPrefix("1;true;") { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let parts = seen.components(separatedBy: ";")
+        #expect(parts.count == 4 && parts[0] == "1" && parts[1] == "true", "one override, after the last copy: \(seen)")
+        #expect(parts.count == 4 && parts[2] == parts[3] && parts[2] != "rgb(225, 112, 85)", "each icon darkened as its own copy would be: \(seen)")
+        // The copy holding the override goes: the one before it takes it over.
+        _ = try await js(web, "document.querySelector('#icons svg:last-of-type').remove(); 1")
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(50))
+            seen = try await js(web, look) as? String ?? ""
+            if seen.hasPrefix("1;true;") { break }
+        }
+        let after = seen.components(separatedBy: ";")
+        #expect(after.count == 4 && after[0] == "1" && after[1] == "true" && after[2] == after[3], "moved to the new last copy: \(seen)")
+    }
+
+    /// A list drawn anew sixty times in one task, as jQuery's TodoMVC does:
+    /// the style taken out of the head on the way leaves no override, the
+    /// one that came with the last drawing is darkened.
+    @MainActor @Test func aListDrawnAnewLetsGoOfTheStylesTakenOut() async throws {
+        let (web, _) = try await page("""
+        <!doctype html><style>body{background:#fff;color:#111}</style><style id=gone>.gone{background:#ffd6d6}</style>
+        <body><p class=gone>Gone</p><ul id=list></ul><p class=warm id=warm>Warm</p></body>
+        """)
+        #expect(try await state(web, until: ["engine"]) == "engine")
+        let overridesOfGone = "[...document.querySelectorAll('style.darkreader--sync')].filter(s => [...s.sheet.cssRules].some(r => r.selectorText === '.gone')).length"
+        for _ in 0..<40 {
+            if (try await js(web, overridesOfGone) as? Int) == 1 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(try await js(web, overridesOfGone) as? Int == 1)
+        _ = try await js(web, """
+        for (let r = 1; r <= 60; r++) {
+          let html = '';
+          for (let i = 1; i <= 60; i++) html += '<li>Item ' + i + '</li>';
+          if (r === 60) html += '<li><style>.warm{background:#c3f0c8}</style>warm</li>';
+          list.innerHTML = html;
+          if (r === 40) document.getElementById('gone').remove();
+        }
+        1
+        """)
+        var gone = -1, warm = ""
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(50))
+            gone = try await js(web, overridesOfGone) as? Int ?? -1
+            warm = try await js(web, "getComputedStyle(document.getElementById('warm')).backgroundColor") as? String ?? ""
+            if gone == 0 && !["", "rgba(0, 0, 0, 0)", "rgb(195, 240, 200)"].contains(warm) { break }
+        }
+        #expect(gone == 0, "the override of the style taken out went with it")
+        #expect(!["", "rgba(0, 0, 0, 0)", "rgb(195, 240, 200)"].contains(warm), "the style drawn in last is darkened: \(warm)")
+    }
+
     @MainActor @Test func thePageNeverSeesTheEngineOrTheBridge() async throws {
         let (web, _) = try await page("<!doctype html><body style='background:#fff'>Private</body>")
         #expect(try await state(web, until: ["engine"]) == "engine")

@@ -1,6 +1,126 @@
 import SwiftUI
 import WebKit
 
+/// Where an extension reads and changes pages, the same rows whichever
+/// engine's Settings page shows them: what they set is the one list's
+/// (ExtensionOneList). `blocks`: its blocked sites, which only WebKit can keep
+/// an extension from (ChromiumExtensionGrants).
+@available(macOS 15.4, *)
+struct ExtensionWebsites: View {
+    let id: String
+    let item: Installed
+    @ObservedObject var extensions: Extensions
+    let everywhere: Bool
+    let hosts: [String]
+    let clickable: Bool
+    var blocks = true
+
+    private static func accessDetail(_ access: Extensions.SiteAccess, everywhere: Bool, hosts: [String]) -> String {
+        switch access {
+        case .click: return "Only the page where you activate it."
+        case .sites: return "Only the sites you add below."
+        case .asked: return everywhere ? "" : hosts.joined(separator: ", ")
+        }
+    }
+
+    /// A table of sites, as Search lists its sites: each site's mark and
+    /// name, the one action on a right click, Add Site… in the heading.
+    @ViewBuilder
+    private func sites(_ list: [String], title: String, empty: String, note: String, menu: String, item: Installed,
+                       remove: @escaping (String) -> Void) -> some View {
+        Section {
+            ForEach(list, id: \.self) { host in
+                HStack(spacing: 9) { // design: the same gap as Search's site rows, which this table matches
+                    Mark(icon: Favicons.shared.cached(host), letter: host.first.map { String($0).uppercased() } ?? "", size: 16)
+                    Text(host).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .contextMenu { Button(menu) { remove(host) } }
+                .onAppear { Favicons.shared.fetch(host: host) }
+            }
+            if list.isEmpty {
+                Text(empty).foregroundStyle(.secondary)
+            }
+        } header: {
+            HStack(spacing: 8) {
+                Text(title)
+                Spacer()
+                Button("Add Site…") { BlockEditing.shared.open(id: id, name: item.name, allow: true) }
+                    .settingsButton()
+            }
+            .textCase(nil)
+        } footer: {
+            SettingsNote(note)
+        }
+    }
+
+    var body: some View {
+        let blocked = extensions.blocked(id)
+        Section {
+            if hosts.isEmpty, !everywhere {
+                SettingsRow("Reads and changes pages", detail: clickable ? "Only the page where you activate it." : nil ?? "") {
+                    Text(clickable ? "On click" : "None").foregroundStyle(.secondary)
+                }
+            } else {
+                SettingsRow("Reads and changes pages", detail: Self.accessDetail(extensions.access(id), everywhere: everywhere, hosts: hosts)) {
+                    // Chrome's three: everywhere it asked, only the sites
+                    // chosen below, or only the page it is pressed on.
+                    DropMenu("Reads and changes pages",
+                             options: [(title: everywhere ? "On all sites" : hosts.count == 1 ? "On \(hosts[0])" : "On \(hosts.count) sites", value: Extensions.SiteAccess.asked),
+                                       (title: "On specific sites", value: .sites)]
+                                 + (clickable || extensions.access(id) == .click ? [(title: "On click", value: .click)] : []),
+                             selection: Binding(get: { extensions.access(id) }, set: { extensions.setAccess(id, $0) }))
+                        .fixedSize()
+                }
+            }
+        } header: {
+            Text("Websites")
+        }
+        if extensions.access(id) == .sites, !hosts.isEmpty || everywhere {
+            sites(extensions.allowed(id), title: "Allowed sites", empty: "No sites yet",
+                  note: extensions.allowed(id).isEmpty
+                      ? "\(item.name) runs on no site until you add one."
+                      : "\(item.name) runs only on these sites. Right-click one to remove it.",
+                  menu: "Remove", item: item) { extensions.disallow($0, for: id) }
+        }
+        // The sites it never runs on, a table as Search lists its sites:
+        // each site's mark and name, Unblock on a right click, and Add
+        // Site… in the heading asking in the app's own card, as Search's
+        // Add Site… does.
+        if blocks { Section {
+            ForEach(blocked, id: \.self) { host in
+                HStack(spacing: 9) { // design: the same gap as Search's site rows, which this table matches
+                    Mark(icon: Favicons.shared.cached(host), letter: host.first.map { String($0).uppercased() } ?? "", size: 16)
+                    Text(host).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .contextMenu {
+                    Button("Unblock") { extensions.unblock(host, for: id) }
+                }
+                .onAppear { Favicons.shared.fetch(host: host) }
+            }
+            if blocked.isEmpty {
+                Text("No blocked sites")
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            HStack(spacing: 8) {
+                Text("Blocked sites")
+                Spacer()
+                Button("Add Site…") { BlockEditing.shared.open(id: id, name: item.name, allow: false) }
+                    .settingsButton()
+            }
+            .textCase(nil)
+        } footer: {
+            SettingsNote(blocked.isEmpty
+                ? "\(item.name) never runs on a site you block, even when you press it."
+                : "\(item.name) never runs on these sites. Right-click one to unblock it.")
+        } }
+    }
+}
+
 /// Settings › Extensions: what is installed as a list to read across, where
 /// each may reach, its key, pinned, on, and each one's own page a click in,
 /// Adding one is its own few steps,
@@ -107,16 +227,23 @@ struct ExtensionsPage: View {
         }
     }
 
-    /// Whether private tabs get extensions too.
-    private struct PrivateTabs: View {
+    /// Whether private tabs get extensions too: the one row Settings search
+    /// finds as "Allow in private tabs", on both engines' pages (feedback
+    /// #1894, where the Chromium page dropped the row and search pointed at
+    /// nothing). On Chromium a new private tab is then its space profile's
+    /// off-the-record side, and each extension's own "Allow in Incognito"
+    /// follows this switch (ChromiumPrivateProfiles, ChromiumExtensions).
+    struct PrivateTabs: View {
         @ObservedObject var prefs: Preferences
+
+        static let note = "Applies to new private tabs. Enabled extensions may access private page content."
 
         var body: some View {
             Section {
                 SettingsSwitch("Allow in private tabs", isOn: $prefs.extensionsInPrivate)
                     .settingsAnchor("extensions-private")
             } footer: {
-                SettingsNote("Applies to new private tabs. Enabled extensions may access private page content.")
+                SettingsNote(Self.note)
             }
         }
     }
@@ -379,7 +506,9 @@ struct ExtensionDetail: View {
                     SettingsNote("Hotkeys work while Yab is active. Click to record a new hotkey.")
                 }
             }
-            access(item, context)
+            ExtensionWebsites(id: id, item: item, extensions: extensions,
+                              everywhere: context.webExtension.allRequestedMatchPatterns.contains { $0.matchesAllHosts || $0.matchesAllURLs },
+                              hosts: Self.hosts(context.webExtension), clickable: context.webExtension.requestedPermissions.contains(.activeTab))
             more(item, context)
         } else {
             if !ExtensionDetail.replacedByYab(item) {
@@ -404,116 +533,6 @@ struct ExtensionDetail: View {
                     // The red of what cannot be undone, on the wash.
                     .buttonStyle(.yab(.secondary, .regular, tint: ButtonCSS.danger))
             }
-        }
-    }
-
-    private static func accessDetail(_ access: Extensions.SiteAccess, everywhere: Bool, hosts: [String]) -> String {
-        switch access {
-        case .click: return "Only the page where you activate it."
-        case .sites: return "Only the sites you add below."
-        case .asked: return everywhere ? "" : hosts.joined(separator: ", ")
-        }
-    }
-
-    /// A table of sites, as Search lists its sites: each site's mark and
-    /// name, the one action on a right click, Add Site… in the heading.
-    @ViewBuilder
-    private func sites(_ list: [String], title: String, empty: String, note: String, menu: String, item: Installed,
-                       remove: @escaping (String) -> Void) -> some View {
-        Section {
-            ForEach(list, id: \.self) { host in
-                HStack(spacing: 9) { // design: the same gap as Search's site rows, which this table matches
-                    Mark(icon: Favicons.shared.cached(host), letter: host.first.map { String($0).uppercased() } ?? "", size: 16)
-                    Text(host).lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .contextMenu { Button(menu) { remove(host) } }
-                .onAppear { Favicons.shared.fetch(host: host) }
-            }
-            if list.isEmpty {
-                Text(empty).foregroundStyle(.secondary)
-            }
-        } header: {
-            HStack(spacing: 8) {
-                Text(title)
-                Spacer()
-                Button("Add Site…") { BlockEditing.shared.open(id: id, name: item.name, allow: true) }
-                    .settingsButton()
-            }
-            .textCase(nil)
-        } footer: {
-            SettingsNote(note)
-        }
-    }
-
-    @ViewBuilder
-    private func access(_ item: Installed, _ context: WKWebExtensionContext) -> some View {
-        let found = context.webExtension
-        let everywhere = found.allRequestedMatchPatterns.contains { $0.matchesAllHosts || $0.matchesAllURLs }
-        let hosts = Self.hosts(found)
-        let clickable = found.requestedPermissions.contains(.activeTab)
-        let blocked = extensions.blocked(id)
-        Section {
-            if hosts.isEmpty, !everywhere {
-                SettingsRow("Reads and changes pages", detail: clickable ? "Only the page where you activate it." : nil ?? "") {
-                    Text(clickable ? "On click" : "None").foregroundStyle(.secondary)
-                }
-            } else {
-                SettingsRow("Reads and changes pages", detail: Self.accessDetail(extensions.access(id), everywhere: everywhere, hosts: hosts)) {
-                    // Chrome's three: everywhere it asked, only the sites
-                    // chosen below, or only the page it is pressed on.
-                    DropMenu("Reads and changes pages",
-                             options: [(title: everywhere ? "On all sites" : hosts.count == 1 ? "On \(hosts[0])" : "On \(hosts.count) sites", value: Extensions.SiteAccess.asked),
-                                       (title: "On specific sites", value: .sites)]
-                                 + (clickable || extensions.access(id) == .click ? [(title: "On click", value: .click)] : []),
-                             selection: Binding(get: { extensions.access(id) }, set: { extensions.setAccess(id, $0) }))
-                        .fixedSize()
-                }
-            }
-        } header: {
-            Text("Websites")
-        }
-        if extensions.access(id) == .sites, !hosts.isEmpty || everywhere {
-            sites(extensions.allowed(id), title: "Allowed sites", empty: "No sites yet",
-                  note: extensions.allowed(id).isEmpty
-                      ? "\(item.name) runs on no site until you add one."
-                      : "\(item.name) runs only on these sites. Right-click one to remove it.",
-                  menu: "Remove", item: item) { extensions.disallow($0, for: id) }
-        }
-        // The sites it never runs on, a table as Search lists its sites:
-        // each site's mark and name, Unblock on a right click, and Add
-        // Site… in the heading asking in the app's own card, as Search's
-        // Add Site… does.
-        Section {
-            ForEach(blocked, id: \.self) { host in
-                HStack(spacing: 9) { // design: the same gap as Search's site rows, which this table matches
-                    Mark(icon: Favicons.shared.cached(host), letter: host.first.map { String($0).uppercased() } ?? "", size: 16)
-                    Text(host).lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .contextMenu {
-                    Button("Unblock") { extensions.unblock(host, for: id) }
-                }
-                .onAppear { Favicons.shared.fetch(host: host) }
-            }
-            if blocked.isEmpty {
-                Text("No blocked sites")
-                    .foregroundStyle(.secondary)
-            }
-        } header: {
-            HStack(spacing: 8) {
-                Text("Blocked sites")
-                Spacer()
-                Button("Add Site…") { BlockEditing.shared.open(id: id, name: item.name, allow: false) }
-                    .settingsButton()
-            }
-            .textCase(nil)
-        } footer: {
-            SettingsNote(blocked.isEmpty
-                ? "\(item.name) never runs on a site you block, even when you press it."
-                : "\(item.name) never runs on these sites. Right-click one to unblock it.")
         }
     }
 

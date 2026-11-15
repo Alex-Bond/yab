@@ -44,6 +44,11 @@ enum FormModel {
         AppleModelAccess.permits { hardwareReady }
     }
 
+    /// Tidy has its own switch; other AI choices do not disable its local model.
+    static var tidyReady: Bool { permitsTidy { hardwareReady } }
+
+    static func permitsTidy(availability: () -> Bool) -> Bool { availability() }
+
     private static var hardwareReady: Bool {
         let now = ProcessInfo.processInfo.systemUptime
         readyLock.lock(); defer { readyLock.unlock() }

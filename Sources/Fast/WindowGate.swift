@@ -123,7 +123,7 @@ enum WindowGate {
 
     // MARK: - always allowed
 
-    private static let key = "windows.allowed"
+    nonisolated static let key = "windows.allowed"
 
     /// Sites whose pages may open windows without a click, said in Site
     /// Controls' This Site rows.
@@ -208,4 +208,48 @@ extension Browser {
         tab.windows.blocked = []
         if let newest { openBlocked(newest, from: tab) }
     }
+}
+
+/// Chromium's own blocker judges a Chromium page's windows, and it says so
+/// only in a bubble nobody sees. A window.open it answered with nothing is told
+/// to the plate, as WebKit's are ("Window blocked", WindowChip), and a site
+/// allowed in Site Controls is allowed in Chromium's settings too
+/// (ChromiumPermissions). A window asked for with noopener answers nothing by
+/// design, and isn't counted.
+final class WindowRelay: NSObject, PageScriptReceiving {
+    static let name = "yabWindows"
+    weak var tab: Tab?
+
+    func receive(_ message: PageScriptMessage) {
+        guard message.frame.isMain else { return }
+        let text = message.body as? String ?? ""
+        MainActor.assumeIsolated {
+            guard let tab, let site = WindowGate.site(of: tab.address) else { return }
+            tab.windows.block(BlockedWindow(url: URL(string: text, relativeTo: tab.address)?.absoluteURL, site: site))
+        }
+    }
+
+    static let page = """
+    (function () {
+      if (window.top !== window) return;
+      var own = window.open;
+      window.open = new Proxy(own, { apply: function (target, self, args) {
+        var made = Reflect.apply(target, self, args);
+        if (made === null && !/noopener|noreferrer/i.test(String(args[2] || ''))) {
+          try { window.dispatchEvent(new CustomEvent('yab:window-blocked', { detail: String(args[0] || '') })); } catch (e) {}
+        }
+        return made;
+      } });
+    })();
+    """
+
+    /// In yab's world: where it was going, handed on.
+    static let bridge = """
+    (function () {
+      var handler = window.webkit && webkit.messageHandlers && webkit.messageHandlers.\(name);
+      if (!handler || window.__yabWindowsBridged) return;
+      window.__yabWindowsBridged = true;
+      window.addEventListener('yab:window-blocked', function (e) { handler.postMessage(String(e.detail)); });
+    })();
+    """
 }

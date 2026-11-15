@@ -91,4 +91,47 @@ struct OmniboxInputMethodTests {
             #expect(!browser.editing)
         }
     }
+
+    /// #1519: Edit › Copy, the field's menu and a drag write the selection
+    /// through the editor, and took the shortened "example.com/page" ⌘L
+    /// shows, without its https://. Only ⌘C, in the window's key monitor,
+    /// put the scheme back.
+    @Test func copyingTheUntouchedAddressKeepsItsScheme() throws {
+        try withField { browser, _, field, editor in
+            let url = try #require(URL(string: "https://www.example.com/page?q=1#top"))
+            let tab = Tab()
+            tab.restore(url: url, title: "Copy")
+            browser.lay([tab])
+            browser.activeID = tab.id
+            browser.query.here = url
+            browser.query.typed = Address.whole(url)
+            field.stringValue = browser.typed
+            editor.string = browser.typed
+            let board = NSPasteboard(name: NSPasteboard.Name("yab-copy-\(UUID().uuidString)"))
+            defer { board.releaseGlobally() }
+            func copied(_ range: NSRange) -> String? {
+                editor.setSelectedRange(range)
+                board.clearContents()
+                _ = editor.writeSelection(to: board, types: [.string])
+                return board.string(forType: .string)
+            }
+            let shown = editor.string as NSString
+            #expect(shown == "www.example.com/page?q=1#top")
+            #expect(copied(NSRange(location: 0, length: shown.length)) == "https://www.example.com/page?q=1#top")
+            // A start of it, copied as Chromium copies one: the scheme put back.
+            #expect(copied(NSRange(location: 0, length: 15)) == "https://www.example.com")
+            // Words from its middle are AppKit's to copy, as they are.
+            #expect(AddressEditor.copied(editor.string, NSRange(location: 4, length: 7), here: browser.untouched) == nil)
+            // Typed over, the address is no longer the page's.
+            browser.query.typed = "example.com/other"
+            editor.string = browser.typed
+            #expect(browser.untouched == nil)
+            #expect(AddressEditor.copied(editor.string, NSRange(location: 0, length: (editor.string as NSString).length),
+                                         here: url) == nil)
+        }
+        let here = URL(string: "http://localhost:3000/app")!
+        #expect(AddressEditor.copied("localhost:3000/app", NSRange(location: 0, length: 18), here: here) == "http://localhost:3000/app")
+        #expect(AddressEditor.copied("about:blank", NSRange(location: 0, length: 6), here: URL(string: "about:blank")!) == nil)
+        #expect(AddressEditor.copied("localhost:3000/app", NSRange(location: 0, length: 18), here: nil) == nil)
+    }
 }

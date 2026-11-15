@@ -24,8 +24,10 @@ import WebKit
 // or a password app, an iPhone nearby over the QR code, or a security key.
 // What comes back goes to the page as the credential WebKit would have made.
 //
-// Not yet: the Mac's passkeys offered under the name field as a sign-in page
-// loads. Pages are told the field has none to offer, so they show their own
+// On Chromium tabs with CEF 0127 the Mac's passkeys are offered under the
+// name field, in Yab's own rows, as Chromium offers them
+// (ChromiumWebAuthn+Conditional.swift). Not yet on WebKit tabs: pages are
+// told the field has none to offer, so they show their own
 // passkey button, unless a password manager extension that keeps passkeys
 // is there to offer its own. A request made that way is the extension's to
 // answer; what it leaves to yab just waits, as it does while nobody picks
@@ -51,14 +53,16 @@ final class Passkeys: NSObject {
     /// Asked before the first ceremony, where it makes sense, a site has
     /// just asked for a passkey, and then never again.
     private static func ensure(_ then: @escaping () -> Void) {
+        note("access \(access.rawValue) entitled=\(Preferences.entitledToPasskeys)")
         guard Preferences.entitledToPasskeys, access == .notDetermined else { return then() }
         if waiting != nil {
             waiting?.append(then)
             return
         }
         waiting = [then]
-        ASAuthorizationWebBrowserPublicKeyCredentialManager().requestAuthorizationForPublicKeyCredentials { _ in
+        ASAuthorizationWebBrowserPublicKeyCredentialManager().requestAuthorizationForPublicKeyCredentials { state in
             DispatchQueue.main.async {
+                note("access asked: \(state.rawValue)")
                 let everyone = waiting ?? []
                 waiting = nil
                 everyone.forEach { $0() }
@@ -72,6 +76,24 @@ final class Passkeys: NSObject {
     /// the bench.
     private(set) static var asked = 0
     private(set) static var last: [String: Any] = [:]
+    /// What the last ceremonies met, for the bench and the log: the windows
+    /// as they were, the anchor macOS was given, and how it ended.
+    private(set) static var trail: [String] = []
+    /// A probe world that asks for the Mac's real sheet (YAB_PASSKEY_SHEET=1),
+    /// on a farm Mac's test screen: the focus check and the sheet as shipped.
+    static let realSheet = ProcessInfo.processInfo.environment["YAB_PASSKEY_SHEET"] == "1"
+    static func note(_ line: String) {
+        trail.append(line)
+        if trail.count > 60 { trail.removeFirst(trail.count - 60) }
+        log.notice("\(line, privacy: .public)")
+    }
+    static func describe(_ window: NSWindow?) -> String {
+        guard let window else { return "none" }
+        return "\(type(of: window))#\(window.windowNumber) key=\(window.isKeyWindow) main=\(window.isMainWindow) visible=\(window.isVisible) onscreen=\(window.occlusionState.contains(.visible)) level=\(window.level.rawValue) sheet=\(window.attachedSheet != nil) frame=\(NSStringFromRect(window.frame))"
+    }
+    static func windows() -> String {
+        "active=\(NSApp.isActive) key=\(describe(NSApp.keyWindow)) all=[" + NSApp.windows.filter(\.isVisible).map(describe).joined(separator: "; ") + "]"
+    }
 
     /// The one on screen, and whom to answer when it ends. A new request
     /// ends the one before, as a page asking twice gets in any browser.
@@ -79,13 +101,14 @@ final class Passkeys: NSObject {
     private var token: String?
     private var answer: (([String: Any]) -> Void)?
     private weak var anchor: NSWindow?
-    /// Called off by its page before it could start.
-    private var withdrawn: String?
+    /// Requests waiting to start, behind the Mac's passkey question: which
+    /// of them starts once it is answered (PasskeyWaits).
+    private var waits = PasskeyWaits()
 
     /// Where a request came from, as WebKit knows it rather than as the
     /// page says.
     struct Caller {
-        let origin: WKSecurityOrigin
+        let origin: PageOrigin
         let mainFrame: Bool
         /// The host of the page the frame is in.
         let pageHost: String?
@@ -94,6 +117,21 @@ final class Passkeys: NSObject {
         /// extension's chrome-extension:// origin, and which sites it may
         /// ask for: the sites it was given.
         var extensionPage: ExtensionPage? = nil
+        /// A Chromium request, checked by Chromium itself (CEF patch 0113):
+        /// the RP ID against the origin and related origins, the frame's
+        /// publickey-credentials permission, an extension's host permissions.
+        /// Its origin is the one Chromium verified; nothing here checks again.
+        var chromium: ChromiumVerified? = nil
+    }
+
+    struct ChromiumVerified: Equatable {
+        /// The calling frame's origin, as Chromium serializes it
+        /// (https://example.com, chrome-extension://id).
+        let origin: String
+        /// The top-level page's, for clientDataJSON when the frame is
+        /// another site's.
+        let topOrigin: String
+        let crossOrigin: Bool
     }
 
     struct ExtensionPage {
@@ -103,7 +141,7 @@ final class Passkeys: NSObject {
 
     func cancel(token: String?) {
         guard let token else { return }
-        if token == self.token { controller?.cancel() } else { withdrawn = token }
+        if token == self.token { controller?.cancel() } else { waits.withdraw(token) }
     }
 
     func perform(_ body: [String: Any], from caller: Caller, answer: @escaping ([String: Any]) -> Void) {
@@ -114,7 +152,17 @@ final class Passkeys: NSObject {
             return refuse(answer, "NotAllowedError", "The operation either timed out or was not allowed.")
         }
         let kind = body["kind"] as? String ?? ""
-        let scheme = caller.origin.protocol.lowercased()
+        if let verified = caller.chromium {
+            guard (Store.testing && !Passkeys.realSheet) || (NSApp.isActive && caller.window?.isKeyWindow == true) else {
+                return refuse(answer, "NotAllowedError", "The document is not focused.")
+            }
+            let named = kind == "create" ? (body["rp"] as? [String: Any])?["id"] as? String : body["rpId"] as? String
+            guard let rp = named?.lowercased(), !rp.isEmpty else {
+                return refuse(answer, "SecurityError", "The request names no relying party.")
+            }
+            return proceed(body, kind: kind, rp: rp, origin: verified.origin, caller: caller, answer: answer)
+        }
+        let scheme = caller.origin.scheme.lowercased()
         let host = caller.origin.host.lowercased()
         let local = host == "localhost" || host.hasSuffix(".localhost") || host == "127.0.0.1" || host == "::1"
         guard !host.isEmpty, caller.extensionPage != nil || scheme == "https" || (scheme == "http" && local) else {
@@ -123,7 +171,7 @@ final class Passkeys: NSObject {
         // The page in front of you only: a tab behind, a window behind, or
         // yab itself behind doesn't get to bring up the Mac's sheet over
         // what you're looking at. A test run is always behind.
-        guard Store.testing || (NSApp.isActive && caller.window?.isKeyWindow == true) else {
+        guard (Store.testing && !Passkeys.realSheet) || (NSApp.isActive && caller.window?.isKeyWindow == true) else {
             return refuse(answer, "NotAllowedError", "The document is not focused.")
         }
         // A frame from another site can't ask on the page's behalf.
@@ -135,18 +183,43 @@ final class Passkeys: NSObject {
         }
         let named = kind == "create" ? (body["rp"] as? [String: Any])?["id"] as? String : body["rpId"] as? String
         let rp = (named.flatMap { $0.isEmpty ? nil : $0 } ?? host).lowercased()
+        let port = caller.origin.port
+        let origin = caller.extensionPage?.origin ?? "\(scheme)://\(host.contains(":") ? "[\(host)]" : host)" + (port == 0 ? "" : ":\(port)")
         // An extension's page names a site it was given, Bitwarden's popup
         // its vault's (vault.bitwarden.com) to unlock with a passkey, as
         // Chrome lets it; a page, its own site or a domain above it.
-        guard caller.extensionPage.map({ $0.mayClaim(rp) }) ?? Passkeys.fits(rp, host) else {
-            return refuse(answer, "SecurityError", "The relying party ID is not a registrable domain suffix of, nor equal to the current domain.")
+        if caller.extensionPage.map({ $0.mayClaim(rp) }) ?? Passkeys.fits(rp, host) {
+            return proceed(body, kind: kind, rp: rp, origin: origin, caller: caller, answer: answer)
         }
+        // Or a site that names this page's origin as its own in its
+        // related origins file: X's passkeys are twitter.com's, asked for
+        // from x.com.
+        let refusal = "The relying party ID is not a registrable domain suffix of, nor equal to the current domain."
+        guard caller.extensionPage == nil, scheme == "https", RelatedOrigins.valid(rp) else {
+            return refuse(answer, "SecurityError", refusal)
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await RelatedOrigins.allow(rp: rp, origin: origin) else {
+                return self.refuse(answer, "SecurityError", refusal)
+            }
+            self.proceed(body, kind: kind, rp: rp, origin: origin, caller: caller, answer: answer)
+        }
+    }
+
+    /// The request once its relying party is one the page may name.
+    private func proceed(_ body: [String: Any], kind: String, rp: String, origin: String, caller: Caller,
+                         answer: @escaping ([String: Any]) -> Void) {
         guard let challenge = Passkeys.data(body["challenge"]), !challenge.isEmpty else {
             return refuse(answer, "TypeError", "A challenge is required.")
         }
-        let port = caller.origin.port
-        let origin = caller.extensionPage?.origin ?? "\(scheme)://\(host.contains(":") ? "[\(host)]" : host)" + (port == 0 ? "" : ":\(port)")
-        let clientData = ASPublicKeyCredentialClientData(challenge: challenge, origin: origin)
+        var clientData = ASPublicKeyCredentialClientData(challenge: challenge, origin: origin)
+        // Another site's frame: clientDataJSON says so, with the page it is
+        // in, as Chromium writes it.
+        if let verified = caller.chromium {
+            clientData.crossOrigin = verified.crossOrigin ? .crossOrigin : .sameOriginWithAncestors
+            if verified.crossOrigin { clientData.topOrigin = verified.topOrigin }
+        }
 
         let requests: [ASAuthorizationRequest]
         switch kind {
@@ -171,8 +244,12 @@ final class Passkeys: NSObject {
         // whoever is working beside it. It gets a credential made up on the
         // spot instead, so the checks above and the page's side are still
         // what they are for real.
-        if Store.testing {
-            var reply = Passkeys.rehearsal(kind, rp: rp, origin: origin, challenge: challenge)
+        if Store.testing && !Passkeys.realSheet {
+            // A picked passkey signs as itself.
+            let picked = body["platformOnly"] as? Bool == true ? Passkeys.descriptors(body["allowCredentials"]).first?.id : nil
+            var reply = Passkeys.rehearsal(kind, rp: rp, origin: origin, challenge: challenge,
+                                           crossOrigin: caller.chromium?.crossOrigin == true ? caller.chromium?.topOrigin : nil,
+                                           id: picked)
             // PRF made up from the salt, so a page can tell its salt arrived.
             if let prf = body["prf"] as? [String: Any] {
                 let salt = ((prf["eval"] as? [String: Any])?["first"] as? String).flatMap(Passkeys.data)
@@ -183,13 +260,14 @@ final class Passkeys: NSObject {
         }
 
         let token = body["token"] as? String
+        let ask = waits.asked()
         Passkeys.ensure { [weak self] in
             guard let self else { return }
-            if let token, token == self.withdrawn {
-                self.withdrawn = nil
-                return answer(Passkeys.failure("AbortError", "The operation was aborted."))
+            switch self.waits.turn(ask, token: token) {
+            case .aborted: answer(Passkeys.failure("AbortError", "The operation was aborted."))
+            case .superseded: answer(Passkeys.failure("NotAllowedError", "A newer request took its place."))
+            case .start: self.begin(requests, token: token, in: caller.window, answer: answer)
             }
-            self.begin(requests, token: token, in: caller.window, answer: answer)
         }
     }
 
@@ -207,6 +285,7 @@ final class Passkeys: NSObject {
         self.token = token
         self.answer = answer
         self.anchor = window
+        Passkeys.note("perform \(requests.count) requests in \(Passkeys.describe(window)); \(Passkeys.windows())")
         controller.performRequests()
     }
 
@@ -221,14 +300,24 @@ final class Passkeys: NSObject {
         platform.userVerificationPreference = verification
         let prf = Passkeys.prfAssertion(body["prf"])
         platform.prf = prf
+        // A passkey's blob, read or written, as Chromium does through iCloud
+        // Keychain (device/fido/mac/icloud_keychain.mm). macOS keeps it for
+        // its own passkeys only; a security key's answer says nothing of it.
+        platform.largeBlob = Passkeys.largeBlobAssertion(body["largeBlob"])
         var requests: [ASAuthorizationRequest] = [platform]
-        if #available(macOS 14.4, *) {
+        // A passkey picked under the box (ChromiumWebAuthn+Conditional) is
+        // the Mac's: no security key is offered beside it, as Chromium sends a
+        // picked iCloud Keychain passkey to iCloud Keychain alone.
+        if #available(macOS 14.4, *), body["platformOnly"] as? Bool != true {
             let key = ASAuthorizationSecurityKeyPublicKeyCredentialProvider(relyingPartyIdentifier: rp)
                 .createCredentialAssertionRequest(clientData: clientData)
             key.allowedCredentials = allowed.map {
                 ASAuthorizationSecurityKeyPublicKeyCredentialDescriptor(credentialID: $0.id, transports: $0.transports)
             }
             key.userVerificationPreference = verification
+            // A key registered through U2F signs for its AppID, not the RP ID
+            // (GitHub's and Google's older security keys).
+            if let appid = body["appid"] as? String, !appid.isEmpty { key.appID = appid }
             if #available(macOS 26.4, *) { key.prf = prf }
             requests.append(key)
         }
@@ -257,12 +346,16 @@ final class Passkeys: NSObject {
             platform.userVerificationPreference = verification
             platform.attestationPreference = attestation
             platform.prf = Passkeys.prfRegistration(body["prf"])
+            platform.largeBlob = Passkeys.largeBlobRegistration(body["largeBlob"])
             if #available(macOS 14.4, *) {
                 platform.excludedCredentials = excluded.map { ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: $0.id) }
             }
             requests.append(platform)
         }
-        if attachment != "platform", #available(macOS 14.4, *) {
+        // A blob the site requires is the Mac's passkeys' alone: a security
+        // key here can't be asked for one, so it isn't offered.
+        let blobRequired = (body["largeBlob"] as? [String: Any])?["support"] as? String == "required"
+        if attachment != "platform", !blobRequired, #available(macOS 14.4, *) {
             let key = ASAuthorizationSecurityKeyPublicKeyCredentialProvider(relyingPartyIdentifier: rp)
                 .createCredentialRegistrationRequest(clientData: clientData, displayName: display, name: name, userID: userID)
             key.credentialParameters = algorithms.map {
@@ -331,6 +424,35 @@ final class Passkeys: NSObject {
         return prfValues(prf["eval"]).map { .inputValues($0) } ?? .checkForSupport
     }
 
+    // MARK: - largeBlob
+
+    /// A create's largeBlob support ("required" or "preferred"), as macOS
+    /// takes it for a passkey of its own.
+    static func largeBlobRegistration(_ value: Any?) -> ASAuthorizationPublicKeyCredentialLargeBlobRegistrationInput? {
+        switch (value as? [String: Any])?["support"] as? String {
+        case "required": return .supportRequired
+        case "preferred": return .supportPreferred
+        default: return nil
+        }
+    }
+
+    /// A get's largeBlob: read the blob, or write the one given.
+    static func largeBlobAssertion(_ value: Any?) -> ASAuthorizationPublicKeyCredentialLargeBlobAssertionInput? {
+        guard let asked = value as? [String: Any] else { return nil }
+        if asked["read"] as? Bool == true { return .read }
+        if let blob = data(asked["write"]) { return .write(blob) }
+        return nil
+    }
+
+    /// What macOS says of the blob: read (its bytes, or none kept) or written.
+    static func largeBlobReply(_ output: ASAuthorizationPublicKeyCredentialLargeBlobAssertionOutput) -> [String: Any] {
+        switch output.result {
+        case .read(data: let blob): return blob.map { ["blob": text($0)] } ?? [:]
+        case .write(success: let success): return ["written": success]
+        @unknown default: return [:]
+        }
+    }
+
     static func prfReply(first: SymmetricKey?, second: SymmetricKey?, enabled: Bool?) -> [String: Any] {
         var reply: [String: Any] = [:]
         if let enabled { reply["enabled"] = enabled }
@@ -354,7 +476,7 @@ final class Passkeys: NSObject {
     }
 
     private func refuse(_ answer: ([String: Any]) -> Void, _ name: String, _ message: String) {
-        Passkeys.log.notice("refused: \(message, privacy: .public)")
+        Passkeys.note("refused \(name): \(message); \(Passkeys.windows())")
         answer(Passkeys.failure(name, message))
     }
 
@@ -390,20 +512,27 @@ final class Passkeys: NSObject {
 
     /// For a test run: a credential in the shape the sheet gives, made up
     /// from the request, a P-256 key and all, with nothing signed.
-    private static func rehearsal(_ kind: String, rp: String, origin: String, challenge: Data) -> [String: Any] {
-        let client = Data(#"{"type":"webauthn.\#(kind)","challenge":"\#(text(challenge))","origin":"\#(origin)","crossOrigin":false}"#.utf8)
-        let id = Data((0..<16).map { UInt8($0) })
-        // Where the relying party's hash would be, then the flags and the count.
-        var auth = Data(count: 32) + Data([kind == "get" ? 0x05 : 0x45]) + Data(count: 4)
+    static func rehearsal(_ kind: String, rp: String, origin: String, challenge: Data, crossOrigin topOrigin: String? = nil,
+                          id picked: Data? = nil) -> [String: Any] {
+        let cross = topOrigin.map { #","crossOrigin":true,"topOrigin":"\#($0)""# } ?? #","crossOrigin":false"#
+        let client = Data(#"{"type":"webauthn.\#(kind)","challenge":"\#(text(challenge))","origin":"\#(origin)"\#(cross)}"#.utf8)
+        let id = picked ?? Data((0..<16).map { UInt8($0) })
+        // The relying party's hash, then the flags and the count.
+        var auth = Data(SHA256.hash(data: Data(rp.utf8))) + Data([kind == "get" ? 0x05 : 0x45]) + Data(count: 4)
         guard kind == "create" else {
             return assertionReply(id: id, clientData: client, authenticatorData: auth, signature: Data([0x30, 0]), user: Data("user".utf8), attachment: "platform")
         }
         auth += Data(count: 16) + Data([0, UInt8(id.count)]) + id
-        auth += Data([0xA5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]) + Data(repeating: 1, count: 32)
-        auth += Data([0x22, 0x58, 0x20]) + Data(repeating: 2, count: 32)
+        // A real P-256 point: Chromium parses the key and its DER must match.
+        let point = P256.Signing.PrivateKey().publicKey.x963Representation
+        auth += Data([0xA5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]) + point[1..<33]
+        auth += Data([0x22, 0x58, 0x20]) + point[33..<65]
         var object = Data([0xA3, 0x63]) + Data("fmt".utf8) + Data([0x64]) + Data("none".utf8)
         object += Data([0x67]) + Data("attStmt".utf8) + Data([0xA0])
-        object += Data([0x68]) + Data("authData".utf8) + Data([0x59, UInt8(auth.count >> 8), UInt8(auth.count & 0xFF)]) + auth
+        // Shortest-form length, as CBOR's canonical form has it: Chromium's
+        // reader refuses any other.
+        let length = auth.count < 256 ? Data([0x58, UInt8(auth.count)]) : Data([0x59, UInt8(auth.count >> 8), UInt8(auth.count & 0xFF)])
+        object += Data([0x68]) + Data("authData".utf8) + length + auth
         return registrationReply(id: id, clientData: client, attestation: object, transports: ["hybrid", "internal"], attachment: "platform")
     }
 
@@ -523,10 +652,13 @@ final class Passkeys: NSObject {
 
 extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
     func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-        anchor ?? NSApp.keyWindow ?? NSApp.windows.first ?? NSWindow()
+        let window = anchor ?? NSApp.keyWindow ?? NSApp.windows.first ?? NSWindow()
+        Passkeys.note("anchor \(anchor == nil ? "fallback" : "caller's") \(Passkeys.describe(window))")
+        return window
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
+        Passkeys.note("didComplete \(type(of: authorization.credential)) current=\(controller === self.controller)")
         guard controller === self.controller else { return }
         let credential = authorization.credential
         // AuthenticationServices' headers say nothing of nil, so each of
@@ -545,6 +677,10 @@ extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationController
             var prf = (credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion)?.prf
             if #available(macOS 26.4, *), prf == nil { prf = (credential as? ASAuthorizationSecurityKeyPublicKeyCredentialAssertion)?.prf }
             if let prf { reply["prf"] = Passkeys.prfReply(first: prf.first, second: prf.second, enabled: nil) }
+            if let blob = (credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion)?.largeBlob {
+                reply["largeBlob"] = Passkeys.largeBlobReply(blob)
+            }
+            if let key = credential as? ASAuthorizationSecurityKeyPublicKeyCredentialAssertion { reply["appid"] = key.appID }
             finish(reply)
         } else if let made = credential as? ASAuthorizationPublicKeyCredentialRegistration,
                   let id = made.credentialID as Data?, let client = made.rawClientDataJSON as Data? {
@@ -558,6 +694,7 @@ extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationController
             var prf = platform?.prf
             if #available(macOS 26.4, *), prf == nil { prf = (credential as? ASAuthorizationSecurityKeyPublicKeyCredentialRegistration)?.prf }
             if let prf { reply["prf"] = Passkeys.prfReply(first: prf.first, second: prf.second, enabled: prf.isSupported) }
+            if let blob = platform?.largeBlob { reply["largeBlob"] = ["supported": blob.isSupported] }
             finish(reply)
         } else {
             finish(Passkeys.failure("NotAllowedError", "The authenticator answered with something else."))
@@ -565,6 +702,7 @@ extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationController
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
+        Passkeys.note("didCompleteWithError \((error as NSError).domain) \((error as NSError).code) current=\(controller === self.controller); \(Passkeys.windows())")
         guard controller === self.controller else { return }
         Passkeys.log.notice("failed: \(String(describing: error), privacy: .public)")
         // A credential it already holds is what a site is told; anything else
@@ -655,8 +793,41 @@ private struct CBOR {
     }
 }
 
+/// Requests that wait on the Mac's passkey question (Passkeys.ensure), and
+/// which of them starts once it is answered. Before, every one started, one
+/// after another in the same moment, each ending the one before: three
+/// sheets opened and closed back to back, Touch ID armed each time, when a
+/// page asked twice while the question was up (farm 2e824d3955444462, adhd).
+/// And only the last one its page called off was remembered, so the others
+/// still brought up the sheet over a page that had given up on them
+/// (feedback #1843). Now the newest one still wanted starts, alone, as a
+/// newer request ends the one before in any browser; the others hear so,
+/// and every one called off hears it was.
+struct PasskeyWaits {
+    enum Turn: Equatable { case start, aborted, superseded }
+
+    private(set) var serial = 0
+    private var withdrawn: Set<String> = []
+
+    /// A request on its way to the question: its place in line.
+    mutating func asked() -> Int {
+        serial += 1
+        return serial
+    }
+
+    /// Called off by its page before it could start.
+    mutating func withdraw(_ token: String) { withdrawn.insert(token) }
+
+    /// Its turn, the question answered: started only if it is the newest
+    /// and still wanted.
+    mutating func turn(_ ask: Int, token: String?) -> Turn {
+        if let token, withdrawn.remove(token) != nil { return .aborted }
+        return ask == serial ? .start : .superseded
+    }
+}
+
 /// The page's side: requests handed over, answers handed back.
-final class PasskeyRelay: NSObject, WKScriptMessageHandlerWithReply {
+final class PasskeyRelay: NSObject, WKScriptMessageHandlerWithReply, PageScriptReplying {
     static let name = "yabPasskeys"
 
     weak var tab: Tab?
@@ -670,46 +841,68 @@ final class PasskeyRelay: NSObject, WKScriptMessageHandlerWithReply {
         replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void
     ) {
         MainActor.assumeIsolated {
-            guard let body = message.body as? [String: Any] else { return replyHandler(nil, "Not a request") }
-            let kind = body["kind"] as? String
-            if kind == "cancel" {
-                Passkeys.shared.cancel(token: body["token"] as? String)
-                return replyHandler(true, nil)
-            }
-            // A page that wanted a passkey where there are none to give
-            // (PasskeyHint): told, and nothing else. Asked of a build without
-            // the entitlement, a request is that too, and goes on as asked.
-            if kind == "missing" || ((kind == "get" || kind == "create") && !PasskeyHint.possible),
-               let tab, let ask = kind == "missing" ? PasskeyHint.Ask(rawValue: body["ask"] as? String ?? "") : .request {
-                tab.onPasskeysMissing?(tab, ask)
-            }
-            if kind == "missing" { return replyHandler(true, nil) }
             let origin = message.frameInfo.securityOrigin
             let caller = Passkeys.Caller(
-                origin: origin,
+                origin: PageOrigin(origin),
                 mainFrame: message.frameInfo.isMainFrame,
                 pageHost: message.webView?.url?.host(),
                 window: message.webView?.window,
                 extensionPage: Passkeys.extensionPage(for: origin)
             )
-            // The same request heard twice, by yab's bridge and an extension
-            // page's both (PasskeyRelay.install): one ceremony, one answer
-            // for each. The page takes the first and lets the other go.
-            let token = body["token"] as? String
-            if let token, PasskeyRelay.inFlight[token] != nil {
-                PasskeyRelay.inFlight[token]?.append { replyHandler($0, nil) }
-                return
-            }
-            if let token { PasskeyRelay.inFlight[token] = [] }
             // A popup closes as the Mac's sheet takes the focus, and the
             // answer would have nowhere to go: held open until it comes.
-            let popup = message.webView.flatMap(ExtensionPopup.hold)
-            Passkeys.shared.perform(body, from: caller) { reply in
-                popup?()
-                replyHandler(reply, nil)
-                let others = token.flatMap { PasskeyRelay.inFlight.removeValue(forKey: $0) } ?? []
-                others.forEach { $0(reply) }
+            handle(message.body, caller: caller, hold: { message.webView.flatMap(ExtensionPopup.hold) }, replyHandler)
+        }
+    }
+
+    /// A Chromium page's word that it wanted a passkey where there are none
+    /// to give (PasskeyHint, forms-without-passkeys.js), and nothing else:
+    /// its passkey requests reach Yab only from Chromium, once Chromium has
+    /// checked them (ChromiumWebAuthn), never from a page script's event.
+    func receive(_ message: PageScriptMessage, reply: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        MainActor.assumeIsolated {
+            guard let body = message.body as? [String: Any], body["kind"] as? String == "missing" else {
+                return reply(nil, "Chromium pages ask for passkeys through Chromium")
             }
+            let caller = Passkeys.Caller(origin: message.frame.origin, mainFrame: message.frame.isMain,
+                                         pageHost: nil, window: message.sourceView?.window)
+            handle(body, caller: caller, hold: { nil }, reply)
+        }
+    }
+
+    @MainActor
+    private func handle(_ message: Any, caller: Passkeys.Caller, hold: () -> (() -> Void)?,
+                        _ replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        guard let body = message as? [String: Any] else { return replyHandler(nil, "Not a request") }
+        let kind = body["kind"] as? String
+        Passkeys.note("asked \(kind ?? "?") by \(caller.origin.scheme)://\(caller.origin.host) main=\(caller.mainFrame) window=\(Passkeys.describe(caller.window))")
+        if kind == "cancel" {
+            Passkeys.shared.cancel(token: body["token"] as? String)
+            return replyHandler(true, nil)
+        }
+        // A page that wanted a passkey where there are none to give
+        // (PasskeyHint): told, and nothing else. Asked of a build without
+        // the entitlement, a request is that too, and goes on as asked.
+        if kind == "missing" || ((kind == "get" || kind == "create") && !PasskeyHint.possible),
+           let tab, let ask = kind == "missing" ? PasskeyHint.Ask(rawValue: body["ask"] as? String ?? "") : .request {
+            tab.onPasskeysMissing?(tab, ask)
+        }
+        if kind == "missing" { return replyHandler(true, nil) }
+        // The same request heard twice, by yab's bridge and an extension
+        // page's both (PasskeyRelay.install): one ceremony, one answer
+        // for each. The page takes the first and lets the other go.
+        let token = body["token"] as? String
+        if let token, PasskeyRelay.inFlight[token] != nil {
+            PasskeyRelay.inFlight[token]?.append { replyHandler($0, nil) }
+            return
+        }
+        if let token { PasskeyRelay.inFlight[token] = [] }
+        let popup = hold()
+        Passkeys.shared.perform(body, from: caller) { reply in
+            popup?()
+            replyHandler(reply, nil)
+            let others = token.flatMap { PasskeyRelay.inFlight.removeValue(forKey: $0) } ?? []
+            others.forEach { $0(reply) }
         }
     }
 
@@ -756,7 +949,7 @@ final class PasskeyRelay: NSObject, WKScriptMessageHandlerWithReply {
     /// functions, and nothing of yab's is there for a page to find, no
     /// window.webkit, no global of its own. Requests go to yab's side as
     /// events on the window (see `bridge`).
-    static let page = PageScript.load("passkeys-page", vars: ["ANSWERED": answered, "ASKED": asked])
+    static let page = PageScript.load("passkeys-page", vars: ["ANSWERED": answered, "ASKED": asked, "OTHER_SITES": "engine"])
 
     /// yab's side of it, in yab's own world (Web.world), where the
     /// handler is and a page can't look. A request the page dispatches is

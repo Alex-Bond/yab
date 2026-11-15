@@ -1,10 +1,34 @@
 import Foundation
+import JavaScriptCore
 import Testing
 @testable import Fast
 
 /// chrome.tabGroups onto Yab's folders (ExtensionGroups.swift): a group's id
 /// is a number from its folder's, the same each time, and never Chrome's -1.
 @Suite struct ExtensionGroupsTests {
+    @MainActor @Test func aQueryDoesNotUseTheLivePortsPreInsertionMembership() throws {
+        let script = ExtensionShims.script
+        let comment = try #require(script.range(of: "  // Tabs as Chrome describes them."))
+        let start = try #require(script.range(of: "  if (chrome.tabs) {", range: comment.upperBound..<script.endIndex))
+        let end = try #require(script.range(of: "    const tabsIn", range: start.upperBound..<script.endIndex))
+        let context = try #require(JSContext())
+        context.evaluateScript("""
+        (() => {
+          const chrome={tabs:{}},runtime={getManifest:()=>({permissions:['tabs']})};
+          const groupsAllowed=true,groupsLive=true,groupMembers=[-1,5,5];
+          const native=(api)=> {if(api!=='tabGroups.membership')throw Error(api);return Promise.resolve({members:[-1,-1,5,5]});};
+          const tabs=[{id:9,index:0,url:'https://new.invalid'},{id:10,index:1,url:'https://old.invalid'},
+                      {id:20,index:2,url:'https://a.invalid'},{id:30,index:3,url:'https://b.invalid'}];
+        \(script[start.lowerBound..<end.lowerBound])
+          mend(tabs).then(()=>globalThis.result=tabs.map(tab=>[tab.id,tab.groupId]));
+          }
+        })()
+        """)
+        try #require(context.exception == nil, "\(context.exception!)")
+        let text = try #require(context.evaluateScript("JSON.stringify(result)")?.toString())
+        let actual = try #require(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [[Int]])
+        #expect(actual == [[9,-1],[10,-1],[20,5],[30,5]])
+    }
     @Test func aFoldersGroupIdIsStableAndPositive() {
         let id = UUID()
         #expect(ExtensionGroups.id(of: id) == ExtensionGroups.id(of: id))

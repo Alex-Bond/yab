@@ -1,0 +1,503 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1133,6 +1133,8 @@
+       "libcef/browser/views/external_crx.h",
+       "libcef/browser/views/external_print.cc",
+       "libcef/browser/views/external_print.h",
++      "libcef/browser/views/external_desktop_media.cc",
++      "libcef/browser/views/external_desktop_media.h",
+       "libcef/browser/views/external_host_mac.h",
+       "libcef/browser/views/external_host_mac.mm",
+       "libcef/browser/views/external_pip_mac.h",
+--- a/cef/include/cef_browser_process_handler.h
++++ b/cef/include/cef_browser_process_handler.h
+@@ -48,6 +48,7 @@
+ #include "include/cef_values.h"
+ 
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
++#define CEF_YAB_EXTENSION_DESKTOP_MEDIA_VERSION 1
+ #define CEF_YAB_EXTENSION_CONSENT_VERSION 1
+ #define CEF_YAB_EXTENSION_ACTION_CHANGED_VERSION 1
+ #define CEF_YAB_WEBAUTHN_PROXY_VERSION 1
+@@ -70,6 +71,25 @@
+ };
+ 
+ ///
++/// Answers one desktopCapture.chooseDesktopMedia request (see
++/// CefBrowserProcessHandler::OnExtensionDesktopMedia). Exactly the first
++/// Choose counts; releasing the callback unanswered refuses, as Chrome's
++/// picker's Cancel does. May be called on any thread.
++///
++/*--cef(source=library,added=experimental)--*/
++class CefExtensionDesktopMediaCallback : public virtual CefBaseRefCounted {
++ public:
++  ///
++  /// |source| is what was picked: "tab:<browser identifier>",
++  /// "window:<CGWindowID>" or "screen:<CGDirectDisplayID>", or empty for a
++  /// refusal. |audio| shares the source's sound too (a tab's only, and only
++  /// when the request's sources have "audio").
++  ///
++  /*--cef(optional_param=source)--*/
++  virtual void Choose(const CefString& source, bool audio) = 0;
++};
++
++///
+ /// Answers one WebAuthn request (see
+ /// CefBrowserProcessHandler::OnWebAuthnRequest). Exactly the first Respond
+ /// counts; releasing the callback unanswered fails the request with
+@@ -240,6 +260,34 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual void OnExtensionConsentWithdrawn(const CefString& request) {}
++
++  ///
++  /// An extension called desktopCapture.chooseDesktopMedia. Only used when the
++  /// process runs with --yab-extension-desktop-media; otherwise Chrome's own
++  /// picker shows. |browser| is the page the picker is for: the target tab,
++  /// else the calling page or the owner of the calling action popup (null for
++  /// a worker or an offscreen document without a target). |request| has
++  /// request (a token), extensionId, extensionName, sources (a list of
++  /// "screen", "window" and "tab", what Chrome's picker would offer after
++  /// policy), audio (the extension asked for a tab's sound too), excludeSelf
++  /// (the calling page's own tab is not to be offered), profilePath and
++  /// offTheRecord. Show a picker and answer exactly once through |callback|;
++  /// the source then plays through getUserMedia with Chrome's own capture. A
++  /// request the extension cancels (cancelChooseDesktopMedia) is reported by
++  /// OnExtensionDesktopMediaWithdrawn and later answers have no effect.
++  ///
++  /*--cef(added=experimental,optional_param=browser)--*/
++  virtual void OnExtensionDesktopMedia(
++      CefRefPtr<CefBrowser> browser,
++      CefRefPtr<CefDictionaryValue> request,
++      CefRefPtr<CefExtensionDesktopMediaCallback> callback) {}
++
++  ///
++  /// Called after the extension cancelled the desktop media request with token
++  /// |request|.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnExtensionDesktopMediaWithdrawn(const CefString& request) {}
+ 
+   ///
+   /// Chrome changed the action of the extension |extension_id| in the profile
+--- a/cef/libcef/browser/media_access_query.cc
++++ b/cef/libcef/browser/media_access_query.cc
+@@ -417,6 +417,26 @@
+     }
+   }
+ 
++  // Yab: a tab's stream asked for by the id tabCapture.getMediaStreamId gave
++  // (chromeMediaSource "tab") is Chrome's to check, as in Chrome: its
++  // TabCaptureAccessHandler takes only an id its registry made for this
++  // extension, origin and frame. The client has no permission bit for it
++  // and would refuse what it was asked with none (patch 0122).
++  const auto tab_or_none = [](blink::mojom::MediaStreamType type,
++                              blink::mojom::MediaStreamType tab) {
++    return type == tab || type == blink::mojom::MediaStreamType::NO_SERVICE;
++  };
++  if ((request.video_type ==
++           blink::mojom::MediaStreamType::GUM_TAB_VIDEO_CAPTURE ||
++       request.audio_type ==
++           blink::mojom::MediaStreamType::GUM_TAB_AUDIO_CAPTURE) &&
++      tab_or_none(request.video_type,
++                  blink::mojom::MediaStreamType::GUM_TAB_VIDEO_CAPTURE) &&
++      tab_or_none(request.audio_type,
++                  blink::mojom::MediaStreamType::GUM_TAB_AUDIO_CAPTURE)) {
++    return query.DisconnectCallback();
++  }
++
+   if (CheckCommandLinePermission()) {
+     // Allow all requested permissions.
+     query.ExecuteCallback(query.requested_permissions());
+--- /dev/null
++++ b/cef/libcef/browser/views/external_desktop_media.cc
+@@ -0,0 +1,194 @@
++#include "cef/libcef/browser/views/external_desktop_media.h"
++
++#include <atomic>
++#include <map>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_browser_process_handler.h"
++#include "cef/include/cef_values.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/browser/thread_util.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "cef/libcef/common/app_manager.h"
++#include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/profiles/profile.h"
++#include "content/public/browser/desktop_media_id.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_media_capture_id.h"
++#include "extensions/common/extension.h"
++
++namespace cef::external_host {
++namespace {
++
++constexpr char kDesktopMediaSwitch[] = "yab-extension-desktop-media";
++constexpr size_t kMaxPending = 16;
++
++using Done = base::OnceCallback<void(const content::DesktopMediaID&)>;
++
++CefRefPtr<CefBrowserProcessHandler> Handler() {
++  auto app = CefAppManager::Get()->GetApplication();
++  return app ? app->GetBrowserProcessHandler() : nullptr;
++}
++
++std::map<std::string, Done>& Pending() {
++  static base::NoDestructor<std::map<std::string, Done>> pending;
++  return *pending;
++}
++
++// What the embedder picked, in the words of patch 0052's display grant:
++// "tab:<browser identifier>", "window:<CGWindowID>", "screen:<CGDirectDisplayID>".
++// Null when it no longer exists, which refuses.
++content::DesktopMediaID Parse(const std::string& source, bool audio) {
++  const auto parts = base::SplitString(source, ":", base::KEEP_WHITESPACE,
++                                       base::SPLIT_WANT_ALL);
++  int64_t id = 0;
++  if (parts.size() != 2 || !base::StringToInt64(parts[1], &id) || id < 0) {
++    return {};
++  }
++  content::DesktopMediaID media;
++  if (parts[0] == "tab") {
++    auto browser =
++        CefBrowserHostBase::GetBrowserForBrowserId(static_cast<int>(id));
++    auto* contents = browser ? browser->GetWebContents() : nullptr;
++    auto* frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
++    if (!frame || !frame->IsRenderFrameLive()) {
++      return {};
++    }
++    media = content::DesktopMediaID(
++        content::DesktopMediaID::TYPE_WEB_CONTENTS,
++        content::DesktopMediaID::kNullId,
++        content::WebContentsMediaCaptureId(frame->GetProcess()->GetDeprecatedID(),
++                                           frame->GetRoutingID()));
++    media.audio_share = audio;
++  } else if (parts[0] == "window") {
++    media = content::DesktopMediaID(content::DesktopMediaID::TYPE_WINDOW, id);
++  } else if (parts[0] == "screen") {
++    media = content::DesktopMediaID(content::DesktopMediaID::TYPE_SCREEN, id);
++  }
++  return media;
++}
++
++void Answer(const std::string& token, const std::string& source, bool audio) {
++  auto& pending = Pending();
++  auto found = pending.find(token);
++  if (found == pending.end()) {
++    return;  // Withdrawn or answered already.
++  }
++  Done done = std::move(found->second);
++  pending.erase(found);
++  std::move(done).Run(source.empty() ? content::DesktopMediaID()
++                                     : Parse(source, audio));
++}
++
++class DesktopMediaCallback : public CefExtensionDesktopMediaCallback {
++ public:
++  explicit DesktopMediaCallback(std::string token) : token_(std::move(token)) {}
++  ~DesktopMediaCallback() override { Finish(std::string(), false); }
++  void Choose(const CefString& source, bool audio) override {
++    Finish(source.ToString(), audio);
++  }
++
++ private:
++  void Finish(const std::string& source, bool audio) {
++    if (answered_.exchange(true)) {
++      return;
++    }
++    if (CEF_CURRENTLY_ON_UIT()) {
++      Answer(token_, source, audio);
++    } else {
++      CEF_POST_TASK(CEF_UIT, base::BindOnce(&Answer, token_, source, audio));
++    }
++  }
++  const std::string token_;
++  std::atomic<bool> answered_{false};
++  IMPLEMENT_REFCOUNTING(DesktopMediaCallback);
++};
++
++// The page the picker is for: |contents| when it is a browser, else the
++// owner of the action popup that called.
++CefRefPtr<CefBrowserHostBase> BrowserFor(content::WebContents* contents) {
++  if (!contents || contents->IsBeingDestroyed()) {
++    return nullptr;
++  }
++  if (auto browser = CefBrowserHostBase::GetBrowserForContents(contents)) {
++    return browser;
++  }
++  auto* origin = extensions::ExternalActionOrigin::Get(contents);
++  auto* owner = origin ? origin->Owner(contents) : nullptr;
++  return owner ? CefBrowserHostBase::GetBrowserForContents(owner) : nullptr;
++}
++
++std::string Choose(content::WebContents* contents,
++                   const extensions::Extension* extension,
++                   const std::string& kinds,
++                   Done done) {
++  auto handler = Handler();
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !handler || !contents ||
++      !extension || Pending().size() >= kMaxPending) {
++    return std::string();
++  }
++  const std::string token = base::UnguessableToken::Create().ToString();
++  auto request = CefDictionaryValue::Create();
++  request->SetString("request", token);
++  request->SetString("extensionId", extension->id());
++  request->SetString("extensionName", extension->name());
++  auto sources = CefListValue::Create();
++  bool audio = false, exclude_self = false;
++  for (const auto& kind : base::SplitString(kinds, ",", base::TRIM_WHITESPACE,
++                                            base::SPLIT_WANT_NONEMPTY)) {
++    if (kind == "audio") {
++      audio = true;
++    } else if (kind == "excludeSelf") {
++      exclude_self = true;
++    } else {
++      sources->SetString(sources->GetSize(), kind);
++    }
++  }
++  request->SetList("sources", sources);
++  request->SetBool("audio", audio);
++  request->SetBool("excludeSelf", exclude_self);
++  auto* profile = Profile::FromBrowserContext(contents->GetBrowserContext());
++  request->SetString("profilePath",
++                     profile ? profile->GetPath().AsUTF8Unsafe() : std::string());
++  request->SetBool("offTheRecord", profile && profile->IsOffTheRecord());
++  CefRefPtr<CefBrowser> browser = BrowserFor(contents).get();
++  Pending()[token] = std::move(done);
++  // The answer may come before this returns; Answer() finds the token then.
++  handler->OnExtensionDesktopMedia(browser, request,
++                                   new DesktopMediaCallback(token));
++  // Answered (or refused) synchronously: the extension function has its
++  // reply, and must not wait on a request that no longer exists.
++  return Pending().count(token) ? token : std::string("answered");
++}
++
++void Cancel(const std::string& token) {
++  if (Pending().erase(token)) {
++    if (auto handler = Handler()) {
++      handler->OnExtensionDesktopMediaWithdrawn(token);
++    }
++  }
++}
++
++}  // namespace
++
++void InstallDesktopMediaHooks() {
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kDesktopMediaSwitch)) {
++    return;
++  }
++  auto& hooks = extensions::GetExternalExtensionHooks();
++  hooks.desktop_media_choose = &Choose;
++  hooks.desktop_media_cancel = &Cancel;
++}
++
++}  // namespace cef::external_host
+--- /dev/null
++++ b/cef/libcef/browser/views/external_desktop_media.h
+@@ -0,0 +1,14 @@
++// desktopCapture.chooseDesktopMedia answered by the embedder's own picker
++// instead of Chrome's, which would open over a concealed window.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_DESKTOP_MEDIA_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_DESKTOP_MEDIA_H_
++#pragma once
++
++namespace cef::external_host {
++// Sets Chrome's desktop media hooks when the process runs with
++// --yab-extension-desktop-media (idempotent): every chooseDesktopMedia then
++// reaches CefBrowserProcessHandler::OnExtensionDesktopMedia. UI thread.
++void InstallDesktopMediaHooks();
++}  // namespace cef::external_host
++
++#endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_DESKTOP_MEDIA_H_
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -26,6 +26,7 @@
+ #include "mojo/public/cpp/bindings/receiver.h"
+ #include "cef/libcef/browser/views/external_consent.h"
+ #include "cef/libcef/browser/views/external_print.h"
++#include "cef/libcef/browser/views/external_desktop_media.h"
+ #include "cef/libcef/browser/views/external_webauthn.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/extensions/external_extension_window.h"
+@@ -958,6 +959,7 @@
+   InstallConsentHooks();
+   InstallPrintHooks();
+   InstallWebAuthnProxy();
++  InstallDesktopMediaHooks();
+ }
+ 
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index) {
+--- a/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.cc
++++ b/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.cc
+@@ -15,6 +15,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/media/webrtc/capture_policy_utils.h"
+ #include "chrome/browser/media/webrtc/desktop_media_picker_factory_impl.h"
+ #include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
+@@ -78,6 +79,14 @@
+ 
+   // If this picker dialog is open, this will close it.
+   picker_controller_.reset();
++  // Yab: and the embedder's own picker, which then never answers this call.
++  if (!external_request_.empty()) {
++    const std::string request = std::move(external_request_);
++    external_request_.clear();
++    if (auto cancel = GetExternalExtensionHooks().desktop_media_cancel) {
++      cancel(request);
++    }
++  }
+ 
+   Respond(ArgumentList(Create(std::string(), Options())));
+ }
+@@ -163,6 +172,42 @@
+         std::move(includable_web_contents_filter), web_contents);
+   }
+ 
++  // Yab: an embedder that presents the pages itself shows its own picker,
++  // asked with what Chrome's would offer (after policy): Chrome's would open
++  // over a concealed window nobody sees, and never be answered. What it
++  // picks is registered below as Chrome registers its picker's answer.
++  if (auto choose = GetExternalExtensionHooks().desktop_media_choose) {
++    std::string kinds;
++    for (auto type : media_types) {
++      if (type == DesktopMediaList::Type::kScreen) {
++        kinds += "screen,";
++      } else if (type == DesktopMediaList::Type::kWindow) {
++        kinds += "window,";
++      } else if (type == DesktopMediaList::Type::kWebContents) {
++        kinds += "tab,";
++      }
++    }
++    if (request_audio) {
++      kinds += "audio,";
++    }
++    if (exclude_self_browser_surface) {
++      kinds += "excludeSelf,";
++    }
++    external_request_ = choose(
++        web_contents, extension(), kinds,
++        base::BindOnce(
++            &DesktopCaptureChooseDesktopMediaFunctionBase::OnExternalPicked,
++            this, origin, render_frame_host->GetGlobalId()));
++    if (!external_request_.empty()) {
++      // The embedder may have answered before returning.
++      if (did_respond()) {
++        external_request_.clear();
++        return AlreadyResponded();
++      }
++      return RespondLater();
++    }
++  }
++
+   DesktopMediaPickerController::DoneCallback callback = base::BindOnce(
+       &DesktopCaptureChooseDesktopMediaFunctionBase::OnPickerDialogResults,
+       this, origin, render_frame_host->GetGlobalId());
+@@ -234,6 +279,18 @@
+   Options options;
+   options.can_request_audio_track = source.audio_share;
+   Respond(ArgumentList(Create(result, options)));
++}
++
++void DesktopCaptureChooseDesktopMediaFunctionBase::OnExternalPicked(
++    const GURL& origin,
++    const content::GlobalRenderFrameHostId& render_frame_host_id,
++    const DesktopMediaID& source) {
++  // Cancelled meanwhile: Cancel() has answered the extension already.
++  if (did_respond()) {
++    return;
++  }
++  external_request_.clear();
++  OnPickerDialogResults(origin, render_frame_host_id, std::string(), source);
+ }
+ 
+ DesktopCaptureRequestsRegistry::RequestId::RequestId(int process_id,
+--- a/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.h
++++ b/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.h
+@@ -79,8 +79,15 @@
+       const content::GlobalRenderFrameHostId& render_frame_host_id,
+       const std::string& err,
+       content::DesktopMediaID source);
++  // Yab: the embedder's own picker answered (patch 0122).
++  void OnExternalPicked(
++      const GURL& origin,
++      const content::GlobalRenderFrameHostId& render_frame_host_id,
++      const content::DesktopMediaID& source);
+ 
+   std::unique_ptr<DesktopMediaPickerController> picker_controller_;
++  // Yab: the embedder's picker request this call waits on, if any.
++  std::string external_request_;
+ };
+ 
+ class DesktopCaptureCancelChooseDesktopMediaFunctionBase
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -4016,6 +4016,19 @@
+     return nullptr;
+   }
+   content::WebContents* contents = tab->GetContents();
++  // Yab: a window the embedder shows holds each page in a concealed physical
++  // Browser of its own; the window's visible tab is the embedder's logical
++  // active page of its group (patch 0019), as tabs.query({active}) reports,
++  // not the physical Browser's one page (patch 0122).
++  if (auto* model = ExternalTabModel::Get(contents)) {
++    for (auto* page : model->tabs()) {
++      auto* candidate = ExternalTabModel::Get(page);
++      if (candidate && candidate->active()) {
++        contents = page;
++        break;
++      }
++    }
++  }
+ 
+   if (!extension()->permissions_data()->CanCaptureVisiblePage(
+           contents->GetLastCommittedURL(),
+--- a/chrome/browser/extensions/external_action_origin.h
++++ b/chrome/browser/extensions/external_action_origin.h
+@@ -21,6 +21,9 @@
+ namespace views {
+ class Widget;
+ }
++namespace content {
++struct DesktopMediaID;
++}
+ 
+ namespace extensions {
+ class Extension;
+@@ -68,6 +71,20 @@
+       nullptr;
+   // |dialog| is closing (answered, canceled, profile or extension gone).
+   void (*uninstall_closed)(ExtensionUninstallDialog* dialog) = nullptr;
++  // Yab: desktopCapture.chooseDesktopMedia shown in the embedder's own
++  // picker, over |contents| (the target tab, else the calling page).
++  // |kinds| is a comma-terminated list of "screen", "window", "tab",
++  // "audio" and "excludeSelf", as Chrome's picker would offer after policy.
++  // |done| runs at most once with what was picked, null for a refusal.
++  // Returns the request's token, or "" to leave Chrome's own picker to it.
++  std::string (*desktop_media_choose)(
++      content::WebContents* contents,
++      const Extension* extension,
++      const std::string& kinds,
++      base::OnceCallback<void(const content::DesktopMediaID&)> done) = nullptr;
++  // The extension called cancelChooseDesktopMedia: take the picker away;
++  // |done| must not run.
++  void (*desktop_media_cancel)(const std::string& request) = nullptr;
+   // A page-initiated print (window.print or the PDF viewer) is about to open
+   // Chrome's print preview. Return true to take over: |done| ends the original
+   // native request (renderer resumes, "afterprint") and must run exactly once.

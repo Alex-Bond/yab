@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 @testable import Fast
 
@@ -7,6 +8,45 @@ import Testing
 /// know and exits, and Yab says how to add it.
 @Suite(.serialized)
 struct ExtensionNativeTests {
+    @MainActor @Test func oneShotReturnsItsFirstReplyAndStopsTheHost() async throws {
+        let pipe = HostPipe(program: URL(fileURLWithPath: "/bin/cat"), origin: "-", buffersReplies: true)
+        let reply = try await ExtensionNative.send(["answer": 7], using: pipe, timeout: .seconds(2)) as? [String: Int]
+        #expect(reply?["answer"] == 7)
+        #expect(pipe.stoppedByUs)
+    }
+
+    @MainActor @Test func silentOneShotHasAResponseDeadline() async throws {
+        let pipe = HostPipe(program: URL(fileURLWithPath: "/bin/sleep"), origin: "30")
+        do {
+            _ = try await ExtensionNative.send(["hello": true], using: pipe, timeout: .milliseconds(25))
+            Issue.record("silent host answered")
+        } catch {
+            #expect(error.localizedDescription == "Native host has exited.")
+        }
+        #expect(pipe.stoppedByUs)
+    }
+
+    @MainActor @Test func unloadingTheOwnerEndsItsPendingOneShots() async throws {
+        let owner = NSObject()
+        let pipe = HostPipe(program: URL(fileURLWithPath: "/bin/sleep"), origin: "30")
+        let call = Task { try await ExtensionNative.send(["hello": true], using: pipe,
+            owner: ObjectIdentifier(owner), timeout: .seconds(60)) }
+        // Let the main actor enter the request before unloading its owner.
+        while pipe.processIdentifier == 0 { await Task.yield() }
+        ExtensionNative.stop(owner: ObjectIdentifier(owner))
+        await #expect(throws: ExtensionNative.Refused.self) { try await call.value }
+        #expect(pipe.stoppedByUs)
+    }
+
+    @MainActor @Test func cancelledOneShotStopsItsHost() async throws {
+        let pipe = HostPipe(program: URL(fileURLWithPath: "/bin/sleep"), origin: "30")
+        let call = Task { try await ExtensionNative.send(["hello": true], using: pipe, timeout: .seconds(60)) }
+        while pipe.processIdentifier == 0 { await Task.yield() }
+        call.cancel()
+        do { _ = try await call.value; Issue.record("cancelled host answered") } catch {}
+        #expect(pipe.stoppedByUs)
+    }
+
     private func ended(_ pipe: HostPipe) async {
         for _ in 0..<100 where !pipe.exitedByItself {
             try? await Task.sleep(for: .milliseconds(20))
@@ -102,6 +142,111 @@ struct ExtensionNativeTests {
         pipe.onExit = { count.add() }
         #expect(count.value == 1)
         await #expect(throws: ExtensionNative.Refused.self) { try await pipe.readOne() }
+    }
+
+    @Test func stoppingResolvesAReaderWithoutWaitingForTheHost() async throws {
+        let pipe = HostPipe(program: URL(fileURLWithPath: "/bin/sleep"), origin: "30")
+        try pipe.start()
+        defer { pipe.stop() }
+        let reader = Task { try await pipe.readOne() }
+        pipe.stop()
+        await #expect(throws: ExtensionNative.Refused.self) { try await reader.value }
+        // Stop is safe even when the exit and output callbacks race it.
+        pipe.stop()
+    }
+
+    @Test(arguments: [true, false])
+    func aCompletedPipeClosesDescriptorsWhileStillRetained(observeWriters: Bool) async throws {
+        // Other suites and Foundation open descriptors while this awaits a
+        // host. Check its pipe ends by their behavior, not process-wide FDs
+        // (or FD numbers that another thread can reuse after close).
+        var pipes: [HostPipe] = []
+        for _ in 0..<16 {
+            let input = Pipe(), output = Pipe()
+            var witnesses: [Int32] = []
+            defer { for fd in witnesses { close(fd) } }
+            for channel in [input, output] {
+                // Keep only one end: holding both would prevent EOF/EPIPE.
+                let handle = observeWriters ? channel.fileHandleForReading : channel.fileHandleForWriting
+                let fd = dup(handle.fileDescriptor)
+                try #require(fd >= 0)
+                witnesses.append(fd)
+                _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+                _ = fcntl(fd, F_SETNOSIGPIPE, 1)
+            }
+            let pipe = HostPipe(program: URL(fileURLWithPath: "/usr/bin/true"), origin: "x", input: input, output: output)
+            pipes.append(pipe)
+            let completed = Count()
+            pipe.onExit = { completed.add() }
+            try pipe.start()
+            await ended(pipe)
+            try #require(pipe.exitedByItself)
+            // isRunning can turn false before the termination callback has
+            // drained stdout and closed the descriptors. Wait for cleanup.
+            for _ in 0..<100 where completed.value == 0 {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try #require(completed.value == 1)
+            for fd in witnesses {
+                var byte: UInt8 = 0
+                if observeWriters {
+                    // No writer left, including the parent's child stdout.
+                    #expect(read(fd, &byte, 1) == 0)
+                } else {
+                    // No reader left, including the parent's child stdin.
+                    let written = write(fd, &byte, 1)
+                    let failure = errno
+                    #expect(written == -1 && failure == EPIPE)
+                }
+            }
+        }
+        withExtendedLifetime(pipes) {}
+    }
+
+    @Test func theFinalReplyIsDrainedBeforeExitClosesThePipe() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("native-last-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let script = folder.appendingPathComponent("reply")
+        // A nine-byte JSON string with Chrome's little-endian length.
+        try "#!/bin/sh\nprintf '\\011\\000\\000\\000\"goodbye\"'\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        for _ in 0..<20 {
+            let pipe = HostPipe(program: script, origin: "x", buffersReplies: true)
+            try pipe.start()
+            defer { pipe.stop() }
+            await ended(pipe)
+            #expect(try await pipe.readOne() as? String == "goodbye")
+        }
+    }
+
+    /// Crashes #853 (0.45.1) and #1501 (0.46.17): a browser out of file
+    /// descriptors. -[NSPipe init] answers nil when pipe(2) fails, Swift
+    /// keeps that nil as a Pipe, the host still started, and the first
+    /// message the extension sent wrote to a nil handle (SIGSEGV at 0x64 in
+    /// _NSFileHandleIsClosed). A pipe that can't be made is now an error:
+    /// here pipe(2)'s EMFILE, without starving the test process.
+    @Test func aHostMadeWithoutDescriptorsFailsInsteadOfCrashing() async throws {
+        let pipe = HostPipe(program: URL(fileURLWithPath: "/bin/sleep"), origin: "30",
+                            open: { throw POSIXError(.EMFILE) })
+        defer { pipe.stop() }
+        // Starting fails with why; a message after that fails, not crashes.
+        let refused = #expect(throws: ExtensionNative.Refused.self) { try pipe.start() }
+        #expect(refused?.why.contains("Too many open files") == true)
+        #expect(throws: (any Error).self) { try pipe.write(["text": "hello"]) }
+        await #expect(throws: ExtensionNative.Refused.self) { try await pipe.readOne() }
+    }
+
+    /// The pipes made for a host are as Pipe's were: a message goes in, the
+    /// reply comes back, and a write after the host ends fails.
+    @Test func aHostEchoesThroughItsOwnPipes() async throws {
+        let pipe = HostPipe(program: URL(fileURLWithPath: "/bin/cat"), origin: "-", buffersReplies: true)
+        try pipe.start()
+        try pipe.write(["text": "hello"])
+        let reply = try await pipe.readOne() as? [String: Any]
+        #expect(reply?["text"] as? String == "hello")
+        pipe.stop()
+        #expect(throws: (any Error).self) { try pipe.write(["text": "again"]) }
     }
 
     // MARK: hosts macOS won't let run

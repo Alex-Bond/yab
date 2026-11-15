@@ -1,33 +1,50 @@
 // Included by core.mm after CDP/Eval. Keep the DRM track out of the dispatcher.
 // This binding only requests an engine change of its own native top-level URL.
 // It grants no extension identity, cookie access or privileged script execution.
-static void DRMCDP(std::string id, NSString* method, NSDictionary* params, Completion done, double deadline) {
+static void DRMWhenReady(std::string id, std::function<void(Tab&)> ready, std::function<void(NSString*)> failed, double deadline) {
   // Browser creation precedes DevTools attachment. Also leave observer callbacks
   // before sending the next command, as CEF forbids reentrant dispatch.
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
     auto tab = tabs.find(id);
-    if (tab == tabs.end() || tab->second.closing) { done(nil, @"Tab closed"); return; }
+    if (tab == tabs.end() || tab->second.closing) { failed(@"Tab closed"); return; }
     if (!tab->second.domainsReady) {
-      if (Now() >= deadline) { done(nil, @"DRM hook timed out waiting for DevTools"); return; }
-      DRMCDP(id, method, params, done, deadline);
+      if (Running() >= deadline) { failed(@"DRM hook timed out waiting for DevTools"); return; }
+      DRMWhenReady(id, ready, failed, deadline);
       return;
     }
-    CDP(tab->second, method, params, done);
+    ready(tab->second);
   });
+}
+static void DRMCDP(std::string id, NSString* method, NSDictionary* params, Completion done, double deadline) {
+  DRMWhenReady(id, [method, params, done](Tab& tab) { CDP(tab, method, params, done); },
+               [done](NSString* error) { done(nil, error); }, deadline);
 }
 static NSString* DRMHookSource() {
   return @R"JS((()=>{
-        if (top !== self || !navigator.requestMediaKeySystemAccess) return;
-        const original = navigator.requestMediaKeySystemAccess;
+        if (top !== self) return;
+        // Chrome's install sheet belongs to a window nobody sees: prompt()
+        // would never answer. Without the event a site offers no install.
+        addEventListener('beforeinstallprompt', event => event.stopImmediatePropagation(), true);
         const notify = globalThis.__yabWidevineRejected;
         let sent = false;
-        navigator.requestMediaKeySystemAccess = function(key, configurations) {
-          return Reflect.apply(original, this, [key, configurations]).catch(error => {
-            if (!sent && key === 'com.widevine.alpha' && error?.name === 'NotSupportedError') {
-              sent = true;
-              notify(JSON.stringify({keySystem:key}));
-            }
+        const refused = key => {
+          if (sent || key !== 'com.widevine.alpha') return;
+          sent = true;
+          notify(JSON.stringify({keySystem:key}));
+        };
+        const access = navigator.requestMediaKeySystemAccess;
+        if (access) navigator.requestMediaKeySystemAccess = function(key, configurations) {
+          return Reflect.apply(access, this, [key, configurations]).catch(error => {
+            if (error?.name === 'NotSupportedError') refused(key);
             throw error;
+          });
+        };
+        // Shaka and others ask this instead: it answers `supported: false` and never throws.
+        const capabilities = navigator.mediaCapabilities, decoding = capabilities?.decodingInfo;
+        if (decoding) capabilities.decodingInfo = function(configuration) {
+          return Reflect.apply(decoding, this, [configuration]).then(info => {
+            if (!info.supported) refused(configuration?.keySystemConfiguration?.keySystem);
+            return info;
           });
         };
       })())JS";
@@ -60,6 +77,6 @@ static void InstallDRM(Tab& tab, Completion done, bool runImmediately = false) {
           // A navigation continuation must leave CEF's observer loop first.
           // Source-built CEF rejects nested DevTools observer notifications.
           dispatch_async(dispatch_get_main_queue(), ^{ finish(result, outcome); });
-        }, Now() + 10);
-    }, Now() + 10);
+        }, Running() + 10);
+    }, Running() + 10);
 }

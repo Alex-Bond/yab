@@ -40,14 +40,23 @@ extension AppModel {
     }
 
     /// The rows for the words typed, best first.
-    var fieldRows: [WordRow] {
+    var fieldRows: [WordRow] { fieldRows(content: NewTabContent.make(for: self)) }
+
+    /// The rows, with New Tab's content already made. The field works them
+    /// out once a draw and hands them to what reads them (its key, the
+    /// address written on): each one looking through every place in History
+    /// again cost a letter three times the work (#1637).
+    func fieldRows(content: NewTabContent) -> [WordRow] {
+        #if DEBUG
+        fieldRowsMade += 1
+        #endif
         // On the Chats page the words search the chats, in the card itself.
         if fieldSearchesChats { return [] }
         let name = fixturesEnabled ? "Google" : field.searchSettings.searchSelection.name
         // History and the Mac's bookmarks; never for words with the eyes shut.
         let places = field.place.isPrivate ? [] : history.places
         let settings = SettingsStore.shared
-        var rows = Words.rows(for: field.words, in: field.place, tabs: tabCandidates, sites: NewTabContent.make(for: self).frequent,
+        var rows = Words.rows(for: field.words, in: field.place, tabs: tabCandidates, sites: content.frequent,
                               places: places, except: field.mode == .address ? field.pageID : nil,
                               replaces: field.pageIsToday, agent: settings.agent.name,
                               guesses: settings.guessesFromWords, asks: settings.offersAsk, tasks: settings.offersTask).map { row in
@@ -80,13 +89,24 @@ extension AppModel {
     /// A search or Ask Claude is never written in the field.
     var fieldCompletion: String? {
         guard !field.showsAddress, !fieldAnswerTakesKey, !fieldSearchesChats else { return nil }
+        return fieldCompletion(rows: fieldRows)
+    }
+
+    func fieldCompletion(rows: [WordRow]) -> String? {
+        guard !field.showsAddress, !fieldAnswerTakesKey, !fieldSearchesChats else { return nil }
         let typed = field.text
-        guard !typed.isEmpty, !typed.contains(where: \.isWhitespace), let row = fieldRows.first else { return nil }
+        guard !typed.isEmpty, !typed.contains(where: \.isWhitespace), let row = rows.first else { return nil }
         return row.completion(after: typed)
     }
 
     /// The keyboard's key, named after the top row; go over the address.
-    var fieldKey: WordRow.Key { fieldAnswerTakesKey || fieldSearchesChats ? .search : fieldRows.first?.key ?? .go }
+    var fieldKey: WordRow.Key { fieldKey(rows: fieldRows) }
+
+    /// The key for rows already made: a view that shows them asks this
+    /// rather than making every row again.
+    func fieldKey(rows: [WordRow]) -> WordRow.Key {
+        fieldAnswerTakesKey || fieldSearchesChats ? .search : rows.first?.key ?? .go
+    }
 
     // MARK: - Return, a row
 
@@ -120,14 +140,15 @@ extension AppModel {
         let searches: Bool = if case .searchFor = row.action { true } else { false }
         if isPrivate, !searches, ![.search, .open, .findOnPage].contains(row.action) { return }
         let place: Bool = if case .place = row.action { true } else { false }
-        if searches || place || [.search, .open].contains(row.action) { adoptNewTabSpace() }
+        let site: Bool = if case .site = row.action { true } else { false }
+        if searches || place || site || [.search, .open].contains(row.action) { adoptNewTabSpace() }
         field.forget()
         switch row.action {
         case let .tab(id):
             closeFieldAfterChoice()
             browser.select(id)
         case let .site(key):
-            let site = NewTabContent.make(for: self).frequent.first { $0.key == key }
+            let site = NewTabContent.frequent(for: self).first { $0.key == key }
             closeFieldAfterChoice(goesUp: site.map { openTab(of: $0) == nil } ?? false)
             if let site { openFrequent(site) }
         case .search:
@@ -216,6 +237,7 @@ extension AppModel {
 
     /// A Frequent tile tapped in New Tab.
     func chooseFrequent(_ site: SiteCandidate) {
+        adoptNewTabSpace()
         field.forget()
         closeFieldAfterChoice()
         openFrequent(site)
@@ -226,9 +248,12 @@ extension AppModel {
     /// kept tab, a folder's too, the page it keeps: the page opens as a new
     /// tab first in today's instead, as the prototype's navigate does. Loaded
     /// into a live folder's tab, it rewrote that tab everywhere, so whatever
-    /// was opened over it landed in the folder instead of Today.
+    /// was opened over it landed in the folder instead of Today. A private
+    /// page loads only into a private tab: over an ordinary one (the plate's
+    /// field with its eyes shut) it is a private tab of its own, or the
+    /// ordinary tab took it and history recorded it (#1603).
     func show(_ tab: Tab, newTab: Bool) {
-        guard !newTab, let front = browser.tab, front.place == .today else {
+        guard !newTab, let front = browser.tab, front.place == .today, tab.isPrivate == front.isPrivate else {
             if tab.isPrivate { openPrivately(tab) }
             else {
                 // Opening the eyes in Private explicitly returns to ordinary browsing.
@@ -356,10 +381,15 @@ extension AppModel {
     /// The iOS share sheet for a page.
     func share(_ tab: Tab) {
         guard let url = link(of: tab) else { return }
+        // The page itself beside its address: with its web view among the
+        // items iOS offers Add to Home Screen, as from Safari (#2034).
+        // Never a private page's: the home screen would keep it.
+        let page = tab.isPrivate ? nil : pages.liveView(tab.id)
         // A turn later, so the field or the menu is gone from under it.
         DispatchQueue.main.async {
             guard let root = Self.topController() else { return }
-            let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            let items: [Any] = page.map { [url, $0] } ?? [url]
+            let sheet = UIActivityViewController(activityItems: items, applicationActivities: [OpenInSafariActivity()])
             // On iPad it is a popover, and UIKit throws without an anchor
             // (register 1142), as PageDownload's share does.
             sheet.popoverPresentationController?.sourceView = root.view

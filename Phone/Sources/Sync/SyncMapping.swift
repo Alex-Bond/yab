@@ -182,7 +182,7 @@ enum SyncMapping {
         var space = Space(id: local(synced.id), name: synced.name, emoji: SpaceSymbols.emoji(synced.icon),
                           tint: tint(synced.paint) ?? old?.tint ?? plainTint, pins: pins, kept: kept, today: today,
                           current: nil, pinsOpen: old?.pinsOpen ?? false, isPrivate: false,
-                          look: synced.paint.flatMap { SpaceLook($0.raw) }, ownSignIns: synced.ownSignIns)
+                          look: synced.paint.flatMap { SpaceLook($0.raw) }, ownSignIns: synced.ownSignIns, signInWith: synced.signInWith.map(local))
         space.current = current(in: space, old: old)
         return space
     }

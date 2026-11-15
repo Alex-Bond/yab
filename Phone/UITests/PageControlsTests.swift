@@ -666,7 +666,7 @@ final class PageControlsTests: XCTestCase {
         }
         app.terminate()
         app.launch()
-        let notNow = app.buttons["welcome.start"]
+        let notNow = app.buttons["welcome.skip"]
         let input = app.textFields["field.input"]
         if allowExistingWelcome {
             XCTAssertTrue(wait { notNow.exists || input.exists || self.app.webViews.staticTexts["Page controls article"].exists })

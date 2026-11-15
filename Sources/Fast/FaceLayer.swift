@@ -24,6 +24,8 @@ struct Face: NSViewRepresentable {
     /// The folder is open: its front lets down and outward, taking the
     /// eyes with it.
     var unfolded = false
+    /// The New Folder action becoming an ordinary open folder.
+    var creating = false
     /// A script's face: a robot's head (see AgentFace).
     var script = false
     /// Outline width in points; nil follows the drawing size.
@@ -38,7 +40,8 @@ struct Face: NSViewRepresentable {
     func updateNSView(_ view: FaceView, context: Context) {
         let paint = Face.paint(pose: pose, tint: tint, folder: folder, folderTint: folderTint, in: context.environment)
         view.update(pose: pose, size: size, ink: paint.ink, full: paint.full, body: paint.body, back: paint.back,
-                    folder: folder, unfolded: unfolded, script: script, still: still, weight: weight)
+                    folder: folder, unfolded: creating ? false : unfolded, script: script, still: still, weight: weight)
+        if creating { view.createFolder() }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: FaceView, context: Context) -> CGSize? {
@@ -264,7 +267,7 @@ final class FaceView: NSView {
             paint()
         }
         CATransaction.commit()
-        if unfolded != self.unfolded {
+        if !creationBegun, unfolded != self.unfolded {
             self.unfolded = unfolded
             unfold(unfolded)
         }
@@ -428,16 +431,108 @@ final class FaceView: NSView {
         return FolderPose(flap: from.flap * (1 - flap), turn: from.turn * (1 - turn))
     }
 
+    private var creationBegun = false
+
+    /// The prototype's 360 ms creation: the plus sinks into the front,
+    /// the closed outline fills, then that same folder opens. There is
+    /// always an outline; the ordinary folder layers own the final frame.
+    func createFolder() {
+        guard !creationBegun, folder else { return }
+        creationBegun = true
+        guard !still else { unfolded = true; unfold(true); return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let plus = CAShapeLayer()
+        let path = CGMutablePath()
+        let k = size / 24
+        path.move(to: CGPoint(x: 17.6 * k, y: 13.4 * k))
+        path.addLine(to: CGPoint(x: 17.6 * k, y: 21.8 * k))
+        path.move(to: CGPoint(x: 13.4 * k, y: 17.6 * k))
+        path.addLine(to: CGPoint(x: 21.8 * k, y: 17.6 * k))
+        plus.path = path
+        plus.strokeColor = ink
+        plus.fillColor = nil
+        plus.lineWidth = 2 * k
+        plus.lineCap = .round
+        plus.frame = outline.frame
+        outline.superlayer?.addSublayer(plus)
+        let mark = CAShapeLayer()
+        let contour = CGMutablePath()
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x * k, y: y * k) }
+        contour.move(to: point(3, 7))
+        contour.addCurve(to: point(6, 4), control1: point(3, 5.3), control2: point(4.3, 4))
+        contour.addLine(to: point(8.6, 4))
+        contour.addCurve(to: point(10.2, 4.7), control1: point(9.2, 4), control2: point(9.8, 4.3))
+        contour.addLine(to: point(11.5, 6.5))
+        contour.addLine(to: point(18.1, 6.5))
+        contour.addCurve(to: point(21, 9.4), control1: point(19.7, 6.5), control2: point(21, 7.8))
+        contour.addLine(to: point(21, 10))
+        contour.move(to: point(9.6, 20))
+        contour.addLine(to: point(5.9, 20))
+        contour.addCurve(to: point(3, 17.1), control1: point(4.3, 20), control2: point(3, 18.7))
+        contour.addLine(to: point(3, 7))
+        mark.path = contour
+        mark.strokeColor = ink
+        mark.fillColor = nil
+        mark.lineWidth = 2 * k
+        mark.lineCap = .round
+        mark.lineJoin = .round
+        mark.frame = outline.frame
+        outline.superlayer?.addSublayer(mark)
+        let contourOut = CAKeyframeAnimation(keyPath: "opacity")
+        contourOut.values = [1, 1, 0]
+        contourOut.keyTimes = [0, 0.5, 1]
+        contourOut.duration = 0.198
+        mark.opacity = 0
+        mark.add(contourOut, forKey: "creation.contour")
+        for layer in [outline, seam] {
+            let arrive = CABasicAnimation(keyPath: "opacity")
+            arrive.fromValue = 0
+            arrive.toValue = 1
+            arrive.duration = 0.099
+            layer.add(arrive, forKey: "creation.contour")
+        }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        fade.duration = 0.198
+        plus.opacity = 0
+        plus.add(fade, forKey: "creation.plus")
+        let sink = CABasicAnimation(keyPath: "transform")
+        sink.fromValue = NSValue(caTransform3D: CATransform3DIdentity)
+        var end = CATransform3DMakeTranslation(-5.6 * k, -2.8 * k, 0)
+        end = CATransform3DScale(end, 0.15, 0.15, 1)
+        sink.toValue = NSValue(caTransform3D: end)
+        sink.duration = 0.198
+        sink.timingFunction = Self.inOut
+        plus.add(sink, forKey: "creation.sink")
+        for layer in [backFill, frontFill] {
+            let fill = CABasicAnimation(keyPath: "opacity")
+            fill.fromValue = 0
+            fill.toValue = 1
+            fill.duration = 0.198
+            layer.add(fill, forKey: "creation.fill")
+        }
+        CATransaction.commit()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.198) { [weak self, weak plus, weak mark] in
+            plus?.removeFromSuperlayer()
+            mark?.removeFromSuperlayer()
+            guard let self else { return }
+            self.unfolded = true
+            self.unfold(true, duration: 0.162)
+        }
+    }
+
     /// A folder's face opened or shut on its clock, for the bench.
     static var unfolds = 0
 
-    private func unfold(_ open: Bool) {
+    private func unfold(_ open: Bool, duration requestedDuration: Double? = nil) {
         guard folder else { return }
         FaceView.unfolds += 1
         // Wherever the last move has got to.
         let now = CACurrentMediaTime()
         let from = fold.pose(now - fold.start)
-        let duration = still ? 0 : open ? 0.3 : 0.24
+        let duration = still ? 0 : requestedDuration ?? (open ? 0.3 : 0.24)
         fold = Fold(from: from, start: now, duration: duration, opening: open)
         let to = fold.to
         CATransaction.begin()

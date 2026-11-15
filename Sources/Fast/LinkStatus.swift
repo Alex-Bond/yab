@@ -63,18 +63,23 @@ final class LinkStatus: ObservableObject {
     /// A page scrolled under the pointer.
     func scrolled() { rule.scrolled() }
 
-    private init() {
+    init() {
         // WebKit says the keys only as the pointer moves: held or let go
         // with the pointer still, the words change all the same.
         watch = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             let held = Self.clicking(event.modifierFlags)
-            MainActor.assumeIsolated { if self?.keys != held { self?.keys = held } }
+            AppKitMainThread.sync { if self?.keys != held { self?.keys = held } }
             return event
         }
         moves = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { [weak self] event in
-            MainActor.assumeIsolated { self?.pointerMoved() }
+            AppKitMainThread.sync { self?.pointerMoved() }
             return event
         }
+    }
+
+    deinit {
+        if let watch { NSEvent.removeMonitor(watch) }
+        if let moves { NSEvent.removeMonitor(moves) }
     }
 
     nonisolated static func clicking(_ flags: NSEvent.ModifierFlags) -> NSEvent.ModifierFlags {

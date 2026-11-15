@@ -97,7 +97,7 @@ final class TabClearUITests: XCTestCase {
         app.launchArguments = ["-YabProfileDirectory", directory.path, "-YabURL", site.url.appendingPathComponent("safe").absoluteString]
         app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
         app.terminate(); app.launch()
-        let later = app.buttons["welcome.start"]
+        let later = app.buttons["welcome.skip"]
         XCTAssertTrue(later.waitForExistence(timeout: 15)); app.passWelcome()
         XCTAssertTrue(app.textFields["field.input"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.closeField(), "the welcome's New Tab field stayed over the page")

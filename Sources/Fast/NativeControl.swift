@@ -29,11 +29,13 @@ final class NativeControl {
     /// keeps them under, the row as it stood, and each tab's pin, folder,
     /// name and home, for Undo to put back.
     private struct Closing {
-        struct Closed { let pin: String?; let kept: Bool; let nest: Nest?; let name: String?; let home: URL?; let homeTitle: String? }
         let batch: UUID
         let space: UUID
         let order: [UUID]
-        let closed: [(id: UUID, tab: Closed)]
+        /// The loose tabs closed, by id, with the names they had.
+        let closed: [(id: UUID, name: String?)]
+        /// The pinned and kept ones put down, asleep where they stand, as ⌘W leaves them.
+        let rested: [UUID]
     }
     private var closings: [String: Closing] = [:]
     /// The ⌘Z step each tabs.close left in its window, taken out once undone.
@@ -369,7 +371,7 @@ final class NativeControl {
         let paint = space.id == browser.spaceID ? SpacePaint(browser.prefs) : space.paint ?? SpacePaint(browser.prefs)
         return .object(["id": .string(space.id.uuidString), "name": .string(space.name), "color": .string(paint.color),
                         "swatch": .string(paint.swatch), "grain": .number(paint.grain), "transparency": .number(paint.transparency), "glass": .bool(paint.glass), "colors": .array(paint.colors.map(NativeValue.string)),
-                        "separateSignIns": .bool(space.ownSignIns)])
+                        "separateSignIns": .bool(space.ownSignIns), "authStoreId": .string(space.profileID.uuidString)])
     }
 
     private func snapshot(action: String, target: String, arguments: [String: NativeValue], browser: Browser) throws -> (String, NativeValue) {
@@ -631,17 +633,24 @@ final class NativeControl {
                 if before != after { changes.changed(resource) }
                 var result: [String: Any] = ["status": "verified", "operationId": receipt.id, "action": action, "target": target,
                                              "before": before.any, "after": after.any, "resourceVersion": changes.version(resource, after)]
-                let undoable = descriptor["undo"] as? Bool == true && before != after
+                // Pins and kept tabs only put down leave nothing to bring back.
+                let undoable = descriptor["undo"] as? Bool == true && before != after && closings[receipt.id]?.closed.isEmpty != true
                 result["undo"] = ["available": undoable, "changeId": undoable ? receipt.id : ""]
                 if let made = liveMade.removeValue(forKey: receipt.id) { result["folderId"] = made.uuidString }
                 if action == "live.update" { result["message"] = "The folder is reading its site now; read native_context's liveFolders for the outcome." }
                 if action == "tabs.close", let closing = closings[receipt.id] {
                     result["closed"] = closing.closed.count
-                    result["message"] = "Closed \(Self.tabCount(closing.closed.count)). Answer in plain words, like “Closed 9 YouTube tabs.”, with no list of them and no mention of Undo: Yab's corner notice carries it."
+                    result["putDown"] = closing.rested.count
+                    result["message"] = (closing.closed.isEmpty ? "" : "Closed \(Self.tabCount(closing.closed.count)). ")
+                        + (closing.rested.isEmpty ? "" : "Put \(Self.tabCount(closing.rested.count)) pinned or kept to sleep; they stay in the sidebar, as ⌘W leaves them. ")
+                        + "Answer in plain words, like “Closed 9 YouTube tabs.”, with no list of them and no mention of Undo: Yab's corner notice carries it."
                 }
                 if action == "mail.disconnect" { result["remoteRevocation"] = "requested_unverified"; result["message"] = "The account was removed from Yab. Google's access revocation was requested separately." }
                 try changes.update(receipt.id, status: "verified", result: result, after: after, version: undoable ? changes.version(resource, after) : nil)
-                if action == "tabs.close", let closing = closings[receipt.id] {
+                if action == "tabs.close" {
+                    // Pins and kept tabs put down, as ⌘W puts them, say
+                    // nothing; the closed ones get the corner's Undo.
+                    guard let closing = closings[receipt.id], !closing.closed.isEmpty else { return }
                     // ⌘Z's step and the notice's Undo are one: either takes
                     // the tabs back, once.
                     let step = browser.did { [weak self, weak browser] in
@@ -1151,35 +1160,31 @@ final class NativeControl {
         guard Set(going.map(\.id)).count == going.count else { throw NativeFailure("invalid_arguments", "Give each tab once") }
         if let refusal = going.lazy.compactMap({ Self.closeRefusal($0, pinned: pinned, in: browser) }).first { throw NativeFailure("invalid_arguments", refusal) }
         let row = browser.tabs
-        let closed = going.compactMap { tab in row.firstIndex { $0 === tab }.map { (tab, $0) } }.sorted { $0.1 < $1.1 }.map { tab, _ in
-            (id: tab.id, tab: Closing.Closed(pin: tab.pin, kept: tab.kept, nest: tab.nest, name: tab.name, home: tab.home, homeTitle: tab.homeTitle))
+        // ⌘W's way, as the hand closes several picked: a pinned or kept
+        // tab is only put down, asleep where it stands, and keeps its place;
+        // the loose ones close as one batch that Undo brings back.
+        let resting = going.filter { $0.pin != nil || $0.kept }
+        let leaving = going.filter { $0.pin == nil && !$0.kept }
+        let closed = leaving.compactMap { tab in row.firstIndex { $0 === tab }.map { (tab, $0) } }.sorted { $0.1 < $1.1 }.map { tab, _ in
+            (id: tab.id, name: tab.name)
         }
-        let closing = Closing(batch: UUID(), space: browser.spaceID, order: row.map(\.id), closed: closed)
-        // Out of the pins and the kept first, as Close and Don't Keep
-        // does: ⌘W only puts those down. A kept one's folder rides on its
-        // ghost, for Undo and ⌘⇧T to keep it there again.
-        let kept = browser.tabs.filter(\.kept)
-        for tab in going where tab.pin != nil || tab.kept {
-            if tab.kept {
-                browser.unkept[tab.id] = .some(tab.nest)
-                browser.unkeptAt[tab.id] = kept.firstIndex { $0 === tab }
-            }
-            tab.pin = nil; tab.kept = false; tab.nest = nil
-        }
-        browser.folderBook.refresh()
+        let closing = Closing(batch: UUID(), space: browser.spaceID, order: row.map(\.id), closed: closed, rested: resting.map(\.id))
         let steps = browser.steps.count
         browser.close(going, batch: closing.batch)
         // ⌘Z's step is the native one (apply), not ⌘⇧T's.
         if browser.steps.count > steps, case .closed = browser.steps.last { browser.steps.removeLast() }
         closings[operation] = closing
-        guard going.allSatisfy({ tab in !browser.tabs.contains { $0 === tab } }) else { throw NativeFailure("verification_failed", "Some tabs could not be closed") }
-        guard browser.ghosts.filter({ $0.batch == closing.batch }).count == going.count else {
+        guard leaving.allSatisfy({ tab in !browser.tabs.contains { $0 === tab } }) else { throw NativeFailure("verification_failed", "Some tabs could not be closed") }
+        guard resting.allSatisfy({ tab in browser.tabs.contains { $0 === tab } && tab.asleep }) else {
+            throw NativeFailure("verification_failed", "Some pinned or kept tabs were not put to sleep in their places")
+        }
+        guard browser.ghosts.filter({ $0.batch == closing.batch }).count == leaving.count else {
             throw NativeFailure("verification_failed", "Some tabs were closed without a way back")
         }
     }
 
-    /// tabs.close's Undo: the batch back, asleep, each where it stood,
-    /// pinned, kept in its folder and named as it was.
+    /// tabs.close's Undo: the closed batch back, asleep, each where it
+    /// stood and named as it was. The pinned and kept never left.
     private func reopen(_ receipt: NativeChanges.Receipt, browser: Browser) throws -> [String: Any] {
         guard !receipt.undone else { throw NativeFailure("conflict", "These tabs are already back") }
         guard let closing = closings[receipt.id] else { throw NativeFailure("conflict", "These tabs can't be brought back after a restart; History › Recently Closed has them") }
@@ -1193,11 +1198,8 @@ final class NativeControl {
         browser.undoing = undoing
         guard back.count == closing.closed.count else { throw NativeFailure("verification_failed", "Only \(back.count) of \(closing.closed.count) tabs came back") }
         var now: [UUID: Tab] = [:]
-        for (tab, (id, was)) in zip(back, closing.closed) {
-            tab.name = was.name
-            if let pin = was.pin { tab.pin = pin; tab.kept = false; tab.nest = nil }
-            if was.kept, !tab.kept || tab.nest !== was.nest { tab.kept = true; tab.nest = was.nest }
-            if was.pin != nil || was.kept { tab.home = was.home; tab.homeTitle = was.homeTitle }
+        for (tab, (id, name)) in zip(back, closing.closed) {
+            tab.name = name
             now[id] = tab
         }
         // The row as it stood, tabs opened since after the rest of their block.
@@ -1209,9 +1211,7 @@ final class NativeControl {
         browser.folderBook.refresh()
         browser.writeSession(now: true)
         observe(browser)
-        guard zip(back, closing.closed).allSatisfy({ tab, closed in
-            browser.tabs.contains { $0 === tab } && tab.pin == closed.tab.pin && tab.kept == closed.tab.kept && (!closed.tab.kept || tab.nest === closed.tab.nest)
-        }) else { throw NativeFailure("verification_failed", "The tabs came back, but not all of them pinned or in their folders") }
+        guard back.allSatisfy({ tab in browser.tabs.contains { $0 === tab } }) else { throw NativeFailure("verification_failed", "The tabs came back, but not all of them in this space") }
         closings.removeValue(forKey: receipt.id)
         if let step = closeSteps.removeValue(forKey: receipt.id) { browser.steps.removeAll { $0.id == step } }
         // Back by the agent's native_undo: the corner's Undo is spent.

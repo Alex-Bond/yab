@@ -122,6 +122,9 @@ final class FieldModel {
     var clipboardLink: URL?
     /// The search sheet's rows while the field stays open, and what they were made for.
     @ObservationIgnored var heldPicks: (key: String, items: [NewTabItem])?
+    /// New Tab's content and what it was made from (NewTabContent.make): a
+    /// memo, not state, so no view observes it and a draw may fill it.
+    @ObservationIgnored var newTabMemo: (inputs: NewTabContent.Inputs, content: NewTabContent)?
     /// A row removed: the rows are made again.
     var picksRevision = 0
     /// Named states: a history to make the rows from.
@@ -375,6 +378,8 @@ final class FieldModel {
     }
 
     @ObservationIgnored private var inPlace = false
+    /// All Tabs turning into the spaces sidebar in place: 1 all blur, 0 sharp.
+    var sidebarBlur: CGFloat = 0
     /// A chat is growing out of a row of the card: don't fade the card under it.
     @ObservationIgnored var underChat = false
 
@@ -610,6 +615,7 @@ final class FieldModel {
             if !LaunchOptions.current.isTestRun { clipboardLink = UIPasteboard.general.hasURLs ? clipboardLink ?? Self.pasteboardMarker : nil }
         }
         heldPicks = nil
+        newTabMemo = nil
         origin = app.surfaces.fieldOrigin
         landing = nil
         let fresh = !shown

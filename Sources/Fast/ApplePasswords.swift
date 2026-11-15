@@ -380,8 +380,21 @@ actor ApplePasswords {
         case noHelper, killedByMacOS, notPaired, timedOut, refused(Int), unexpected
     }
 
+    /// Apple lets this Yab run its helper (the passkeys entitlement), or a
+    /// test world stands one in (YAB_APPLE_HELPER, as YAB_BW_CLI is for bw).
+    static var mayRun: Bool { Preferences.entitledToPasskeys || standIn != nil }
+
+    /// A test world's stand-in for Apple's helper: a program at
+    /// YAB_APPLE_HELPER speaking its protocol with synthetic values.
+    static var standIn: URL? {
+        guard Store.testing, let path = ProcessInfo.processInfo.environment["YAB_APPLE_HELPER"], !path.isEmpty,
+              FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
     /// Where Apple's helper is: the path its Chrome manifest names.
     static var helper: URL? {
+        if let standIn { return standIn }
         let folders = ["/Library/Google/Chrome/NativeMessagingHosts",
                        "/System/Cryptexes/App/Library/Google/Chrome/NativeMessagingHosts"]
         for folder in folders {
@@ -413,13 +426,12 @@ actor ApplePasswords {
     /// Requests given up on while paired, by cmd: their answers, still to
     /// come, are not the next request's. Replies carry no id.
     private var owed: [Int: Int] = [:]
-    /// Quick requests in a row with no word from the helper at all.
-    private var silences = 0
-    /// When a request waiting on the person (Touch ID, Apple's Save alert)
-    /// was given up on: the helper may be busy with it, not stuck.
-    private var withPerson: SuspendingClock.Instant?
     /// Scales the paired requests' waits, for tests.
     private let patience: TimeInterval
+    /// What the last list for each host said of filling from it: the
+    /// helper asks the person (Touch ID, the Mac's password) before it
+    /// gives a password (RequiresUserAuthenticationToFill), or doesn't.
+    private var asksToFill: [String: Bool] = [:]
 
     init(program: URL? = nil, patience: TimeInterval = 1) {
         self.program = program
@@ -442,8 +454,6 @@ actor ApplePasswords {
         let id = UUID()
         generation = id
         owed = [:]
-        silences = 0
-        withPerson = nil
         started.killedAtLaunch = { [weak self] in Task { await self?.killedAtLaunch(id) } }
         started.onExit = { [weak self, weak started] in
             let stopped = started?.stoppedByUs ?? false
@@ -505,11 +515,9 @@ actor ApplePasswords {
                     noAnswer(to: cmd, from: pipe)
                     throw Failure.timedOut
                 }
-                silences = 0
                 guard let object = reply as? [String: Any], let got = object["cmd"] as? Int else { continue }
                 if let late = owed[got], late > 0 {
                     owed[got] = late - 1
-                    if got == 5 || got == 17 { withPerson = nil }
                     continue
                 }
                 if cmd == 16 || cmd == 17 {
@@ -530,31 +538,19 @@ actor ApplePasswords {
         return object
     }
 
-    /// A request's wait ran out. The session lives only in this helper
-    /// process, so a slow answer (the Mac just awake, Touch ID or Apple's
-    /// Save alert left open, a save it never answers) must not cost a new
-    /// code: the iCloud Passwords extension has no timeout at all. Stopped
-    /// only unpaired, with nothing to lose, or stuck: three quick requests in
-    /// a row unheard while nothing is with the person.
+    /// A missing answer cannot distinguish a stuck helper from a locked
+    /// keychain, a slow wake or an unanswered authentication alert. Only
+    /// Apple ending the session (or the process exiting) invalidates it.
+    /// Killing this process to recover a query would also destroy its key.
     private func noAnswer(to cmd: Int, from pipe: HostPipe) {
         guard paired else {
             pipe.stop()
             return
         }
         Self.log.notice("no answer to cmd \(cmd) in time, helper kept")
-        // Only a save's answer is harmless on the next request of its kind,
-        // and may never come: nothing is owed for it.
+        // Save replies may never arrive and carry no secret; other late
+        // replies must not be mistaken for the next request's answer.
         if cmd != 6 { owed[cmd, default: 0] += 1 }
-        if cmd == 5 || cmd == 6 || cmd == 17 {
-            withPerson = SuspendingClock.now
-            return
-        }
-        if let withPerson, withPerson.duration(to: .now) < .seconds(600) { return }
-        silences += 1
-        if silences >= 3 {
-            Self.log.error("helper stuck, stopping it")
-            pipe.stop()
-        }
     }
 
     // MARK: pairing
@@ -660,11 +656,19 @@ actor ApplePasswords {
     /// The site's logins, names only ("Not Included" for the password).
     func logins(for host: String) async throws -> [Entry] {
         let answer = try await request(4, qid: "CmdGetLoginNames4URL", url: host, ["ACT": 5, "URL": host], wait: 10)
+        // Said only when it asks, as the extension reads it: absent is no.
+        let asks = answer["RequiresUserAuthenticationToFill"] as? Bool ?? false
+        asksToFill[host] = asks
+        Self.log.notice("list helper auth required \(asks)")
         return Self.entries(answer).compactMap { entry in
             guard let user = entry["USR"] as? String, user != "Passwords\u{a0}not\u{a0}saved" else { return nil }
             return Entry(user: user, sites: entry["sites"] as? [String] ?? [], title: entry["customTitle"] as? String)
         }
     }
+
+    /// Whether the helper asks the person before it gives a password for
+    /// `host`, as its last list for it said; no list, no.
+    func asksBeforeFilling(_ host: String) -> Bool { asksToFill[host] ?? false }
 
     /// One login's password: the helper asks Touch ID first.
     func password(host: String, user: String) async throws -> String {
@@ -692,7 +696,7 @@ actor ApplePasswords {
         if let user { body["username"] = user }
         let answer = try await request(16, qid: "CmdGetOneTimeCodes", url: nil, body, wait: 10)
         let locked = answer["RequiresUserAuthenticationToFill"] as? Bool ?? false
-        return Self.codes(in: answer, host: host, locked: locked)
+        return Self.codes(in: answer, host: host, locked: locked, also: await Self.related(in: answer, host: host))
     }
 
     /// One code as it is now (cmd 17): the helper asks Touch ID first when
@@ -701,23 +705,43 @@ actor ApplePasswords {
         guard canFillCodes, let host = URL(string: page)?.host() else { throw Failure.notPaired }
         let answer = try await request(17, qid: "CmdDidFillOneTimeCode", url: nil,
                                        ["ACT": 2, "TYPE": "oneTimeCodes", "frameURLs": [page], "username": user], wait: 120)
-        let found = Self.codes(in: answer, host: host, locked: false)
+        let found = Self.codes(in: answer, host: host, locked: false, also: await Self.related(in: answer, host: host))
         guard let code = found.first(where: { $0.user.lowercased() == user.lowercased() })?.code,
               !code.isEmpty else { throw Failure.unexpected }
         return code
     }
 
-    /// Time codes for this site only: a code for another one is never offered.
-    static func codes(in answer: [String: Any], host: String, locked: Bool) -> [Code] {
+    /// Time codes for this site only: a code for another one is never offered,
+    /// but for a site in `related`, one that says this page is its own.
+    static func codes(in answer: [String: Any], host: String, locked: Bool, also related: Set<String> = []) -> [Code] {
         let site = Vault.registrable(host)
         return entries(answer).compactMap { entry in
             let source = entry["source"] as? String ?? "totp"
             let domain = entry["domain"] as? String ?? host
-            guard source == "totp", Vault.registrable(domain) == site else { return nil }
+            let owner = Vault.registrable(domain)
+            guard source == "totp", owner == site || related.contains(owner) else { return nil }
             let digits = (entry["code"] as? String ?? "").filter { !$0.isWhitespace }
             let code = locked || !digits.allSatisfy(\.isNumber) || !(4...10).contains(digits.count) ? "" : digits
             return Code(code: code, user: entry["username"] as? String ?? "", site: site)
         }
+    }
+
+    /// The other sites in an answer whose related origins file lists this
+    /// page (RelatedOrigins): a code kept for twitter.com years ago is X's
+    /// on x.com, as Passwords itself offers it there. Asked only when the
+    /// answer holds a time code for another site.
+    static func related(in answer: [String: Any], host: String) async -> Set<String> {
+        let site = Vault.registrable(host)
+        let others = Set(entries(answer).compactMap { entry -> String? in
+            guard (entry["source"] as? String ?? "totp") == "totp", let domain = entry["domain"] as? String else { return nil }
+            let owner = Vault.registrable(domain)
+            return owner == site ? nil : owner
+        })
+        var found: Set<String> = []
+        for other in others.sorted() where await RelatedOrigins.allow(rp: other, origin: "https://\(host.lowercased())") {
+            found.insert(other)
+        }
+        return found
     }
 
     /// A new sign-in, kept in Passwords. The helper may ask with its own
@@ -756,32 +780,33 @@ struct AppleVault: ManagerAdapter {
     /// Paired by now, asking for the code if it has to.
     var connect: @Sendable () async -> Bool = { await ApplePasswordsPairing.connected() }
 
-    /// Logins filled from Passwords this launch, by site and name: their
-    /// sign-in isn't offered back to it.
-    @MainActor static var filled: Set<String> = []
-
     func state() async -> ManagerVault.State {
-        let entitled = await MainActor.run { Preferences.entitledToPasskeys }
+        let entitled = await MainActor.run { ApplePasswords.mayRun }
         guard entitled, ApplePasswords.helper != nil else { return .noTool }
-        if await ApplePasswords.shared.macOSRefused { return .failed("macOS didn't let Passwords' helper run") }
-        if await ApplePasswords.shared.isPaired { return .open }
-        await MainActor.run { ApplePasswordsPairing.offer() }
+        if await passwords.macOSRefused { return .failed("macOS didn't let Passwords' helper run") }
+        if await passwords.isPaired { return .open }
+        // Not paired by this helper yet: the code is asked for at the sign-in
+        // box the person is at (ApplePasswordsPairing.offer), not wherever
+        // a page reads the managers.
         return .needsApproval
     }
 
     func logins(for host: String) async throws -> [ManagerVault.Login] {
-        guard await ApplePasswords.shared.isPaired else { throw ManagerVault.Failure.locked }
-        let found = try await ApplePasswords.shared.logins(for: host)
+        guard await passwords.isPaired else { throw ManagerVault.Failure.locked }
+        let found = try await passwords.logins(for: host)
         return ManagerVault.tidy(found.map { entry in
             ManagerVault.Login(provider: provider, item: host + "\u{1}" + entry.user, title: entry.title ?? entry.user,
                                user: entry.user, urls: entry.sites.isEmpty ? [host] : entry.sites)
         })
     }
 
+    /// Proven when the helper said it asks before filling from this site:
+    /// it put its own Touch ID up for this password, as it does for the
+    /// iCloud Passwords extension in Chrome.
     func secret(_ login: ManagerVault.Login) async throws -> ManagerVault.Secret {
         let host = String(login.item.split(separator: "\u{1}").first ?? "")
-        let password = try await ApplePasswords.shared.password(host: host, user: login.user)
-        return ManagerVault.Secret(user: login.user, password: password)
+        let password = try await passwords.password(host: host, user: login.user)
+        return ManagerVault.Secret(user: login.user, password: password, proven: await passwords.asksBeforeFilling(host))
     }
 
     func save(host: String, user: String, password: String) async throws {
@@ -805,19 +830,33 @@ struct AppleVault: ManagerAdapter {
 /// alone. The sixth digit connects; a wrong code brings a new one.
 @MainActor
 enum ApplePasswordsPairing {
-    /// Asked this launch already: not again until Yab starts again or the
-    /// helper drops the session.
-    private static var asked = false
+    /// The sites whose sign-in box the person answered Not Now on, for as
+    /// long as this helper's session lasts: their boxes don't ask again.
+    /// Another site's sign-in does: that Not Now was for that page, and
+    /// connected Apple Passwords stays reachable without a restart, as
+    /// Apple's own extension offers its pairing on every box until paired.
+    private static var declined: Set<String> = []
     private static var busy = false
 
-    static func ended() { asked = false }
+    static func ended() { declined = [] }
 
-    /// From a sign-in box's first look this launch.
-    static func offer() {
-        guard !asked, !busy else { return }
-        asked = true
-        Task { await pair() }
+    /// From a sign-in box on `host` the person is at (Browser.onField, an
+    /// agent's sign_in on its tab): the code, unless this site said Not Now
+    /// already or a card is up.
+    static func offer(on host: String) {
+        let site = Vault.registrable(host)
+        guard !busy, !declined.contains(site) else { return }
+        Task {
+            // What the box last read may be older than a pairing just made.
+            guard !(await ApplePasswords.shared.isPaired) else { return }
+            if await pairing() == .declined { declined.insert(site) }
+        }
     }
+
+    /// How an ask ended: paired; the person said Not Now (or Escape); or it
+    /// never reached them (a card already up, the helper didn't start),
+    /// which says nothing about the site.
+    enum Outcome { case paired, declined, unasked }
 
     /// Whether the helper is paired, after asking for the code when it isn't
     /// (and after the card already up, if one is).
@@ -829,8 +868,13 @@ enum ApplePasswordsPairing {
     }
 
     /// Settings' Connect: asked whatever happened before.
-    static func pair() async {
-        guard !busy else { return }
+    @discardableResult
+    static func pair(registerConnection: Bool = false) async -> Bool {
+        await pairing(registerConnection: registerConnection) == .paired
+    }
+
+    private static func pairing(registerConnection: Bool = false) async -> Outcome {
+        guard !busy else { return .unasked }
         busy = true
         defer { busy = false }
         // Keep the source window before Passwords brings its own forward.
@@ -840,24 +884,12 @@ enum ApplePasswordsPairing {
             try await ApplePasswords.shared.beginPairing()
         } catch {
             ApplePasswords.log.error("pairing didn't start: \(String(describing: error), privacy: .public)")
-            return
+            return .unasked
         }
         let model = CodeModel()
         let anchor = QuestionAnchor(processIdentifier: await ApplePasswords.shared.processIdentifier)
         let enablement = Question.Enablement()
-        let question = Question(
-            title: "Connect Apple Passwords",
-            detail: "Enter the code Passwords shows.",
-            icon: PasswordManagers.icon(PasswordManagers.apple),
-            ownIcon: true,
-            yes: "",
-            no: "Not Now",
-            place: .plain,
-            anchor: anchor,
-            window: sourceNumber,
-            accessory: AnyView(PairingField(model: model)),
-            enablement: enablement
-        )
+        let question = connectQuestion(model: model, anchor: anchor, window: sourceNumber, enablement: enablement)
         let questionID = question.id
         model.done = { [weak model, weak anchor] code in
             Task { @MainActor in
@@ -887,6 +919,12 @@ enum ApplePasswordsPairing {
         }
         let connected = await Questions.shared.ask(question)
         if connected {
+            // Extension redirects connect only after the code was accepted,
+            // before clearing caches and reopening the page's password list.
+            if registerConnection {
+                PasswordManagers.Connections.shared.connect(PasswordManagers.apple, mode: .you, pair: false)
+            }
+            declined = []
             PasswordManagers.quietAppleExtension()
             ManagerVaults.forget()
             ManagerLists.shared.forget()
@@ -895,6 +933,26 @@ enum ApplePasswordsPairing {
         } else {
             await ApplePasswords.shared.cancelPairing()
         }
+        return connected ? .paired : .declined
+    }
+
+    /// Shared with the isolated bench scene; the native pairing question's
+    /// content, field, buttons and layout remain the Settings flow's own.
+    static func connectQuestion(model: CodeModel, anchor: QuestionAnchor? = nil, window: Int? = nil,
+                         enablement: Question.Enablement = Question.Enablement()) -> Question {
+        Question(
+            title: "Connect Apple Passwords",
+            detail: "Enter the code Passwords shows.",
+            icon: PasswordManagers.icon(PasswordManagers.apple),
+            ownIcon: true,
+            yes: "",
+            no: "Not Now",
+            place: .plain,
+            anchor: anchor,
+            window: window,
+            accessory: AnyView(PairingField(model: model)),
+            enablement: enablement
+        )
     }
 
     final class CodeModel: ObservableObject {
@@ -977,7 +1035,12 @@ enum ApplePasswordsPairing {
             .onTapGesture { focused = true }
             .animation(.spring(response: 0.34, dampingFraction: 0.86), value: code)
             .animation(Motion.settle, value: focused)
-            .onAppear { if editable { focused = true } }
+            // The field is the card's default focus, the one SwiftUI gives
+            // as the card first takes focus. Setting `focused` on appear, as
+            // this did, came while the card's panel was still off screen:
+            // SwiftUI's focus bridge then gave the window's first key view,
+            // with keyboard navigation on the Not Now button (R2564).
+            .defaultFocus($focused, true)
             .onReceive(Timer.publish(every: 0.53, on: .main, in: .common).autoconnect()) { now in
                 lit = now.timeIntervalSince(typedAt) < 0.53 ? true : !lit
             }

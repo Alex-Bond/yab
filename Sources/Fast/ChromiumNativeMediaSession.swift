@@ -39,7 +39,7 @@ struct ChromiumNativeMediaSession: Equatable {
         album = hidden ? "" : String((p["album"]?.string ?? "").prefix(1024))
         let images: [JSONValue]
         if case .array(let rows)? = p["artwork"] { images = Array(rows.prefix(8)) } else { images = [] }
-        artwork = hidden ? [] : images.compactMap { row in
+        artwork = hidden ? [] : NowPlayingArtwork.ranked(images).compactMap { row in
             guard let raw = row["src"].string, raw.count <= 8192, let url = URL(string: raw),
                   ["http", "https", "data"].contains(url.scheme?.lowercased() ?? ""),
                   url.user == nil, url.password == nil else { return nil }

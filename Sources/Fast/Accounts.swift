@@ -21,8 +21,9 @@ struct AccountList: View {
     var body: some View {
         let rows = asked.list
         VStack(alignment: .leading, spacing: 0) {
-            // Every row, scrolling past a few; All Passwords stays under them.
-            let upper = rows.filter { $0.kind != .all }
+            // Every row, scrolling past a few; the footer rows (another
+            // device's passkey, All Passwords) stay under them.
+            let upper = rows.filter { !$0.footer }
             if Double(upper.count) > Self.shown {
                 ScrollViewReader { reader in
                     ThreadScrollView(.vertical) { list(upper, in: rows) }
@@ -36,7 +37,11 @@ struct AccountList: View {
             } else {
                 list(upper, in: rows)
             }
-            if let all = rows.firstIndex(where: { $0.kind == .all }) { row(rows[all], at: all) }
+            ForEach(Array(rows.enumerated()).filter { $0.element.footer }, id: \.element.id) { at, item in
+                // A hairline over another device's passkey, setting the footer apart.
+                if case .otherPasskey = item.kind, !upper.isEmpty { FieldListSeparator() }
+                row(item, at: at)
+            }
             // A page over plain http: one quiet line, not a red band.
             if asked.insecure {
                 HStack(spacing: 6) {
@@ -108,6 +113,12 @@ struct AccountList: View {
             FieldListWell(glyph: "key")
         case .email:
             FieldListWell(glyph: "envelope")
+        case .passkey:
+            // The site's own mark: the page's icon on a passkey.
+            LoginSiteMark(host: item.host, badge: nil)
+        case .otherPasskey:
+            // The device icon.
+            FieldListWell(glyph: item.glyph ?? "iphone")
         }
     }
 }

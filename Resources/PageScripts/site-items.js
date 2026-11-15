@@ -153,9 +153,16 @@
     svg.style.overflow = 'visible';
     svg.style.flex = '0 0 auto';
     var w = String(Math.round(stroke * 100) / 100);
-    svg.innerHTML = '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="' + w + '"></circle>'
-      + '<path fill="currentColor" opacity="0" style="transform-origin:12px 16px" d="' + HAND + '"></path>'
-      + '<path fill="none" stroke="currentColor" stroke-width="' + w + '" stroke-linecap="round"></path>';
+    function part(tag, attrs) {
+      var node = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (key) { node.setAttribute(key, attrs[key]); });
+      svg.appendChild(node);
+      return node;
+    }
+    part('circle', { cx: '12', cy: '12', r: '9', fill: 'none', stroke: 'currentColor', 'stroke-width': w });
+    var hand = part('path', { fill: 'currentColor', opacity: '0', d: HAND });
+    hand.style.transformOrigin = '12px 16px';
+    part('path', { fill: 'none', stroke: 'currentColor', 'stroke-width': w, 'stroke-linecap': 'round' });
     svg.__face = { gx: 0, gy: 0, open: 1, tick: 0, hand: 0, mode: 'rest', t0: 0, blink: -1, look: [-0.7, 0.3], until: 0 };
     draw(svg, 1, 0);
     return svg;

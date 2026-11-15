@@ -411,7 +411,7 @@ if (!window.__yabCall) window.__yabCall = (function () {
       label.appendChild(said);
       var handMark = document.createElement('div');
       handMark.className = 'hand';
-      handMark.innerHTML = HAND;
+      handMark.appendChild(handArt());
       handMark.style.display = 'none';
       box.appendChild(handMark);
       var react = document.createElement('div');
@@ -727,7 +727,26 @@ if (!window.__yabCall) window.__yabCall = (function () {
   // Meet's own controls and notices, found by what they are rather than
   // what they say: Material icon names, jsname and data attributes,
   // words only last and in English.
-  var HAND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><path d="M8 13V6.5a1.5 1.5 0 0 1 3 0V11V4.5a1.5 1.5 0 0 1 3 0V11V5.5a1.5 1.5 0 0 1 3 0V12V8.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-.8a6.5 6.5 0 0 1-4.8-2.4l-3.2-4.25a1.6 1.6 0 0 1 2.5-2.08L8 13.7"/></svg>';
+  // DOM construction works even when the page allows no Trusted Types policy.
+  function handArt() {
+    var ns = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(ns, 'svg');
+    var attrs = { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+                  'stroke-width': '2.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    Object.keys(attrs).forEach(function (key) { svg.setAttribute(key, attrs[key]); });
+    svg.style.width = svg.style.height = '100%';
+    var path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', 'M8 13V6.5a1.5 1.5 0 0 1 3 0V11V4.5a1.5 1.5 0 0 1 3 0V11V5.5a1.5 1.5 0 0 1 3 0V12V8.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-.8a6.5 6.5 0 0 1-4.8-2.4l-3.2-4.25a1.6 1.6 0 0 1 2.5-2.08L8 13.7');
+    svg.appendChild(path);
+    return svg;
+  }
+  function textElement(tag, text, css, className) {
+    var el = document.createElement(tag);
+    el.textContent = text;
+    if (css) el.style.cssText = css;
+    if (className) el.className = className;
+    return el;
+  }
   var ICONS = 'i, .google-symbols, .material-icons-extended, .material-symbols-outlined, .google-material-icons';
   // An icon by its name: in a button (that button), or not in one.
   function icon(names, root, inButton) {
@@ -1145,7 +1164,11 @@ if (!window.__yabCall) window.__yabCall = (function () {
         var said = place + '/' + hs + '/' + view;
         if (t.handSaid !== said) {
           t.handSaid = said;
-          t.hand.innerHTML = '<i style="width:' + pt(icon) + ';height:' + pt(icon) + '">' + HAND + '</i>' + (place ? '<span>' + place + '</span>' : '');
+          var art = document.createElement('i');
+          art.style.width = art.style.height = pt(icon);
+          art.appendChild(handArt());
+          t.hand.replaceChildren(art);
+          if (place) t.hand.appendChild(textElement('span', place));
         }
         var h = t.hand.style;
         h.height = h.minWidth = pt(hs);
@@ -1168,7 +1191,9 @@ if (!window.__yabCall) window.__yabCall = (function () {
         t.react.style.width = t.react.style.height = pt(size * 1.5);
         t.react.style.fontSize = pt(size);
         t.react.style.background = t.video ? 'radial-gradient(closest-side, rgba(0,0,0,.45), transparent)' : 'transparent';
-        t.react.innerHTML = r.emoji + (r.n > 1 ? '<span class="times" style="font-size:' + pt(10) + ';padding:0 ' + pt(4) + ';border-radius:' + pt(7) + ';height:' + pt(14) + '">×' + r.n + '</span>' : '');
+        t.react.textContent = r.emoji;
+        if (r.n > 1) t.react.appendChild(textElement('span', '×' + r.n,
+          'font-size:' + pt(10) + ';padding:0 ' + pt(4) + ';border-radius:' + pt(7) + ';height:' + pt(14), 'times'));
         if (r.fresh) {
           var life = Math.max(300, r.until - now) + 'ms';
           t.react.style.setProperty('--life', life);
@@ -1195,7 +1220,9 @@ if (!window.__yabCall) window.__yabCall = (function () {
       var says = (off ? off.emoji : '') + '|' + more.more;
       if (more.said !== says) {
         more.said = says;
-        more.box.innerHTML = (off ? '<span class="cheer on" style="font-size:' + pt(14) + '">' + off.emoji + '</span>' : '') + '<span>+' + more.more + '</span>';
+        more.box.replaceChildren();
+        if (off) more.box.appendChild(textElement('span', off.emoji, 'font-size:' + pt(14), 'cheer on'));
+        more.box.appendChild(textElement('span', '+' + more.more));
       }
     }
     reacting.forEach(function (r, key) { if (r.until <= now) reacting.delete(key); });
@@ -1226,13 +1253,14 @@ if (!window.__yabCall) window.__yabCall = (function () {
     var said = history.map(function (h) { return h.name + '|' + h.text + '|' + h.mine; }).join('\n') + view;
     if (threadEl.dataset.said !== said) {
       threadEl.dataset.said = said;
-      threadEl.innerHTML = '';
+      threadEl.replaceChildren();
       history.slice(-6).forEach(function (h) {
         var m = document.createElement('div');
         m.className = 'm' + (h.mine ? ' mine' : '');
         m.style.fontSize = pt(11.5); m.style.lineHeight = '1.3';
         m.style.padding = pt(5) + ' ' + pt(9); m.style.borderRadius = pt(12);
-        m.innerHTML = (h.mine ? '' : '<b style="font-size:' + pt(10) + '">' + escape(h.name) + '</b>') + escape(h.text);
+        if (!h.mine) m.appendChild(textElement('b', h.name, 'font-size:' + pt(10)));
+        m.appendChild(document.createTextNode(h.text));
         threadEl.appendChild(m);
       });
     }
@@ -1289,15 +1317,27 @@ if (!window.__yabCall) window.__yabCall = (function () {
     }
     var el = b.el, own = placed.get(b.key), at = own || placed.get('+more');
     var away = !own;
-    var face = '';
-    if (away) {
-      var initial = escape((b.name.charAt(0) || '·').toUpperCase());
-      face = '<span class="mini" style="width:' + pt(14) + ';height:' + pt(14) + ';font-size:' + pt(7) + ';margin-right:' + pt(5) +
-        (b.face ? ';background-image:url(&quot;' + escape(b.face) + '&quot;)' : '') + '">' + (b.face ? '' : initial) + '</span>';
+    var said = JSON.stringify([away, b.name, b.face, b.lines, view]);
+    if (b.said !== said) {
+      var title = textElement('b', '', 'font-size:' + pt(10.5) + ';margin-bottom:' + pt(1));
+      if (away) {
+        var face = textElement('span', b.face ? '' : (b.name.charAt(0) || '·').toUpperCase(),
+          'width:' + pt(14) + ';height:' + pt(14) + ';font-size:' + pt(7) + ';margin-right:' + pt(5), 'mini');
+        if (b.face) face.style.backgroundImage = 'url(' + JSON.stringify(b.face) + ')';
+        title.appendChild(face);
+      }
+      title.appendChild(document.createTextNode(b.name + (b.lines.length > 1 ? ' · ' + b.lines.length : '')));
+      el.replaceChildren(title);
+      b.lines.slice(-2).forEach(function (line, i) {
+        if (i) {
+          var rule = document.createElement('hr');
+          rule.style.margin = pt(4) + ' 0';
+          el.appendChild(rule);
+        }
+        el.appendChild(document.createTextNode(line));
+      });
+      b.said = said;
     }
-    var words = '<b style="font-size:' + pt(10.5) + ';margin-bottom:' + pt(1) + '">' + face + escape(b.name) + (b.lines.length > 1 ? ' · ' + b.lines.length : '') + '</b>' +
-      b.lines.slice(-2).map(escape).join('<hr style="margin:' + pt(4) + ' 0">');
-    if (b.said !== words + view) { el.innerHTML = words; b.said = words + view; }
     el.style.fontSize = pt(12); el.style.lineHeight = '1.3';
     el.style.padding = pt(7) + ' ' + pt(10);
     el.style.borderRadius = pt(14);
@@ -1355,9 +1395,7 @@ if (!window.__yabCall) window.__yabCall = (function () {
     if (b.fresh) { el.classList.add('in'); b.fresh = false; }
     b.box = { x: x, top: y !== null ? y : winH - bottom - tall, w: w, h: tall };
   }
-  function escape(text) {
-    return String(text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
-  }
+
 
   // Two lines along the bottom, one in a small window, over the band,
   // 18 in from the sides; the newest words, the speaker's name dimmer
@@ -1376,12 +1414,18 @@ if (!window.__yabCall) window.__yabCall = (function () {
     caps.style.bottom = pt(lift ? lift : 14);
     var roll = caps.firstChild;
     if (!roll) { roll = document.createElement('div'); caps.appendChild(roll); }
-    var words = (now.who ? '<em>' + escape(now.who.split(' ')[0]) + ':</em> ' : '') + escape(now.said);
+    var words = JSON.stringify([now.who, now.said]);
     if (words !== capsWords) {
       // The same speaker going on rolls; someone else starts afresh.
       var fresh = now.who !== capsWho || !now.said.startsWith(capsSaid.slice(0, 12));
       capsWords = words; capsWho = now.who; capsSaid = now.said;
-      roll.innerHTML = '<span style="padding:' + pt(1) + ' ' + pt(4) + ';border-radius:' + pt(3) + '">' + words + '</span>';
+      var lineEl = textElement('span', '', 'padding:' + pt(1) + ' ' + pt(4) + ';border-radius:' + pt(3));
+      if (now.who) {
+        lineEl.appendChild(textElement('em', now.who.split(' ')[0] + ':'));
+        lineEl.appendChild(document.createTextNode(' '));
+      }
+      lineEl.appendChild(document.createTextNode(now.said));
+      roll.replaceChildren(lineEl);
       var high = roll.getBoundingClientRect().height, line = 17 * pageW() / Math.max(view, 1);
       if (!fresh && capsHigh && high > capsHigh + line / 2 && !still()) {
         roll.animate([{ transform: 'translateY(' + (high - capsHigh) + 'px)' }, { transform: 'none' }], { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)' });
@@ -1557,11 +1601,19 @@ if (!window.__yabCall) window.__yabCall = (function () {
   function wait(ms) { return new Promise(function (done) { setTimeout(done, ms); }); }
   // Kept from every look: WebKit hides the ids again once a capture is
   // ended from outside the page, and the menus' ids stay what they were.
-  var kinds = {};
+  var kinds = Object.create(null);
   async function known() {
     var list = [];
     try { list = await navigator.mediaDevices.enumerateDevices(); } catch (e) {}
-    list.forEach(function (d) { if (d.deviceId) kinds[d.deviceId] = d.kind; });
+    // Chromium uses "default" (and "communications") for both input
+    // and output. An ambiguous id cannot tell us which menu this is;
+    // only the menu's unambiguous physical devices can vote.
+    list.forEach(function (d) {
+      if (!d.deviceId) return;
+      if (Object.prototype.hasOwnProperty.call(kinds, d.deviceId) && kinds[d.deviceId] !== d.kind) {
+        kinds[d.deviceId] = null;
+      } else { kinds[d.deviceId] = d.kind; }
+    });
     return kinds;
   }
   function named(item) {

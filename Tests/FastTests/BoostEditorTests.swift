@@ -68,7 +68,7 @@ struct BoostEditorTests {
         var look = BoostEditorLook(); look.amount = 0.4
         store.set(look, host: "www.example.test", profile: AddonProfiles.of(tab))
         let script = try #require(store.script(for: tab, host: "www.example.test"))
-        #expect(script.source.contains("location.hostname.toLowerCase() === \"www.example.test\""))
+        #expect(script.source.contains(" === \"www.example.test\""))
         #expect(store.script(for: tab, host: "example.test") == nil)
         let privateTab = Tab(shy: true, bench: true)
         privateTab.restore(url: tab.address!, title: "Private")
@@ -99,5 +99,45 @@ struct BoostEditorTests {
         let result = try #require(try await BoostJavaScript.call("return await (\(checks))", on: web) as? [String: Any])
         #expect(result["passed"] as? Bool == true, "\(result)")
         #expect((result["checks"] as? Int ?? 0) >= 30)
+    }
+
+    /// A long page: Dark's colour move and a font's blur are drawn only on
+    /// screen. Every element of a 20 000-element page got its own animation,
+    /// each read between writes, and the page stopped for seconds (#1908).
+    @Test func motionsOnALongPageStayOnScreen() async throws {
+        _ = NSApplication.shared
+        let sourceRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let script = try String(contentsOf: sourceRoot.appendingPathComponent("Resources/PageScripts/boost-editor.js"), encoding: .utf8)
+        let sections = (0..<1500).map { "<section><h2>Part \($0)</h2><p id=p\($0)>Words of part \($0), <a href=#>a link</a>.</p></section>" }.joined()
+        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = .nonPersistent()
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 900, height: 800), configuration: configuration)
+        defer { web.stopLoading() }
+        web.loadHTMLString("<!doctype html><body style='background:#fff;color:#222'>\(sections)</body>", baseURL: URL(string: "https://long.example.test/"))
+        var ready = false
+        for _ in 0..<100 {
+            ready = (try? await BoostJavaScript.evaluate("document.readyState==='complete'&&!!document.getElementById('p1499')", on: web)) as? Bool == true
+            if ready { break }; try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(ready)
+        _ = try await BoostJavaScript.evaluate(script, on: web)
+        let result = try #require(try await BoostJavaScript.call("""
+            const E = window.__yabEditor, far = document.getElementById('p1499');
+            const look = {enabled:true,hue:205,amount:0,mode:'',font:0,size:1,spacing:1,photos:1,css:'',hidden:[]};
+            const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+            E.apply(look);
+            E.apply({...look, mode:'dark'}, 'scheme');
+            const scheme = E.report().animations, schemeFar = far.getAnimations().length;
+            E.apply({...look, mode:'dark', font:2}, 'font');
+            const font = E.report().animations, fontFar = far.getAnimations().length + far.parentElement.querySelector('h2').getAnimations().length;
+            return {reduced, scheme, schemeFar, font, fontFar, nodes: document.getElementsByTagName('*').length};
+            """, on: web) as? [String: Any])
+        if result["reduced"] as? Bool == true { return }
+        let nodes = result["nodes"] as? Int ?? 0
+        #expect(nodes > 4000, "\(result)")
+        #expect((result["scheme"] as? Int ?? .max) > 0, "\(result)")
+        #expect((result["scheme"] as? Int ?? .max) < 400, "\(result)")
+        #expect(result["schemeFar"] as? Int == 0, "\(result)")
+        #expect((result["font"] as? Int ?? .max) < 400, "\(result)")
+        #expect(result["fontFar"] as? Int == 0, "\(result)")
     }
 }

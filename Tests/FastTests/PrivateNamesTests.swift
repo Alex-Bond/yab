@@ -46,8 +46,6 @@ struct PrivateNamesTests {
         ]),
         // A call's voice plays without a click on call sites (CallSound).
         ("WKWebpagePreferences", ["_setAutoplayPolicy:"]),
-        // bench pdf-hud only: WebKit's bar along a PDF's foot, shown.
-        ("WKPDFHUDView", ["_setVisible:"]),
         // BFTrace answers WebKit's diagnostic logging; the runtime has no
         // protocol for it to be looked up in, so the answers are asked here.
         ("Fast.BFTrace", [
@@ -82,7 +80,8 @@ struct PrivateNamesTests {
         ]),
         ("WKHTTPCookieStore", ["_setCookieAcceptPolicy:completionHandler:", "_getCookiesForURL:completionHandler:"]),
         ("WKUserContentController", ["_userStyleSheets", "_addUserStyleSheet:", "_addContentRuleList:extensionBaseURL:"]),
-        ("WKNavigationAction", ["_isUserInitiated"]),
+        // A server's redirect is not a person's click (WebKitPageEvents.byPerson, 44df06f4b).
+        ("WKNavigationAction", ["_isUserInitiated", "_isRedirect"]),
         // Hidden pages' garbage collected while the Mac is idle (Garbage).
         ("WKProcessPool", ["_garbageCollectJavaScriptObjectsForTesting"]),
         ("_WKWebsiteDataStoreConfiguration", ["generalStorageDirectory"]),
@@ -118,11 +117,17 @@ struct PrivateNamesTests {
 
     /// Optional PDF getters: Fill & Sign reads the PDF from WebKit when
     /// present, and otherwise fetches the original with the tab's cookies.
-    static let optional = ["_dataForDisplayedPDF", "_suggestedFilenameForDisplayedPDF",
+    static let optional = ["_getMainResourceDataWithCompletionHandler:", "_suggestedFilenameForDisplayedPDF",
                            // macOS 15 only: 26 sets obscuredContentInsets instead (PageFullScreenMove).
                            "_setTopContentInset:",
                            // Download Audio asks only when the page answers it (PageView.audioDocument).
                            "_isDisplayingStandaloneMediaDocument"]
+
+    /// WebKit replaced the CALayer PDF HUD with NSButtons in macOS 27.
+    /// The bench must still be able to show it through one real interface.
+    static let alternatives: [(type: String, names: [String])] = [
+        ("WKPDFHUDView", ["_setVisible:", "show"]),
+    ]
 
     /// Class methods.
     static let classes: [(type: String, names: [String])] = [
@@ -163,6 +168,8 @@ struct PrivateNamesTests {
         ("WKUIDelegatePrivate", "_webView:saveDataToFile:suggestedFilename:mimeType:originatingURL:", Browser.self),
         // A link into a named window brings that tab forward (NamedWindowFocus, register 1661).
         ("WKUIDelegatePrivate", "_focusWebView:", Browser.self),
+        // A page's requestPointerLock() asks the site's question (#1921, c8936884a).
+        ("WKUIDelegatePrivate", "_webViewDidRequestPointerLock:completionHandler:", WebKitPageEvents.self),
     ]
 
     @Test func everyPrivateNameStillAnswers() throws {
@@ -174,6 +181,11 @@ struct PrivateNamesTests {
                     || (name == "_setDrawsBackground:" && class_respondsToSelector(cls, NSSelectorFromString("setDrawsBackground:")))
                 #expect(answers, "\(type) no longer answers \(name)")
             }
+        }
+        for (type, names) in Self.alternatives {
+            let cls = try #require(NSClassFromString(type), "\(type) is gone")
+            #expect(names.contains { class_respondsToSelector(cls, NSSelectorFromString($0)) },
+                    "\(type) no longer supports any visibility interface: \(names)")
         }
         for (type, names) in Self.classes {
             let cls: AnyClass = try #require(NSClassFromString(type), "\(type) is gone")
@@ -205,7 +217,7 @@ struct PrivateNamesTests {
         let files = try FileManager.default.contentsOfDirectory(at: sources, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "swift" }
         try #require(files.count > 100)
-        let listed = Set(Self.instances.flatMap(\.names) + Self.classes.flatMap(\.names) + Self.delegates.map(\.name) + Self.newer + Self.optional)
+        let listed = Set(Self.instances.flatMap(\.names) + Self.alternatives.flatMap(\.names) + Self.classes.flatMap(\.names) + Self.delegates.map(\.name) + Self.newer + Self.optional)
         let patterns = [
             #"NSSelectorFromString\("(_[A-Za-z][A-Za-z:]*)"\)"#,
             #"forKey(?:Path)?: "(_[A-Za-z][A-Za-z:]*)""#,

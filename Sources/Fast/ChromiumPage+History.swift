@@ -17,6 +17,21 @@ struct PageNavigationList {
         history = { [weak web] in web?.history() ?? TabHistory(entries: [], pick: { _ in }) }
     }
 
+    /// One native step is already known from CEF's state event. CDP history
+    /// supplies names and deeper destinations later, without gating a flick.
+    static func immediate(page: ChromiumPage, tab: Tab, back: Bool) -> PageNavigationList {
+        let canStep = back ? page.canGoBack : page.canGoForward
+        let from = back ? tab.fromTitle?(tab) : nil
+        let rows = Swipe.rows(canStep ? [(title: back ? "Back" : "Forward", host: "")] : [], from: from)
+        return PageNavigationList(stops: rows, address: { _ in nil }, take: { [weak page, weak tab] stop in
+            guard let tab else { return }
+            if stop.kind == .from {
+                if page?.canGoBack != true, tab.backSourceAvailable, tab.onBackAtStart?(tab) == true { return }
+                tab.onFrom?(tab)
+            } else if back { tab.back() } else { tab.forward() }
+        }, history: { TabHistory(entries: [], pick: { _ in }) })
+    }
+
     init(stops: [Stop], address: @escaping (Stop) -> URL?, take: @escaping (Stop) -> Void,
          history: @escaping () -> TabHistory) {
         self.stops = stops; self.address = address; self.take = take; self.history = history
@@ -69,9 +84,16 @@ struct ChromiumHistorySnapshot {
             switch stop.kind {
             case .page, .run:
                 guard pages.indices.contains(stop.index) else { return }
-                page?.command("history.go", ["entry": .number(Double(pages[stop.index].id))])
+                if stop.index == 0, let tab {
+                    if back { tab.back() } else { tab.forward() }
+                } else {
+                    page?.command("history.go", ["entry": .number(Double(pages[stop.index].id))])
+                }
             case .from:
-                if let tab { tab.onFrom?(tab) }
+                if let tab {
+                    if page?.canGoBack != true, tab.backSourceAvailable, tab.onBackAtStart?(tab) == true { return }
+                    tab.onFrom?(tab)
+                }
             case .search: break // DoorList opens its existing history panel.
             }
         }, history: { [weak page] in
@@ -91,6 +113,13 @@ struct ChromiumHistorySnapshot {
 extension ChromiumPage {
     func navigationHistory() async throws -> ChromiumHistorySnapshot {
         let value = try await navigationRequest("history.read")
+        return try ChromiumHistorySnapshot(value)
+    }
+
+    /// Observational only: never join the accepted input/operation queue.
+    func swipeHistory() async throws -> ChromiumHistorySnapshot {
+        let (core, id) = try await endpoint()
+        let value = try await core.request("history.read", params: ["tab": .string(id)])
         return try ChromiumHistorySnapshot(value)
     }
 }

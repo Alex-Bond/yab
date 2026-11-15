@@ -590,6 +590,7 @@ private struct ChatTurn: View, Equatable {
                     // The typing capsule itself grows into its first message.
                     let grow = arriving && !still && ChatWords.opensSaid(shown.text)
                     let words = ChatWords(text: writing == nil && notebook ? KnowPage.linked(shown.text) : shown.text, streaming: writing != nil,
+                                          partial: writing != nil && shown.state == .running,
                                           fresh: arriving, bubbles: true, grow: grow)
                         // What you can do with it once it is all written out, in its menu.
                         .modifier(ChatAnswerMenu(browser: browser, chat: chat, asked: notebook || report != nil ? nil : asked?.text, answer: shown,
@@ -1189,6 +1190,9 @@ private struct ChatCopy: View {
 struct ChatWords: View {
     let text: String
     let streaming: Bool
+    /// Real partial messages are already paced by their transport/feed. A
+    /// buffered complete message still gets the normal lump reveal.
+    var partial = false
     /// Its words' size: the column's, or the ⌘J field's a size up.
     var size: CGFloat = 13.5
     /// Words that came just now: a lump of them is written out (WriteOut).
@@ -1213,20 +1217,26 @@ struct ChatWords: View {
     @State private var inked = false
     @State private var renderedText: String?
 
-    init(text: String, streaming: Bool, size: CGFloat = 13.5, fresh: Bool = false,
+    init(text: String, streaming: Bool, partial: Bool = false, size: CGFloat = 13.5, fresh: Bool = false,
          bubbles: Bool = false, tail: Bool = true, grow: Bool = false) {
         self.text = text
         self.streaming = streaming
+        self.partial = partial
         self.size = size
         self.fresh = fresh
         self.bubbles = bubbles
         self.tail = tail
         self.grow = grow
-        let count = CodexVisualize.stripped(text).count
+        let count = fresh && !partial ? CodexVisualize.stripped(text).count : 0
         // Start before the first frame, rather than briefly drawing the
         // whole answer and erasing it again in onAppear.
         _out = State(initialValue: fresh && count > WriteOut.lump ? WriteOut(from: 0, to: count, start: Date()) : nil)
     }
+
+    /// Do not type an arriving stream a second time. Besides lagging behind
+    /// its provider, that would lay out both the full answer and its growing
+    /// prefix on every animation tick. FreshText keeps its existing ink fade.
+    private var reveal: WriteOut? { partial ? nil : out }
 
     /// Its words, Codex's markers (CodexVisualize) never among them, even
     /// while its answer is still coming in.
@@ -1234,15 +1244,15 @@ struct ChatWords: View {
 
     var body: some View {
         // Ticks only while a lump is being written out.
-        TimelineView(.animation(minimumInterval: WriteOut.tick, paused: out == nil)) { context in
+        TimelineView(.animation(minimumInterval: WriteOut.tick, paused: reveal == nil)) { context in
             let text = words
-            let shown = out.map { String(text[..<WriteOut.stop(text, at: $0.count(at: context.date))]) } ?? text
-            let writing = streaming || out != nil
+            let shown = reveal.map { String(text[..<WriteOut.stop(text, at: $0.count(at: context.date))]) } ?? text
+            let writing = streaming || reveal != nil
             // In the column the line of counts isn't said: a turn's steps
             // are never shown.
             let blocks = blocksForDisplay(shown, writing: writing)
             ZStack(alignment: .topLeading) {
-                if out != nil {
+                if reveal != nil {
                     // Reserve the whole known answer, including every later
                     // paragraph and table. Cards below it never ride down as
                     // WriteOut reveals more of text we already received.
@@ -1261,6 +1271,7 @@ struct ChatWords: View {
             if grow { growFromCapsule() }
         }
         .onChange(of: words) { old, new in
+            guard !partial else { if out != nil { out = nil }; return }
             let now = Date()
             if let going = out {
                 let at = going.count(at: now)
@@ -1271,15 +1282,18 @@ struct ChatWords: View {
                 out = WriteOut(from: old.count, to: new.count, start: now)
             }
         }
+        .onChange(of: partial) { _, partial in
+            if partial, out != nil { out = nil }
+        }
         // Written out: the words stand as any others.
         .task(id: out) {
-            guard let end = out?.end else { return }
+            guard let end = reveal?.end else { return }
             try? await Task.sleep(for: .seconds(max(0, end.timeIntervalSinceNow)))
             if !Task.isCancelled { out = nil }
         }
-        .preference(key: WritingOut.self, value: out != nil)
-        .task(id: RenderState(text: text, ready: !streaming && out == nil && (!grow || settled))) {
-            guard !streaming, out == nil, !grow || settled else { return }
+        .preference(key: WritingOut.self, value: reveal != nil)
+        .task(id: RenderState(text: text, ready: !streaming && reveal == nil && (!grow || settled))) {
+            guard !streaming, reveal == nil, !grow || settled else { return }
             // FreshText's last letters fade for 150 ms. Report readiness
             // after that frame has settled, not merely when WriteOut ends.
             if fresh {
@@ -1289,7 +1303,7 @@ struct ChatWords: View {
             guard !Task.isCancelled else { return }
             renderedText = text
         }
-        .preference(key: Rendered.self, value: renderedText == text && !streaming && out == nil && (!grow || settled) ? [text] : [])
+        .preference(key: Rendered.self, value: renderedText == text && !streaming && reveal == nil && (!grow || settled) ? [text] : [])
     }
 
     private func blocksForDisplay(_ text: String, writing: Bool) -> [Block] {
@@ -1318,7 +1332,7 @@ struct ChatWords: View {
                         let morph = !reserving && grow && !settled && part == 0
                         HStack(spacing: 0) {
                             ZStack(alignment: .topLeading) {
-                                if !reserving, grow, part == 0, out != nil, let whole = Self.first(words) {
+                                if !reserving, grow, part == 0, reveal != nil, let whole = Self.first(words) {
                                     VStack(alignment: .leading, spacing: 8) {
                                         ForEach(whole.indices, id: \.self) { ChatBlock(block: whole[$0], size: size).equatable() }
                                     }
@@ -1650,15 +1664,13 @@ struct WriteOut: Equatable {
 /// Rich text made once for each finished stretch of words.
 @MainActor
 enum RichMemo {
-    private static var memo: [String: AttributedString] = [:]
+    private static var memo = RichTextCache()
 
     static func rich(_ words: String) -> AttributedString {
-        if let known = memo[words] { return known }
-        // Its math kept out of Markdown's way, a mark in its place (MathTeX).
-        let made = AgentAnswer.rich(MathTeX.marked(words))
-        if memo.count > 400 { memo.removeAll() }
-        memo[words] = made
-        return made
+        memo.value(words) {
+            // Its math kept out of Markdown's way, a mark in its place (MathTeX).
+            AgentAnswer.rich(MathTeX.marked(words))
+        }
     }
 
     static func text(_ words: String, size: CGFloat = 13.5) -> Text { text(rich(words), size: size) }

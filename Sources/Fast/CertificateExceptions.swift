@@ -229,7 +229,11 @@ extension Tab {
     /// the endpoint excused in this tab's profile, and the page again.
     func continuePastUntrusted() {
         guard let untrusted, let exception = untrusted.exception else { return }
-        if let page = builtPage as? ChromiumPage { CertificateExceptions.allow(exception, in: page) }
+        if let page = builtPage as? ChromiumPage {
+            CertificateExceptions.allow(exception, in: page)
+            // Chrome holds the refused load three seconds for its own warning.
+            page.stopLoading()
+        }
         else if let web = webKitOnly("WebKit certificate exception context", build: false) { CertificateExceptions.allow(exception, in: web) }
         else { return }
         self.untrusted = nil

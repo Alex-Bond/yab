@@ -10,7 +10,8 @@ struct AgentInventory {
 };
 static bool AgentTree(const std::shared_ptr<AgentInventory>& inventory, NSDictionary* tree,
                       NSString* parent, int depth) {
-  if (![tree isKindOfClass:NSDictionary.class] || depth >= 32 || ++inventory->nodes > 256) return false;
+  // Nodes up to Blink's frame bound (1000, as below); depth 32 is a cycle guard.
+  if (![tree isKindOfClass:NSDictionary.class] || depth >= 32 || ++inventory->nodes > 1000) return false;
   NSDictionary* frame = tree[@"frame"];
   NSString* frameID = S(frame, @"id");
   if (!frameID.length) return false;
@@ -71,7 +72,9 @@ static void AgentCollect(std::string tabID, std::shared_ptr<AgentInventory> inve
     value[@"url"] = S(inventory->frames[frameID], @"url");
     [frames addObject:value];
   }
-  if (!frames.count || frames.count > 256) { done(nil, @"Incomplete agent frame inventory"); return; }
+  // Blink's own bound on a page's frames (Page::MaxNumberOfFrames, 1000 in
+  // third_party/blink/renderer/core/page/page.cc); 256 failed pages Chrome draws.
+  if (!frames.count || frames.count > 1000) { done(nil, @"Incomplete agent frame inventory"); return; }
   done(@{@"frames": frames}, nil);
 }
 static bool AgentRequest(Tab& tab, NSString* method, NSString* request) {

@@ -29,6 +29,11 @@ import WebKit
 @MainActor
 final class ExtensionGroups {
     static let shared = ExtensionGroups()
+    private weak var logicalBrowser: Browser?
+    private var logicalProfile: String?
+    init(browser: Browser? = nil, profile: String? = nil) {
+        logicalBrowser = browser; logicalProfile = profile
+    }
     nonisolated static let portName = ExtensionShims.application + ".groups"
     /// Chrome's nine, in the order Chrome gives a new group the next one.
     nonisolated static let colors = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]
@@ -38,7 +43,11 @@ final class ExtensionGroups {
     private var ports: [String: [WKWebExtension.MessagePort]] = [:]
     private var colors: [String: String] = Store.settings.dictionary(forKey: colorsKey) as? [String: String] ?? [:]
     /// Folders an extension made and hasn't named: their title is "".
-    private var untitled: Set<UUID> = []
+    private static var untitledGroups: Set<UUID> = []
+    private var untitled: Set<UUID> {
+        get { Self.untitledGroups }
+        set { Self.untitledGroups = newValue }
+    }
     private var watch: AnyCancellable?
     private var nestWatches: [AnyCancellable] = []
     private var last: [Int: [String: Any]] = [:]
@@ -57,8 +66,13 @@ final class ExtensionGroups {
         return (Int(bytes.0) << 23 | Int(bytes.1) << 15 | Int(bytes.2) << 7 | Int(bytes.3) >> 1) + 1
     }
 
-    private var browser: Browser? { Extensions.shared.browser }
-    private var row: [Tab] { Extensions.shared.visibleTabs }
+    private var browser: Browser? { logicalBrowser ?? Extensions.shared.browser }
+    private var row: [Tab] {
+        if let browser = logicalBrowser, let profile = logicalProfile {
+            return browser.tabs.filter { $0.chromiumProfile == profile && !$0.shy }
+        }
+        return Extensions.shared.visibleTabs
+    }
 
     /// The folders of the row, by group id.
     private func groups() -> [Int: Nest] {
@@ -87,7 +101,6 @@ final class ExtensionGroups {
     // MARK: - the extension's calls
 
     func run(_ api: String, _ args: [Any], context: WKWebExtensionContext) throws -> Any? {
-        let first = args.first
         // chrome.tabGroups is the permission's; tabs.group and ungroup are
         // any extension's, as in Chromium. The permission named in the
         // manifest, or optional and granted since: OneTab asks for it at its
@@ -99,6 +112,13 @@ final class ExtensionGroups {
                 throw ExtensionShims.Unsupported(what: "The extension never asked for \u{201C}tabGroups\u{201D}")
             }
         }
+        return try runLogical(api, args)
+    }
+
+    /// CEF has already checked the extension API permission and profile.
+    func runLogical(_ api: String, _ args: [Any]) throws -> Any? {
+        colors = Store.settings.dictionary(forKey: Self.colorsKey) as? [String: String] ?? [:]
+        let first = args.first
         switch api {
         case "tabGroups.membership":
             return snapshot()

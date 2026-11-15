@@ -244,6 +244,7 @@ final class BrowserWindows: ObservableObject {
         menuWatches[id] = nil
         entries[id] = Entry(browser: browser, window: window)
         if !order.contains(id) { order.append(id) }
+        ChromiumTabGroups.shared.changed()
         NativeControl.shared.observe(browser)
         if #available(macOS 15.4, *) { Extensions.all.forEach { $0.follow(browser) } }
         // In the Window menu and the Dock's list of windows, as the others
@@ -386,6 +387,9 @@ final class BrowserWindows: ObservableObject {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.title = "Yab"
+        // Its space's own Light or Dark before the first frame: the colors
+        // are drawn in the shades of the window's appearance.
+        if purpose == .normal { window.wearLookMode(of: browser.prefs) }
         window.contentView = WindowFloorLayout.host(ContentView(browser: browser)
             .windowFloor(browser))
         let frameName = frameAutosaveName(for: id)
@@ -435,6 +439,7 @@ final class BrowserWindows: ObservableObject {
             if shown.closed.count > 10 { shown.closed.removeFirst(shown.closed.count - 10) }
             entries[id] = nil
             order.removeAll { $0 == id }
+            ChromiumTabGroups.shared.changed()
             if #available(macOS 15.4, *) { Extensions.all.forEach { $0.unfollow(entry.browser) } }
             entry.browser.letGo()
             for token in watches.removeValue(forKey: id) ?? [] { NotificationCenter.default.removeObserver(token) }
@@ -449,6 +454,21 @@ final class BrowserWindows: ObservableObject {
         focusedID = order.last(where: { entries[$0]?.window.isVisible == true })
         menuRevision += 1
         save()
+    }
+
+    /// A unit test's window let go entirely, the first one too, which a
+    /// close keeps: the next suite starts with no window of this one's
+    /// sharing its rows (KeptEverywhere.first).
+    func forgetForTests(_ browser: Browser) {
+        guard Store.unitTests, let id = entries.first(where: { $0.value.browser === browser })?.key else { return }
+        entries[id] = nil
+        order.removeAll { $0 == id }
+        ChromiumTabGroups.shared.changed()
+        closedAt[id] = nil
+        for token in watches.removeValue(forKey: id) ?? [] { NotificationCenter.default.removeObserver(token) }
+        menuWatches[id] = nil
+        fullscreen[id] = nil
+        if focusedID == id { focusedID = nil }
     }
 
     func flushAll() {

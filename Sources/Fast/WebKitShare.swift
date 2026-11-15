@@ -6,14 +6,16 @@ extension PageHandle {
 }
 
 extension Browser {
-    /// WebKit's question before its own picker. Reached only from the
-    /// box's way to macOS's picker, or from a page that got past Yab's
-    /// getDisplayMedia: the screens' picker, which switches to windows.
+    /// WebKit's question before its own picker: 1 opens it on the screens,
+    /// 2 on the windows, 0 tells the page no. Only the box's way to macOS's
+    /// picker leaves a prompt here. A page that got past Yab's getDisplayMedia
+    /// is told no: macOS's picker covers every screen and takes every press,
+    /// and nobody asked for it.
     @objc(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:)
     func requestDisplayCapture(_ web: WKWebView, origin: WKSecurityOrigin, frame: WKFrameInfo, systemAudio: Bool,
                                decisionHandler: @escaping (Int) -> Void) {
         Share.shared.systemAsked += 1
-        decisionHandler(Share.shared.prompts.removeValue(forKey: ObjectIdentifier(web)) ?? 1)
+        decisionHandler(Share.shared.prompts.removeValue(forKey: ObjectIdentifier(web)) ?? 0)
     }
     // Compatibility for the extension system's raw offscreen document.
     func shareAsked(page web: WKWebView, _ body: [String: Any], _ frame: WKFrameInfo) {

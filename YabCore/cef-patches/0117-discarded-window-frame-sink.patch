@@ -1,0 +1,230 @@
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -38,6 +38,8 @@
+ #include "base/no_destructor.h"
+ #include <map>
+ #include <cmath>
++#include <cstdio>
++#include <cstdlib>
+ #include "base/command_line.h"
+ #include "cef/libcef/browser/chrome/chrome_browser_host_impl.h"
+ #include "cef/libcef/browser/browser_platform_delegate.h"
+@@ -233,6 +235,21 @@
+   void WebContentsDestroyed() override {
+     observation_.Reset();
+     Observe(nullptr);
++  }
++  // A discarded page draws nothing until it is shown and restored, so its
++  // hidden producer window gives up its compositor's frame sink meanwhile:
++  // a sleeping tab keeps no Display, frame resources or CALayer tree in the
++  // GPU process. The next show takes the frame sink back.
++  void WasDiscarded() override {
++    auto* host = bound() ? views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
++                               observation_.GetSource()->GetNativeWindow())
++                         : nullptr;
++    if (getenv("YAB_TRACE_FRAME_SINK")) {
++      fprintf(stderr, "YabFrameSink: discarded bound=%d host=%d\n", bound(), !!host);
++    }
++    if (host) {
++      host->ReleaseCompositorWhileHidden();
++    }
+   }
+  private:
+   friend class content::WebContentsUserData<ExternalVisibility>;
+--- a/components/viz/host/host_frame_sink_manager.cc
++++ b/components/viz/host/host_frame_sink_manager.cc
+@@ -137,6 +137,19 @@
+   }
+ }
+ 
++void HostFrameSinkManager::DestroyRootCompositorFrameSink(
++    const FrameSinkId& frame_sink_id) {
++  auto it = frame_sink_data_map_.find(frame_sink_id);
++  if (it == frame_sink_data_map_.end() || !it->second.is_root ||
++      !it->second.has_created_compositor_frame_sink || !frame_sink_manager_) {
++    return;
++  }
++  it->second.has_created_compositor_frame_sink = false;
++  display_hit_test_query_.erase(frame_sink_id);
++  frame_sink_manager_->DestroyCompositorFrameSink(frame_sink_id,
++                                                  base::DoNothing());
++}
++
+ void HostFrameSinkManager::InvalidateFrameSinkId(
+     const FrameSinkId& frame_sink_id,
+     HostFrameSinkClient* client,
+--- a/components/viz/host/host_frame_sink_manager.h
++++ b/components/viz/host/host_frame_sink_manager.h
+@@ -153,6 +153,13 @@
+   // closed. `callback` if non-null is called after invalidation is done on
+   // service side, or if there are errors before service side is able to
+   // complete the invalidation. Thus it is safe use `callback` for clean up.
++  // Destroys the root CompositorFrameSink of `frame_sink_id` (its Display and
++  // what that holds in the GPU process) and keeps the FrameSinkId and its
++  // hierarchy registered, so a later CreateRootCompositorFrameSink() starts a
++  // new one, as after a lost GPU context. For a hidden window whose
++  // ui::Compositor gave up its widget (Yab, CEF 0117).
++  void DestroyRootCompositorFrameSink(const FrameSinkId& frame_sink_id);
++
+   void InvalidateFrameSinkId(const FrameSinkId& frame_sink_id,
+                              HostFrameSinkClient* client,
+                              base::OnceClosure callback);
+--- a/ui/compositor/recyclable_compositor_mac.cc
++++ b/ui/compositor/recyclable_compositor_mac.cc
+@@ -4,10 +4,15 @@
+ 
+ #include "ui/compositor/recyclable_compositor_mac.h"
+ 
++#include <cstdio>
++#include <cstdlib>
++
++
+ #include "base/functional/bind.h"
+ #include "base/no_destructor.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "components/viz/common/features.h"
++#include "components/viz/host/host_frame_sink_manager.h"
+ #include "ui/accelerated_widget_mac/window_resize_helper_mac.h"
+ #include "ui/base/ui_base_features.h"
+ #include "ui/compositor/compositor.h"
+@@ -63,6 +68,32 @@
+   compositor_suspended_lock_ = nullptr;
+ }
+ 
++void RecyclableCompositorMac::ReleaseFrameSink() {
++  if (frame_sink_released_ || compositor_.IsVisible()) {
++    return;
++  }
++  frame_sink_released_ = true;
++  compositor_.ReleaseAcceleratedWidget();
++  // Releasing the widget drops this side's frame sink only: viz keeps the root
++  // CompositorFrameSink, its Display and the last frame's resources until it
++  // is told, as it is when a lost context creates the next one.
++  if (auto* manager = compositor_.context_factory()->GetHostFrameSinkManager()) {
++    manager->DestroyRootCompositorFrameSink(compositor_.frame_sink_id());
++  }
++  if (getenv("YAB_TRACE_FRAME_SINK")) {
++    fprintf(stderr, "YabFrameSink: root frame sink destroyed\n");
++  }
++}
++
++void RecyclableCompositorMac::RestoreFrameSink() {
++  if (!frame_sink_released_) {
++    return;
++  }
++  frame_sink_released_ = false;
++  compositor_.SetAcceleratedWidget(
++      accelerated_widget_mac_->accelerated_widget());
++}
++
+ void RecyclableCompositorMac::UpdateSurface(
+     const gfx::Size& size_pixels,
+     float scale_factor,
+--- a/ui/compositor/recyclable_compositor_mac.h
++++ b/ui/compositor/recyclable_compositor_mac.h
+@@ -46,6 +46,14 @@
+   void Suspend();
+   void Unsuspend();
+ 
++  // An invisible compositor can give up its frame sink: the GPU process then
++  // destroys its Display, the Display's resources and its CALayer tree, and
++  // the layer tree host its tiles, as after a lost GPU context. Restoring
++  // reconnects the same widget and the next frame rebuilds them.
++  void ReleaseFrameSink();
++  void RestoreFrameSink();
++  bool frame_sink_released() const { return frame_sink_released_; }
++
+   // Update the compositor's surface information, if needed.
+   void UpdateSurface(const gfx::Size& size_pixels,
+                      float scale_factor,
+@@ -69,6 +77,7 @@
+   std::unique_ptr<ui::AcceleratedWidgetMac> accelerated_widget_mac_;
+   ui::Compositor compositor_;
+   std::unique_ptr<ui::CompositorLock> compositor_suspended_lock_;
++  bool frame_sink_released_ = false;
+ };
+ 
+ }  // namespace ui
+--- a/ui/views/cocoa/native_widget_mac_ns_window_host.h
++++ b/ui/views/cocoa/native_widget_mac_ns_window_host.h
+@@ -280,6 +280,14 @@
+   bool EnableExternalHosting();
+   bool externally_hosted() const { return externally_hosted_; }
+   bool SetExternalHostFocus(bool focused);
++  // An externally hosted window whose page was discarded: while it stays
++  // hidden its compositor holds no frame sink, so it keeps nothing in the GPU
++  // process (its Display, the last frame's resources and CALayer tree). Chrome
++  // keeps a discarded tab in a window that goes on showing other tabs; here
++  // each tab has its window, and its last frame stayed for as long as the tab
++  // slept. The next show restores the frame sink and ends this; a capture
++  // holding the window visible only defers it.
++  void ReleaseCompositorWhileHidden();
+ 
+   void SetVisibilityState(remote_cocoa::mojom::WindowVisibilityState new_state);
+ 
+@@ -576,6 +584,7 @@
+   std::vector<uint8_t> state_restoration_data_;
+   bool is_visible_ = false;
+   bool externally_hosted_ = false;
++  bool release_compositor_while_hidden_ = false;
+   // This tracks -[NSWindow isOnActiveSpace].
+   bool is_on_active_space_ = false;
+   bool target_fullscreen_state_ = false;
+--- a/ui/views/cocoa/native_widget_mac_ns_window_host.mm
++++ b/ui/views/cocoa/native_widget_mac_ns_window_host.mm
+@@ -5,6 +5,8 @@
+ #include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
+ 
+ #include <algorithm>
++#include <cstdio>
++#include <cstdlib>
+ #include <tuple>
+ #include <utility>
+ 
+@@ -1169,6 +1171,17 @@
+   const bool was_layer_visible = layer()->visible();
+   layer()->SetVisible(visible);
+   if (visible) {
++    // Shown again (or captured): the frame sink comes back first
++    // (ReleaseCompositorWhileHidden), and the compositor it was taken from was
++    // made invisible for it. Only a show ends the release; a capture's end
++    // gives the frame sink up again.
++    if (is_visible_) {
++      release_compositor_while_hidden_ = false;
++    }
++    if (compositor_->frame_sink_released()) {
++      compositor_->RestoreFrameSink();
++      compositor_->compositor()->SetVisible(true);
++    }
+     if (base::FeatureList::IsEnabled(
+             views::features::kNotifyCompositorOfWindowVisibilityOnMacOs)) {
+       compositor_->compositor()->SetVisible(true);
+@@ -1185,6 +1198,28 @@
+             views::features::kNotifyCompositorOfWindowVisibilityOnMacOs)) {
+       compositor_->compositor()->SetVisible(false);
+     }
++    if (release_compositor_while_hidden_) {
++      compositor_->compositor()->SetVisible(false);
++      compositor_->ReleaseFrameSink();
++    }
++  }
++}
++
++void NativeWidgetMacNSWindowHost::ReleaseCompositorWhileHidden() {
++  // A capture (a picture of the page asked as it went to sleep) may still hold
++  // the compositor visible: the release then waits for the capture's end
++  // (OnVideoCaptureLockDestroyed).
++  if (getenv("YAB_TRACE_FRAME_SINK")) {
++    fprintf(stderr, "YabFrameSink: release asked hosted=%d compositor=%d visible=%d captures=%u\n",
++            externally_hosted_, !!compositor_, is_visible_, video_capture_count_);
++  }
++  if (!externally_hosted_ || !compositor_ || is_visible_) {
++    return;
++  }
++  release_compositor_while_hidden_ = true;
++  UpdateCompositorVisibility();
++  if (getenv("YAB_TRACE_FRAME_SINK")) {
++    fprintf(stderr, "YabFrameSink: released=%d\n", compositor_->frame_sink_released());
+   }
+ }
+ 

@@ -517,7 +517,8 @@ struct SettingsPageView: View {
                                       askClearData: { SettingsUI.shared.confirmClearData = true },
                                       askSyncOff: { SettingsUI.shared.confirmSyncOff = true },
                                       revealRecovery: { [app] in SyncRecovery.reveal(app) },
-                                      copyRecovery: { [app] in SyncRecovery.copy(app) }, tabletLayout: app.workspace.preferences)
+                                      copyRecovery: { [app] in SyncRecovery.copy(app) },
+                                      showWelcome: { [app] in FirstRun.shared.replay(app) }, tabletLayout: app.workspace.preferences)
         ScrollViewReader { reader in
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.Settings.sectionGap) {

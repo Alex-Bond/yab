@@ -1,0 +1,15 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1941,6 +1941,12 @@
+       ":libcef_autogen_config",
+       ":libcef_includes_config",
+     ]
++
++    # Link like Chrome's own framework (//chrome:chrome_framework). The
++    # default config runs ThinLTO's link step at -O0: no cross-module
++    # inlining, whole-program devirtualization or late loop optimization.
++    configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
++    configs += [ "//build/config/compiler:thinlto_optimize_max" ]
+ 
+     # We don't link the framework so just use the path from the main executable.
+     ldflags = [

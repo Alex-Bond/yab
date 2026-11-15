@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import WebKit
 import YabCoreClient
 
 /// Chrome's own DevTools for a Chromium tab, in the card, under the card's
@@ -12,7 +13,7 @@ final class ChromiumDevFrontend {
     weak var owner: Tab?
     let tab: Tab
     let page: ChromiumPage
-    private let events = ChromiumSidePanel.Events()
+    private let events = ChromiumDevEvents()
     fileprivate(set) var ready = false
     fileprivate(set) var panels: [DevPanel] = []
     fileprivate(set) var selected = ""
@@ -294,5 +295,32 @@ struct ChromiumDevHost: NSViewRepresentable {
               !(flags == [.command, .option] && key != "f") else { return false }
         page.keyDown(with: event)
         return true
+    }
+}
+
+/// The frontend has no ordinary tab in Browser.tabs. Its file questions still
+/// belong to the window hosting the DevTools card. PageEvents' default answer
+/// is cancellation, which silently discarded Import HAR and CEF's save panel.
+@MainActor
+final class ChromiumDevEvents: NSObject, WKNavigationDelegate, WKUIDelegate, PageEvents {
+    weak var browser: Browser?
+
+    func page(_ page: any PageHandle, navigation event: PageNavigationEvent) { }
+
+    func page(_ page: any PageHandle, decide response: PageDocumentResponse,
+              reply: @escaping @MainActor (PagePolicy) -> Void) { reply(.allow) }
+
+    func page(_ page: any PageHandle, chooseFiles picker: PageFilePicker,
+              reply: @escaping @MainActor ([URL]?) -> Void) {
+        guard let browser else { reply(nil); return }
+        browser.page(page, chooseFiles: picker, reply: reply)
+    }
+
+    func page(_ page: any PageHandle, open popup: PagePopup,
+              reply: @escaping @MainActor (UUID?) -> Void) {
+        if let url = popup.action.request.url, url.scheme == "https" || url.scheme == "http", let browser {
+            _ = browser.open(url, foreground: true, atEnd: true)
+        }
+        reply(nil)
     }
 }

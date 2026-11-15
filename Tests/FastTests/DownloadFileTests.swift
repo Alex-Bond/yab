@@ -41,6 +41,33 @@ struct DownloadFileTests {
         #expect(try Data(contentsOf: target) == Data([1, 2, 3]))
     }
 
+    @Test func confirmedReplacementKeepsOldBytesUntilPublication() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("download-replace-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("existing.bin")
+        try Data("old".utf8).write(to: target)
+        let file = try DownloadFile(destination: target, root: root.appendingPathComponent("parts"), replacesExisting: true)
+        try Data("new".utf8).write(to: file.staging)
+        #expect(try Data(contentsOf: target) == Data("old".utf8))
+        #expect(try file.publish() == target)
+        file.discard()
+        #expect(try Data(contentsOf: target) == Data("new".utf8))
+    }
+
+    @Test func cancellingConfirmedReplacementPreservesExistingFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("download-replace-cancel-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("existing.bin")
+        try Data("old".utf8).write(to: target)
+        let file = try DownloadFile(destination: target, root: root.appendingPathComponent("parts"), replacesExisting: true)
+        try Data("partial".utf8).write(to: file.staging)
+        file.discard()
+        #expect(throws: (any Error).self) { try file.publish() }
+        #expect(try Data(contentsOf: target) == Data("old".utf8))
+    }
+
     @Test func collisionNeverOverwritesOrDeletesAnExistingFile() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("download-collision-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

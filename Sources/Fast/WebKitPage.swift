@@ -101,8 +101,8 @@ extension PageView: PageHandle {
 
     var contentProcess: pid_t? { Browser.process(of: self) }
     var gpuProcess: pid_t? { Browser.gpuProcess(of: self) }
-    func setCameraCapture(_ state: PageMediaState) { setCameraCaptureState(state.webKit, completionHandler: nil) }
-    func setMicrophoneCapture(_ state: PageMediaState) { setMicrophoneCaptureState(state.webKit, completionHandler: nil) }
+    func setCameraCapture(_ state: PageMediaState) { setCameraCaptureState(state.webKit, completionHandler: {}) }
+    func setMicrophoneCapture(_ state: PageMediaState) { setMicrophoneCaptureState(state.webKit, completionHandler: {}) }
     func stopDisplayCapture() { Tab.endScreen(of: self) }
     var captureStatus: PageCaptureStatus {
         PageCaptureStatus(camera: PageMediaState(cameraCaptureState), microphone: PageMediaState(microphoneCaptureState),

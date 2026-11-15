@@ -14,12 +14,14 @@ struct AgentUserTabOwnershipTests {
         let session = Agents.shared.attach(name: "Ownership fixture")
         let user = Tab()
         let other = Tab()
+        let previousBench = Store.settings.object(forKey: "bench")
         let previousMode: AgentAsking
         let url = URL(string: "http://127.0.0.1:9/user")!
         let target = URL(string: "http://127.0.0.1:9/agent")!
 
         init(front: Bool = false, mode: AgentAsking = .auto) {
             _ = NSApplication.shared
+            Store.settings.set(true, forKey: "bench")
             previousMode = browser.prefs.agentsAsking
             browser.prefs.agentsAsking = mode
             user.restore(url: url, title: "User fixture")
@@ -52,6 +54,7 @@ struct AgentUserTabOwnershipTests {
         }
         func dispose() {
             bench.stop()
+            Store.settings.set(previousBench, forKey: "bench")
             browser.prefs.agentsAsking = previousMode
             Agents.shared.detach(session.id)
             for tab in browser.everyTab { tab.close() }

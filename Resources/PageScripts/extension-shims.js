@@ -2547,15 +2547,39 @@
   if (chrome.downloads && chrome.downloads.onChanged?.listeners instanceof Set &&
       typeof chrome.downloads.download === "function") {
     const downloads = chrome.downloads;
-    const names = ["onCreated", "onChanged", "onErased"];
+    const names = ["onCreated", "onChanged", "onErased", "onDeterminingFilename"];
     const listening = () => names.some((name) => downloads[name].listeners.size > 0);
     let cursor = null, polling = false;
-    const starting = new Set();
+    let filenameRegistration = Promise.resolve();
+    const starting = new Set(), notifications = [];
+    const deliverNotifications = () => {
+      if (starting.size) return;
+      for (const { name, value } of notifications.splice(0)) {
+        for (const listener of [...(downloads[name]?.listeners || [])]) {
+          try { listener(value); } catch (error) { queueMicrotask(() => { throw error; }); }
+        }
+      }
+    };
+    const determineFilename = ({ request, item }) => {
+      const listeners = [...downloads.onDeterminingFilename.listeners];
+      let answered = false;
+      const suggest = (suggestion) => {
+        if (answered) return;
+        answered = true;
+        native("downloads.filenameSuggestion", [{ request, filename: suggestion?.filename }]).catch(() => {});
+      };
+      // Chrome permits one filename listener per extension. Returning true
+      // holds its reply for an asynchronous suggest(); unload cancels natively.
+      try {
+        if (!listeners.length || listeners[0](item, suggest) !== true) suggest();
+      } catch (error) { suggest(); queueMicrotask(() => { throw error; }); }
+    };
     const poll = async () => {
       if (polling || !listening()) return;
       polling = true;
       let misses = 0;
       try {
+        await filenameRegistration;
         while (listening()) {
           let reply;
           try {
@@ -2568,34 +2592,38 @@
           }
           if (!reply) break;
           cursor = reply.seq;
-          // Not before a download started here has its id: Chrome answers
-          // download() before it tells of the download's changes, and
-          // SingleFile waits for "complete" on the id it was given, so a
-          // page saved in an instant was told before it knew the id, and
-          // its button stayed at "Save progress: 100%". Five seconds at
-          // most, for a download() that never answers.
-          const until = Date.now() + 5000;
-          while (starting.size && Date.now() < until) {
-            await Promise.race([Promise.allSettled([...starting]), new Promise((resolve) => setTimeout(resolve, until - Date.now()))]);
-            await new Promise((resolve) => setTimeout(resolve, 0));
+          // Naming is part of download(), so it must be answered before
+          // waiting for that download() promise to resolve.
+          for (const entry of reply.events || []) {
+            if (entry.name === "onDeterminingFilename") determineFilename(entry.value);
           }
-          for (const { name, value } of reply.events || []) {
-            for (const listener of [...(downloads[name]?.listeners || [])]) {
-              try { listener(value); } catch (e) { setTimeout(() => { throw e; }); }
-            }
-          }
+          // Keep ordinary notifications until download() has supplied its
+          // id, while continuing to receive the naming requests it depends on.
+          notifications.push(...(reply.events || []).filter(entry => entry.name !== "onDeterminingFilename"));
+          deliverNotifications();
         }
       } finally { polling = false; }
       if (background && !listening()) native("downloads.events", [{ stop: true }]).catch(() => {});
     };
     for (const name of names) {
-      const target = downloads[name], add = target.addListener;
-      put(target, "addListener", (listener) => { add(listener); Promise.resolve().then(poll); });
+      const target = downloads[name], add = target.addListener, remove = target.removeListener;
+      put(target, "addListener", (listener) => {
+        if (name === "onDeterminingFilename") {
+          if (target.listeners.size && !target.listeners.has(listener)) throw new Error("Only one onDeterminingFilename listener is allowed");
+          filenameRegistration = native("downloads.filenameListening", [true]);
+        }
+        add(listener); Promise.resolve().then(poll);
+      });
+      if (name === "onDeterminingFilename") put(target, "removeListener", (listener) => {
+        remove(listener);
+        if (!target.listeners.size) filenameRegistration = native("downloads.filenameListening", [false]);
+      });
     }
     const start = downloads.download;
     put(downloads, "download", (...args) => {
       const callback = args.length > 1 && typeof args[args.length - 1] === "function" ? args.pop() : null;
       const pending = (async () => {
+        await filenameRegistration;
         if (cursor == null) {
           try { cursor = (await native("downloads.events", [{ now: true }])).seq; } catch (e) {}
         }
@@ -2603,7 +2631,7 @@
         poll();
         return id;
       })();
-      const settled = pending.catch(() => {}).finally(() => starting.delete(settled));
+      const settled = pending.catch(() => {}).finally(() => { starting.delete(settled); deliverNotifications(); });
       starting.add(settled);
       if (!callback) return pending;
       pending.then((id) => callback(id), (error) => withLastError(error, callback));
@@ -4509,9 +4537,10 @@
       const tabs = list.filter(isTab);
       grouped(tabs, groupMembers);
       const waits = [];
-      // Which folder each is in, asked of the browser where the worker's
-      // port doesn't keep it.
-      if (groupsAllowed && !groupsLive && tabs.length) {
+      // The port reports group events asynchronously. Its index snapshot can
+      // still precede a tab insertion when query() completes. Read membership
+      // for this result before exposing group IDs to the extension.
+      if (groupsAllowed && tabs.length) {
         waits.push(native("tabGroups.membership", []).then((v) => grouped(tabs, v && v.members), () => {}));
       }
       const blind = seesTabs ? tabs.filter((t) => !t.url && t.index >= 0) : [];
@@ -4592,6 +4621,21 @@
   // where Chrome answers false. The ones yab answers itself are
   // yab's to grant: those a manifest names are granted, optional
   // ones are asked for.
+  // chrome.alarms.create has returned a Promise since Chrome 111.
+  // Older WebKit returns void: Jam 5.96 chains .then() during startup,
+  // throws, and never updates the site-access state its popup reads (#1526).
+  // Keep native scheduling and errors. A read queued after the void call
+  // waits for the native creation before resolving, without scheduling twice.
+  if (chrome.alarms && typeof chrome.alarms.create === "function") {
+    const alarms = chrome.alarms, create = alarms.create.bind(alarms);
+    put(alarms, "create", function (...args) {
+      const result = create(...args);
+      if (typeof args[args.length - 1] === "function" || (result && typeof result.then === "function")) return result;
+      const name = typeof args[0] === "string" ? args[0] : "";
+      return alarms.get(name).then(() => undefined);
+    });
+  }
+
   if (chrome.permissions) {
     const webkit = new Set(["activeTab", "alarms", "clipboardWrite", "contextMenus", "cookies", "declarativeNetRequest",
       "declarativeNetRequestFeedback", "declarativeNetRequestWithHostAccess", "menus", "nativeMessaging", "scripting",

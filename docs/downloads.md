@@ -51,7 +51,10 @@ the pointer:
 - **Under way:** the row says progress in words, in whole megabytes so it
   doesn't flicker: "144 of 452 MB · 2 min", and a thin line along the foot
   of the kind's icon fills as it comes.
-  Stop Download is in its context menu. A failed download says
+  At its end, a tab's cross cancels it, as Arc's row has; its context
+  menu says Cancel, Chrome's word. Cancelled, the file goes from the folder
+  with its "name.yabdownload" and its piece, as Chromium deletes its
+  .crdownload (feedback #2007). A failed download says
   "Couldn't download", with Try Again and Remove in its context menu.
 - **Done:** a click opens the file. With the pointer on the row, a plate
   stands under it 4 points round the picture, curved concentric with it

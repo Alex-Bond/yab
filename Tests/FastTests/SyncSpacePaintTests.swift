@@ -313,6 +313,67 @@ struct SyncSpacePaintTests {
         #expect(wears(browser.prefs, Self.red))
     }
 
+    @Test func activeProfileChangeRetainsPinIdentity() throws {
+        let previousCurrent = Spaces.current
+        let world = try World()
+        let browser = Browser()
+        defer { world.close(); browser.letGo(); Spaces.current = previousCurrent }
+        let id = UUID()
+        browser.tabs.forEach { $0.close() }
+        browser.spaces = world.spaces + [Space(id: id, name: "Pinned profile", icon: "📌", ownSignIns: false)]
+        Spaces.write(browser.spaces)
+        browser.spaceID = id
+        browser.pinsShared = false // This fixture checks a per-Space pin.
+        let page = Store.file("profile-pin-" + id.uuidString + ".html")
+        try "<title>Kept pin</title>".write(to: page, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: page) }
+        let pin = Tab(later: Spaces.store(for: id))
+        pin.restore(url: page, title: "Kept pin")
+        pin.pin = "P"
+        browser.showRow([pin], active: pin.id)
+        browser.setSpaceSignIns(id, own: true)
+        let back = try #require(browser.tabs.first)
+        #expect(back.id == pin.id)
+        #expect(back.pin == "P")
+        #expect(browser.activeID == pin.id)
+        #expect(pin.gone)
+    }
+
+    @Test func unchangedSyncedMembershipKeepsImportProvenance() throws {
+        let world = try World(); defer { world.close() }
+        var local = world.spaces
+        local[1].ownSignIns = true
+        local[1].signedInAs = "Arc:Profile 1"
+        Spaces.write(local)
+        try deliver(world, replacing: local, withSettings: false)
+        #expect(Spaces.read().first { $0.id == Self.otherID }?.signedInAs == "Arc:Profile 1")
+        local[1].signInWith = UUID()
+        try deliver(world, replacing: local, withSettings: false)
+        #expect(Spaces.read().first { $0.id == Self.otherID }?.signedInAs == nil)
+    }
+
+    @Test func remoteProfileLinkAndExplicitClearReachEveryWindow() throws {
+        let world = try World(); defer { world.close() }
+        let first = world.browser(Self.otherID)
+        let second = world.browser(Self.otherID)
+        var edited = world.spaces
+        edited[1].ownSignIns = true
+        edited[1].signInWith = Self.emptyID
+        edited[2].ownSignIns = true
+        try deliver(world, replacing: edited, withSettings: false)
+        #expect(first.space.profileID == Self.emptyID)
+        #expect(second.space.profileID == Self.emptyID)
+        #expect(Spaces.store(for: Self.otherID) === Spaces.store(for: Self.emptyID))
+        edited[1].signInWith = nil
+        try deliver(world, replacing: edited, withSettings: false)
+        #expect(first.space.signInWith == nil)
+        #expect(second.space.signInWith == nil)
+        #expect(first.space.profileID == Self.otherID)
+        #expect(Spaces.store(for: Self.otherID) !== Spaces.store(for: Self.emptyID))
+        #expect(first.space.paint == Self.green)
+        #expect(second.space.paint == Self.green)
+    }
+
     @Test func ownEditsStillSaveAfterwards() throws {
         let world = try World(); defer { world.close() }
         let browser = world.browser(Space.firstID)

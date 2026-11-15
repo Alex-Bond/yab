@@ -25,8 +25,14 @@ enum ManagerVaults {
     /// open, or being unlocked by it, with no manager's extension on in
     /// Yab. One that is on has the box to itself (fieldOwner): Yab never
     /// hides an extension's icon or menu to draw its own list instead.
-    static var listed: [String] {
-        guard PasswordManagers.fieldOwner == nil else { return [] }
+    static var listed: [String] { listed(owner: PasswordManagers.fieldOwner) }
+
+    /// The same on this tab: a private one that no extension reaches lists
+    /// them beside nobody's (PasswordManagers.fieldOwner(on:)).
+    static func listed(on tab: Tab) -> [String] { listed(owner: PasswordManagers.fieldOwner(on: tab)) }
+
+    private static func listed(owner: Installed?) -> [String] {
+        guard owner == nil else { return [] }
         return readable.filter { lastState[$0] == .open || ManagerLists.shared.unlocking[$0] != nil }
     }
 
@@ -46,26 +52,55 @@ enum ManagerVaults {
     /// as it is, for the list to say so.
     static func look(_ host: String, fresh: Bool = false) async -> [Found] {
         let key = Vault.registrable(host)
-        if !fresh, let kept = recent[key], Date().timeIntervalSince(kept.at) < 30 { return kept.found }
+        let managers = readable
+        if !fresh, let kept = recent[key],
+           stillTrue(true, at: kept.at, states: Dictionary(kept.found.map { ($0.provider, $0.state) }, uniquingKeysWith: { a, _ in a }),
+                     readable: managers) {
+            return kept.found
+        }
         var out: [Found] = []
-        for id in readable {
+        var complete = true
+        for id in managers {
             guard let adapter = ManagerVault.adapter(id) else { continue }
             var state = await adapter.state()
             if state == .locked, let opened = await unlock(id, adapter) { state = opened }
             var logins: [ManagerVault.Login] = []
             if state == .open {
-                logins = (try? await adapter.logins(for: host)) ?? []
+                if let read = try? await adapter.logins(for: host) { logins = read } else { complete = false }
             } else if state == .needsApproval, fresh, let read = try? await adapter.logins(for: host) {
                 // 1Password's app asks the person on the first read: only
                 // when they asked for the list (`fresh`), never on focus.
                 logins = read
                 state = .open
             }
+            // An agent's sign-in with Apple Passwords not paired yet: the
+            // code asked for, as the person's own box does (Browser.onField).
+            if id == PasswordManagers.apple, state == .needsApproval { ApplePasswordsPairing.offer(on: host) }
+            if !answered(state) { complete = false }
             lastState[id] = state
             out.append(Found(provider: id, state: state, logins: logins))
         }
-        recent[key] = (Date(), out)
+        // Only a real answer is kept: a list that timed out or a tool that
+        // failed is asked again next time, not remembered as nothing here.
+        recent[key] = complete ? (Date(), out) : nil
         return out
+    }
+
+    /// A state that is an answer: the manager said what it is. A failure
+    /// (the tool didn't answer, said something unknown) is not one.
+    static func answered(_ state: ManagerVault.State) -> Bool {
+        if case .failed = state { return false }
+        return true
+    }
+
+    /// Whether what was read for a site at `at` still holds: every manager
+    /// gave a real answer, less than 30 seconds ago, the same managers are
+    /// read now and none has been seen in another state since.
+    static func stillTrue(_ complete: Bool, at: Date, states: [String: ManagerVault.State], readable: [String],
+                          now: Date = Date(), seen: [String: ManagerVault.State]? = nil) -> Bool {
+        guard complete, now.timeIntervalSince(at) < 30, Set(states.keys) == Set(readable) else { return false }
+        let seen = seen ?? lastState
+        return states.allSatisfy { id, state in seen[id].map { $0 == state } ?? true }
     }
 
     /// Each manager's state as last seen, for the list to know whom to ask.
@@ -93,21 +128,41 @@ enum ManagerVaults {
         recent = [:]
     }
 
+    private static func sameOrigin(_ a: URL?, _ b: URL?) -> Bool {
+        guard let a, let b else { return false }
+        return a.scheme?.lowercased() == b.scheme?.lowercased() && a.host()?.lowercased() == b.host()?.lowercased() && a.port == b.port
+    }
+
     /// One login read from its manager and put into the page: Touch ID
-    /// first when Settings asks for it (Tab.fill), only into the site it
-    /// was listed for. The secret lives for this call.
-    static func fill(_ login: ManagerVault.Login, into tab: Tab, agent: Bool = false,
+    /// first when Settings asks for it (Tab.fill), unless the manager just
+    /// asked the person for it itself (Secret.proven), only into the site it
+    /// was listed for. `caret`: into the box the caret is in, another
+    /// site's frame too, for a row of the field's list, which was read for
+    /// that frame's site; the login must be that frame's site's, and
+    /// Tab.fill fills only while the caret is still in a frame of that
+    /// origin. The secret lives for this call.
+    static func fill(_ login: ManagerVault.Login, into tab: Tab, agent: Bool = false, caret: Bool = false,
                      done: @escaping @MainActor (Tab.Filled) -> Void) {
+        let target = caret ? tab.fieldAddress : tab.address
+        let frame = caret ? tab.fieldFrame : nil
         guard let adapter = ManagerVault.adapter(login.provider),
-              let host = tab.address?.host()?.lowercased(),
+              let host = target?.host()?.lowercased(),
               ManagerVault.matches(login.urls, host: host) || login.urls.isEmpty
         else { done(.gone); return }
         Task { @MainActor in
             guard let secret = try? await adapter.secret(login) else { done(.gone); return }
+            // The manager may take a while (Touch ID, an app's approval):
+            // the caret has to be where the login was matched still, the
+            // same frame, or the page at the same origin, never wherever
+            // it has gone since.
+            let now = caret ? tab.fieldAddress : tab.address
+            guard sameOrigin(now, target), !caret || tab.fieldFrame?.token === frame?.token
+            else { done(.gone); return }
             if login.provider == PasswordManagers.apple {
-                AppleVault.filled.insert(Vault.registrable(host) + "\u{1}" + (secret.user.isEmpty ? login.user : secret.user))
+                PasswordSaveDecision.remember(host: host, user: secret.user.isEmpty ? login.user : secret.user, password: secret.password)
             }
-            tab.fill(user: secret.user.isEmpty ? login.user : secret.user, password: secret.password, agent: agent) { done($0) }
+            tab.fill(user: secret.user.isEmpty ? login.user : secret.user, password: secret.password, agent: agent,
+                     caret: caret, proven: secret.proven) { done($0) }
         }
     }
 }

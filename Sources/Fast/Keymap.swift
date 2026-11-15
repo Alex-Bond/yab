@@ -556,6 +556,7 @@ enum Shortcut {
         case openAddress, copyAddress, pasteAndGo, pasteAndMatchStyle, bookmark, keepTab
         case folderWithTabs, newTabInFolder
         case copyMarkdownLink
+        case sharePage
         case back, forward, reload, hardReload, find, findNext, findPrevious, reader, darkPage, float, fillForm
         case translatePage
         case hide, zoomIn, zoomOut, actualSize, print, inspector, console, inspectElement
@@ -742,6 +743,10 @@ enum Shortcut {
             // No key unless one is chosen: ⌘D keeps the tab, as in Arc, and
             // neither Arc nor Chrome has another key for a bookmark.
             Item(.bookmark, "Bookmark this page", "bookmarks the page", nil),
+            // Tabs › Share Page…, the picker its menu item opens. No key
+            // unless one is chosen: the reporter gave Arc's Share ⌃S
+            // (register 2675), which no Yab default holds.
+            Item(.sharePage, "Share this page", "shares the page", nil),
         ]),
         Group(title: "Page", items: [
             Item(.back, "Back", "goes back", k("[")),
@@ -1009,12 +1014,17 @@ enum Shortcut {
     /// page too busy or too stuck to hand anything back, ⇧⌘V, which no page
     /// has a use for, Copy URL and Copy Markdown Link, which Arc and Dia
     /// keep over Docs' word count and Gmail's Cc (register #376), and
-    /// reading mode and the inspector, which were never the page's. ⌘S, ⌘[ and ⌘] are the page's first: a code editor saves
-    /// on ⌘S, Figma and Docs indent on ⌘[ ⌘]. A page that keeps one is told
-    /// so in the corner, and the same key again is yab's (`again`).
+    /// reading mode and the inspector, which were never the page's. The
+    /// sidebar (⌘S) and Back and Forward (⌘[ ⌘]) are Arc's ahead of the page
+    /// too: on a page that keeps every ⌘ key (evals/reserved-keys) Arc 1.172
+    /// put its sidebar away on ⌘S whatever the page did with it, and went
+    /// back and forward on ⌘[ ⌘] the page never heard, where they had been
+    /// the page's first with "Again to hide the sidebar" in the corner. ⌘F, ⌘G and ⌘Y stay the page's first, as in Arc and
+    /// Chrome.
     /// ⌘← and ⌘→ stay first, but only outside text, where they move the
     /// caret (ContentView.perform).
     static let first: Set<Action> = [
+        .column, .back, .forward,
         .newWindow, .closeWindow, .newTab, .newTabInFolder, .reopen, .privateTab, .closeTab, .closeOthers, .closeBefore, .closeAfter, .nextTab, .previousTab, .recentTab, .recentTabReverse, .openAddress, .pasteAndGo, .copyAddress, .copyMarkdownLink,
         .backArrow, .forwardArrow, .reload, .stopLoading, .hardReload, .fillForm, .closeChat, .reader, .inspector, .console, .inspectElement, .devMode, .devSheet, .measure, .capture,
         .sendFeedback, .nextSpace, .previousSpace,
@@ -1031,12 +1041,6 @@ enum Shortcut {
         first.contains(action) && hotkey.flatMap { also[$0] } == nil
     }
 
-    /// Each action's menu item, by its title, the name System Settings'
-    /// App Shortcuts knows it by (see Hotkeys).
-    /// The page's first, but said in the corner when the page keeps one,
-    /// and the same key again is yab's (ContentView.watchKept).
-    static let again: Set<Action> = [.column, .back, .forward]
-
     /// A second key an action answers to unless its key was taken away
     /// on purpose, and while nothing else was given this one (`Keymap.alias`):
     /// F12 for the inspector, the page having it first (github.dev and web IDEs go to a definition on F12);
@@ -1044,10 +1048,18 @@ enum Shortcut {
     /// #160), so the hands that learned it keep it.
     static let also: [Hotkey: Action] = [Hotkey("f12", []): .inspector, Hotkey("b", [.control, .command]): .bookmarksBar]
 
+    /// The same for the field's own keys, heard where the field asks
+    /// (Keymap.matches): ⇧⌦, fn⇧⌫ on a laptop, is Chrome's key for a
+    /// suggestion taken out of the list and the history (#2017: it did
+    /// nothing here, only ⇧⌫ did).
+    static let fieldAlso: [Hotkey: Action] = [Hotkey("⌦", .shift): .fieldForget]
+
+    /// Each action's menu item, by its title, the name System Settings'
+    /// App Shortcuts knows it by (see Hotkeys).
     private static let fixedTitles: [Action: String] = [
         .newWindow: "New Window", .blankWindow: "Blank Window", .closeWindow: "Close Window", .newTab: "New Tab", .privateTab: "New Private Window", .closeTab: "Close Tab", .reopen: "Reopen Closed Tab",
         .nextTab: "Next Tab", .previousTab: "Previous Tab", .duplicate: "Duplicate Tab", .mute: "Mute Tab",
-        .openAddress: "Open Address…", .copyAddress: "Copy URL", .copyMarkdownLink: "Copy Markdown Link", .pasteAndGo: "Paste and Go", .pasteAndMatchStyle: "Paste and Match Style", .keepTab: "Keep Tab", .folderWithTabs: "New Folder with Tabs", .newTabInFolder: "New Tab in Folder", .bookmark: "Add This Page",
+        .openAddress: "Open Address…", .copyAddress: "Copy URL", .copyMarkdownLink: "Copy Markdown Link", .sharePage: "Share Page\u{2026}", .pasteAndGo: "Paste and Go", .pasteAndMatchStyle: "Paste and Match Style", .keepTab: "Keep Tab", .folderWithTabs: "New Folder with Tabs", .newTabInFolder: "New Tab in Folder", .bookmark: "Add This Page",
         .back: "Back", .forward: "Forward", .reload: "Reload Page", .stopLoading: "Stop Loading", .hardReload: "Reload Without Cache",
         .find: "Find on Page…", .findNext: "Find Next", .findPrevious: "Find Previous", .reader: "Reading Mode", .translatePage: "Translate Page", .darkPage: "Dark Page",
         .float: "Float Video", .hide: "Hide Elements…", .zoomIn: "Zoom In",
@@ -1097,7 +1109,8 @@ enum Shortcut {
     static let system: Set<Hotkey> = [
         k("q"), k("h"), k("h", [.option, .command]), k("m"), k("m", [.option, .command]),
         k("⇥"), k("⇥", [.shift, .command]), k("`"), k("`", [.shift, .command]),
-        k("space"), k("space", [.option, .command]), Hotkey("space", .control), Hotkey("space", [.control, .option]),
+        k("space"), k("space", [.option, .command]), k("space", [.control, .command]),
+        Hotkey("space", .control), Hotkey("space", [.control, .option]),
         k("3", [.shift, .command]), k("4", [.shift, .command]), k("5", [.shift, .command]), k("6", [.shift, .command]),
         k("q", [.control, .command]), k("esc", [.option, .command]), k("/", [.shift, .command]),
         k("f", [.control, .command]),
@@ -1270,6 +1283,10 @@ final class Keymap {
                 extensionKeys += owner.asleep.flatMap { id in
                     (owner.tipFacts[id]?.keys ?? []).filter { !ExtensionCommands.off(id, $0.command) }.map(\.hotkey)
                 }
+                // And the keys Chrome gave the commands of those that run in Chromium.
+                extensionKeys += (ChromiumExtensionCommands.native(for: owner)?.items ?? []).filter(\.enabled).flatMap { item in
+                    item.commands.compactMap { ExtensionCommands.off(item.id, $0.name) ? nil : $0.hotkey }
+                }
             }
             return Self.pasteStyleKey(key, chosen: chosen, system: system,
                                       quickActions: QuickActions.shared, extensionKeys: extensionKeys)
@@ -1294,7 +1311,11 @@ final class Keymap {
 
     func matches(_ readings: [Hotkey], _ action: Shortcut.Action) -> Bool {
         guard let key = keys(action) else { return false }
-        return heard(readings) == key
+        if heard(readings) == key { return true }
+        // Its second key (`Shortcut.fieldAlso`), while it keeps its own
+        // and nothing was given that one.
+        return chosen[action.rawValue] == nil
+            && readings.contains { Shortcut.fieldAlso[$0] == action && !bound.contains($0) }
     }
 
     /// The first reading of a press that is some action's key, anywhere:
@@ -1729,7 +1750,10 @@ final class Keymap {
     /// Imports have no Overwrite confirmation, so keep `takeSeveral` false.
     func clash(_ hotkey: Hotkey, for owner: Shortcut.Action?, command: AnyObject? = nil,
                quickAction: String? = nil, snippet: String? = nil, takeSeveral: Bool = true,
-               commandAction: Command? = nil) -> Clash? {
+               commandAction: Command? = nil, extensionCommand: String? = nil) -> Clash? {
+        // An extension's command Chrome keeps ("id/command"): an extension's
+        // shortcut as much as WebKit's `command` is.
+        let command: AnyObject? = command ?? extensionCommand.map { $0 as NSString }
         if Shortcut.kept(hotkey, from: owner) { return .refused("macOS keeps this one.") }
         if let owner, Shortcut.global.contains(owner),
            hotkey.flags.intersection([.command, .option, .control]).isEmpty || KeyLayout.code(for: hotkey.key) == nil {
@@ -1771,7 +1795,7 @@ final class Keymap {
             guard other != commandAction, let key = commandCurrent[other] else { return false }
             return Self.conflicts(.duplicate, key, owner ?? .duplicate, hotkey)
         }.map { other in (other.title, { self.set(nil, forCommand: other) }) }
-        if #available(macOS 15.4, *) { owners += Self.extensionClash(hotkey, besides: command) }
+        if #available(macOS 15.4, *) { owners += Self.extensionClash(hotkey, besides: command, besidesChromium: extensionCommand) }
         let quicks = QuickActions.shared.actions.filter {
             $0.id != quickAction && $0.enabled && Hotkey(stored: $0.shortcut).map { Self.keysOverlap($0, hotkey) } == true
         }
@@ -1814,11 +1838,21 @@ final class Keymap {
     }
 
     @available(macOS 15.4, *)
-    private static func extensionClash(_ hotkey: Hotkey, besides command: AnyObject?) -> [(name: String, free: () -> Void)] {
+    private static func extensionClash(_ hotkey: Hotkey, besides command: AnyObject?,
+                                       besidesChromium: String? = nil) -> [(name: String, free: () -> Void)] {
         let extensions = Extensions.here
-        let titles = Dictionary(uniqueKeysWithValues: extensions.commandGroups().flatMap { group in
+        let groups = extensions.commandGroups()
+        let titles = Dictionary(uniqueKeysWithValues: groups.flatMap { group in
             group.commands.map { ($0.id, $0.title) }
         })
+        // The commands of those that run in Chromium, by the keys Chrome gave them.
+        let chromium = groups.flatMap { group in
+            group.commands.filter { entry in
+                entry.chromium && entry.id != besidesChromium && entry.keys.map { Self.keysOverlap($0, hotkey) } == true
+            }
+        }.map { entry -> (name: String, free: () -> Void) in
+            (entry.title, { extensions.setKey(nil, extension: entry.extensionID, command: entry.command) })
+        }
         let matches = extensions.contexts.keys.sorted().flatMap { id -> [(String, WKWebExtension.Command)] in
             guard let context = extensions.contexts[id] else { return [] }
             return context.commands.compactMap { other -> (String, WKWebExtension.Command)? in
@@ -1830,7 +1864,7 @@ final class Keymap {
         return matches.map { id, other in
             let name = titles[id + "/" + other.id] ?? (other.title.isEmpty ? other.id : other.title)
             return (name, { extensions.setKey(nil, [], for: other) })
-        }
+        } + chromium
     }
 
     /// Check every reading, the layout's key first. A mark's US Shift
@@ -1958,6 +1992,7 @@ final class Keymap {
 extension View {
     /// The menu item's key, the one chosen in Settings › Shortcuts, kept up
     /// with it.
+    @MainActor
     func shortcut(_ action: Shortcut.Action, enabled: Bool = true) -> some View {
         modifier(MenuKey(action: action, enabled: enabled))
     }
@@ -1965,7 +2000,11 @@ extension View {
 
 /// Each item watches its own key: a menu item is drawn from the commands'
 /// own graph, which a change seen only by the App doesn't reach.
-private struct MenuKey: ViewModifier {
+/// Keep construction on the actor at compile time: an assumeIsolated check
+/// here crashed inside Swift's executor lookup while SwiftUI rebuilt menus
+/// on the main thread (reports 902, 926 and 933).
+@MainActor
+struct MenuKey: ViewModifier {
     let action: Shortcut.Action
     let enabled: Bool
     @ObservedObject var slot: KeySlot
@@ -1973,7 +2012,7 @@ private struct MenuKey: ViewModifier {
     init(action: Shortcut.Action, enabled: Bool) {
         self.action = action
         self.enabled = enabled
-        slot = MainActor.assumeIsolated { Keymap.shared.slot(action) }
+        slot = Keymap.shared.slot(action)
     }
 
     func body(content: Content) -> some View {
@@ -1990,13 +2029,14 @@ private struct MenuKey: ViewModifier {
 }
 
 /// A button's visible key, driven by the same slot as its handler and menu.
+@MainActor
 struct ShortcutGlyphs: View {
     @ObservedObject private var slot: KeySlot
     let size: CGFloat
     let tint: Color?
 
     init(_ action: Shortcut.Action, size: CGFloat, tint: Color?) {
-        slot = MainActor.assumeIsolated { Keymap.shared.slot(action) }
+        slot = Keymap.shared.slot(action)
         self.size = size
         self.tint = tint
     }

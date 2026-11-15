@@ -146,6 +146,13 @@ final class PrivateLock {
     func didBecomeActive() {
         isActive = true
         preferenceChanged()
+        // An external link may arrive before the scene is active. With
+        // authentication off, no authentication callback will run its action.
+        if !requiresAuthentication, let action = pending {
+            pending = nil
+            promptPresented = false
+            action()
+        }
         if let id = successfulAttempt { received(.unlocked, for: id) }
     }
 

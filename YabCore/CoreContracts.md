@@ -1,5 +1,21 @@
 # Core runtime contracts
 
+## Extension OAuth and inspector targets
+
+`page.oauthRedirect` reports a main-frame navigation failure at the reserved
+HTTPS origin `<32-letter extension id>.chromiumapp.org`. It preserves the
+complete callback URL. Native Chromium owns `tabs.onUpdated`; the helper
+does not synthesize extension events, navigate to a replacement URL, or
+close a tab on the extension's behalf. The client settles loading without
+an error card or retry. Other origins retain normal load-failure handling.
+
+`devtools.open` normally inspects the supplied `tab`. An optional `targetId`
+can select an extension popup or worker in that tab's own extension origin
+and native browser context; a target in another profile or extension is
+rejected. Changing the target replaces the old relay. Page, tab and worker
+targets use the corresponding bundled frontend configuration, and every
+frontend retains its independent CDP session.
+
 ## Verified document readiness
 
 `tab.readiness` requires `tab`, `profile`, and optionally an exact target
@@ -50,7 +66,12 @@ mismatched opener. Background/parked profiles stay parked. Native close
 retires the local tab; helper generations reject late adoption replies.
 
 window.open and target=_blank have OnBeforePopup metadata and pass through
-the existing WindowGate policy. Extension `chrome.tabs.create` reaches the
+the existing WindowGate policy. Swift places eligible foreground user popups
+in Peek from that native creation receipt, before publishing a tab row or
+attaching navigation events. The initial URL can be blank and later script
+or server redirects keep the same native document; a navigation transition
+is not proof of the original opening intent. Explicit background and modified
+new-tab requests keep their tab disposition. Extension `chrome.tabs.create` reaches the
 default client and is adopted into the space of its own request context,
 keeping Chrome's tab (one document load, the same `chrome.tabs.get` result).
 Public CEF does not report its requested active/index/openerTabId. Own-CEF's
@@ -105,6 +126,20 @@ DevTools observer notification. A completion that sends the next command
 would otherwise nest a notification and trip Chromium's observer-list
 reentrancy check.
 
+Agent-attached callbacks must not call `GetMainFrame()`, including for logging.
+The pinned SDK can publish a native DevTools browser with no tracked frames;
+that lookup traps instead of returning null. Creating its first resource
+loader hits the same check inside CEF even without the diagnostic lookup.
+
+The DevTools card therefore starts the bundled inspector as an ordinary page
+with a tracked initial frame. Its loopback WebSocket accepts only the random
+per-window path and the DevTools origin. It exposes no HTTP discovery endpoint.
+Commands use a separate flattened target session on the inspected browser;
+message IDs are remapped, and only that session and its descendants return to
+the frontend. Closing either page shuts down the listener and detaches the
+session. The health monitor treats this card as an attached debugger, so a
+breakpoint is not reported as an unresponsive page.
+
 ## Acceptance
 
 `evals/chromium-core/job.sh` builds the actual Developer ID-signed app on the
@@ -114,3 +149,33 @@ existing Chromium-tab smoke, client tests and mapped default-WebKit suites.
 It writes SCK pictures and JSON. `lifetime.sh` runs only the parent-death
 and EOF checks against the standalone helper, with no app build. A queued job or a compiled draft is not
 feature acceptance; inspect the report and each picture before claiming it.
+
+## Session / profiles: several Spaces, one profile
+
+A Space is placement (tabs, pins and look). Its profile is a stable logical
+website-store identity, not a pointer to the mutable state of another Space.
+`ownSignIns == false` retains the original shared profile; otherwise
+`signInWith ?? id` identifies the profile. A link names the resolved identity,
+so deleting or detaching its original Space cannot move its other members.
+Detaching a member of a shared profile allocates a fresh identity. Choosing
+Its own again for an already independent profile must preserve its identity.
+
+A confirmed profile change rebuilds that Space's live and parked pages in the
+selected store, including other open windows. Tabs, pins, folders and paint
+are retained. Previous profile data must not be erased by membership changes.
+Field/history reads and writes use the logical profile too, including a
+background page after another Space is selected. The original history file
+remains the default profile's history; old mixed history is never guessed apart.
+CEF physical directories are still authorized by ChromiumPersistentProfiles;
+never substitute the placement id for the logical profile's receipt.
+
+`signInWith` is portable metadata in the shared SyncSpace schema. Explicit null
+clears an old relationship; an absent field from an older sender retains local
+import metadata. The iPhone persists the link and derives its website-store
+identity from the linked logical id, rather than from each Space's placement.
+Cookies, sessions and physical profile directories never travel in this field.
+
+Acceptance: SpaceProfileTests, SpaceLinkTests and the ready-app
+`evals/space-profiles/check.py` (Chromium): two Spaces share one HTTP session,
+a third starts signed out; Settings shows the group and picker, and sidebar
+creation opens the same page with the master Spaces toggle hidden.

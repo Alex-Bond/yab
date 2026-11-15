@@ -21,7 +21,7 @@ import CryptoKit
 
 /// One installed extension, as the list in Settings shows it.
 struct Installed: Codable, Identifiable, Equatable {
-    /// The Chrome Web Store id, or "local-…" for one loaded from a folder.
+    /// The Chrome identity; older folder installs may still have a "local-…" id.
     let id: String
     var name: String
     var version: String
@@ -30,6 +30,7 @@ struct Installed: Codable, Identifiable, Equatable {
     /// The permissions it was installed with, so an update that asks for more
     /// is asked about rather than slipped through.
     var permissions: [String]
+    var installedAt: Date? = nil
     /// Kept in the row beside the menu rather than only in it. Optional, so
     /// a list written before there was pinning still reads.
     var pinned: Bool? = nil
@@ -40,6 +41,16 @@ struct Installed: Codable, Identifiable, Equatable {
     /// it was allowed there: what more, kept off until it is turned on
     /// here and allowed. Nil for the rest.
     var wants: [String]? = nil
+    /// What its Chromium package asks for beyond what was approved, as
+    /// `ChromiumExtensionGrants.beyondApproval` writes it, still unanswered:
+    /// it comes to Chromium on a yes, and is asked about when it is turned
+    /// on. Nil for the rest (ExtensionOneList).
+    var chromeAsks: [String]? = nil
+    /// Chrome's "Allow User Scripts" (Chrome 138+), as chosen on its
+    /// Settings page: what each Chromium profile of the sign-in is set to.
+    /// Nil until chosen, off as in Chrome. WebKit's shim has no such gate:
+    /// it runs them on the install's grant.
+    var userScripts: Bool? = nil
 }
 
 @available(macOS 15.4, *)
@@ -68,6 +79,9 @@ final class Extensions: NSObject, ObservableObject {
     private static let pages = ProcessInfo.processInfo.environment["YAB_EXT_PAGES"]
 
     let controller: WKWebExtensionController
+    /// Dynamic action choices belong to this extension profile, including
+    /// while its background worker/context is asleep.
+    var popupPaths: [String: [String: String]] = [:]
     /// Whose extensions these are: nil for the sign-ins the first space
     /// keeps, which every space without its own shares, else the space
     /// with sign-ins of its own. Each is a list, a controller, storage and
@@ -313,6 +327,8 @@ final class Extensions: NSObject, ObservableObject {
             loaded = read != nil
             installedBeforeLaunch = Set(installed.map(\.id))
         }
+        let quiet = ApplePasswordExtensionRoute.disabled(installed)
+        if quiet != installed { installed = quiet; save() }
         // Written down before yab was yab, what it answers itself was
         // "fast:", and every update then read "yab:" as more than it had.
         if installed.contains(where: { $0.permissions.contains { $0.hasPrefix("fast:") } }) {
@@ -480,6 +496,21 @@ final class Extensions: NSObject, ObservableObject {
     /// The enabled ones loaded, as a launch loads them.
     func launch() async {
         guard !launchBegan else { return }
+        // A page of one of its own in a tab needs it there to draw.
+        let ownPage = BrowserWindows.shared.browsers.contains { browser in
+            (browser.tabs + browser.parkedTabs).contains { ($0.pending ?? $0.address).flatMap(Browser.extensionHost(of:)) != nil }
+        }
+        if Extensions.restsForChromium, !ownPage {
+            // Nothing waits for extensions that aren't coming yet.
+            starting = []
+            holdingFirstPages = []
+            releaseFirstPages()
+            releaseTabs()
+            Extensions.rest(self)
+            return
+        }
+        let inChromium = Extensions.restingInChromium(store).subtracting(ExtensionOneList.webKitFolders(installed))
+        starting = Set(installed.filter(\.enabled).map(\.id)).subtracting(inChromium)
         launchBegan = true
         // Before any of them starts: their workers are registered afresh.
         // A space's own sign-in's went as its store was made (`storeMade`).
@@ -498,7 +529,8 @@ final class Extensions: NSObject, ObservableObject {
             // A sign-in whose pages wait, between two of these, once those
             // this one's first pages wait for are in.
             if holdingFirstPages.isEmpty { await Extensions.launchPromoted() }
-            guard installed.contains(where: { $0.id == item.id && $0.enabled }), contexts[item.id] == nil else {
+            guard installed.contains(where: { $0.id == item.id && $0.enabled }), contexts[item.id] == nil,
+                  !inChromium.contains(item.id) else {
                 starting.remove(item.id)
                 holdingFirstPages.remove(item.id)
                 tabsWait(for: item.id)
@@ -1079,6 +1111,14 @@ final class Extensions: NSObject, ObservableObject {
         }
     }
 
+    /// Document-start scripts can connect as soon as a navigation starts.
+    /// Row/property notifications remain coalesced, but tab identity must be
+    /// in WebKit before that document runs, including pages outside the row.
+    func willLoad(_ tab: Tab) {
+        guard home[tab.id] == nil, seen(tab) else { return }
+        place()
+    }
+
     /// Every window's tabs, told: its row, its spaces parked (a switch is
     /// no closing and reopening of every tab), and its pages not in the row
     /// yet, a small window's, a peek's. Each runs the extensions' scripts,
@@ -1202,10 +1242,18 @@ final class Extensions: NSObject, ObservableObject {
         return context.value(forKey: key) != nil
     }
 
+    static func backgroundViewForTesting(_ context: WKWebExtensionContext) -> WKWebView? {
+        guard Store.testing, context.responds(to: NSSelectorFromString("_backgroundWebView")) else { return nil }
+        return context.value(forKey: "_backgroundWebView") as? WKWebView
+    }
+
     // MARK: - loading
 
     @discardableResult
     private func load(_ item: Installed) async -> Bool {
+        // At rest for Chromium (`restsForChromium`): an install or a switch
+        // turned on writes the list, and the launch that wakes these loads it.
+        if Extensions.restsForChromium, !launchBegan { return false }
         if let removal = removingData[item.id], !(await removal.task.value) { return false }
         if contexts[item.id] != nil { return true }
         if let current = loading[item.id] { return await current.value }
@@ -1240,6 +1288,7 @@ final class Extensions: NSObject, ObservableObject {
         // first launch after an update reads and rewrites every script and
         // page each extension ships, hundreds of milliseconds for a big one.
         try? await Task.detached(priority: .userInitiated) { try ExtensionShims.prepare(folder) }.value
+        try WebKitIPCBoundary.validateExtensions(at: [folder])
         return try await WKWebExtension(resourceBaseURL: folder)
     }
 
@@ -1307,6 +1356,7 @@ final class Extensions: NSObject, ObservableObject {
                     save()
                 }
             }
+            try WebKitIPCBoundary.validateExtensions(at: (Array(contexts.keys).filter { $0 != item.id } + [item.id]).map { Extensions.folder(for: $0) })
             let context = WKWebExtensionContext(for: found)
             context.uniqueIdentifier = item.id
             // The same origin every launch. WebKit picks a fresh one
@@ -1388,6 +1438,8 @@ final class Extensions: NSObject, ObservableObject {
             return
         }
         ExtensionFetch.cancel(for: context)
+        ExtensionDownloads.unloaded(id, owner: self)
+        ExtensionNative.stop(owner: context)
         trace(id, "unloaded")
         for key in Array(panelPages.keys) {
             for pageKey in Array(panelPages[key, default: [:]].keys)
@@ -1427,6 +1479,107 @@ final class Extensions: NSObject, ObservableObject {
         try? JSONEncoder().encode(installed).write(to: list, options: .atomic)
     }
 
+    // MARK: - the one list (ExtensionOneList.swift)
+
+    /// The list as the two engines' lists came together, once.
+    func joinList(_ merged: [Installed]) {
+        guard loaded else { return }
+        installed = ApplePasswordExtensionRoute.disabled(merged)
+        save()
+    }
+
+    /// One Chromium has and this list doesn't. A password manager comes in
+    /// pinned the first time, as `admit` pins one.
+    func takeNative(id: String, name: String, version: String, enabled: Bool, fromStore: Bool = true,
+                    source: URL? = nil, permissions: [String] = []) {
+        guard loaded else { return }
+        if let index = installed.firstIndex(where: { $0.id == id }) {
+            // A concurrent native list read may have adopted this folder
+            // while load() was in flight. Keep the explicitly approved source.
+            if source != nil || !permissions.isEmpty {
+                installed[index].fromStore = fromStore
+                installed[index].source = source?.path
+                installed[index].permissions = permissions
+                save()
+            }
+            return
+        }
+        let pins = Extensions.pinsOnArrival(id, pinnedBefore: Extensions.pinnedOnArrival)
+        if pins { Extensions.pinnedOnArrival.insert(id) }
+        let item = Installed(id: id, name: name, version: version, enabled: enabled && !ApplePasswordExtensionRoute.matches(id), fromStore: fromStore, permissions: permissions, installedAt: Date(), pinned: pins ? true : nil, source: source?.path)
+        if pins { installed.insert(item, at: 0) } else { installed.append(item) }
+        save()
+    }
+
+    /// What Chromium asks for beyond the approval, unanswered. `turnOff`:
+    /// a no, which leaves it listed and off until it is turned on.
+    func holdForChromium(_ id: String, asks: [String], turnOff: Bool) {
+        guard let index = installed.firstIndex(where: { $0.id == id }) else { return }
+        let next = asks.isEmpty ? nil : asks.sorted()
+        guard installed[index].chromeAsks != next || (turnOff && installed[index].enabled) else { return }
+        installed[index].chromeAsks = next
+        if turnOff, installed[index].enabled {
+            installed[index].enabled = false
+            unload(id)
+        }
+        save()
+    }
+
+    /// A yes to that question: what it asked for is approved now.
+    func allowOnChromium(_ id: String, _ grants: [String]) {
+        guard let index = installed.firstIndex(where: { $0.id == id }) else { return }
+        installed[index].permissions = Array(Set(installed[index].permissions + grants)).sorted()
+        installed[index].chromeAsks = nil
+        save()
+    }
+
+    /// WebKit's copy of one that came in on Chromium: its original package
+    /// (`source`) with the shim, as any install has it, and what WebKit
+    /// understands of it written down. It is in the list already.
+    func fillFolder(_ id: String, from source: URL) async throws {
+        let target = Extensions.folder(for: id)
+        let files = FileManager.default
+        guard !files.fileExists(atPath: target.appendingPathComponent("manifest.json").path) else { return }
+        let root = Extensions.folder
+        let staged = root.appendingPathComponent(".staging-\(id)", isDirectory: true)
+        do {
+            try await Task.detached(priority: .utility) {
+                let files = FileManager.default
+                try? files.removeItem(at: staged)
+                try files.createDirectory(at: root, withIntermediateDirectories: true)
+                try files.copyItem(at: source, to: staged)
+                try ChromiumExtensionPackages.plain(staged)
+                try ExtensionShims.prepare(staged, fresh: true)
+            }.value
+            let found = try await WKWebExtension(resourceBaseURL: staged)
+            guard !files.fileExists(atPath: target.appendingPathComponent("manifest.json").path),
+                  installed.contains(where: { $0.id == id }) else {
+                try? files.removeItem(at: staged)
+                return
+            }
+            try? files.removeItem(at: target)
+            try files.moveItem(at: staged, to: target)
+            let grants = Extensions.grants(found, in: target)
+            if let index = installed.firstIndex(where: { $0.id == id }) {
+                installed[index].permissions = Array(Set(installed[index].permissions + grants)).sorted()
+                save()
+                if installed[index].enabled { await load(installed[index]) }
+            }
+        } catch {
+            try? files.removeItem(at: staged)
+            throw error
+        }
+    }
+
+    /// What was chosen for it changed outside WebKit: put back on its
+    /// context, as a load puts it (`applyChoices`, `applyAccess`).
+    func choicesChanged(_ id: String) {
+        objectWillChange.send()
+        guard let context = contexts[id] else { return }
+        applyChoices(context)
+        applyAccess(context)
+    }
+
     // MARK: - installing
 
     /// A store link or an id, from the field in Settings or the bar that
@@ -1438,6 +1591,7 @@ final class Extensions: NSObject, ObservableObject {
             browser?.announce(Crx.Refused.notAnID.localizedDescription, mark: "exclamationmark.triangle")
             return
         }
+        if ApplePasswordExtensionRoute.intercept(id, browser: browser) { return }
         if installed.contains(where: { $0.id == id }) {
             browser?.announce("Already installed", mark: "puzzlepiece.extension")
             return
@@ -1471,6 +1625,7 @@ final class Extensions: NSObject, ObservableObject {
     /// Test-only installation from a frozen, still-verified store package.
     @discardableResult
     func installFrozen(_ id: String, at source: URL, giving: Set<String> = []) -> Bool {
+        guard !ApplePasswordExtensionRoute.intercept(id, browser: browser) else { return false }
         guard Store.testing, Crx.id(in: id) == id, !installed.contains(where: { $0.id == id }) else { return false }
         busy = id
         installErrors[id] = nil
@@ -1481,8 +1636,7 @@ final class Extensions: NSObject, ObservableObject {
                 let staged = Extensions.folder.appendingPathComponent(".staging-\(id)", isDirectory: true)
                 try await Task.detached(priority: .userInitiated) {
                     let crx = try Data(contentsOf: source)
-                    try Crx.unpack(try Crx.verifiedZip(crx, id: id), into: staged)
-                    try ExtensionShims.prepare(staged, fresh: true)
+                    try self.prepareReview(crx, id: id, into: staged)
                 }.value
                 try await admit(staged, as: id, fromStore: true, finalFolder: target,
                                 confirm: false, giving: giving)
@@ -1553,7 +1707,14 @@ final class Extensions: NSObject, ObservableObject {
             browser?.announce("That folder has no manifest.json", mark: "exclamationmark.triangle")
             return
         }
-        let id = "local-" + String(UUID().uuidString.prefix(8)).lowercased()
+        let id: String
+        do { id = try ChromiumExtensionPackages.unpackedID(source) }
+        catch { browser?.announce("Can’t read the extension manifest", mark: "exclamationmark.triangle"); return }
+        guard !ApplePasswordExtensionRoute.intercept(id, browser: browser) else { return }
+        guard !installed.contains(where: { $0.id == id }) else {
+            browser?.announce("That extension is already installed", mark: "puzzlepiece.extension")
+            return
+        }
         let staged = Extensions.folder.appendingPathComponent(".staging-\(id)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: Extensions.folder, withIntermediateDirectories: true)
@@ -1611,11 +1772,18 @@ final class Extensions: NSObject, ObservableObject {
             if let found {
                 let wants = Set(Extensions.grants(found, in: staged ?? target))
                 let more = wants.subtracting(item.permissions)
-                if !more.isEmpty {
+                var nativeMore: Set<String> = []
+                if let source = item.source,
+                   let manifest = try? ChromiumExtensionPackages.manifest(in: URL(fileURLWithPath: source)),
+                   let previous = ChromiumExtensionPackages.existingUnpacked(id),
+                   let before = try? ChromiumExtensionPackages.manifest(in: previous) {
+                    nativeMore = ChromiumExtensionGrants.required(in: manifest).subtracting(ChromiumExtensionGrants.required(in: before))
+                }
+                if !more.isEmpty || !nativeMore.isEmpty {
                     guard await ask(Question(
                         title: "\(found.displayName ?? item.name) wants more to reload",
                         detail: "Say no and the one running now stays as it is. Reloaded, it could also:",
-                        lines: Extensions.describe(found, in: staged ?? target, only: more),
+                        lines: Extensions.describe(found, in: staged ?? target, only: more) + ChromiumInstallWords.lines(nativeMore),
                         icon: ExtensionIconShape.rounded(found.icon(for: CGSize(width: 64, height: 64))),
                         yes: "Reload", no: "Not Now", place: .plain
                     )) else {
@@ -1644,8 +1812,19 @@ final class Extensions: NSObject, ObservableObject {
                 installed[index].permissions = Extensions.grants(found, in: target)
                 save()
             }
-            guard let item = installed.first(where: { $0.id == id }), item.enabled else { return }
-            let started = await load(item)
+            guard let item = installed.first(where: { $0.id == id }) else { return }
+            var nativeStarted = true
+            for native in ChromiumExtensions.profiles.values where native.joined.map({ $0.signIn == signIn }) == true {
+                do { try await native.reloadUnpacked(item) }
+                catch {
+                    native.failure = error.localizedDescription
+                    native.loadFailures[id] = "Couldn’t run in Chromium: \(error.localizedDescription)"
+                    native.compose()
+                    nativeStarted = false
+                }
+            }
+            guard item.enabled else { return }
+            let started = await load(item) && nativeStarted
             browser?.announce(started ? "\(item.name) reloaded" : "\(item.name) didn't start", mark: started ? "puzzlepiece.extension" : "exclamationmark.triangle", feedback: started ? .success : nil)
         }
     }
@@ -1923,6 +2102,12 @@ final class Extensions: NSObject, ObservableObject {
         }
     }
 
+    func setUserScripts(_ id: String, _ on: Bool) {
+        guard let index = installed.firstIndex(where: { $0.id == id }), installed[index].userScripts != on else { return }
+        installed[index].userScripts = on
+        save()
+    }
+
     func setPinned(_ id: String, _ on: Bool) {
         guard let index = installed.firstIndex(where: { $0.id == id }) else { return }
         installed[index].pinned = on
@@ -2001,6 +2186,12 @@ final class Extensions: NSObject, ObservableObject {
     @discardableResult
     func admit(_ staged: URL, as id: String, fromStore: Bool, finalFolder: URL, confirm: Bool = true, source: URL? = nil, quiet: Bool = false, giving: Set<String> = [], synced: Synced? = nil) async throws -> Bool {
         let files = FileManager.default
+        if ApplePasswordExtensionRoute.matches(id) {
+            // A sync is silent; an explicit install/import opens Connect.
+            if synced == nil { ApplePasswordExtensionRoute.intercept(id, browser: browser) }
+            try? files.removeItem(at: staged)
+            return false
+        }
         if let removal = removingData[id], !(await removal.task.value) {
             try? files.removeItem(at: staged)
             throw CocoaError(.fileWriteUnknown)
@@ -2023,6 +2214,10 @@ final class Extensions: NSObject, ObservableObject {
                 return false
             }
             given = answer.given
+        }
+        if let source, !fromStore, ChromiumExtensions.validID(id),
+           ChromiumExtensionPackages.existingUnpacked(id) == nil {
+            _ = try ChromiumExtensionPackages.prepareUnpacked(source, id: id)
         }
         // From another Mac, and removed there while this one read it: not put in.
         if let synced, !synced.wanted() {
@@ -2050,6 +2245,7 @@ final class Extensions: NSObject, ObservableObject {
         let item = Installed(
             id: id, name: name, version: found.version ?? "?", enabled: heldOff ? false : arrival?.enabled ?? true, fromStore: fromStore,
             permissions: arrival?.permissions ?? grants,
+            installedAt: installed.first(where: { $0.id == id })?.installedAt ?? Date(),
             pinned: synced.map { $0.pinned ? true : nil } ?? (pins ? true : nil),
             source: source?.path,
             wants: arrival?.wants
@@ -2088,7 +2284,8 @@ final class Extensions: NSObject, ObservableObject {
         // welcome page. One added that soon after launch waits them out.
         let early = Extensions.startingFor - Date().timeIntervalSince(made)
         if early > 0 { try? await Task.sleep(for: .seconds(early)) }
-        let started = await load(item)
+        let rests = Extensions.restsForChromium && !launchBegan
+        let started = await load(item) || rests
         if !quiet, !(flying && started) {
             browser?.announce(started ? "\(name) installed" : "\(name) didn't start", mark: started ? "puzzlepiece.extension" : "exclamationmark.triangle", feedback: started ? .success : nil)
         }
@@ -2112,6 +2309,9 @@ final class Extensions: NSObject, ObservableObject {
         /// What it may ask for later, each ticked unless unticked here.
         let extras: [Extra]
         let shortcuts: Int
+        /// Original native package; staged is only the review/WebKit copy.
+        var chromiumFolder: URL? = nil
+        var packageName: String? = nil
     }
 
     enum NotAdded: LocalizedError {
@@ -2126,52 +2326,113 @@ final class Extensions: NSObject, ObservableObject {
     }
 
     /// A store link or id, fetched and checked the way any install is.
-    func prepare(link text: String) async throws -> Candidate {
+    func prepare(link text: String, chromium: ChromiumExtensions? = nil) async throws -> Candidate {
         guard let id = Crx.id(in: text) else { throw Crx.Refused.notAnID }
+        guard !ApplePasswordExtensionRoute.intercept(id, browser: browser) else { throw CancellationError() }
         if let here = installed.first(where: { $0.id == id }) { throw NotAdded.already(here.name) }
         let staged = Extensions.folder.appendingPathComponent(".staging-\(id)", isDirectory: true)
         do {
-            let zip = try Crx.verifiedZip(try await Crx.fetch(id), id: id)
+            let data: Data
+            if chromium != nil { data = try await ChromiumExtensionPackages.fetch(id) }
+            else { data = try await Crx.fetch(id) }
+            let native = try chromium.map { _ in try ChromiumExtensionPackages.prepare(data, id: id, root: Store.file("ChromiumPackages")) }
+            let zip = try Crx.verifiedZip(data, id: id)
             try? FileManager.default.removeItem(at: staged)
             try Crx.unpack(zip, into: staged)
             try ExtensionShims.prepare(staged, fresh: true)
-            return try await candidate(id: id, staged: staged, fromStore: true, source: nil)
+            return try await candidate(id: id, staged: staged, fromStore: true, source: nil, chromium: chromium, native: native)
         } catch {
             try? FileManager.default.removeItem(at: staged)
             throw error
         }
     }
 
+    /// A chosen CRX uses the same verified package and review as a store link.
+    func prepare(package source: URL, chromium: ChromiumExtensions? = nil) async throws -> Candidate {
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: source)
+        let id = try Crx.id(inPackage: data)
+        guard !ApplePasswordExtensionRoute.intercept(id, browser: browser) else { throw CancellationError() }
+        if let here = installed.first(where: { $0.id == id }) { throw NotAdded.already(here.name) }
+        let staged = Extensions.folder.appendingPathComponent(".staging-\(id)", isDirectory: true)
+        do {
+            try prepareReview(data, id: id, into: staged)
+            let manifest = try ChromiumExtensionPackages.manifest(in: staged)
+            let eligible = Self.storeUpdateURL(manifest["update_url"] as? String)
+            let fromStore: Bool
+            if eligible {
+                // A manifest alone cannot claim the store. Ask it for this ID
+                // and authenticate its answer with the developer's same key.
+                let served = try? await ChromiumExtensionPackages.fetch(id)
+                fromStore = served.map { (try? Crx.verifiedPackage($0, id: id)) != nil } ?? false
+            } else { fromStore = false }
+            // Local packages keep an owned original folder for engine switching
+            // and restart, just like approved unpacked extensions.
+            let native = try ChromiumExtensionPackages.prepare(data, id: id, root: Store.file("ChromiumPackages"))
+            var found = try await candidate(id: id, staged: staged, fromStore: fromStore,
+                                            source: fromStore ? nil : native, chromium: chromium, native: native)
+            found.packageName = source.lastPathComponent
+            return found
+        } catch {
+            try? FileManager.default.removeItem(at: staged)
+            throw error
+        }
+    }
+
+    nonisolated static func storeUpdateURL(_ text: String?) -> Bool {
+        guard let text else { return true }
+        guard let url = URL(string: text) else { return false }
+        return ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+            && url.host?.lowercased() == "clients2.google.com"
+            && url.path == "/service/update2/crx" && url.user == nil && url.password == nil && url.port == nil
+    }
+
+    /// Shared with the fixture-only install entry point; never bypass signatures.
+    nonisolated private func prepareReview(_ data: Data, id: String, into staged: URL) throws {
+        try Crx.unpack(try Crx.verifiedZip(data, id: id), into: staged)
+        try ExtensionShims.prepare(staged, fresh: true)
+    }
+
     /// A folder with a manifest.json, copied in so moving it breaks nothing.
-    func prepare(folder source: URL) async throws -> Candidate {
+    func prepare(folder source: URL, chromium: ChromiumExtensions? = nil) async throws -> Candidate {
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
         let files = FileManager.default
         guard files.fileExists(atPath: source.appendingPathComponent("manifest.json").path) else { throw NotAdded.noManifest }
         if let here = installed.first(where: { $0.source == source.path }) { throw NotAdded.already(here.name) }
-        let id = "local-" + String(UUID().uuidString.prefix(8)).lowercased()
+        let id = try ChromiumExtensionPackages.unpackedID(source)
+        guard !ApplePasswordExtensionRoute.intercept(id, browser: browser) else { throw CancellationError() }
+        if let here = installed.first(where: { $0.id == id }) { throw NotAdded.already(here.name) }
         let staged = Extensions.folder.appendingPathComponent(".staging-\(id)", isDirectory: true)
         do {
             try files.createDirectory(at: Extensions.folder, withIntermediateDirectories: true)
             try files.copyItem(at: source, to: staged)
             try ExtensionShims.prepare(staged, fresh: true)
-            return try await candidate(id: id, staged: staged, fromStore: false, source: source)
+            let native = try chromium.map { _ in try ChromiumExtensionPackages.prepareUnpacked(source, id: id) }
+            return try await candidate(id: id, staged: staged, fromStore: false, source: source, chromium: chromium, native: native)
         } catch {
             try? files.removeItem(at: staged)
             throw error
         }
     }
 
-    private func candidate(id: String, staged: URL, fromStore: Bool, source: URL?) async throws -> Candidate {
+    private func candidate(id: String, staged: URL, fromStore: Bool, source: URL?, chromium: ChromiumExtensions? = nil, native: URL? = nil) async throws -> Candidate {
         let found = try await WKWebExtension(resourceBaseURL: staged)
+        let wants: [String]
+        if let chromium, let native { wants = try await chromium.installLines(found, folder: native) }
+        else { wants = Extensions.describe(found, in: staged) }
         return Candidate(
             id: id, fromStore: fromStore, staged: staged, source: source,
             name: found.displayName ?? id,
             version: found.displayVersion ?? found.version ?? "",
             about: found.displayDescription ?? "",
             icon: ExtensionIconShape.rounded(found.icon(for: CGSize(width: 128, height: 128))),
-            wants: Extensions.describe(found, in: staged),
+            wants: wants,
             extras: Extensions.extras(of: found),
             // Its commands are only listed on a context; this one is never loaded.
-            shortcuts: WKWebExtensionContext(for: found).commands.count
+            shortcuts: WKWebExtensionContext(for: found).commands.count,
+            chromiumFolder: native
         )
     }
 
@@ -2224,7 +2485,10 @@ final class Extensions: NSObject, ObservableObject {
         // The last one takes the puzzle out of the row the way it came.
         withAnimation(installed.count == 1 ? Motion.room : nil) { installed.removeAll { $0.id == id } }
         save()
-        if !elsewhere { try? FileManager.default.removeItem(at: Extensions.folder(for: id)) }
+        if !elsewhere {
+            try? FileManager.default.removeItem(at: Extensions.folder(for: id))
+            if let native = ChromiumExtensionPackages.existingUnpacked(id) { try? FileManager.default.removeItem(at: native) }
+        }
         forgetData(of: id, context: context)
     }
 
@@ -2392,6 +2656,7 @@ final class Extensions: NSObject, ObservableObject {
     }
 
     func setEnabled(_ id: String, _ on: Bool) {
+        if on, ApplePasswordExtensionRoute.intercept(id, browser: browser) { return }
         guard let index = installed.firstIndex(where: { $0.id == id }) else { return }
         if !on { starting.remove(id); asleep.remove(id) }
         if on, installed[index].wants != nil {
@@ -2456,12 +2721,14 @@ final class Extensions: NSObject, ObservableObject {
         guard !list.contains(host) else { return }
         Store.settings.set(list + [host], forKey: "extensions.allowed.\(id)")
         objectWillChange.send()
+        Extensions.listsChanged.send()
         if let context = contexts[id] { applyAccess(context) }
     }
 
     func disallow(_ host: String, for id: String) {
         Store.settings.set(allowed(id).filter { $0 != host }, forKey: "extensions.allowed.\(id)")
         objectWillChange.send()
+        Extensions.listsChanged.send()
         guard let context = contexts[id] else { return }
         for pattern in Extensions.patterns(for: host) { context.setPermissionStatus(.unknown, for: pattern) }
         applyAccess(context)
@@ -2471,6 +2738,7 @@ final class Extensions: NSObject, ObservableObject {
         if access == .asked { Store.settings.removeObject(forKey: "extensions.access.\(id)") }
         else { Store.settings.set(access.rawValue, forKey: "extensions.access.\(id)") }
         objectWillChange.send()
+        Extensions.listsChanged.send()
         guard let context = contexts[id] else { return }
         // The chosen sites go back to what the manifest says of them.
         for host in allowed(id) {
@@ -2615,6 +2883,14 @@ final class Extensions: NSObject, ObservableObject {
         }
     }
 
+    /// Chromium's copy is ahead: Chrome's own updater installed a newer
+    /// version from the store. This copy takes it now, by the same check and
+    /// question as the daily one, so both engines run one version.
+    func followChromium(_ id: String) {
+        guard let item = installed.first(where: { $0.id == id }), item.fromStore, item.wants == nil else { return }
+        Task { await update(item) }
+    }
+
     /// Its folder updated, by this sign-in or another: taken up again at
     /// the version there, with what that version was allowed.
     fileprivate func updated(_ id: String, version: String, grants: [String]) async {
@@ -2709,7 +2985,8 @@ final class Extensions: NSObject, ObservableObject {
            (action["default_popup"] as? String)?.contains(ExtensionShims.actionStandIn) == true {
             return url
         }
-        let named = [popupURL(for: context)] + (ExtensionShims.popups[id]?.values.map { URL(string: $0, relativeTo: context.baseURL)?.absoluteURL } ?? [])
+        let dynamic = all.flatMap { Array(($0.popupPaths[id] ?? [:]).values) }
+        let named = [popupURL(for: context)] + dynamic.map { URL(string: $0, relativeTo: context.baseURL)?.absoluteURL }
         guard named.contains(where: { $0?.path == url.path }) else { return url }
         // Only a regular file inside the extension's own folder.
         let folder = Extensions.folder(for: id).standardizedFileURL
@@ -2890,6 +3167,7 @@ final class Extensions: NSObject, ObservableObject {
     static func setChoices(_ choices: [String: Bool], for id: String) {
         if choices.isEmpty { Store.settings.removeObject(forKey: "extensions.optional.\(id)") }
         else { Store.settings.set(choices, forKey: "extensions.optional.\(id)") }
+        listsChanged.send()
     }
 
     /// Adds to what was chosen. Chrome's own permissions, which WebKit
@@ -3056,6 +3334,11 @@ final class Extensions: NSObject, ObservableObject {
         _ = actionsChanged
         let tab = activeAdapter
         return installed.compactMap { item in
+            if ApplePasswordExtensionRoute.offersButton(item.id) {
+                return Button(id: item.id, name: item.name, label: item.name,
+                              icon: icon(for: item.id, side: 16), badge: "", enabled: true,
+                              pinned: item.pinned ?? false, keys: nil)
+            }
             // Still waiting its turn at launch: its button is there already,
             // with the icon it ships, as Chrome shows every button at once.
             // Yab loads them one after another, a moment apart, and the
@@ -3098,14 +3381,9 @@ final class Extensions: NSObject, ObservableObject {
     /// `panel`: the extensions list's popover, when it was pressed from
     /// there, a popup takes it over; anything else closes it.
     func press(_ id: String, from panel: NSPopover? = nil) {
-        // iCloud Passwords, while macOS kills Apple's helper for Yab: its
-        // popup only asks for a code no helper will show, so a popover of
-        // Yab's own hangs from the button instead, saying why, with the way
-        // to its page (ExtensionWithheld). Before the worker is woken: each
-        // wake is one more kill and crash report.
-        if ExtensionDetail.iCloudWaiting(id) {
-            if panel == nil, ExtensionWithheld.shared.closes(id) { return }
-            withheld(id, reusing: panel)
+        if ApplePasswordExtensionRoute.matches(id) {
+            panel?.performClose(nil)
+            ApplePasswordExtensionRoute.intercept(id, browser: browser)
             return
         }
         guard let context = contexts[id] else {
@@ -3122,8 +3400,12 @@ final class Extensions: NSObject, ObservableObject {
         // Its own button again, with its popup up: closed, as in Chrome.
         if panel == nil, ExtensionPopup.shared.closes(id) { return }
         if let tab = activeAdapter { context.userGesturePerformed(in: tab) }
+        // The shim records the extension's current setPopup path for this
+        // tab. WebKit's presentsPopup can still describe the manifest's
+        // default, so it must not gate that authoritative dynamic choice.
+        let currentPopup = popupURL(for: context)
         // An extension that asked for its button to open its side panel.
-        if ExtensionShims.panelOnClick.contains(id), context.action(for: activeAdapter)?.presentsPopup != true {
+        if ExtensionShims.panelOnClick.contains(id), currentPopup == nil {
             panel?.performClose(nil)
             if let browser = BrowserWindows.shared.activeBrowser ?? self.browser,
                browser.panelExtension == id, browser.chatOpen {
@@ -3136,7 +3418,7 @@ final class Extensions: NSObject, ObservableObject {
         // A popup is opened here, straight away. Left to WebKit, it builds
         // a popup of its own first, and closing that one in favour of
         // yab's lost the new popup's first messages to its worker.
-        if context.action(for: activeAdapter)?.presentsPopup == true, let url = popupURL(for: context) {
+        if let url = currentPopup {
             // Its worker started as the popup opens, as Chrome starts it for
             // the popup's first message. WebKit left an unloaded worker
             // asleep through the messages of Rabby's popup, which gave up
@@ -3166,7 +3448,7 @@ final class Extensions: NSObject, ObservableObject {
     /// after a relaunch): its popup opens, as the press would have opened
     /// it had the popup been set already. Nothing else is pressed again.
     func pressHeld(_ id: String) {
-        guard let context = contexts[id], context.action(for: activeAdapter)?.presentsPopup == true,
+        guard let context = contexts[id], popupURL(for: context) != nil,
               ExtensionPopup.shared.extensionID != id else { return }
         press(id)
     }
@@ -3174,7 +3456,7 @@ final class Extensions: NSObject, ObservableObject {
     /// The page the button's popup is now: one the extension set for this
     /// tab or for all of them, else its manifest's.
     private func popupURL(for context: WKWebExtensionContext) -> URL? {
-        let set = ExtensionShims.popups[context.uniqueIdentifier] ?? [:]
+        let set = popupPaths[context.uniqueIdentifier] ?? [:]
         let path = browser?.active.flatMap { set[$0.id.uuidString] } ?? set["*"]
         guard let path else { return Extensions.popupURL(for: context) }
         guard !path.isEmpty else { return nil }
@@ -3318,6 +3600,9 @@ extension Extensions: WKWebExtensionControllerDelegate {
         // and A, added after its page drew, landed after B and C.
         let tab = browser.open(url, foreground: configuration.shouldBeActive, atEnd: true, rowNow: true)
         if configuration.shouldBePinned { browser.pin(tab) }
+        if configuration.index != NSNotFound, !browser.tabs.isEmpty {
+            browser.move(tab, to: min(configuration.index, browser.tabs.count - 1))
+        }
         return adapter(for: tab)
     }
 
@@ -3435,13 +3720,16 @@ extension Extensions: WKWebExtensionControllerDelegate {
     /// messaging host installed on this Mac, spoken to the way Chrome would.
     func webExtensionController(_ controller: WKWebExtensionController, sendMessage message: Any, toApplicationWithIdentifier applicationIdentifier: String?, for extensionContext: WKWebExtensionContext) async throws -> Any? {
         if applicationIdentifier == nil || applicationIdentifier == ExtensionShims.application {
-            return try await ExtensionShims.answer(message, from: extensionContext, owner: self)
+            let reply = try await ExtensionShims.answer(message, from: extensionContext, owner: self)
+            guard WebKitIPCBoundary.allow([reply ?? NSNull()], "extension shim reply") else { throw WebKitIPCBoundary.error }
+            return reply
         }
         let id = extensionContext.uniqueIdentifier, host = applicationIdentifier!
         do {
-            let reply = try await ExtensionNative.send(message, to: host, from: Extensions.chromeID(id)) { [weak self] in
+            let reply = try await ExtensionNative.send(message, to: host, from: Extensions.chromeID(id), owner: extensionContext) { [weak self] in
                 Task { @MainActor in self?.macOSStopped(id) }
             }
+            guard WebKitIPCBoundary.allow([reply ?? NSNull()], "native application reply") else { throw WebKitIPCBoundary.error }
             if Extensions.onePasswordCalling(id, host) {
                 if Extensions.refusal(reply) { appUnreached(id, host: host) } else { appReached(id, host: host) }
             }
@@ -3508,7 +3796,7 @@ extension Extensions: WKWebExtensionControllerDelegate {
             if Extensions.refusal(message) { self?.appUnreached(id, host: host) } else { self?.appReached(id, host: host) }
         } : nil
         do {
-            try ExtensionNative.connect(port, from: Extensions.chromeID(id), heard: heard, killed: { [weak self] in
+            try ExtensionNative.connect(port, from: Extensions.chromeID(id), owner: extensionContext, heard: heard, killed: { [weak self] in
                 Task { @MainActor in self?.macOSStopped(id) }
             }) { [weak self] ending in
                 guard let self, Extensions.refused(ending) else { return }
@@ -3551,7 +3839,10 @@ extension Extensions: WKWebExtensionControllerDelegate {
     /// 1Password's extensions, and the host its app leaves for browsers.
     static let onePassword: Set<String> = ["aeblfdkhhhdcdjpifhhbdiojplfjncoa", "khgocmkkpikpnmmkgmdnfckapcdkgfaf"]
     static let onePasswordHost = "com.1password.1password"
-    static let onePasswordApp = URL(fileURLWithPath: "/Applications/1Password.app")
+    /// 1Password's app wherever it is, nil on a Mac without it.
+    static var onePasswordApp: URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.1password.1password")
+    }
 
     /// One of 1Password's extensions calling its app.
     static func onePasswordCalling(_ id: String, _ host: String) -> Bool {
@@ -3568,7 +3859,7 @@ extension Extensions: WKWebExtensionControllerDelegate {
     /// True when it was 1Password's, now said on its row.
     @discardableResult
     func appUnreached(_ id: String, host: String) -> Bool {
-        let here = FileManager.default.fileExists(atPath: Extensions.onePasswordApp.path)
+        let here = Extensions.onePasswordApp != nil
         let next = Extensions.nextUnconnected(unconnected, id, host: host, refused: true, appHere: here)
         if next != unconnected { unconnected = next }
         onePasswordAnswered.remove(id)
@@ -3634,7 +3925,8 @@ extension Extensions: WKWebExtensionControllerDelegate {
     }
 
     static func openOnePassword() {
-        NSWorkspace.shared.openApplication(at: onePasswordApp, configuration: .init(), completionHandler: nil)
+        guard let app = onePasswordApp else { return }
+        NSWorkspace.shared.openApplication(at: app, configuration: .init(), completionHandler: nil)
     }
 }
 
@@ -3831,6 +4123,22 @@ final class AnchorView: NSView {
         super.viewDidMoveToWindow()
         arrived = window == nil ? 0 : CACurrentMediaTime()
         MainActor.assumeIsolated { AnchorView.settle(id) }
+    }
+
+    /// The ones for this extension showing in `window` now, for a window
+    /// of the extension's own to hang from (ExtensionWindowFrame).
+    @MainActor
+    static func showing(_ id: String, in window: NSWindow) -> [NSView] {
+        live.allObjects.filter { $0.id == id && $0.window === window && ExtensionWindowFrame.shows($0) }
+    }
+
+    /// Every one for this extension, said for a test run's log.
+    @MainActor
+    static func census(_ id: String) -> [String] {
+        live.allObjects.filter { $0.id == id }.map { view in
+            let alpha = sequence(first: view as NSView, next: \.superview).map(\.alphaValue).min() ?? 1
+            return "webkit window=\(view.window?.windowNumber ?? -1) shows=\(ExtensionWindowFrame.shows(view)) size=\(view.bounds.size) alpha=\(alpha) hidden=\(view.isHiddenOrHasHiddenAncestor)"
+        }
     }
 
     @MainActor

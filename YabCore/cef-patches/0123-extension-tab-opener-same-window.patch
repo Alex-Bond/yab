@@ -1,0 +1,24 @@
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -2348,6 +2348,21 @@ ExtensionFunction::ResponseAction TabsCreateFunction::Run() {
+   if (opener) {
+     BrowserWindowInterface* opener_browser =
+         browser_window_util::GetBrowserForTabContents(*opener);
++    // Yab: each page of an embedder's window has a concealed window of its
++    // own, and windowId names the embedder's window by any of its pages
++    // (0050). An opener in that same embedder window is in the window asked
++    // for: the tab opens beside it, as in Chrome (Tampermonkey's installer:
++    // tabs.create({windowId, index, openerTabId}) of the active tab).
++    if (opener_browser && browser && opener_browser != browser) {
++      auto* opener_model = ExternalTabModel::Get(opener);
++      auto* target_model = ExternalTabModel::Get(
++          browser->GetTabStripModel()->GetActiveWebContents());
++      if (opener_model && target_model && opener_model->embedded() &&
++          target_model->embedded() &&
++          opener_model->window() == target_model->window()) {
++        browser = opener_browser;
++      }
++    }
+     if (!opener_browser || opener_browser != browser) {
+       return RespondNow(
+           Error("Tab opener must be in the same window as the updated tab."));

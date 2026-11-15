@@ -259,9 +259,11 @@ struct PlaceTileView: View {
         switch tile {
         case .site(let host):
             let bare = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
-            Mark(icon: Favicons.shared.cached(host) ?? Favicons.shared.cached(bare),
+            Mark(icon: Self.picture(tile),
                  letter: bare.first.map { String($0).uppercased() } ?? "", size: Omnibox.tile - 4)
                 .frame(width: Omnibox.tile, height: Omnibox.tile)
+        case .page(let url):
+            PlacePageMark(url: url)
         case .stack(let hosts):
             ThreadStack(hosts: hosts)
         case .file(let path):
@@ -281,6 +283,57 @@ struct PlaceTileView: View {
                 ProjectCircle(project: project, size: Omnibox.tile)
             }
         }
+    }
+}
+
+extension PlaceTileView {
+    /// The site's or page's icon a row's tile draws, nil for a letter or
+    /// any other kind of tile (also the bench's, evals/bookmark-icons).
+    @MainActor static func picture(_ tile: PlaceTile) -> NSImage? {
+        switch tile {
+        case .site(let host):
+            let bare = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+            return Favicons.shared.cached(host) ?? Favicons.shared.cached(bare)
+        case .page(let url):
+            return PlacePageMark.known(url)
+        default:
+            return nil
+        }
+    }
+}
+
+/// A bookmark's mark in its row, the
+/// page's favicon beside its title: the icon the page last wore, its
+/// site's for one never open here (Favicons.cached(page:)). With neither
+/// kept, as for bookmarks brought from another browser and never opened,
+/// the site's letter, and its icon fetched once from its front page, as
+/// the bookmarks' row does, put on as it arrives.
+struct PlacePageMark: View {
+    let url: URL
+    /// The icon that arrived while it was shown, and for which address: a
+    /// bookmark edited to another doesn't keep the old one's.
+    @State private var arrived: (url: URL, icon: NSImage?)?
+
+    var body: some View {
+        let host = url.host()?.lowercased() ?? ""
+        let bare = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        let icon = arrived?.url == url ? arrived?.icon : nil
+        Mark(icon: icon ?? Self.known(url), letter: bare.first.map { String($0).uppercased() } ?? "", size: Omnibox.tile - 4)
+            .frame(width: Omnibox.tile, height: Omnibox.tile)
+            .onReceive(Favicons.shared.changes) { site in
+                if site == Favicons.site(url) { arrived = (url, Self.known(url)) }
+            }
+            .onAppear {
+                if Self.known(url) == nil { Favicons.shared.fetch(page: url) }
+            }
+    }
+
+    /// What is kept for it, nothing fetched: the page's own icon, its
+    /// site's (with its port), or the site's without www.
+    @MainActor static func known(_ url: URL) -> NSImage? {
+        if let icon = Favicons.shared.cached(page: url) { return icon }
+        guard let host = url.host()?.lowercased(), host.hasPrefix("www.") else { return nil }
+        return Favicons.shared.cached(String(host.dropFirst(4)))
     }
 }
 

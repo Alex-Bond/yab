@@ -40,6 +40,7 @@ final class Bench {
     private var listener: Int32 = -1
     private var accepting: DispatchSourceRead?
     private var clients: [Int32: Client] = [:]
+    let agentCapabilities = AgentCapabilityCache()
 
     /// Where the socket is. Beside the session file, so a test run's bench is
     /// as separate from the real one as everything else it keeps.
@@ -99,6 +100,8 @@ final class Bench {
     /// Controls by name, where each is in the window (benchSpot), on a test
     /// run only.
     static var spots: [String: CGRect] = [:]
+    /// How each Settings removal started by `extension-review-removal` ended.
+    static var reviewedRemovals: [String: String] = [:]
     static let spotting = Store.testing
 
     /// The key code of a letter on a US keyboard, which is what WebKit reads
@@ -382,7 +385,7 @@ final class Bench {
             if !source.isCancelled { source.cancel() }
             handedOff = true
             let fd = fd
-            Client.writer.async { [self] in
+            Client.writer.async(flags: DispatchWorkItemFlags(rawValue: 0)) { [self] in
                 // JSONSerialization raises an Objective-C exception, not a Swift
                 // error, on a value it can't write (NaN, infinity, a Date): `try?`
                 // never sees it and the app goes, the reply empty (#381). What
@@ -543,10 +546,22 @@ final class Bench {
         let patience = bringing || pour ? 600 : fixture || osa ? 90 : polls ? min(request["seconds"] as? Double ?? 20, 60) + 5 : 25
         DispatchQueue.main.asyncAfter(deadline: .now() + patience) { answer(["error": "no answer within \(Int(patience)) s"]) }
         // A test can address either browser window without moving focus.
-        let windowBrowser: Browser? = Store.testing ? (request["browserWindow"] as? Int).flatMap { number in
-            let windows = BrowserWindows.shared.openWindows()
-            return windows.indices.contains(number - 1) ? windows[number - 1].browser : nil
-        } : nil
+        let windowBrowser: Browser?
+        if Store.testing, let number = request["browserWindowNumber"] as? Int {
+            // Visible-window indexes omit minimized windows. A probe of
+            // their restore must keep addressing the same owned window.
+            guard let window = NSApp.windows.first(where: { $0.windowNumber == number }),
+                  let found = BrowserWindows.shared.browser(for: window) else {
+                answer(["error": "no browser window with that number"])
+                return
+            }
+            windowBrowser = found
+        } else {
+            windowBrowser = Store.testing ? (request["browserWindow"] as? Int).flatMap { number in
+                let windows = BrowserWindows.shared.openWindows()
+                return windows.indices.contains(number - 1) ? windows[number - 1].browser : nil
+            } : nil
+        }
         guard let browser = windowBrowser ?? browser else {
             answer(["error": "no browser"])
             return
@@ -554,7 +569,10 @@ final class Bench {
         let verb = request["do"] as? String ?? ""
         if let refusal = ContextConsent.preflight(request) { answer(["error": refusal]); return }
         let contextEpoch = ContextPrivacy.shared.epoch
-        let admission = (request["session"] as? String).flatMap { Agents.shared.session($0)?.admission }
+        // A task's watcher gets its result after the task ends: the end
+        // closes the admission this answer would otherwise be held to.
+        let admission = ContextConsent.watching.contains(verb) ? nil
+            : (request["session"] as? String).flatMap { Agents.shared.session($0)?.admission }
         let allowed = { ContextPrivacy.shared.current(contextEpoch) && (admission?.valid ?? true) }
         let originalAnswer = answer
         answer = { out in
@@ -580,6 +598,7 @@ final class Bench {
         Hangs.phase("bench " + verb)
 
         if verb == "boost-probe" { boostProbe(request, browser: browser, answer: answer); return }
+        if verb == "action-menu" { answer(ActionMenu.state()); return }
         if verb == "userscript-probe" { userscriptProbe(request, browser: browser, answer: answer); return }
         if verb == "windows" { windowsCommand(request, browser: browser, answer); return }
         if verb == "native-scrollbars" { answer(NativeScrollBench.run(request)); return }
@@ -819,6 +838,38 @@ final class Bench {
 
         case "chromium-drm":
             ChromiumDRMBench.respond(request, tab: find(request, in: browser) ?? browser.active, answer: answer)
+        case "energy-tab-groups":
+            guard Store.testing else { answer(["error": "Tab-group counters require a probe world"]); return }
+            answer(["scans": ChromiumTabGroups.shared.scans])
+        case "energy-window-poll":
+            guard Store.testing, let core = ChromiumProcess.shared.connectedClient else {
+                answer(["error": "Window-poll counters require a connected probe world"]); return
+            }
+            Task { @MainActor in
+                do {
+                    let value = try await core.request("debug.windowPoll")
+                    answer(try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any] ?? [:])
+                } catch { answer(["error": String(describing: error)]) }
+            }
+        case "now-playing-artwork":
+            answer(nowPlayingArtworkProbe())
+        case "keyboard-source":
+            guard Store.testing, let tab = find(request, in: browser) ?? browser.active,
+                  let window = tab.page.window, window.isKeyWindow,
+                  let responder = window.firstResponder as? NSView,
+                  responder === tab.page || responder.isDescendant(of: tab.page),
+                  let context = responder.inputContext, NSTextInputContext.current === context,
+                  let source = request["source"] as? String,
+                  context.keyboardInputSources?.contains(source) == true else {
+                answer(["error": "Focused page input context and enabled source required"]); return
+            }
+            // Test setup must select in the active editor, just as its input
+            // menu does. Cross-process TIS selection alone is not adoption.
+            context.selectedKeyboardInputSource = source
+            answer(["inputSource": context.selectedKeyboardInputSource ?? "",
+                    "inputContextIsCurrent": NSTextInputContext.current === context,
+                    "responderClass": String(describing: type(of: responder))])
+
         case "page-engine":
             guard Store.testing, let tab = find(request, in: browser) ?? browser.active else {
                 answer(["error": "page-engine requires an isolated tab"]); return
@@ -874,11 +925,50 @@ final class Bench {
                     }
                 } else { answer(["requests": ChromiumConsent.benchState]) }
                 return
+            case "extension-review-removal":
+                // Settings' Remove… on a Chromium page (ChromiumExtensionsSettings),
+                // started and left to its questions; `read` answers how it
+                // ended: asking, removed, kept or the error (test worlds only).
+                guard Store.testing, let id = request["extension"] as? String else { answer(["error": "Removal diagnostics require a test world and an extension"]); return }
+                if request["read"] as? Bool == true { answer(["state": Self.reviewedRemovals[id] ?? ""]); return }
+                let native = page.extensions
+                let name = native.items.first { $0.id == id }?.name ?? id
+                Self.reviewedRemovals[id] = "asking"
+                Task { @MainActor in
+                    do { Self.reviewedRemovals[id] = try await native.reviewRemoval(id, name: name, place: .settings) ? "removed" : "kept" }
+                    catch { Self.reviewedRemovals[id] = "error: " + String(describing: error) }
+                }
+                answer(["started": true])
+                return
+            case "private-extensions":
+                // "Allow in private tabs", set as its switch sets it (test
+                // worlds only), and whether this page is its space's private side.
+                if Store.testing, let allow = request["allow"] as? Bool { browser.prefs.extensionsInPrivate = allow }
+                answer(["allow": browser.prefs.extensionsInPrivate, "private": ChromiumColumn.isPrivate(tab),
+                        "profile": page.profile, "space": ChromiumPrivateProfiles.space(of: page.profile)?.profile ?? "",
+                        "made": ChromiumPrivateProfiles.benchState(page.profile)])
+                return
             case "extension-popup":
                 if let id = request["extension"] as? String { ChromiumColumn.shared.press(id, tab: tab) }
                 answer(ChromiumPopupHost.shared.state)
                 return
             case "side-panel":
+                // The real panel document in an isolated acceptance world,
+                // matching ext-side-panel's WebKit inspection route.
+                if let js = request["js"] as? String {
+                    guard #available(macOS 15.4, *), let id = request["extension"] as? String,
+                          let panel = ChromiumSidePanel.shared.front(in: browser), panel.extensionID == id,
+                          let content = panel.tab.builtPage else { answer(["error": "No matching Chromium panel in front"]); return }
+                    content.run(js) { result in
+                        MainActor.assumeIsolated {
+                            switch result {
+                            case .success(let value): answer(["value": Bench.plain(value)])
+                            case .failure(let error): answer(["error": error.localizedDescription])
+                            }
+                        }
+                    }
+                    return
+                }
                 // The extension's side panel: "press" as its button does,
                 // "open" as chrome.sidePanel.open; then every panel's state.
                 if let id = request["extension"] as? String, #available(macOS 15.4, *) {
@@ -891,6 +981,26 @@ final class Bench {
                     return
                 }
                 answer(["panels": ChromiumSidePanel.shared.benchState])
+                return
+            case "extension-action-menu":
+                // The extension's own rows of its button's menu on this page,
+                // as read for it (CEF patch 0124); `run` chooses one by id.
+                guard let id = request["extension"] as? String else { answer(["error": "extension-action-menu needs an extension"]); return }
+                Task { @MainActor in
+                    var out: [String: Any] = ["capable": ChromiumProcess.shared.extensionSurfaces.actionMenu]
+                    if let item = request["run"] as? String,
+                       let row = ChromiumActionMenu.shared.rows(id, tab: tab).first(where: { $0.id == item }) {
+                        out["ran"] = await ChromiumActionMenu.shared.run(id, row: row, tab: tab)
+                    }
+                    ChromiumActionMenu.shared.refresh(id, tab: tab)
+                    try? await Task.sleep(for: .milliseconds(600))
+                    func plain(_ rows: [ChromiumActionMenu.Row]) -> [[String: Any]] {
+                        rows.map { ["id": $0.id, "title": $0.title, "type": $0.kind.rawValue, "checked": $0.checked,
+                                    "enabled": $0.enabled, "items": plain($0.rows)] }
+                    }
+                    out["items"] = plain(ChromiumActionMenu.shared.rows(id, tab: tab))
+                    answer(out)
+                }
                 return
             case "extension-popup-input":
                 guard Store.testing, let input = ChromiumPopupProbeInput(request) else {
@@ -923,6 +1033,10 @@ final class Bench {
                     } catch { answer(["error": String(describing: error)]) }
                 }
                 return
+            case "one-list":
+                if #available(macOS 15.4, *) { page.extensions.benchOneList(request, answer: answer) }
+                else { answer(["error": "macOS 15.4 or later"]) }
+                return
             case "extension-column":
                 answer(ChromiumColumn.benchState(tab: tab, page: page, pin: request["pin"] as? String,
                                                  pinned: request["pinned"] as? Bool ?? true, read: request["read"] as? Bool ?? false))
@@ -947,6 +1061,12 @@ final class Bench {
                            let path = params["path"] as? String, let id = params["extension"] as? String {
                             let item = try await page.extensions.install(Data(contentsOf: URL(fileURLWithPath: path)), id: id)
                             answer(["value": ["id": item.id, "name": item.name, "state": item.state]])
+                            return
+                        }
+                        // As Remove in the extensions' lists does: gone from the list at once.
+                        if method == "extension.removeListed", Store.testing, let id = (request["params"] as? [String: Any])?["extension"] as? String {
+                            try await page.extensions.remove(id, userApproved: true)
+                            answer(["value": true])
                             return
                         }
                         if method == "extension.registerNativeHost", let path = (request["params"] as? [String: Any])?["path"] as? String {
@@ -1007,6 +1127,13 @@ final class Bench {
                     "frame": [rect.minX, rect.minY, rect.width, rect.height],
                     "windowSize": [page.window?.frame.width ?? 0, page.window?.frame.height ?? 0],
                     "visible": page.window != nil && !page.isHiddenOrHasHiddenAncestor])
+        case "cursor-state":
+            answer(Self.cursorState(windowNumber: request["window"] as? Int))
+
+        case "spare-state":
+            guard Store.testing else { answer(["error": "spare-state requires an isolated test run"]); return }
+            answer(browser.spareForBench)
+
         case "usage-open":
             guard Store.testing, let url = (request["url"] as? String).flatMap(Address.url(from:)) else {
                 answer(["error": "usage-open requires a test run and a URL"]); return
@@ -1066,7 +1193,8 @@ final class Bench {
                  "trouble": sync.joinTrouble ?? "", "on": sync.on, "state": String(describing: sync.state),
                  "account": sync.account ?? "", "arrival": String(describing: sync.arrival),
                  "separate": sync.separate?.name ?? "", "keptApart": sync.keptApart?.name ?? "",
-                 "joiningAccounts": sync.joiningAccounts, "devices": sync.devices.count]
+                 "joiningAccounts": sync.joiningAccounts, "devices": sync.devices.count,
+                 "awaitingConfirmation": sync.awaitingJoinConfirmation]
             }
             switch request["action"] as? String ?? "status" {
             case "category-controls":
@@ -1509,6 +1637,9 @@ final class Bench {
             // A test's: the corner's "… needs you", and the tabs out of sight.
             if request["session"] == nil {
                 said["calling"] = Agents.shared.calling?.name ?? ""
+                // Whether this window's corner says it (a private one doesn't).
+                said["callingHere"] = Agents.speaks(in: browser) ? Agents.shared.calling?.name ?? "" : ""
+                said["corneredHere"] = Agents.shared.corneredAll(in: browser).count
                 said["sealed"] = browser.tabs.filter { Agents.shared.sealed($0) }.map(Bench.short)
             }
             answer(said)
@@ -1558,7 +1689,7 @@ final class Bench {
                             "stderr": failed.trimmingCharacters(in: .whitespacesAndNewlines), "exit": code])
                 }
             }
-            do { try script.run() } catch { answer(["error": "osascript: \(error.localizedDescription)"]); return }
+            do { try script.runValidated() } catch { answer(["error": "osascript: \(error.localizedDescription)"]); return }
             // A script still waiting at 80 s is stopped, so what it said comes back.
             DispatchQueue.main.asyncAfter(deadline: .now() + 80) { if script.isRunning { script.terminate() } }
 
@@ -1685,6 +1816,10 @@ final class Bench {
                 "built": mine.filter { $0.builtPage != nil }.count,
                 "loading": mine.filter { $0.builtPage != nil && $0.loading }.count,
                 "pid": Int(getpid()),
+                "live_seen": LiveSeen.count,
+                // Every Tab object still in memory, closed ones a reference
+                // keeps included: a live folder's churn must not raise it.
+                "tabs_alive": Tab.every.count,
             ]
             if Hangs.enabled { Hangs.start(); out["lag"] = Hangs.lag() }
             out["thrift"] = Thrift.on
@@ -1792,6 +1927,10 @@ final class Bench {
             }
             // "tally" with "id": what that tab's page had blocked, and
             // whether it had the lists or a quiet site's list.
+            if Store.testing, request["tally"] as? Bool == true, let tab = find(request, in: browser), let chromium = tab.builtPage as? ChromiumPage {
+                Task { @MainActor in answer(await chromium.shieldStatus()) }
+                return
+            }
             if Store.testing, request["tally"] as? Bool == true, let tab = find(request, in: browser), let controller = tab.webKitOnly("WebKit-only bench fixtures", build: false)?.configuration.userContentController {
                 answer(Shield.shared.tally(controller))
                 return
@@ -1816,6 +1955,17 @@ final class Bench {
             Thrift.forced = request["on"] as? Bool ?? true
             answer(["thrift": Thrift.on, "sleep_after": Browser.sleepAfter])
 
+        case "energy-saver":
+            // Settings › Tabs › Energy Saver: the choice, Yab's own saving,
+            // and what the Chromium helper last said it holds (evals/energy-saver).
+            if let raw = request["set"] as? String {
+                guard let choice = EnergySaver(rawValue: raw) else { answer(["error": "set: off, low or unplugged"]); return }
+                EnergySaver.current = choice
+            }
+            let power = Power.now()
+            answer(["setting": EnergySaver.current.rawValue, "thrift": Thrift.on, "chromium_state": ChromiumEnergySaver.state,
+                    "chromium": ChromiumEnergySaver.answer, "on_battery": power.onBattery, "percent": power.percent ?? -1])
+
         case "switcher":
             // ⌃Tab's walk without the keys: "step" as a press while ⌃ is
             // down, "land" as ⌃ let go of, "cancel" as Escape; each answers
@@ -1830,6 +1980,7 @@ final class Bench {
             DispatchQueue.main.asyncAfter(deadline: .now() + (request["wait"] as? Double ?? 0.3)) {
                 let walk = browser.switcher
                 answer(["open": walk.open, "at": walk.at,
+                        "pictured": walk.order.filter { walk.pictures[$0.id] != nil }.count,
                         "tiles": walk.order.map { ["title": $0.title, "url": $0.address?.absoluteString ?? "",
                                                    "space": walk.homes[$0.id]?.name ?? browser.space.name] },
                         "space": browser.space.name, "active": browser.active?.address?.absoluteString ?? ""])
@@ -1921,6 +2072,10 @@ final class Bench {
                 ] as [String: Any]
             }
             answer(out)
+
+        case "private-folder-check":
+            guard Store.testing else { answer(["error": "test session required"]); return }
+            answer(privateFolderCheck(request, browser: browser))
 
         case "rowframes":
             // Where each tab's row of the space on screen is drawn, in the
@@ -2165,6 +2320,18 @@ final class Bench {
             if let reach = request["reach"] as? String { Store.settings.set(reach, forKey: FrequentReach.key) }
             if request["open"] as? Bool == true { SettingsWindow.shared.show(.search, for: browser) }
             answer(["order": sections.order.map(\.rawValue), "off": sections.off.map(\.rawValue).sorted()])
+        case "space-profile-open":
+            guard Store.testing, let text = request["url"] as? String, let url = URL(string: text) else {
+                answer(["error": "test session and URL required"]); return
+            }
+            // The ordinary user route: agent/bench pages intentionally do not
+            // record history and cannot prove profile history or pin retention.
+            answer(describe(browser.open(url, foreground: true)))
+        case "space-profile-state":
+            guard Store.testing else { answer(["error": "test session required"]); return }
+            answer(["settings": SettingsWindow.shared.benchWhere,
+                    "history": browser.history.everything().map { $0.url.absoluteString },
+                    "profiles": browser.spaces.map { ["id": $0.id.uuidString, "name": $0.name, "profile": $0.profileID.uuidString] }])
         case "space":
             // A --test run's hand on the spaces: switch to one by name or
             // index, make one, or delete one, without their menu.
@@ -2179,6 +2346,10 @@ final class Bench {
             if let today = request["today"] as? Bool { browser.prefs.todayEveryWindow = today }
             if let name = request["new"] as? String { browser.addSpace(named: name, ownSignIns: request["own"] as? Bool ?? false) }
             if let own = request["signins"] as? Bool { browser.setSpaceSignIns(browser.spaceID, own: own) }
+            if let profile = request["profile"] as? String {
+                let peer = browser.spaces.first { $0.name == profile || $0.id.uuidString == profile }
+                if profile == "own" || peer != nil { browser.setSpaceProfile(browser.spaceID, with: peer?.id) }
+            }
             if let name = request["to"] as? String, let space = browser.spaces.first(where: { $0.name.lowercased() == name.lowercased() }) {
                 browser.switchSpace(to: space.id)
             }
@@ -2226,6 +2397,11 @@ final class Bench {
                                  "worn": browser.prefs.backdropTransparency, "wornGlass": browser.prefs.lookGlass]])
             }
 
+        case "strip-turn":
+            // Parts of the strip's turn left out ("cut": leaving, arrival,
+            // carousel, slide), for `pace` to weigh each (evals/dia-top-spaces).
+            if let cut = request["cut"] as? [String] { StripTurn.cut = Set(cut) }
+            answer(["cut": StripTurn.cut.sorted()])
         case "spacetray":
             // A --test run's hand on the new space's tray: open it, fill it
             // in, move it along, and read back where it stands.
@@ -2556,6 +2732,13 @@ final class Bench {
                 answer(["closed": 0, "handedBack": true, "id": Bench.short(tab)])
                 return
             }
+            // An extension's own window (windows.create on a Chromium tab),
+            // closed as its red light closes it. A --test run only.
+            if Store.testing, let made = ChromiumExtensionWindow.showing(tab) {
+                made.close()
+                answer(["closed": 1, "extensionWindow": true])
+                return
+            }
             guard tab.bench else {
                 answer(["error": "not a bench tab, only tabs the bench opened can be closed from here"])
                 return
@@ -2572,6 +2755,28 @@ final class Bench {
             } else {
                 wait(for: tab, until: limit, answer)
             }
+
+        case "clear-data":
+            // What Settings and Site Controls clear, past their questions. A --test run only.
+            guard Store.testing else { answer(["error": "clear-data only works on a --test run"]); return }
+            let tab = find(request, in: browser) ?? browser.active
+            switch request["what"] as? String ?? "" {
+            case "sites": browser.clearSites()
+            case "cache": browser.clearCache()
+            case "history": browser.clearHistory()
+            case "cookies": tab?.clearCookiesAndReload()
+            case "fail-chromium":
+                // Chromium's side of Clear Data and Sign Out answers that it failed.
+                ChromiumSiteData.failsForTesting = request["on"] as? Bool ?? false
+            case "owed":
+                answer(["owed": ChromiumClearingDebt.owed]); return
+            case "site":
+                guard let tab, let site = request["site"] as? String else { answer(["error": "tab and site required"]); return }
+                Task { @MainActor in await browser.forgetSite(site, tab: tab); answer(["ok": true]) }
+                return
+            default: answer(["error": "what?"]); return
+            }
+            answer(["ok": true])
 
         case "untrusted":
             // The Untrusted page in a tab, and with go, its Continue.
@@ -2613,7 +2818,7 @@ final class Bench {
                     [
                         "id": session.id, "caller": session.caller.map { String($0.id.uuidString.prefix(8)).lowercased() } ?? "",
                         "shown": session.shown.map { String($0.id.uuidString.prefix(8)).lowercased() } ?? "",
-                        "system": session.source == nil, "open": session.feed?.open ?? false, "sending": session.sending,
+                        "system": session.source == nil, "native": session.native, "hearing": session.hearing, "open": session.feed?.open ?? false, "sending": session.sending,
                         "recorder": session.recorder ?? "",
                         "sent": session.sent, "dropped": session.dropped,
                         "rect": [session.rect.minX, session.rect.minY, session.rect.width, session.rect.height],
@@ -2622,7 +2827,7 @@ final class Bench {
                 if let picker = picker() {
                     out["picker"] = [
                         "typed": picker.typed, "allowed": picker.allowed, "sees": picker.sees, "chosen": picker.chosen?.title ?? "",
-                        "door": picker.door.rawValue, "doors": picker.doors.map(\.rawValue),
+                        "door": picker.door.rawValue, "doors": picker.doors.map(\.rawValue), "onDoors": picker.onDoors,
                         "sections": picker.sections.map { section in
                             ["title": section.title, "items": section.items.map { ["title": $0.title, "picture": $0.picture != nil] }] as [String: Any]
                         },
@@ -2636,6 +2841,8 @@ final class Bench {
                 out["outlines"] = Share.shared.sessions.values.compactMap { $0.outline?.report }
                 out["open"] = Share.shared.sessions.values.contains { $0.fold?.open == true }
                 out["window"] = BrowserWindows.shared.window(for: browser).map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] } ?? []
+                out["boxes"] = AskView.all.allObjects.compactMap(\.probe)
+                out["keyWindow"] = NSApp.keyWindow.map { "\(type(of: $0))" } ?? "none"
                 out["systemAsked"] = Share.shared.systemAsked
                 out["trail"] = Share.shared.trail
                 return out
@@ -2662,6 +2869,30 @@ final class Bench {
                     if items.indices.contains(index) { picker.chosenID = items[index].id }
                 }
                 later()
+            case "keys":
+                // Keys as macOS hands them to the app: each a key event sent
+                // through NSApp to the key window, wherever its first
+                // responder is, as a person's keyboard reaches the box.
+                // "left" "right" "up" "down" "tab" "backtab" "return"
+                // "escape", or a letter to type.
+                let named: [String: (UInt16, String, NSEvent.ModifierFlags)] = [
+                    "left": (123, "\u{F702}", [.function, .numericPad]), "right": (124, "\u{F703}", [.function, .numericPad]),
+                    "down": (125, "\u{F701}", [.function, .numericPad]), "up": (126, "\u{F700}", [.function, .numericPad]),
+                    "tab": (48, "\t", []), "backtab": (48, "\u{19}", [.shift]), "return": (36, "\r", []), "escape": (53, "\u{1B}", []),
+                ]
+                for key in request["keys"] as? [String] ?? [] {
+                    let (code, chars, flags) = named[key] ?? (key.first.map { Bench.keyCode(for: $0) } ?? 0, key, [])
+                    let target = NSApp.keyWindow ?? BrowserWindows.shared.window(for: browser)
+                    for type in [NSEvent.EventType.keyDown, .keyUp] {
+                        guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags,
+                                                           timestamp: ProcessInfo.processInfo.systemUptime,
+                                                           windowNumber: target?.windowNumber ?? 0, context: nil,
+                                                           characters: chars, charactersIgnoringModifiers: key == "backtab" ? "\t" : chars,
+                                                           isARepeat: false, keyCode: code) else { continue }
+                        NSApp.sendEvent(event)
+                    }
+                }
+                later()
             case "arrow":
                 let way = request["way"] as? String
                 picker()?.move(way == "up" ? .up : way == "down" ? .down : way == "left" ? .left : .right)
@@ -2674,6 +2905,12 @@ final class Bench {
             case "stop":
                 guard let tab else { answer(missing(request)); return }
                 Share.shared.stop(caller: tab)
+                later()
+            case "engine":
+                // ⌘K's Open in: this tab on the engine named, for a share
+                // between a WebKit tab and a Chromium one.
+                guard let tab else { answer(missing(request)); return }
+                tab.openHere(in: request["engine"] as? String == "webkit" ? .webKit : .chromium)
                 later()
             case "instead":
                 // Share Instead on ID's row, as the pointer would press it.
@@ -3004,7 +3241,13 @@ final class Bench {
             let came = tab.gone ? browser.tabs.first { other in
                 tab.everywhere.map { other.everywhere == $0 } ?? (other.everywhere == nil && KeptEverywhere.key(other) == KeptEverywhere.key(tab))
             } : nil
-            answer(describe(came ?? tab))
+            // A switch to a Chromium page lands on that page's frame: answered
+            // then, for whoever reads the tab in front after this.
+            func landed(_ tries: Int) {
+                guard browser.switchPending != nil, tries > 0 else { answer(describe(came ?? tab)); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { MainActor.assumeIsolated { landed(tries - 1) } }
+            }
+            landed(200)
 
         case "chord":
             // Keys pressed the way the keyboard presses them, through the
@@ -3276,6 +3519,7 @@ final class Bench {
             if let enabled = request["enabled"] as? Bool { browser.prefs.usesLiveFolders = enabled }
             var nest = browser.nests.first { $0.live != nil }
             switch request["action"] as? String ?? "state" {
+            case "follow": nest = LiveFolders.shared.followRepo(request["repo"] as? String ?? "", in: browser)
             case "make": nest = LiveFolders.shared.make(request["source"] as? String ?? "github.pulls", in: browser, host: request["host"] as? String)
             case "items":
                 guard let nest else { answer(["error": "no live folder"]); return }
@@ -3458,8 +3702,16 @@ final class Bench {
             // or a drag onto that window moves it (BrowserWindows.move).
             case "to-window":
                 let windows = BrowserWindows.shared.openWindows()
-                if let tab = group.first, let to = request["to"] as? Int, windows.indices.contains(to - 1) {
-                    _ = BrowserWindows.shared.move(tab, from: browser, to: windows[to - 1].browser, announce: false)
+                let destination: Browser?
+                if let number = request["toWindowNumber"] as? Int {
+                    destination = NSApp.windows.first(where: { $0.windowNumber == number })
+                        .flatMap { BrowserWindows.shared.browser(for: $0) }
+                    guard destination != nil else { answer(["error": "no destination browser window with that number"]); return }
+                } else {
+                    destination = (request["to"] as? Int).flatMap { windows.indices.contains($0 - 1) ? windows[$0 - 1].browser : nil }
+                }
+                if let tab = group.first, let destination {
+                    _ = BrowserWindows.shared.move(tab, from: browser, to: destination, announce: false)
                 }
             case "aim":
                 // Where the first of `ids` would land with the hand `want`
@@ -3511,6 +3763,13 @@ final class Bench {
                     // Edit…'s field (PinnedHome.swift): which tab, and what is in it.
                     "editing_home": browser.editingHome ? browser.editingTab.map { String($0.uuidString.prefix(8)).lowercased() } ?? "" : "",
                     "draft": browser.tabDraft,
+                    // A name being typed (Browser.editingTab), a pin's
+                    // letter, and who has the keys (evals/tab-rename/long.py).
+                    "editing_tab": browser.editingTab.map { String($0.uuidString.prefix(8)).lowercased() } ?? "",
+                    "editing_pin": browser.editingPin.map { String($0.uuidString.prefix(8)).lowercased() } ?? "",
+                    "responder": (NSApp.keyWindow?.firstResponder).map { "\(type(of: $0))" } ?? "none",
+                    "field_arrived_s": TabAddressField.arrived ?? -1,
+                    "field_keyed_s": TabAddressField.keyed ?? -1,
                     "refusals": browser.refusals,
                     "extra": browser.folderBook.extra,
                     // The space folded under its name, and where the name
@@ -3543,6 +3802,13 @@ final class Bench {
         case "pointer":
             // The mouse on the page in front, as a person's would be: moved,
             // dragged, right-clicked (BenchPointer).
+            // A Chromium page named by `id`, a Small Window's too: a press
+            // and let-go through its window, as AppKit hands a person's, so
+            // the page feels it (RelayGuard.felt) as it would yours.
+            if request["op"] as? String == "click", request["id"] != nil, let target = find(request, in: browser),
+               let chromium = target.builtPage as? ChromiumPage {
+                answer(BenchPointer.click(chromium, at: request["at"] as? [Double])); return
+            }
             guard let front = browser.active, let pointed = front.builtPage else { answer(["error": "no page"]); return }
             // ⌘F's page: a peek's while one is up (Browser.findPage).
             let tab = request["find"] != nil || request["findStep"] != nil || request["findClose"] != nil || request["found"] != nil
@@ -3584,15 +3850,21 @@ final class Bench {
             house(tab)
             // What a person can read: words a pixel high or the color of
             // the page are left out and counted (AgentPage.readable).
-            AgentPage.run(tab, AgentPage.readable) { result in
-                guard case .success(let value) = result, let got = value as? [String: Any] else {
-                    if case .failure(let error) = result { answer(["error": error.localizedDescription]) } else { answer(["error": "no answer"]) }
-                    return
+            Task { @MainActor in
+                do {
+                    if try await AgentPDF.isDocument(tab.page) { AgentPDF.read(tab, snapshot: false, done: answer); return }
+                } catch { answer(["error": error.localizedDescription]); return }
+                AgentPage.run(tab, AgentPage.readable) { result in
+                    guard case .success(let value) = result, let got = value as? [String: Any] else {
+                        if case .failure(let error) = result { answer(["error": error.localizedDescription]) } else { answer(["error": "no answer"]) }
+                        return
+                    }
+                    var text = got["text"] as? String ?? ""
+                    var cut = false
+                    if text.count > 120_000 { text = String(text.prefix(120_000)); cut = true }
+                    answer(["text": text, "truncated": cut, "hidden": got["hidden"] as? Int ?? 0, "url": tab.address?.absoluteString ?? "", "title": tab.title])
                 }
-                var text = got["text"] as? String ?? ""
-                var cut = false
-                if text.count > 120_000 { text = String(text.prefix(120_000)); cut = true }
-                answer(["text": text, "truncated": cut, "hidden": got["hidden"] as? Int ?? 0, "url": tab.address?.absoluteString ?? "", "title": tab.title])
+
             }
 
         case "eval":
@@ -3788,6 +4060,18 @@ final class Bench {
                                 "parked": offer.parked, "refused": offer.refused]
             }
             answer(out)
+
+        case "proof":
+            // Settings' "Ask before filling", test runs only: "prove" turns
+            // it (forgetting the last yes), "forget" forgets the yes,
+            // "cancel" takes a question that is up down unanswered. Says how
+            // many questions Yab has put this launch and whether one is up.
+            guard Store.testing else { answer(["error": "proof only works on a --test run"]); return }
+            if let prove = request["prove"] as? Bool { browser.prefs.provesToFill = prove }
+            if request["forget"] as? Bool == true { Vault.forgetProof(cancelling: false) }
+            let up = Vault.asking != nil
+            if request["cancel"] as? Bool == true, up { Vault.forgetProof(cancelling: true) }
+            answer(["asked": Vault.questions, "up": up, "proves": browser.prefs.provesToFill])
 
         case "fill":
             // A kept password put into the page as a pick from the list
@@ -4052,6 +4336,9 @@ final class Bench {
             let probeWindow = Store.testing ? (request["window"] as? Int).flatMap { number in
                 NSApp.windows.first { $0.windowNumber == number }
             } : nil
+            if Store.testing, request["window"] != nil, probeWindow == nil {
+                answer(["error": "Requested original window is no longer available"]); return
+            }
             // `browserWindow`: that browser window, though another is in front.
             let named = request["browserWindow"] != nil ? BrowserWindows.shared.window(for: browser) : nil
             // "popover": the popover up now, Look's over Settings (#459).
@@ -4059,6 +4346,11 @@ final class Bench {
                 ? NSApp.windows.first { $0.isVisible && String(describing: type(of: $0)).contains("Popover") } : nil
             if request["popover"] as? Bool == true, popover == nil { answer(["error": "no popover"]); return }
             let which = popover ?? probeWindow ?? named ?? (request["settings"] as? Bool == true ? SettingsWindow.shared.window : Links.window)
+            if Store.testing, request["native"] as? Bool == true, let window = which,
+               let path = request["path"] as? String {
+                Self.captureOwnWindow(window, path: path, cursor: request["cursor"] as? Bool == true, answer: answer)
+                return
+            }
             // Settings is AppKit's own split view, whose source list a layer
             // render leaves blank: it is drawn the way AppKit prints it.
             // "print": the browser's window drawn the same way, AppKit's own
@@ -4684,6 +4976,8 @@ final class Bench {
             let took = (CACurrentMediaTime() - start) * 1000
             NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: NSApp.mainMenu)
             answer(["wrapped": String(describing: type(of: menu.delegate as AnyObject)), "items": menu.items.map(\.title),
+                    // Each item's mark, averaged, "" for none (evals/bookmark-icons).
+                    "images": menu.items.map { $0.image.flatMap { Scope.average(of: $0)?.hex } ?? "" },
                     "ours": BookmarkMenu.shared.count, "ms": took, "unopened": quiet])
 
         case "menu-pop":
@@ -4872,9 +5166,11 @@ final class Bench {
                                 "x": frame.minX, "y": frame.minY, "w": frame.width, "h": frame.height]
                     } : [],
                     "list": hoard.listWindow.map { ["number": $0.windowNumber, "x": $0.frame.minX, "y": $0.frame.minY,
-                                                    "w": $0.frame.width, "h": $0.frame.height, "visible": $0.isVisible] } ?? [:],
+                                                    "w": $0.frame.width, "h": $0.frame.height, "visible": $0.isVisible,
+                                                    "parent": $0.parent?.windowNumber ?? 0] } ?? [:],
                     "stack": hoard.stackWindow.map { ["number": $0.windowNumber, "x": $0.frame.minX, "y": $0.frame.minY,
-                                                      "w": $0.frame.width, "h": $0.frame.height, "visible": $0.isVisible] } ?? [:],
+                                                      "w": $0.frame.width, "h": $0.frame.height, "visible": $0.isVisible,
+                                                      "parent": $0.parent?.windowNumber ?? 0] } ?? [:],
                     "window": Links.window.map { ["number": $0.windowNumber, "x": $0.frame.minX, "y": $0.frame.minY,
                                                     "w": $0.frame.width, "h": $0.frame.height, "visible": $0.isVisible,
                                                     "occluded": !$0.occlusionState.contains(.visible), "key": $0.isKeyWindow] } ?? [:]])
@@ -4902,6 +5198,25 @@ final class Bench {
                 if let path = request["path"] as? String { out["drawn"] = KeyTip.shared.snapshot(to: URL(fileURLWithPath: path)) }
                 answer(out)
             }
+
+        case "mouse-swipe":
+            guard Store.testing else { answer(["error": "mouse-swipe requires --test"]); return }
+            guard let window = Links.window, let content = window.contentView,
+                  let x = request["x"] as? Double, let y = request["y"] as? Double,
+                  let dx = request["dx"] as? Double else {
+                answer(["error": "mouse-swipe needs x, y and dx"]); return
+            }
+            let at = NSPoint(x: x, y: content.bounds.height - y)
+            guard let event = Self.mouseSwipe(dx, phase: .began, at: at, in: window),
+                  let end = Self.mouseSwipe(0, phase: .ended, at: at, in: window),
+                  event.type == .swipe, event.window === window,
+                  event.deltaX == CGFloat(dx) else {
+                answer(["error": "could not create a window-stamped mouse swipe"]); return
+            }
+            let sidebar = SpaceSwipe.claims(event)
+            NSApp.postEvent(event, atStart: false)
+            NSApp.postEvent(end, atStart: false)
+            answer(["ok": true, "sidebar": sidebar, "dx": event.deltaX])
 
         case "middle":
             // A press and let-go of the middle button at a point of the
@@ -4955,25 +5270,17 @@ final class Bench {
                 }
                 return nil
             }
-            guard let bar = hud(in: web), let root = bar.layer else { answer(["error": "no bar", "pdf": web.webKitShowsPDF]); return }
+            guard let bar = hud(in: web) else { answer(["error": "no bar", "pdf": web.webKitShowsPDF]); return }
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             // Shown, as a pointer over the page shows it.
-            let show = NSSelectorFromString("_setVisible:")
-            if let method = class_getInstanceMethod(type(of: bar), show) {
-                typealias Set = @convention(c) (AnyObject, Selector, Bool) -> Void
-                unsafeBitCast(method_getImplementation(method), to: Set.self)(bar, show, true)
+            guard PDFHUDProbe.show(bar) else {
+                answer(["error": "PDF bar has no visibility interface"])
+                return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                // The buttons: the panel's sublayers as wide as a button,
-                // the separator left out.
-                let panel = root.sublayers?.first
-                let buttons = (panel?.sublayers ?? []).filter { $0.frame.width >= 20 }.map { button -> NSRect in
-                    let r = button.convert(button.bounds, to: root)
-                    return bar.convert(r, to: nil)
-                }
+                let (buttons, shown) = PDFHUDProbe.controls(in: bar)
                 let frames = buttons.map { [Double($0.minX), Double(content.bounds.height - $0.maxY), Double($0.width), Double($0.height)] }
-                let shown = Double(panel?.presentation()?.opacity ?? panel?.opacity ?? 0)
                 guard let index = request["press"] as? Int else {
                     answer(["buttons": frames, "opacity": shown])
                     return
@@ -5034,7 +5341,7 @@ final class Bench {
                     "codeError": account.codeError ?? "", "binary": account.binary ?? "", "signedIn": account.signedIn.map { $0 ? "yes" : "no" } ?? "unknown",
                     "ready": account.ready, "models": account.models.map(\.model),
                     "email": account.identity?.email ?? "", "choiceRows": GeminiChoices.shared.rows.map { $0.email ?? "another" },
-                    "trouble": account.trouble ?? ""])
+                    "trouble": account.trouble ?? "", "pageOpen": account.pageOpen, "looking": GeminiChoices.shared.looking])
 
         case "settingsclick":
             // An isolated probe's native click, in Settings content points
@@ -5085,6 +5392,24 @@ final class Bench {
                 }
             }
             return
+
+        case "apple-extension-scene":
+            guard Store.testing else { answer(["error": "test session required"]); return }
+            let connected = request["connected"] as? Bool ?? false
+            ApplePasswordExtensionRoute.isConnected = { connected }
+            ApplePasswordExtensionRoute.pair = {
+                await Questions.shared.ask(ApplePasswordsPairing.connectQuestion(model: ApplePasswordsPairing.CodeModel()))
+            }
+            let id = PasswordManagers.apple
+            if request["inspect"] as? Bool != true {
+                if request["press"] as? Bool == true { Extensions.here.press(id) }
+                else { Extensions.here.install(from: id) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                answer(["installed": Extensions.here.installed.contains { $0.id == id },
+                        "connected": connected, "question": Questions.shared.current?.title ?? "",
+                        "notice": browser.toaster.shown ? browser.toaster.words : ""])
+            }
 
         case "settingsnotice":
             // A notice said by the browser or by Settings, and where each
@@ -5405,6 +5730,22 @@ final class Bench {
                     "notice": link.noticeShown,
                     "list": NSApp.windows.first { $0 is DropPanel && $0.isVisible && $0.parent === link.window }?.windowNumber ?? 0,
                 ]
+            }, "extensionWindows": ChromiumExtensionWindow.open.map { made -> [String: Any] in
+                // An extension's own window on a Chromium tab (windows.create).
+                let frame = made.window.frame
+                return ["id": made.tab.id.uuidString, "url": made.tab.address?.absoluteString ?? "", "number": made.window.windowNumber,
+                        "key": made.window.isKeyWindow, "visible": made.window.isVisible, "title": made.window.title,
+                        "frame": [frame.minX, frame.minY, frame.width, frame.height],
+                        // Under its pin (ExtensionWindowFrame).
+                        "extension": made.shown.owner.id, "hung": made.shown.underPin != nil,
+                        "pin": made.shown.underPin.map { [$0.minX, $0.minY, $0.width, $0.height] } ?? [],
+                        "header": made.shown.owner.name,
+                        "lit": ExtensionWindowFrame.Hung.shared.ids.contains(made.shown.owner.id),
+                        // The pins for it now, wherever they are, and what the tab in front pins.
+                        "census": AnchorView.census(made.shown.owner.id) + ChromiumPopupAnchor.View.census(made.shown.owner.id),
+                        "pinnedHere": browser.active.map { ChromiumColumn.shared.pinnedIDs(for: $0) } ?? [],
+                        "pinNow": (BrowserWindows.shared.window(for: browser).flatMap { ExtensionWindowFrame.pin(made.shown.owner.id, in: $0) })
+                            .map { [$0.minX, $0.minY, $0.width, $0.height] } ?? []]
             }, "row": browser.tabs.count, "active": browser.active?.address?.absoluteString ?? "",
                "browserWindow": Links.window?.isVisible ?? false, "browserKey": Links.window?.isKeyWindow ?? false,
                "fullScreen": NSApp.windows.contains { $0.styleMask.contains(.fullScreen) }, "browserSheet": Links.window?.attachedSheet != nil, "spaceName": browser.space.name,
@@ -5939,7 +6280,7 @@ final class Bench {
             case "chat-attach":
                 let attach = browser.chatAttach
                 if request["open"] as? Bool == true { browser.moveChat(open: true) }
-                if request["clear"] as? Bool == true { attach.clear() }
+                if request["clear"] as? Bool == true { attach.clear(for: browser.chatID) }
                 if let path = request["path"] as? String { attach.add(.file(URL(fileURLWithPath: path)), chat: nil, browser: browser) }
                 if let quote = request["quote"] as? String { attach.add(.quote(quote), chat: nil, browser: browser) }
                 if request["tabs"] as? Bool == true {
@@ -5953,7 +6294,7 @@ final class Bench {
                 // What is there goes as a new chat, with no words.
                 if request["send"] as? Bool == true {
                     let items = attach.current(chat: nil, browser: browser)
-                    attach.clear()
+                    attach.clear(for: nil)
                     ChatComposer.begin("", with: items, in: browser)
                 }
             case "chat-hide": browser.moveChat(open: false)
@@ -6611,10 +6952,7 @@ final class Bench {
                       let space = browser.spaces.first(where: { $0.name.lowercased() == (request["space"] as? String ?? "").lowercased() })
                 else { answer(missing(request)); return }
                 act = {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Browser.folderLeavesAfter) {
-                        browser.columnCurve = Browser.folderLeaves
-                        if browser.moveTabs([tab], to: space.id, say: false) != nil { browser.switchSpace(to: space.id) }
-                    }
+                    SpaceSend(browser: browser, tabs: [tab]).send(to: space.id)
                 }
             // The chat column's own screens: its chats kept coming in over a
             // chat, and one of them picked ("id"), as its row does.
@@ -6856,6 +7194,14 @@ final class Bench {
             // everything on the screen.
             guard Store.testing else { answer(["error": "float only works on a --test run"]); return }
             switch request["action"] as? String ?? "state" {
+            case "return-before-pip":
+                guard let sibling = find(["id": request["other"] ?? ""], in: browser) else { answer(["error": "sibling required"]); return }
+                // Same native event turn: the person returns before the
+                // asynchronous native request can present its video.
+                answer(browser.benchReturnBeforePiP(sibling))
+            case "pending-pip":
+                answer(["pending": browser.pendingVideoRequestsForBench, "showing": browser.floater.showing,
+                        "active": browser.activeID.map { String($0.uuidString.prefix(8)).lowercased() } ?? ""])
             case "toggle":
                 // ⇧⌘P into Yab's window: away, or, tucked behind an edge, back out.
                 browser.toggleFloat(own: true)
@@ -7264,6 +7610,12 @@ final class Bench {
                 } }(),
                 "passkeyAsks": Passkeys.asked,
                 "passkeyLast": Passkeys.last,
+                "passkeyTrail": Passkeys.trail,
+                // Chromium's WebAuthn requests as they came, and the
+                // conditional gets pending (CEF 0127), without credentials.
+                "chromiumWebAuthn": ChromiumWebAuthn.heard,
+                "passkeyConditional": ChromiumWebAuthn.conditionalReport,
+                "fieldWebAuthn": browser.active?.fieldWebAuthn ?? false,
                 // The page's Web Inspector: up, and docked beside the page.
                 "inspector": browser.active?.webKitOnly("WebKit-only bench fixtures", build: false).flatMap(Inspector.of).map { Inspector.asks($0, "isVisible") } ?? false,
                 "inspectorDocked": browser.active?.webKitOnly("WebKit-only bench fixtures", build: false)?.superview?.subviews.contains { String(describing: type(of: $0)).hasPrefix("WKInspector") } ?? false,
@@ -7431,12 +7783,19 @@ final class Bench {
             // permissions.request, every site with its capture permissions.
             let place: Question.Place = request["place"] as? String == "plain" ? .plain : .page
             // "apple-pairing": Passwords' code card, `code` typed so far and
-            // `wrong` after a refused one.
+            // `wrong` after a refused one. With `pid`, the pairing's own
+            // question beside that process's window, in its own panel, as
+            // Settings' Connect raises it (R2564: "pairing-state" says what
+            // holds its keys).
             let pairing = ApplePasswordsPairing.CodeModel()
             pairing.code = request["code"] as? String ?? ""
             pairing.wrong = request["wrong"] as? Bool ?? false
+            Bench.pairing = pairing
+            let helper = (request["pid"] as? Int).map { Int32($0) }
             let asked = request["sample"] as? String == "apple-pairing"
-                ? Question(title: "Connect Apple Passwords", detail: "Enter the code Passwords shows.",
+                ? helper != nil
+                ? ApplePasswordsPairing.connectQuestion(model: pairing, anchor: QuestionAnchor(processIdentifier: helper))
+                : Question(title: "Connect Apple Passwords", detail: "Enter the code Passwords shows.",
                            icon: PasswordManagers.icon(PasswordManagers.apple), ownIcon: true,
                            yes: "", no: "Not Now", place: .plain,
                            accessory: AnyView(ApplePasswordsPairing.PairingField(model: pairing)))
@@ -7485,6 +7844,29 @@ final class Bench {
                             "shownIn": Questions.shared.shownIn.sorted()])
                 }
             }
+
+        case "pairing-state":
+            // The pairing card up beside its helper (question-up `pid`): the
+            // code its strip holds, whether Yab and the card have the keys,
+            // and which view of the card takes them. Only on a YAB_PROBE run.
+            guard Store.testing else { answer(["error": "pairing-state only works on a --test run"]); return }
+            let panel = Questions.shared.current?.anchor?.panel
+            let responder = panel?.firstResponder
+            var holder = responder.map { String(describing: type(of: $0)) } ?? "none"
+            if let editor = responder as? NSTextView, editor.isFieldEditor, let owner = editor.delegate {
+                holder = "field editor of " + String(describing: type(of: owner))
+            }
+            func fields(_ view: NSView?) -> [String] {
+                guard let view else { return [] }
+                return (view is NSTextField ? [String(describing: type(of: view))] : []) + view.subviews.flatMap(fields)
+            }
+            answer(["code": Bench.pairing?.code ?? "", "active": NSApp.isActive,
+                    "panel": panel?.windowNumber ?? 0, "panelVisible": panel?.isVisible ?? false,
+                    "panelKey": panel?.isKeyWindow ?? false, "keyWindow": NSApp.keyWindow?.windowNumber ?? 0,
+                    "responder": holder, "fields": fields(panel?.contentView),
+                    "fullKeyboardAccess": NSApp.isFullKeyboardAccessEnabled,
+                    "front": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0),
+                    "pid": Int(ProcessInfo.processInfo.processIdentifier)])
 
         case "restart":
             // Quit and come back the way an update restarts Yab
@@ -7806,6 +8188,36 @@ final class Bench {
                     "menu": items(NSApp.windowsMenu), "chose": chose,
                 ])
             }
+
+        case "fullscreenchrome":
+            guard let window = BrowserWindows.shared.window(for: browser), let content = window.contentView else {
+                answer(["error": "no window"]); return
+            }
+            func rect(_ view: NSView) -> [Double] {
+                let r = (view.window ?? window).convertToScreen(view.convert(view.bounds, to: nil))
+                return [r.minX, r.minY, r.width, r.height].map(Double.init)
+            }
+            func visible(_ view: NSView) -> CGFloat {
+                guard !view.isHiddenOrHasHiddenAncestor, let owner = view.window, owner.isVisible,
+                      let screen = owner.screen else { return 0 }
+                let r = owner.convertToScreen(view.convert(view.visibleRect, to: nil)).intersection(screen.frame)
+                return r.isNull ? 0 : r.height
+            }
+            let strip = StripView.of(browser)
+            let title = Lights.titleBar(of: window)
+            answer([
+                "content": rect(content), "strip": strip.map(rect) ?? [],
+                "stripVisible": strip.map { visible($0) > 1 } ?? false,
+                "stripVisibleHeight": Double(strip.map(visible) ?? 0),
+                "stripWindow": strip?.window?.windowNumber ?? 0,
+                "title": title.map(rect) ?? [],
+                "titleVisible": title.map { visible($0) > 1 } ?? false,
+                "titleVisibleHeight": Double(title.map(visible) ?? 0),
+                "titleWindow": title?.window?.windowNumber ?? 0,
+                "menuOut": browser.menuOut, "menuDown": Double(browser.menuDown),
+                "stripPeek": browser.stripPeek, "full": browser.fullScreen,
+                "accessories": window.titlebarAccessoryViewControllers.map { rect($0.view) },
+            ])
 
         case "edge":
             // The pointer, as Brim sees it, put somewhere against the window
@@ -8389,6 +8801,10 @@ final class Bench {
                 answer([
                     "offers": browser.offers.map { $0.id },
                     "rows": browser.offers.map { $0.key },
+                    // Each row's address and the color of the icon it wears,
+                    // "" for a letter (evals/favicons/per_page.py).
+                    "urls": browser.offers.map { $0.url?.absoluteString ?? "" },
+                    "icons": browser.offers.map { Scope.average(of: Omnibox.favicon(for: $0))?.hex ?? "" },
                     "ending": browser.ending ?? "",
                     "lead": browser.query.lead ?? -1,
                     "tab": browser.query.offering?.name ?? "",
@@ -8405,7 +8821,7 @@ final class Bench {
                 switch card {
                 case "add": SiteEditing.shared.open(nil)
                 case "close": SiteEditing.shared.close()
-                default: SiteEditing.shared.open(Scopes.all.first { $0.id == card })
+                default: SiteEditing.shared.open(Scopes.all.first { $0.id == card } ?? Scopes.all.first { $0.host == card })
                 }
                 answer(["open": SiteEditing.shared.draft != nil])
                 return
@@ -8525,7 +8941,7 @@ final class Bench {
         case "import":
             importCommand(request, browser: browser, answer)
 
-        case "extensions", "ext-add", "ext-add-frozen", "ext-diagnostics", "ext-folder", "ext-press", "ext-withheld", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-popout", "ext-side-panel", "ext-menu", "site-shot", "site-facts", "ext-pin", "ext-tip", "ext-commands", "ext-shot", "ext-answer", "ext-enable", "ext-scan", "ext-bring", "debugger", "ext-search-engines", "answer-links":
+        case "extensions", "ext-add", "ext-add-frozen", "ext-diagnostics", "ext-background", "ext-folder", "ext-press", "ext-withheld", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-popout", "ext-side-panel", "ext-menu", "site-shot", "site-facts", "ext-pin", "ext-tip", "ext-commands", "ext-shot", "ext-answer", "ext-enable", "ext-scan", "ext-bring", "debugger", "ext-search-engines", "answer-links":
             guard #available(macOS 15.4, *) else {
                 answer(["error": "extensions need macOS 15.4"])
                 return
@@ -8689,6 +9105,7 @@ final class Bench {
         // A controlled browser-data fixture in an isolated test world.
         // The same disk reader and bringing path as a person's import.
         if let path { source?.dataRoot = path }
+        source = source?.authorizingImport()
         // The fixture's Safe Storage passphrase: its tabs.db read with no
         // keychain asked.
         if let path, let key = request["key"] as? String {
@@ -8809,7 +9226,13 @@ final class Bench {
         switch verb {
         case "extensions":
             let hung = ExtensionPopup.shared.frames
-            answer(["busy": extensions.busy ?? "", "panel": ExtensionPanel.shared.isShown, "menuOpen": extensions.menuOpen,
+            let popupView = ExtensionPopup.shared.view
+            let popupRect = popupView.flatMap { view in view.window.map { $0.convertToScreen(view.convert(view.bounds, to: nil)) } } ?? .zero
+            answer(["popupWindow": popupView?.window?.windowNumber ?? 0,
+                    "popupKey": popupView?.window?.isKeyWindow ?? false,
+                    "popupContentOnScreen": [popupRect.minX, (NSScreen.screens.first?.frame.maxY ?? 0) - popupRect.maxY, popupRect.width, popupRect.height],
+                    "busy": extensions.busy ?? "", "panel": ExtensionPanel.shared.isShown, "menuOpen": extensions.menuOpen,
+                    "popupLayoutState": ExtensionPopup.shared.layoutState,
                     // The panel's window, for `film` with "window".
                     "panelWindow": ExtensionPanel.shared.windowNumber ?? 0,
                     "signIn": extensions.signIn?.uuidString ?? "shared",
@@ -8860,6 +9283,8 @@ final class Bench {
                     "line": ExtensionDetail.stoppedByMacOS(item, context, extensions) ? ExtensionDetail.stoppedLine(item.id) : "",
                     "action": action?.label ?? "", "badge": action?.badgeText ?? "",
                     "popup": action?.presentsPopup ?? false,
+                    // The icon drawn now, as a Chromium tab's is read (ExtensionOneList.tint).
+                    "iconTint": ExtensionOneList.tint(action?.icon(for: CGSize(width: 32, height: 32))),
                     "pinned": item.pinned ?? false, "source": item.source ?? "",
                     // Whether it reaches example.com and each site kept from it.
                     "reaches": Dictionary((["example.com", "github.com"] + extensions.blocked(item.id)).map { host in
@@ -8891,15 +9316,30 @@ final class Bench {
             guard Store.testing, let id = request["id"] as? String else {
                 answer(["error": "ext-diagnostics needs a test session and id"]); return
             }
+            let background = extensions.contexts[id].flatMap(Extensions.backgroundViewForTesting)
             answer(["busy": extensions.busy == id,
                     "install_error": extensions.installErrors[id] ?? "",
                     "installed": extensions.installed.contains(where: { $0.id == id }),
                     "loaded": extensions.contexts[id] != nil,
+                    "shim_popups": extensions.popupPaths[id] ?? [:],
+                    "background_url": background?.url?.absoluteString ?? "",
+                    "background_loading": background?.isLoading ?? false,
                     // WebKit's own words: a worker that failed to start says why.
                     "errors": extensions.contexts[id]?.errors.map { error in
                         let e = error as NSError
                         return "\(e.domain) \(e.code): \(e.localizedDescription) \(e.userInfo[NSUnderlyingErrorKey].map { "\($0)" } ?? "")"
                     } ?? []])
+        case "ext-background":
+            guard Store.testing, let id = request["id"] as? String,
+                  let script = request["js"] as? String,
+                  let context = extensions.contexts[id],
+                  let background = Extensions.backgroundViewForTesting(context) else {
+                answer(["error": "No native background view in this test context"]); return
+            }
+            background.evaluateJavaScript(script) { value, error in
+                if let error { answer(["error": error.localizedDescription]) }
+                else { answer(["value": value ?? NSNull()]) }
+            }
         case "ext-folder":
             guard let path = request["path"] as? String else { answer(["error": "ext-folder needs a path"]); return }
             extensions.installFolder(at: URL(fileURLWithPath: path), confirm: !skip, giving: Set(request["give"] as? [String] ?? []))
@@ -8950,7 +9390,7 @@ final class Bench {
             guard let tab = browser.active else { answer(["error": "no tab in front"]); return }
             let facts = SiteFacts(tab: tab)
             if let title = request["forget"] as? String { facts.allowed.first { $0.title == title }?.forget() }
-            answer(["site": facts.site, "secure": facts.secure, "zoom": Double(tab.zoom),
+            answer(["site": facts.site, "secure": facts.secure, "zoom": Double(tab.zoom), "connection": facts.connection.title, "certificate": facts.trust != nil,
                     "camera": tab.camera == .active, "microphone": tab.microphone == .active,
                     "allowed": facts.allowed.map { ["title": $0.title, "said": $0.said ? "Allowed" : "Blocked"] }])
         case "site-shot":
@@ -9007,7 +9447,7 @@ final class Bench {
                                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: Links.window?.windowNumber ?? 0,
                                             context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false,
                                             keyCode: Bench.keyCode(for: character)) {
-                out["taken"] = extensions.take(event)
+                out["taken"] = ChromiumExtensionCommands.take(event, in: browser) || extensions.take(event)
             }
             answer(out)
         case "ext-commands":
@@ -9036,7 +9476,8 @@ final class Bench {
                 if let keys = request["record"] as? String, let (flags, name, _) = Bench.chord(keys), !name.isEmpty {
                     let hotkey = Hotkey(name, flags)
                     let own = extensions.contexts[id]?.commands.first { $0.id == command }
-                    switch Keymap.shared.clash(hotkey, for: nil, command: own) {
+                    let entry = extensions.commandGroups().first { $0.item.id == id }?.commands.first { $0.command == command }
+                    switch entry.map({ ExtensionCommandRow.clash(hotkey, entry: $0, command: own) }) ?? Keymap.shared.clash(hotkey, for: nil, command: own) {
                     case nil:
                         extensions.setKey(hotkey, extension: id, command: command)
                         recorded = ["said": "", "taken": true]
@@ -9055,10 +9496,12 @@ final class Bench {
             var out: [String: Any] = ["groups": extensions.commandGroups().map { group -> [String: Any] in
                 ["id": group.item.id, "short": group.short, "commands": group.commands.map { entry -> [String: Any] in
                     ["command": entry.command, "title": entry.title, "keys": entry.keys?.text ?? "",
-                     "alias": entry.kept.alias, "on": !entry.kept.off]
+                     "alias": entry.kept.alias, "on": !entry.kept.off, "chromium": entry.chromium]
                 }]
             }, "recorded": recorded, "settings": SettingsWindow.shared.benchWhere, "routed": ChromePages.last,
                "closeWindow": Keymap.shared.text(.closeWindow), "taken": Extensions.lastTaken,
+               // The helper runs named commands in Chromium (CEF patch 0116).
+               "chromiumRunsNamed": ChromiumExtensionCommands.runsNamed,
                "windows": BrowserWindows.shared.browsers.filter { BrowserWindows.shared.window(for: $0)?.isVisible == true }.count]
             if let path = request["path"] as? String {
                 let dark = request["dark"] as? Bool ?? false
@@ -9149,7 +9592,9 @@ final class Bench {
                     }
                 }
             } else {
-                answer(["selected": selected, "url": page.web.url?.absoluteString ?? "",
+                let rect = page.web.window.map { $0.convertToScreen(page.web.convert(page.web.bounds, to: nil)) } ?? .zero
+                answer(["contentOnScreen": [rect.minX, (NSScreen.screens.first?.frame.maxY ?? 0) - rect.maxY, rect.width, rect.height],
+                        "selected": selected, "url": page.web.url?.absoluteString ?? "",
                         "tabs": browser.tabs.count, "open": browser.chatOpen,
                         "attached": page.web.window != nil,
                         "hasSuperview": page.web.superview != nil,
@@ -9168,7 +9613,11 @@ final class Bench {
                     ["window": popout.window.windowNumber, "extension": popout.extensionID, "title": popout.window.title,
                      "url": popout.web.url.map(Extensions.popped)?.absoluteString ?? "",
                      "view": popout.web.url?.absoluteString ?? "", "frame": box(popout.window.frame),
-                     "key": popout.window.isKeyWindow, "visible": popout.window.isVisible]
+                     "key": popout.window.isKeyWindow, "visible": popout.window.isVisible,
+                     // Under its pin (ExtensionWindowFrame).
+                     "hung": popout.shown.underPin != nil, "pin": popout.shown.underPin.map(box) ?? [], "page": box(popout.web.frame),
+                     "header": popout.shown.owner.name,
+                     "lit": ExtensionWindowFrame.Hung.shared.ids.contains(popout.extensionID)]
                 }, "browser": BrowserWindows.shared.window(for: browser).map { box($0.frame) } ?? []])
                 return
             }
@@ -9263,6 +9712,9 @@ final class Bench {
     /// Whether the Touch ID question was up when `fill` took it down.
     static var sawQuestion = false
 
+    /// The code card question-up raised last, read by "pairing-state".
+    static var pairing: ApplePasswordsPairing.CodeModel?
+
     /// Passwords that would end a string they were written into, or run
     /// as code inside one: quotes of every kind, a template's `${}`, a
     /// backslash before each, line breaks, a script's end tag, and
@@ -9344,6 +9796,10 @@ final class Bench {
             // What its row says (a short name, a search's part), not the page's title.
             "row": tab.rowLabel,
             "title": tab.title,
+            "count": tab.count ?? -1,
+            "countCorner": tab.countCorner?.words ?? "",
+            "unadornedCountCorner": tab.unadornedCountCorner?.words ?? "",
+            "showsOwnCount": tab.showsOwnCount,
             "loading": tab.loading,
             "drawn": tab.drawn,
             // What WebKit says of the load, and what the tab's end shows of it.
@@ -9958,7 +10414,7 @@ final class Spin {
                           let event = CGEvent(scrollWheelEvent2Source: nil, units: smooth ? .pixel : .line, wheelCount: 2,
                                               wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) else { return }
                     if smooth { event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1) }
-                    if shift { event.flags = .maskShift }
+                    event.flags = shift ? .maskShift : []
                     event.timestamp = CGEventTimestamp(start + UInt64(Double(index) * gap * 1e9))
                     let screen = window.convertPoint(toScreen: point)
                     event.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y)
@@ -10024,6 +10480,7 @@ final class Spin {
                                   wheel1: kind == .wheel ? lines : kind == .page ? lines * 40 : kind == .fingers || kind == .column ? lines : 0,
                                   wheel2: kind == .across ? lines * 40 : 0, wheel3: 0)
         else { return }
+        event.flags = []
         if phase >= 0 {
             event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
             event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
@@ -10200,6 +10657,7 @@ extension Bench {
         let start = DispatchTime.now().uptimeNanoseconds
         func post(_ dx: Int32, phase: Int64, step: Int) {
             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: vertical ? dx : 0, wheel2: vertical ? 0 : dx, wheel3: 0) else { return }
+            event.flags = []
             let screen = window.convertPoint(toScreen: middle)
             event.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y)
             event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
@@ -10241,6 +10699,7 @@ extension Bench {
         guard let window = Links.window, let content = window.contentView, let dot = SpaceAnchors.dot,
               let value = ["maybegin": Int64(128), "began": 1, "ended": 4, "cancelled": 8][phase],
               let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: 0, wheel3: 0) else { return }
+        event.flags = []
         let at = page ? NSPoint(x: content.bounds.maxX - 200, y: content.bounds.midY)
             : dot.convert(NSPoint(x: dot.bounds.midX, y: dot.bounds.midY), to: nil)
         let screen = window.convertPoint(toScreen: at)
@@ -10279,6 +10738,7 @@ extension Bench {
         let middle = web.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), to: nil)
         func post(_ dx: Int32, _ dy: Int32 = 0, phase: Int64) {
             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
+            event.flags = []
             let screen = window.convertPoint(toScreen: middle)
             event.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y)
             event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
@@ -10349,14 +10809,43 @@ extension Bench {
     /// stamped with the window and the point in it, as the window server
     /// stamps a real one. Private Quartz calls; only a test run gets here.
     static func smartMagnify(at point: NSPoint, in window: NSWindow) -> NSEvent? {
+        gesture(hidType: 22, at: point, in: window)
+    }
+
+    /// One event of a pinch as the trackpad hands it over: a gesture event
+    /// whose HID type is zoom, with its phase and how far the fingers moved.
+    static func magnify(_ amount: Double, phase: NSEvent.Phase, at point: NSPoint, in window: NSWindow) -> NSEvent? {
+        gesture(hidType: 8, at: point, in: window) { made in
+            // IOHID's phase bits, which are not NSEvent.Phase's.
+            made.setIntegerValueField(CGEventField(rawValue: 132)!, value: Int64(ChromiumWheelPhase.gesture(phase)))
+            made.setDoubleValueField(CGEventField(rawValue: 113)!, value: amount)
+        }
+    }
+
+    /// Discrete navigation swipe, as a mouse driver emits it. Use a real
+    /// Quartz gesture so AppKit can enqueue it (an NSEvent subclass has no
+    /// backing event). HID type/masks match WebKit's IOKit SPI and
+    /// LinearMouse's GestureKit navigation swipe producer.
+    /// https://github.com/linearmouse/linearmouse/blob/main/Modules/GestureKit/Sources/GestureKit/GestureEvent%2BNavigationSwipe.swift
+    static func mouseSwipe(_ horizontal: Double, phase: NSEvent.Phase, at point: NSPoint, in window: NSWindow) -> NSEvent? {
+        // NSEvent deltaX is +1 for left, -1 for right (NSEvent.h).
+        gesture(hidType: 16, at: point, in: window) { made in
+            made.setIntegerValueField(CGEventField(rawValue: 115)!, value: horizontal > 0 ? 4 : horizontal < 0 ? 8 : 0)
+            made.setIntegerValueField(CGEventField(rawValue: 132)!, value: Int64(ChromiumWheelPhase.gesture(phase)))
+        }
+    }
+
+    private static func gesture(hidType: Int64, at point: NSPoint, in window: NSWindow, fields: (CGEvent) -> Void = { _ in }) -> NSEvent? {
         guard let made = CGEvent(source: nil) else { return nil }
+        made.flags = []
         typealias SetType = @convention(c) (CGEvent, UInt32) -> Void
         typealias Place = @convention(c) (CGEvent, CGPoint) -> Void
         guard let setType = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGEventSetType"),
               let place = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGEventSetWindowLocation") else { return nil }
-        // kCGSEventGesture, with kCGEventGestureHIDType the zoom toggle.
+        // kCGSEventGesture, with kCGEventGestureHIDType what the fingers did.
         unsafeBitCast(setType, to: SetType.self)(made, 29)
-        made.setIntegerValueField(CGEventField(rawValue: 110)!, value: 22)
+        made.setIntegerValueField(CGEventField(rawValue: 110)!, value: hidType)
+        fields(made)
         made.timestamp = CGEventTimestamp(DispatchTime.now().uptimeNanoseconds)
         let screen = window.convertPoint(toScreen: point)
         made.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y)
@@ -10459,6 +10948,26 @@ private final class PaceLatency: @unchecked Sendable {
 /// `copy` is ⌘C, answering with what went on the pasteboard.
 @MainActor enum BenchPointer {
     private static var rows: [String: Any] = [:]
+
+    /// A click on a Chromium page at `at` in its points from the top left,
+    /// its middle without: down and up sent to its window.
+    static func click(_ page: ChromiumPage, at: [Double]?) -> [String: Any] {
+        guard let window = page.window else { return ["error": "the page has no window"] }
+        let x = at?.first ?? page.bounds.width / 2, y = at.flatMap { $0.count == 2 ? $0[1] : nil } ?? page.bounds.height / 2
+        let local = CGPoint(x: x, y: page.isFlipped ? y : page.bounds.height - y)
+        let point = page.convert(local, to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+        }
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+        guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return ["error": "no event"] }
+        let hit = window.contentView?.hitTest(window.contentView?.superview?.convert(point, from: nil) ?? point)
+        window.sendEvent(down)
+        window.sendEvent(up)
+        return ["clicked": true, "hitPage": hit === page || hit?.isDescendant(of: page) == true, "window": window.windowNumber]
+    }
 
     static func run(_ request: [String: Any], on web: PageView) -> [String: Any] {
         let point = { (key: String) -> CGPoint? in

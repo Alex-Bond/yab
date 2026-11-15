@@ -28,6 +28,22 @@ struct PasswordManagersTests {
         }
     }
 
+    // Register 2497: with Apple Passwords connected, Yab's own card asks to
+    // save into it, so Offer to save passwords stays the person's switch.
+    // Only a manager's extension asking by itself holds it.
+    @Test func offerToSaveStaysThePersonsWithApplePasswords() {
+        let apple = M.Source(yab: true, saver: M.apple, asksForApple: true)
+        #expect(apple.offerSwitch(saves: true).on && apple.offerSwitch(saves: true).enabled)
+        #expect(!apple.offerSwitch(saves: false).on && apple.offerSwitch(saves: false).enabled)
+        let yab = M.Source(yab: true, saver: nil)
+        #expect(yab.offerSwitch(saves: true).on && yab.offerSwitch(saves: true).enabled)
+        // The iCloud Passwords extension on, not connected: the extension asks.
+        let iCloudExtension = M.Source(yab: true, saver: M.apple)
+        #expect(!iCloudExtension.offerSwitch(saves: true).enabled && !iCloudExtension.offerSwitch(saves: true).on)
+        let bitwarden = M.Source(yab: true, saver: M.bitwarden)
+        #expect(!bitwarden.offerSwitch(saves: true).enabled && !bitwarden.offerSwitch(saves: true).on)
+    }
+
     @Test func strongboxOwnsFieldsWithoutPrivacyOptOut() {
         let id = "mnilpkfepdibngheginihjpknnopchbn"
         let unrelated = "test-unrelated-strongbox"
@@ -45,6 +61,22 @@ struct PasswordManagersTests {
             // A matching name and native-messaging permission do not take fields.
             #expect(!M.isManager(extensionItem(unrelated)))
             #expect(!M.yabMayUnlock(id))
+        }
+    }
+
+    // A private tab no extension reaches: no manager's extension has its
+    // boxes, so Yab's own list is there (#1303). Allowed in private tabs,
+    // the extension has them as on any other tab.
+    @Test func noExtensionHasThePrivateTabsBoxesUnlessAllowedThere() {
+        keeping(["extensions.private"]) {
+            let shy = Tab(shy: true, bench: true), plain = Tab(bench: true)
+            defer { shy.close(); plain.close() }
+            Store.settings.set(false, forKey: "extensions.private")
+            #expect(M.extensionsRun(on: plain))
+            #expect(!M.extensionsRun(on: shy))
+            #expect(M.fieldOwner(on: shy) == nil)
+            Store.settings.set(true, forKey: "extensions.private")
+            #expect(M.extensionsRun(on: shy))
         }
     }
 
@@ -159,9 +191,11 @@ struct PasswordManagersTests {
         #expect(ManagerUnlock.boxScript.contains("input[type=password]"))
     }
 
-    // Another browser's extension is found in the profiles its Local State
-    // lists, and in Default when it lists none, without walking its folders.
-    @Test func extensionsInOtherBrowsersAreFoundByLocalState() throws {
+    // Another browser's extension is found in the profiles its folder holds
+    // (a profile by its entry names, as Preferences), and in Default when it
+    // holds none, without walking its folders. Local State is a credential
+    // file and is not read without an import (53fc519dd, edr-credentials).
+    @Test func extensionsInOtherBrowsersAreFoundByTheirProfileFolders() throws {
         let files = FileManager.default
         let top = files.temporaryDirectory.appendingPathComponent("pm-browsers-" + UUID().uuidString)
         defer { try? files.removeItem(at: top) }
@@ -171,6 +205,8 @@ struct PasswordManagersTests {
         }
         let arc = top.appendingPathComponent("Arc")
         try files.createDirectory(at: arc.appendingPathComponent("Profile 3/Extensions/\(M.bitwarden)"), withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: arc.appendingPathComponent("Profile 3/Preferences"))
+        // There as on a real Mac; the folder, not this, says Profile 3 is a profile.
         let state = #"{"profile":{"info_cache":{"Default":{"name":"Personal"},"Profile 3":{"name":"Work"}}}}"#
         try Data(state.utf8).write(to: arc.appendingPathComponent("Local State"))
         let dia = top.appendingPathComponent("Dia")

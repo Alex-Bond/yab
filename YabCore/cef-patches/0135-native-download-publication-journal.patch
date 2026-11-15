@@ -1,0 +1,178 @@
+--- /dev/null
++++ b/components/download/public/common/download_publication.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_DOWNLOAD_PUBLIC_COMMON_DOWNLOAD_PUBLICATION_H_
++#define COMPONENTS_DOWNLOAD_PUBLIC_COMMON_DOWNLOAD_PUBLICATION_H_
++
++#include "base/functional/callback.h"
++#include "base/supports_user_data.h"
++#include "components/download/public/common/download_item.h"
++
++namespace download {
++// A native DownloadItem owns this adapter. It synchronizes the real journal
++// after a trusted embedder publishes the completed bytes, without extending
++// DownloadItem's public vtable or keeping a second filename registry.
++class DownloadPublication : public base::SupportsUserData::Data {
++ public:
++  using MoveCallback = base::RepeatingCallback<bool(const base::FilePath&,
++                                                   const base::FilePath&)>;
++  static void Attach(DownloadItem& item, MoveCallback callback) {
++    item.SetUserData(&key_, std::make_unique<DownloadPublication>(std::move(callback)));
++  }
++  static bool Move(DownloadItem& item, const base::FilePath& previous,
++                   const base::FilePath& path) {
++    auto* adapter = static_cast<DownloadPublication*>(item.GetUserData(&key_));
++    return adapter && adapter->callback_.Run(previous, path);
++  }
++  explicit DownloadPublication(MoveCallback callback) : callback_(std::move(callback)) {}
++
++ private:
++  inline static constexpr char key_ = 0;
++  MoveCallback callback_;
++};
++}  // namespace download
++#endif  // COMPONENTS_DOWNLOAD_PUBLIC_COMMON_DOWNLOAD_PUBLICATION_H_
+--- a/components/download/public/common/BUILD.gn
++++ b/components/download/public/common/BUILD.gn
+@@ -45,6 +45,7 @@
+     "download_job.h",
+     "download_job_factory.h",
+     "download_path_reservation_tracker.h",
++    "download_publication.h",
+     "download_response_handler.h",
+     "download_save_info.cc",
+     "download_save_info.h",
+--- a/components/download/public/common/download_item_impl.h
++++ b/components/download/public/common/download_item_impl.h
+@@ -694,6 +694,8 @@
+   void SetDangerType(DownloadDangerType danger_type);
+ 
+   void SetFullPath(const base::FilePath& new_path);
++  bool UpdatePublishedPath(const base::FilePath& previous_path,
++                           const base::FilePath& path);
+ 
+   void AutoResumeIfValid();
+ 
+--- a/components/download/internal/common/download_item_impl.cc
++++ b/components/download/internal/common/download_item_impl.cc
+@@ -22,6 +22,7 @@
+ //        auto-opened.
+ 
+ #include "components/download/public/common/download_item_impl.h"
++#include "components/download/public/common/download_publication.h"
+ 
+ #include <memory>
+ #include <optional>
+@@ -830,6 +831,21 @@
+   std::move(callback).Run(result);
+ }
+ 
++bool DownloadItemImpl::UpdatePublishedPath(const base::FilePath& previous_path,
++                                           const base::FilePath& path) {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  if (state_ != COMPLETE_INTERNAL || previous_path != GetFullPath() ||
++      path.empty() || !path.IsAbsolute()) {
++    return false;
++  }
++  destination_info_.target_path = path;
++  SetFullPath(path);
++  display_name_ = path.BaseName();
++  file_externally_removed_ = false;
++  UpdateObservers();
++  return true;
++}
++
+ void DownloadItemImpl::Rename(const base::FilePath& display_name,
+                               DownloadItem::RenameDownloadCallback callback) {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+@@ -1634,6 +1650,11 @@
+                             DownloadItem::DownloadCreationType download_type) {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+ 
++  // This callback is stored on this item and invoked synchronously through
++  // that same live item. The transfer weak factory is invalidated when the
++  // DownloadFile is detached, before publication of a completed file.
++  DownloadPublication::Attach(*this, base::BindRepeating(
++      &DownloadItemImpl::UpdatePublishedPath, base::Unretained(this)));
+   download_type_ = download_type;
+   std::string file_name;
+   if (download_type == TYPE_HISTORY_IMPORT) {
+--- a/cef/include/cef_request_context.h
++++ b/cef/include/cef_request_context.h
+@@ -42,6 +42,8 @@
+ 
+ #include "include/cef_api_hash.h"
+ #include "include/cef_callback.h"
++
++#define CEF_YAB_DOWNLOAD_PUBLICATION_VERSION 2
+ #include "include/cef_cookie.h"
+ #include "include/cef_media_router.h"
+ #include "include/cef_preference.h"
+@@ -264,6 +266,20 @@
+   virtual void CloseAllConnections(
+       CefRefPtr<CefCompletionCallback> callback) = 0;
+ 
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Synchronize the native journal after the embedder atomically moved a
++  /// completed file. The identifier belongs to this request context and
++  /// previous_path must still match. This does not move bytes or change
++  /// download state. Returns true on acceptance. Call on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetDownloadPublishedPath(int64_t identifier,
++                                       const CefString& previous_path,
++                                       const CefString& path) = 0;
++#endif
++
++
+   ///
+   /// Attempts to resolve |origin| to a list of associated IP addresses.
+   /// |callback| will be executed on the UI thread after completion.
+--- a/cef/libcef/browser/request_context_impl.h
++++ b/cef/libcef/browser/request_context_impl.h
+@@ -125,6 +125,9 @@
+   void ClearHttpAuthCredentials(
+       CefRefPtr<CefCompletionCallback> callback) override;
+   void CloseAllConnections(CefRefPtr<CefCompletionCallback> callback) override;
++  bool SetDownloadPublishedPath(int64_t identifier,
++                               const CefString& previous_path,
++                               const CefString& path) override;
+   void ResolveHost(const CefString& origin,
+                    CefRefPtr<CefResolveCallback> callback) override;
+   CefRefPtr<CefMediaRouter> GetMediaRouter(
+--- a/cef/libcef/browser/request_context_impl.cc
++++ b/cef/libcef/browser/request_context_impl.cc
+@@ -3,6 +3,9 @@
+ // can be found in the LICENSE file.
+ 
+ #include "cef/libcef/browser/request_context_impl.h"
++#include "components/download/public/common/download_publication.h"
++#include "content/public/browser/download_manager.h"
++
+ #include "content/public/browser/web_contents.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "cef/libcef/browser/views/external_crx.h"
+@@ -550,6 +553,18 @@
+                      callback));
+ }
+ 
++bool CefRequestContextImpl::SetDownloadPublishedPath(
++    int64_t identifier, const CefString& previous_path, const CefString& path) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  auto* context = GetBrowserContext();
++  auto* manager = context ? context->AsBrowserContext()->GetDownloadManager() : nullptr;
++  if (!manager || identifier <= 0 || identifier > UINT32_MAX) return false;
++  auto* item = manager->GetDownload(static_cast<uint32_t>(identifier));
++  // An already-removed item has no journal left to synchronize.
++  return !item || download::DownloadPublication::Move(
++      *item, base::FilePath(previous_path), base::FilePath(path));
++}
++
+ void CefRequestContextImpl::ResolveHost(
+     const CefString& origin,
+     CefRefPtr<CefResolveCallback> callback) {

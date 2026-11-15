@@ -29,6 +29,14 @@ enum AgentRead {
     static func run(_ url: URL, method: String, body: String?, type: String?, keepHTML: Bool, store: WKWebsiteDataStore,
                     allowed: @escaping @Sendable () -> Bool = { true }, done: @escaping ([String: Any]) -> Void) {
         guard allowed() else { done(["error": "This context was cleared."]); return }
+        Task { @MainActor in
+            await ChromiumDRMCookies.beforeSending(to: url, from: store)
+            send(url, method: method, body: body, type: type, keepHTML: keepHTML, store: store, allowed: allowed, done: done)
+        }
+    }
+
+    private static func send(_ url: URL, method: String, body: String?, type: String?, keepHTML: Bool, store: WKWebsiteDataStore,
+                             allowed: @escaping @Sendable () -> Bool, done: @escaping ([String: Any]) -> Void) {
         store.httpCookieStore.getAllCookies { cookies in
             guard allowed() else { done(["error": "This context was cleared."]); return }
             var request = URLRequest(url: url, timeoutInterval: 30)

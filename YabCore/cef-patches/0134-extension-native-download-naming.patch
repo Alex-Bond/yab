@@ -1,0 +1,96 @@
+--- a/cef/include/cef_download_handler.h
++++ b/cef/include/cef_download_handler.h
+@@ -41,6 +41,8 @@
+ #include "include/cef_base.h"
+ #include "include/cef_browser.h"
+ #include "include/cef_download_item.h"
++
++#define CEF_YAB_DOWNLOAD_NAMING_VERSION 1
+ 
+ ///
+ /// Callback interface used to asynchronously continue a download.
+@@ -90,6 +92,16 @@
+ /*--cef(source=client)--*/
+ class CefDownloadHandler : public virtual CefBaseRefCounted {
+  public:
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Return true to resolve Chrome's creator-suggested filename and native
++  /// downloads.onDeterminingFilename listeners before OnBeforeDownload.
++  /// An opting-in handler owns the target and must handle OnBeforeDownload.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool UseChromeDownloadNaming() { return false; }
++#endif
++
+   ///
+   /// Called before a download begins in response to a user-initiated action
+   /// (e.g. alt + link click or link click that returns a `Content-Disposition:
+--- a/cef/libcef/browser/download_manager_delegate_impl.cc
++++ b/cef/libcef/browser/download_manager_delegate_impl.cc
+@@ -18,6 +18,9 @@
+ #include "cef/libcef/browser/download_item_impl.h"
+ #include "cef/libcef/browser/thread_util.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/download/download_core_service.h"
++#include "chrome/browser/download/download_core_service_factory.h"
++#include "chrome/browser/extensions/api/downloads/downloads_api.h"
+ #include "extensions/browser/extension_registry.h"
+ #include "extensions/common/constants.h"
+ #include "chrome/common/pref_names.h"
+@@ -308,6 +311,33 @@
+ 
+   IMPLEMENT_REFCOUNTING(CefDownloadItemCallbackImpl);
+ };
++
++// The native extension router owns creator suggestions, permission checks,
++// worker wake-up and filename-event arbitration. Resolve them once, before
++// the embedder chooses its actual destination; do not emulate the event in JS.
++void ChromeDownloadNameResolved(
++    base::WeakPtr<DownloadManager> manager, uint32_t id,
++    CefRefPtr<CefBrowserHostBase> browser,
++    base::FilePath fallback_name, download::DownloadTargetCallback callback,
++    const base::FilePath& changed_name,
++    download::DownloadPathReservationTracker::FilenameConflictAction) {
++  auto* item = manager ? manager->GetDownload(id) : nullptr;
++  auto handler = browser ? GetDownloadHandler(browser) : nullptr;
++  if (!item || item->GetState() != DownloadItem::IN_PROGRESS || !handler) {
++    RunDownloadTargetCallback(std::move(callback), base::FilePath());
++    return;
++  }
++  const auto name = changed_name.empty() ? fallback_name : changed_name;
++  CefRefPtr<CefDownloadItemImpl> native(new CefDownloadItemImpl(item));
++  CefRefPtr<CefBeforeDownloadCallbackImpl> target(
++      new CefBeforeDownloadCallbackImpl(manager, id, name, std::move(callback)));
++  const bool handled = handler->OnBeforeDownload(browser, native, name.value(), target);
++  std::ignore = native->Detach(nullptr);
++  if (!handled && !target->IsDetached()) {
++    LOG(ERROR) << "Chrome download naming requires the opting-in handler to own its target";
++    RunDownloadTargetCallback(target->Detach(), base::FilePath());
++  }
++}
+ 
+ }  // namespace
+ 
+@@ -453,6 +483,21 @@
+         item->GetURL(), item->GetContentDisposition(), charset,
+         item->GetSuggestedFilename(), item->GetMimeType(), "download");
+ 
++    if (handler->UseChromeDownloadNaming() && !item->IsTransient() &&
++        item->GetTargetFilePath().empty()) {
++      auto* context = content::DownloadItemUtils::GetBrowserContext(item);
++      auto* service = DownloadCoreServiceFactory::GetForBrowserContext(context);
++      auto* router = service ? service->GetExtensionEventRouter() : nullptr;
++      if (router) {
++        router->OnDeterminingFilename(
++            item, suggested_name.BaseName(),
++            base::BindOnce(&ChromeDownloadNameResolved,
++                           manager_ptr_factory_.GetWeakPtr(), item->GetId(),
++                           browser, suggested_name, std::move(*callback)));
++        return true;
++      }
++    }
++
+     CefRefPtr<CefDownloadItemImpl> download_item(new CefDownloadItemImpl(item));
+     CefRefPtr<CefBeforeDownloadCallbackImpl> callbackObj(
+         new CefBeforeDownloadCallbackImpl(manager_ptr_factory_.GetWeakPtr(),

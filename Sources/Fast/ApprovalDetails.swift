@@ -374,6 +374,10 @@ final class ApprovalDetails {
             guard let tab = Agents.shared.browser?.everyTab.first(where: { $0.id == id }), let permit = tab.permit,
                   permit.key == record.key, permit.session == record.session else { return nil }
             return (permit, tab)
+        case .mail(let id):
+            guard let permit = Agents.shared.mailRequest(id)?.permit, permit.key == record.key,
+                  permit.session == record.session else { return nil }
+            return (permit, nil)
         case .chat(let id):
             guard let permit = Agents.shared.session(id)?.permit, permit.key == record.key else { return nil }
             return (permit, nil)
@@ -446,6 +450,11 @@ final class ApprovalDetails {
     func ran(_ tab: Tab, _ permit: AgentPermit, trouble: String?) {
         guard let id = owed.first(where: { $0.value.tab == tab.id && $0.value.key == permit.key && $0.value.session == permit.session })?.key
         else { return }
+        say(trouble == nil ? .init(id: id, phase: .done) : .init(id: id, phase: .failed, words: Self.failure(permit)))
+    }
+
+    func ran(_ permit: AgentPermit, trouble: String?) {
+        guard let id = owed.first(where: { $0.value.tab == nil && $0.value.key == permit.key && $0.value.session == permit.session })?.key else { return }
         say(trouble == nil ? .init(id: id, phase: .done) : .init(id: id, phase: .failed, words: Self.failure(permit)))
     }
 

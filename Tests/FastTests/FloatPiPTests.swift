@@ -195,6 +195,58 @@ struct FloatPiPTests {
         step("button: done")
     }
 
+    /// #805/#808/#847: native dismiss while a close completion is pending,
+    /// then immediately reuse the same page for another presentation.
+    @Test func repeatedNativeCloseCompletesOncePerRequest() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let tab = fixture.tabs[0]
+        let web = requireNativeWebKitFixture(tab, "FloatPiPTests")
+        for round in 0..<12 {
+            step("close stress \(round): enter")
+            _ = try await enter(tab)
+            try await wait { tab.pictureInPicture && fixture.browser.picturing != nil }
+            let tracked = await withCheckedContinuation { done in
+                Isolate.run("picture", on: web) { done.resume(returning: Isolate.floated($0)) }
+            }
+            #expect(tracked)
+            var completed = 0
+            web.closeAllMediaPresentations { completed += 1 }
+            try await wait { completed == 1 && !tab.pictureInPicture && fixture.browser.floating == nil }
+            try await wait { try await gone(tab) }
+            try await wait {
+                await withCheckedContinuation { done in
+                    Isolate.run("where", on: web) { value in
+                        done.resume(returning: value == nil || value is NSNull)
+                    }
+                }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(completed == 1)
+        }
+    }
+
+    /// #1027–1028 reached WebKit's null completion through pipDidClose:.
+    /// Exercise the actual native round trip with both optional-call forms,
+    /// not only a fake delegate that counts our queued notifications.
+    @Test func nativeCloseWithoutACompletionCanReopen() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let tab = fixture.tabs[0]
+        let web = requireNativeWebKitFixture(tab, "FloatPiPTests")
+        for round in 0..<4 {
+            _ = try await enter(tab)
+            try await wait { tab.pictureInPicture && fixture.browser.picturing != nil }
+            if round.isMultiple(of: 2) {
+                web.closeAllMediaPresentations(completionHandler: nil)
+            } else {
+                _ = web.perform(NSSelectorFromString("closeAllMediaPresentationsWithCompletionHandler:"), with: nil)
+            }
+            try await wait { !tab.pictureInPicture && fixture.browser.floating == nil }
+            try await wait { try await gone(tab) }
+        }
+    }
+
     /// One picture at a time, either way round: a video out in Yab's window
     /// goes home when another page puts its own out, and ⇧⌘P's window puts
     /// a page's back into its page.
@@ -213,6 +265,14 @@ struct FloatPiPTests {
         fixture.browser.float(a)
         try await wait { fixture.browser.floating == a.id && !b.pictureInPicture }
         try await wait { try await gone(b) }
+        #expect(!a.floating && !b.floating)
+        #expect(requireNativeWebKitFixture(a, "FloatPiPTests").window === fixture.window)
+        // Switching back again uses the actual close completion, including a
+        // source whose previous presentation has only just been dismissed.
+        fixture.browser.float(b)
+        try await wait { fixture.browser.floating == b.id && !a.pictureInPicture }
+        try await wait { try await gone(a) }
+        #expect(requireNativeWebKitFixture(b, "FloatPiPTests").window === fixture.window)
     }
 
     /// ⇧⌘P on the tab in front puts only its video out, in Yab's window: the
@@ -235,6 +295,40 @@ struct FloatPiPTests {
         fixture.browser.toggleFloat()
         try await wait { !tab.pictureInPicture }
         try await wait { try await gone(tab) }
+    }
+
+    /// The automatic path used to isolate and reparent the entire WKWebView,
+    /// unlike the shortcut. Returning to its tab must use the same native
+    /// video lifetime, with the document and its layout left on the stage.
+    @Test func automaticDepartureLeavesTheDocumentAndVideoBoxInPlace() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let tab = fixture.tabs[0]
+        let web = requireNativeWebKitFixture(tab, "FloatPiPTests")
+        let oldMaster = fixture.browser.prefs.floatsOnLeave
+        defer { fixture.browser.prefs.floatsOnLeave = oldMaster }
+        fixture.browser.prefs.floatsOnLeave = true
+        // Listed-site policy; the actual document remains the local fixture.
+        tab.setAddressOptimistically(URL(string: "https://vimeo.com/fixture")!)
+        tab.noisy = true
+        _ = try await run("const v=document.querySelector('video');v.muted=false;v.volume=.02;return true", in: tab)
+        try await wait {
+            (try await run("const v=document.querySelector('video');return v.played.length>0 && v.played.end(0)>=1", in: tab)) as? Bool == true
+        }
+        let box = try await run("return JSON.stringify(document.querySelector('video').getBoundingClientRect())", in: tab) as? String
+        let frame = web.frame
+        fixture.browser.activeID = tab.id
+        fixture.browser.leavingSpace()
+        fixture.browser.activeID = fixture.tabs[1].id
+        try await wait { tab.pictureInPicture && fixture.browser.picturing != nil }
+        #expect(!tab.floating && web.window === fixture.window)
+        #expect(web.frame == frame)
+        #expect(try await run("return JSON.stringify(document.querySelector('video').getBoundingClientRect())", in: tab) as? String == box)
+        #expect(try await run("return document.documentElement.classList.contains('yab-floating')", in: tab) as? Bool == false)
+        fixture.browser.select(tab)
+        try await wait { !tab.pictureInPicture && fixture.browser.floating == nil }
+        #expect(web.window === fixture.window && web.frame == frame && !tab.floating)
+        #expect(try await gone(tab))
     }
 
     /// ⇧⌘P on a paused video puts it out too, as the button does:

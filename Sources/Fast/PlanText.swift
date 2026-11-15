@@ -50,21 +50,44 @@ enum PlanText {
                       codexModel: String? = nil, codexEffort: String = "low", limit: Double = 120,
                       only: String? = nil) async -> (text: String, cli: String?) {
         let permits = Dictionary(uniqueKeysWithValues: agents.compactMap { cli in ProviderConsent.shared.permit(cli).map { (cli, $0) } })
-        let found = await Shell.find()
+        return await write(prompt, system: system, room: room, claudeModel: claudeModel,
+                           codexModel: codexModel, codexEffort: codexEffort, limit: limit,
+                           agents: agents.filter { only == nil || $0 == only }, permits: permits)
+    }
+
+    /// Tidy is separately authorized. These permits never connect a provider
+    /// for chat or background work, and use only the tool-free writer below.
+    static func tidy(_ prompt: String, system: String, only: String) async -> (text: String, cli: String?) {
+        _ = await Shell.find()
+        let agents = TidyTabs.agents.filter { $0 == only }
+        let permits = Dictionary(uniqueKeysWithValues: agents.map { cli in
+            (cli, ProviderLaunchPermit.forTidy(cli))
+        })
+        return await write(prompt, system: system, room: "agent/tidy-tabs", claudeModel: "haiku",
+                           codexModel: LinkFolders.codexModel, codexEffort: "low", limit: 45,
+                           agents: agents, permits: permits)
+    }
+
+    private static func write(_ prompt: String, system: String, room: String, claudeModel: String,
+                              codexModel: String?, codexEffort: String, limit: Double,
+                              agents: [String], permits: [String: ProviderLaunchPermit]) async -> (text: String, cli: String?) {
+        let found = await AgentLaunch.environment()
         let folder = Store.file(room)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        for cli in agents where only == nil || cli == only {
+        for cli in agents {
             guard let permit = permits[cli], permit.valid else { continue }
             ConsentAudit.record("provider.helper")
-            let env = PlanAccounts.shared.env(PlanAccounts.shared.pick(cli), base: found.env)
+            // The copy, account and environment a chat on it starts with.
+            let launch = cli == "gemini" ? nil : AgentLaunch.resolve(cli, in: found)
+            let env = launch?.env ?? found.env
             var text = ""
-            if cli == "claude", let claude = found.claude {
+            if cli == "claude", let claude = launch?.binary {
                 let ran = await Shell.timed("/bin/bash", ["-c", "exec \"$0\" \"$@\"", claude,
                     "-p", prompt, "--output-format", "json", "--no-session-persistence", "--tools", "", "--strict-mcp-config",
                     "--model", claudeModel, "--append-system-prompt", system,
                 ], env: env, limit: limit, in: folder, permit: permit)
                 text = (try? JSONSerialization.jsonObject(with: Data(ran.output.utf8)) as? [String: Any])?["result"] as? String ?? ""
-            } else if cli == "codex", let codex = found.codex {
+            } else if cli == "codex", let codex = launch?.binary {
                 let out = folder.appendingPathComponent("answer-\(UUID().uuidString).txt")
                 defer { try? FileManager.default.removeItem(at: out) }
                 let args = codexArgs(system + "\n\n" + prompt, out: out.path, model: codexModel, effort: codexEffort)
@@ -73,7 +96,7 @@ enum PlanText {
             } else if cli == "gemini", let agy = found.gemini {
                 text = await GeminiRunner.once(binary: agy, message: system + "\n\n" + prompt, environment: found.env,
                                                room: room.replacingOccurrences(of: "/", with: "-"), limit: limit, permit: permit)
-            } else if cli == "cursor", let cursor = found.cursor {
+            } else if cli == "cursor", let cursor = launch?.binary {
                 text = await CursorRunner.once(binary: cursor, message: system + "\n\n" + prompt, environment: env,
                                                room: folder.appendingPathComponent("cursor", isDirectory: true), limit: limit, permit: permit)
             }

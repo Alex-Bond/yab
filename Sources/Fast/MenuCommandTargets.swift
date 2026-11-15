@@ -46,8 +46,8 @@ extension MenuCommands {
             return !browser.privateBrowsing && browser.nests.contains { nest in
                 !nest.today && browser.chosen.contains { $0.keepable && $0.nest !== nest }
             }
-        case .openFolder: return !browser.privateBrowsing && browser.nests.contains { !$0.open }
-        case .closeFolder: return !browser.privateBrowsing && browser.nests.contains { $0.open }
+        case .openFolder: return (!browser.privateBrowsing || browser.windowPurpose == .privateOnly) && browser.nests.contains { !$0.open }
+        case .closeFolder: return (!browser.privateBrowsing || browser.windowPurpose == .privateOnly) && browser.nests.contains { $0.open }
         case .renameFolder, .customizeFolder: return !browser.privateBrowsing && browser.nests.contains { !$0.today }
         case .newFolderInside: return !browser.privateBrowsing && browser.nests.contains { !$0.today && $0.depth < Nest.deepest }
         case .ungroupFolder: return !browser.privateBrowsing && !browser.nests.isEmpty
@@ -76,6 +76,13 @@ extension MenuCommands {
                                          title: title, aliases: aliases, symbol: symbol,
                                          shortcut: key, opens: opens, run: run))
         }
+        func folderToggle(_ nest: Nest, id: String, name: String) {
+            let action: Command = nest.open ? .closeFolder : .openFolder
+            add(action, id, "\(nest.open ? "Close" : "Open") Folder \(name)",
+                nest.open ? [] : ["open \(name)", "folder \(name)"], symbol: "folder", opens: !nest.open) {
+                $0.folderBook.toggle(nest.key)
+            }
+        }
         if browser.spacesShown && !browser.privateBrowsing {
             for (index, space) in browser.turnOrder.enumerated() where space.id != browser.spaceID {
                 let id = space.id.uuidString
@@ -96,6 +103,14 @@ extension MenuCommands {
                         }
                     }
                 }
+            }
+        }
+        // Only this private window's ephemeral folders; a private tab in
+        // a normal window still cannot list personal destinations.
+        if browser.windowPurpose == .privateOnly {
+            for nest in browser.nests {
+                let name = nest.chain.map { $0.name.isEmpty ? "Untitled Folder" : $0.name }.joined(separator: " / ")
+                folderToggle(nest, id: nest.id.uuidString, name: name)
             }
         }
         if !browser.privateBrowsing {
@@ -126,11 +141,7 @@ extension MenuCommands {
                         }
                     }
                 }
-                let action: Command = nest.open ? .closeFolder : .openFolder
-                add(action, id, "\(nest.open ? "Close" : "Open") Folder \(name)",
-                    nest.open ? [] : ["open \(name)", "folder \(name)"], symbol: "folder", opens: !nest.open) {
-                    $0.folderBook.toggle(nest.key)
-                }
+                folderToggle(nest, id: id, name: name)
                 add(.ungroupFolder, id, "Remove Folder \(name), Keep Tabs", ["ungroup \(name)"], symbol: "folder") {
                     LiveFolders.shared.removed(nest, in: $0)
                     $0.ungroup(nest)
@@ -156,7 +167,7 @@ extension MenuCommands {
                     // Pull Requests already has a Command of its own.
                     guard source.id != "github.pulls" || operation != nil else { continue }
                     add(.newLiveFolder, source.id, "New \(source.title) Folder",
-                        ["live folder \(source.title)"], symbol: "folder.badge.gearshape", opens: true) {
+                        ["live folder \(source.title)"], symbol: "folder.badge.gearshape") {
                         $0.folderBook.unfoldSpace()
                         LiveFolders.shared.make(source.id, in: $0)
                     }
@@ -240,7 +251,7 @@ extension Browser {
     /// The page-copy card already owns reading and writing the page. Raise it
     /// first, then use its own operation; a Markdown document is not a URL.
     func copyWholePageForCommand(save: Bool) {
-        guard let tab = active, let web = tab.built, !tab.isBlank, !fieldShowing,
+        guard let tab = active, let web = tab.builtPage, !tab.isBlank, !fieldShowing,
               !save || !tab.shy else { return }
         pageCopy.offer(tab: tab.id, web: web, words: 0, canSave: !tab.shy, transcript: false)
         // offer makes its stage visible on the next main-queue turn.

@@ -318,7 +318,8 @@ enum LocalNetwork {
 
     // MARK: - what was said
 
-    private static let key = "localNetwork.allowed"
+    nonisolated static let settingsKey = "localNetwork.allowed"
+    private static let key = settingsKey
 
     /// "https://host:443|loopback", allowed for good.
     private static var allowed: Set<String> {

@@ -1,5 +1,8 @@
 #include "core.h"
+#include "launch_trace.h"
+#include "script_errors.h"
 #include "core_lifetime.h"
+#include "gpu_stability.h"
 #include "original_caller.h"
 #include "group_snapshot_store.h"
 #include <CommonCrypto/CommonDigest.h>
@@ -8,15 +11,21 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <atomic>
+#include <unordered_set>
+#include <functional>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <cerrno>
 #include "original_pdf_budget.h"
 #include "original_pdf_presence_owner.h"
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
 #include <vector>
 #include <memory>
+#include <iterator>
+#include "keyboard_event.h"
 #include <string>
 #include <cmath>
 #include <climits>
@@ -27,22 +36,44 @@
 #include "include/cef_process_message.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_server.h"
 #include "include/cef_command_line.h"
+#include "include/cef_preference.h"
+#include "include/cef_command_handler.h"
+#include "include/cef_id_mappers.h"
+#include "devtools_commands.h"
+#include "devtools_extensions.h"
+#include "devtools_files.h"
+#include "devtools_target.h"
+#include "extension_oauth.h"
 #include "include/cef_devtools_message_observer.h"
 #include "include/cef_dialog_handler.h"
 #include "include/cef_jsdialog_handler.h"
+#include "include/cef_keyboard_handler.h"
 #include "include/cef_find_handler.h"
 #include "include/cef_resource_handler.h"
 #include "include/cef_resource_request_handler.h"
 #include "include/cef_response.h"
 #include "include/cef_download_handler.h"
 #include "include/cef_permission_handler.h"
+#include "include/cef_task.h"
+#import "site_notice_center.h"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <bsm/libbsm.h>
+#include <servers/bootstrap.h>
 #include "include/cef_parser.h"
 #include "include/cef_request_context.h"
+#include "include/cef_navigation_entry.h"
+#include "include/cef_ssl_status.h"
+#include "include/cef_x509_certificate.h"
+#include "shield_engine.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 #include "include/views/cef_window_delegate.h"
 #include "owncef_surface.h"
+#include "page_zoom.h"
+#include "accessibility_api.h"
 
 // The experimental callback is available only with matching patched CEF.
 #if defined(CEF_YAB_LAYER_CONTEXT_VERSION) && CEF_API_ADDED(CEF_EXPERIMENTAL)
@@ -58,11 +89,41 @@
 #include "extensions_native.h"
 #include "extensions_actions.h"
 
+// AppKit gives no way to make a magnify event, and the original stays in the
+// client's process. As in Chromium's SyntheticPinchEvent
+// (synthetic_gesture_target_mac.mm), an object with what the view's event
+// builder reads stands in for one, so a pinch takes the same path as Chromium's.
+@interface YabGestureEvent : NSObject
+@property NSEventType type;
+@property NSEventPhase phase;
+@property CGFloat magnification;
+@property NSPoint locationInWindow;
+@property NSTimeInterval timestamp;
+@property NSEventModifierFlags modifierFlags;
+@property(readonly) CGFloat deltaX;
+@property(readonly) CGFloat deltaY;
+@end
+@implementation YabGestureEvent
+@end
+
 namespace yc {
 static std::string Key(NSString* s) { return s.UTF8String ?: ""; }
 static NSString* Str(const CefString& s) { return @(s.ToString().c_str()); }
 static NSString* S(NSDictionary* p, NSString* k) { return [p[k] isKindOfClass:NSString.class] ? p[k] : @""; }
 static double Now() { return NSProcessInfo.processInfo.systemUptime; }
+// Deadlines are kept on the time this helper was running: while its main
+// thread was held (a loaded Mac, swap, the process stopped) nobody could
+// answer anything, so that time is no one's lateness. Before, the poll after
+// such a pause found every deadline gone and failed the pages waiting
+// ("Operation timed out", "CDP timeout"), each a PageLoadFailure report.
+// The poll timer measures it: how much later than asked it came.
+static double heldFor = 0;
+static double Running() { return Now() - heldFor; }
+// YAB_CEF_TRACE_TIMING: one line per step, on the same clock as Swift's marks.
+static void Mark(const char* step, const std::string& detail = "") {
+  static const bool on = getenv("YAB_CEF_TRACE_TIMING") != nullptr;
+  if (on) fprintf(stderr, "YabCore T %.1f %s %s\n", NSDate.date.timeIntervalSince1970 * 1000, step, detail.c_str());
+}
 static NSDictionary* Decode(const void* bytes, size_t size) {
   if (!bytes || !size) return @{};
   id v = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:bytes length:size] options:0 error:nil];
@@ -75,7 +136,17 @@ static NSString* JSON(id value) {
 // A request context is usable only after CEF reports it initialized: creating a
 // browser earlier trips Chromium's own check in source builds. profile.open
 // answers (and later opens of the same profile wait) until then.
-struct Profile { CefRefPtr<CefRequestContext> context; bool privateMode = false; bool ready = false; std::vector<NSString*> waiting; };
+// A private profile opened with a parent is that space profile's own
+// off-the-record side (CEF 0092), as Chromium's incognito is of its profile:
+// the space's extensions allowed in private tabs run there, and nothing is
+// written to the space. Without the capability, or a parent, it is CEF's
+// in-memory default, which no space's extension reaches.
+struct Profile { CefRefPtr<CefRequestContext> context; bool privateMode = false; bool ready = false; std::vector<NSString*> waiting; std::string parent; };
+#if defined(CEF_YAB_OFF_THE_RECORD_CONTEXT_VERSION) && CEF_API_ADDED(CEF_EXPERIMENTAL)
+#define YABCORE_PRIVATE_EXTENSIONS 1
+#else
+#define YABCORE_PRIVATE_EXTENSIONS 0
+#endif
 #include "scripts_state.h"
 #if defined(CEF_YAB_EXTERNAL_PAGE_VERSION) && YABCORE_OWNCEF_SURFACES && CEF_API_ADDED(CEF_EXPERIMENTAL)
 #define YABCORE_NATIVE_PAGE 1
@@ -88,6 +159,7 @@ struct Profile { CefRefPtr<CefRequestContext> context; bool privateMode = false;
 #define YABCORE_NATIVE_TAB_MODEL 0
 #endif
 struct Tab {
+  std::deque<std::shared_ptr<QueuedKeyboardEvent>> keyboard;
   std::string healthToken, healthFrame;
   pid_t healthPID = 0;
   double healthSendAt = 0, healthDeadline = 0;
@@ -116,20 +188,52 @@ struct Tab {
   bool fitPage = false;
   // Chrome's DevTools frontend for this page, and whether this tab is one.
   std::string devToolsFront; bool devToolsFrontend = false;
+  bool browseGesture = false, browseRedirect = false;
   bool adopted = true, closing = false, visible = true, internal = false, themeReady = false, crashed = false, transportReady = false, domainsReady = false;
+  // A worker's clients.openWindow() after a click on its notification.
+  bool fromNotice = false;
   double themeAttempt = 0;
   double width = 800, height = 600, scale = 1;
   NSString* lastLayer = nil;
   OwnCEFSurface surface;
   bool externallyHosted = false;
   bool externalPage = false;
+  bool pinched = false;
+  // The zoom the page is drawn at, as its renderer said (page_zoom.h).
+  yabcore::PageZoomCache zoomRead;
+  // A page's own floating window. CEF always gives it Chrome's own Browser and
+  // window, so it has no Views window and no compositor callback.
+  bool documentPiP = false, documentPiPSized = false;
   NSString* nativePageToken = nil;
   NSDictionary* nativePageReceipt = nil;
   bool audible = false, focused = false, discarded = false, frozen = false;
+  // The page holds the pointer (pointer_lock.inc), and where in its hidden
+  // window the pointer last was.
+  bool pointerLocked = false, pointerPointKnown = false;
+  NSPoint pointerPoint = NSZeroPoint;
+  // Muted by Yab (media.mute): what the browser's audio must stay (KeepMuted).
+  bool mutedWanted = false;
+  // The element Yab holds a token for, which stands for the page's document
+  // view of the moment, and that view (accessibility.inc).
+  ::id accessibilityElement = nil;
+  __weak NSView* accessibilityView = nil;
+  // Its waiting events were shed (transport.h) and its document is being ended.
+  bool shedding = false;
+  uint64_t visibleTurn = 0;
+  bool everShown = false, viewCleared = false;
+  // An agent's files for the next picker the page opens (agent_files.inc).
+  NSArray* offeredFiles = nil;
+  // Pictures in flight. Blink's scheduler counts a page being pictured as visible.
+  int capturing = 0;
+  // A hide that came while a picture was in flight: run once it is taken.
+  bool clearAfterCapture = false;
   NSDictionary* textState = nil;
   NSString* closeOwner = nil;
   NSString* closeWireRequest = nil;
   NSDictionary* closePreflight = nil;
+  bool closeUnresponsive = false;
+  bool quitUnresponsive = false;
+  uint64_t closeDocumentGeneration = 0;
   NSString* backgroundColor = nil;
   NSString* resizeSerial = nil;
   int resizeWidth = 0, resizeHeight = 0;
@@ -154,6 +258,16 @@ static NSString* dataRoot;
 static std::map<std::string, Profile> profiles;
 static std::map<std::string, Tab> tabs;
 static std::map<int, std::string> browserTabs;
+// A native creation receipt (OnExtensionTabCreated) that arrives before its
+// browser's OnAfterCreated: an extension's windows.create from its service
+// worker makes Chrome's Browser, and CEF reports the page to the client only
+// later. Held by browser id until that page is a Yab tab, never dropped, or
+// the page was retired as unrequested and Bitwarden's passkey window closed
+// as it opened.
+static std::map<int, CefRefPtr<CefDictionaryValue>> earlyExtensionReceipts;
+static void ApplyEarlyExtensionReceipt(Tab& tab, int browser);  // owncef_native.inc
+static void AccessibilityFocused(Tab& tab, bool focused);  // accessibility.inc
+static void AccessibilityDocument(Tab& tab);  // accessibility.inc
 static std::map<int, Pending> pending;
 static std::map<std::string, double> requests;
 static int sequence = 0, tabSequence = 0;
@@ -168,7 +282,9 @@ static void OriginalPDFPresenceDocumentEnded(CefRefPtr<CefBrowser> browser);
 static int nativeCloseDepth = 0;
 static bool contextInitialized = false, shutdownStarted = false;
 static NSTimer* timer;
-static double lastPoll = 0;
+static NSMutableArray* windowWatches;
+static uint64_t pollTicks = 0, fastPollTicks = 0, windowNotifications = 0, pollHurries = 0;
+static void PollHurry();
 static Tab* Find(CefRefPtr<CefBrowser> browser) {
   if (!browser) return nullptr;
   auto i = browserTabs.find(browser->GetIdentifier());
@@ -197,13 +313,32 @@ static void Reply(NSString* id, ::id result = @{}, NSString* error = nil) {
   else value[@"result"] = result ?: NSNull.null;
   wire.Send(value);
 }
-static void CDP(Tab& t, NSString* method, NSDictionary* params, Completion completion, NSString* session = @"") {
+// `deadline`: the client request's own when the call is made for one (a
+// page's scripts and appearance before its load), else 15 s for the helper's
+// own work. Chrome's DevTools commands have no deadline: one ends with its
+// answer, or with its target closed or crashed (DevToolsSession::
+// ClearPendingMessages), as these end in CancelPending. A fixed 15 s under a
+// request the client allows 300 s failed a page whose renderer answered at
+// 16 s: "The page couldn't load", YabCoreError.remote "CDP timeout" (R1982).
+static void CDP(Tab& t, NSString* method, NSDictionary* params, Completion completion, NSString* session = @"", double deadline = 0) {
   if (!t.browser || t.closing || !t.transportReady) { completion(nil, @"Tab DevTools is not ready or is closing"); return; }
-  if (pending.size() >= 256) { completion(nil, @"Too many pending CDP calls"); return; }
-  auto v = CefParseJSON(Key(JSON(params)), JSON_PARSER_RFC);
+  // No count of calls in flight: Chrome's DevTools sessions have none, and
+  // each ends at its deadline below. 300 tabs waking at once with their
+  // frames attaching sent more than a fixed 8192 and failed pages.
+  NSString* encoded = JSON(params);
+  auto v = CefParseJSON(Key(encoded), JSON_PARSER_RFC);
   int id = ++sequence;
-  if (getenv("YAB_CEF_TRACE_CDP")) fprintf(stderr, "YabCore CDP send id=%d browser=%d window=%ld internal=%d method=%s\n", id, t.browser->GetIdentifier(), (long)t.native.windowNumber, t.internal, method.UTF8String);
-  pending.emplace(id, Pending{t.browser->GetIdentifier(), completion, Now() + 15});
+  if (getenv("YAB_CEF_TRACE_CDP")) {
+    NSString* source = S(params, @"expression");
+    if (!source.length) source = S(params, @"functionDeclaration");
+    if (!source.length) source = S(params, @"source");
+    fprintf(stderr, "YabCore CDP send id=%d browser=%d window=%ld internal=%d method=%s bytes=%lu sourceBytes=%lu argumentBytes=%lu\n",
+      id, t.browser->GetIdentifier(), (long)t.native.windowNumber, t.internal, method.UTF8String,
+      (unsigned long)[encoded lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+      (unsigned long)[source lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+      params[@"arguments"] ? (unsigned long)[JSON(params[@"arguments"]) lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : 0UL);
+  }
+  pending.emplace(id, Pending{t.browser->GetIdentifier(), completion, deadline > 0 ? deadline : Running() + 15});
   int sent;
   if (session.length) {
     NSString* message = JSON(@{@"id": @(id), @"method": method, @"params": params, @"sessionId": session});
@@ -212,6 +347,77 @@ static void CDP(Tab& t, NSString* method, NSDictionary* params, Completion compl
   if (!sent) { pending.erase(id); completion(nil, @"CDP rejected command"); }
 }
 static void Ignore(NSDictionary*, NSString*) {}
+// Only our inspector session's results reach this path. The person's DevTools
+// and chrome.debugger clients own their own object handles and release them.
+// Called outside the observer notification, before delivering the text/value
+// result. Releasing a handle does not erase the serialized exception details.
+static void ReleaseScriptObjects(const std::string& id, NSString* session, NSArray<NSString*>* objects) {
+  if (!objects.count) return;
+  auto found = tabs.find(id);
+  if (found == tabs.end()) return;  // Closing the target releases its handles.
+  for (NSString* object in objects)
+    CDP(found->second, @"Runtime.releaseObject", @{@"objectId": object}, Ignore, session);
+}
+// The page's zoom and pinch for a pointer or drag event, then `send` with
+// them. The renderer's own zoom, not the zoom controller's level: in manual
+// mode (Chrome's PDF viewer) that level is the viewer's and the page is not
+// drawn at it (page_zoom.h, #1906). Read once per document and level; while a
+// read is in flight later events wait behind it, so they keep their order.
+static void WithPageZoom(Tab& tab, NSString* request, std::function<void(double zoom, double pinch)> send) {
+  double level = tab.browser->GetHost()->GetZoomLevel();
+  uint64_t generation = tab.documentGeneration;
+  if (!tab.pinched && tab.zoomRead.Usable(generation, level)) { send(tab.zoomRead.zoom, 1); return; }
+  tab.zoomRead.Ask(generation);
+  std::string tabID = tab.id;
+  CDP(tab, @"Page.getLayoutMetrics", @{}, [=](NSDictionary* value, NSString* error) {
+    auto live = tabs.find(tabID);
+    if (live != tabs.end()) live->second.zoomRead.Answered(generation);
+    if (error) { Reply(request, nil, error); return; }
+    NSDictionary* viewport = [value[@"cssVisualViewport"] isKindOfClass:NSDictionary.class] ? value[@"cssVisualViewport"] : @{};
+    double zoom = yabcore::PageZoomOr([viewport[@"zoom"] doubleValue], level);
+    double pinch = viewport[@"scale"] ? [viewport[@"scale"] doubleValue] : 1;
+    if (!std::isfinite(pinch) || pinch <= 0) { Reply(request, nil, @"Invalid visual viewport scale"); return; }
+    if (live != tabs.end() && live->second.documentGeneration == generation) live->second.zoomRead.Keep(zoom, generation, level);
+    send(zoom, pinch);
+  });
+}
+// Each tab has a window of its own, and a window keeps its last frame's surfaces
+// in the GPU process for as long as no frame follows: a page-sized pass and its
+// overlay per tab ever shown, 600 MB at 12 tabs of a 2x window. So the page's
+// view goes first, the window draws without it until the overlay in flight is
+// back, and only then hides. Nobody is looking: Yab took the window's layer down first.
+static void HideProducer(Tab& tab) {
+#if YABCORE_NATIVE_PAGE
+  if (tab.externalPage) { if (tab.browser) tab.browser->GetHost()->SetExternalPageVisibility(false); return; }
+#endif
+  if (tab.window) tab.window->Hide();
+}
+// The window is still shown: on its way to hiding (HideClearing), its page
+// still visible to itself, the view perhaps already cleared.
+static bool ProducerShown(Tab& tab) {
+  return !tab.externalPage && tab.window && tab.window->IsVisible();
+}
+static bool HoldHideForPicture(Tab& t);  // page_snapshot.inc
+static void HideClearing(Tab& t) {
+  // A picture asked before the hide (the stage's leaving picture is) is taken
+  // with the page as it was shown; the hide follows it (FinishSnapshot).
+  if (HoldHideForPicture(t)) return;
+  std::string id = t.id;
+  // A hide run again after a picture retires the timers of the one before.
+  uint64_t turn = ++t.visibleTurn;
+  t.viewCleared = true;
+  t.view->SetVisible(false);
+  auto later = [id, turn](int ms, void (^work)(Tab&)) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      auto found = tabs.find(id);
+      if (found == tabs.end() || found->second.closing || found->second.visibleTurn != turn) return;
+      work(found->second);
+    });
+  };
+  // The page's view is hidden and paints nothing: the window itself is told to.
+  for (int ms : {40, 90, 140}) later(ms, ^(Tab& tab) { if (tab.window) tab.window->SetBackgroundColor(tab.window->GetBackgroundColor()); });
+  later(200, ^(Tab& tab) { HideProducer(tab); });
+}
 // A shutdown request and the peer's disconnect both end the run; the message
 // loop may be asked to quit only once (a second call trips CEF's context check).
 static void QuitOnce() {
@@ -220,9 +426,11 @@ static void QuitOnce() {
   quit = true;
   CefQuitMessageLoop();
 }
-static void Eval(Tab& t, NSString* expression, int context, Completion completion, bool userGesture = false) {
+static void Eval(Tab& t, NSString* expression, int context, Completion completion, bool userGesture = false, bool repl = false) {
   NSMutableDictionary* p = [@{@"expression": expression, @"returnByValue": @YES, @"awaitPromise": @YES} mutableCopy];
   if (userGesture) p[@"userGesture"] = @YES;
+  // A script's top-level let can be run again, as an eval's could.
+  if (repl) p[@"replMode"] = @YES;
   if (context) p[@"contextId"] = @(context);
   CDP(t, @"Runtime.evaluate", p, [completion](NSDictionary* r, NSString* e) {
     if (e) { completion(nil, e); return; }
@@ -230,7 +438,7 @@ static void Eval(Tab& t, NSString* expression, int context, Completion completio
     completion(r, nil);
   });
 }
-static NSString* ScriptBridge(NSArray* names);
+static NSString* ScriptBridge(NSArray* names, NSString* world);
 static void WithWorld(std::string id, NSString* world, std::function<void(Tab&, int)> action, Completion failure) {
   auto i = tabs.find(id);
   if (i == tabs.end()) { failure(nil, @"Tab closed"); return; }
@@ -261,7 +469,7 @@ static void WithWorld(std::string id, NSString* world, std::function<void(Tab&, 
         // need the same authenticated binding before their first request.
         NSArray* names = j->second.scripts.relays[world];
         if (!names.count) { action(j->second, context); return; }
-        NSString* bridge = [NSString stringWithFormat:@"if(!globalThis.__yabScriptReply){%@}", ScriptBridge(names)];
+        NSString* bridge = [NSString stringWithFormat:@"if(!globalThis.__yabScriptReply){%@}", ScriptBridge(names, world)];
         Eval(j->second, bridge, context, [id, context, action, failure](NSDictionary*, NSString* error) {
           auto current = tabs.find(id);
           if (error || current == tabs.end()) { failure(nil, error ?: @"Tab closed"); return; }
@@ -270,23 +478,34 @@ static void WithWorld(std::string id, NSString* world, std::function<void(Tab&, 
       });
   });
 }
+#include "cursor.inc"
+#include "drag.inc"
+#include "external_scheme.inc"
+#include "agent_files.inc"
 #include "scripts.inc"
+#include "shield.inc"
+#include "page_tools.inc"
 #include "agents.inc"
 #include "drm.inc"
 #include "drm_cookies.inc"
+#include "clear_data.inc"
+static bool OpensApplication(NSString* url) {
+  NSString* scheme = [url componentsSeparatedByString:@":"].firstObject.lowercaseString;
+  static NSSet* pages = [NSSet setWithArray:@[@"http", @"https", @"about", @"data", @"blob", @"file", @"filesystem",
+    @"chrome", @"chrome-extension", @"chrome-untrusted", @"chrome-error", @"chrome-search", @"devtools", @"view-source", @"javascript"]];
+  return scheme.length && ![pages containsObject:scheme];
+}
 #include "ext_bridge.inc"
 #include "core_readiness.inc"
 #include "ext_actions.inc"
+#include "ext_commands.inc"
 
 static NSWindow* Native(CefRefPtr<CefWindow> w) {
   NSView* v = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(w->GetWindowHandle());
   return [(id)v isKindOfClass:NSWindow.class] ? (NSWindow*)(id)v : v.window;
 }
-static NSView* FindView(NSView* v, NSString* name) {
-  if ([NSStringFromClass(v.class) isEqual:name]) return v;
-  for (NSView* child in v.subviews) { NSView* found = FindView(child, name); if (found) return found; }
-  return nil;
-}
+#include "input_view.h"
+#include "wheel_event.h"
 // This private walk is confined to YabCore, never exposed in the client.
 static void Layers(CALayer* layer, NSView* owner, NSMutableArray* rows, int depth) {
   if (!layer || depth > 60) return;
@@ -315,6 +534,39 @@ static uint32_t Context(NSWindow* w) {
 // by sendEvent:. An NSWindow hands a mouse-moved event to its views only when
 // it accepts them, so a page behind it would hear no pointer move at all.
 static void Conceal(NSWindow* w) { if (w) { w.alphaValue = 0; w.ignoresMouseEvents = YES; w.acceptsMouseMovedEvents = YES; } }
+// Chrome shows its floating document window twice over: the system's document
+// animation as it is ordered in, then PictureInPictureWidgetFadeAnimator setting
+// its alpha for half a second, which overwrites anything set from here. Seen from
+// outside, a raw window faded in over the page. So the next window Chrome orders
+// in while one is expected is hidden first and held at no alpha for good. Only
+// that one, and never a window of ours: external hosting keeps those off screen.
+static double documentPiPExpected = 0;
+static NSHashTable* documentPiPWindows = nil;
+static IMP orderWindowOriginal = nullptr, setAlphaOriginal = nullptr;
+static void HoldDocumentPiPWindow(NSWindow* window) {
+  window.animationBehavior = NSWindowAnimationBehaviorNone;
+  [documentPiPWindows addObject:window];
+  Conceal(window);
+}
+static void OrderWindowHidden(NSWindow* self, SEL command, NSWindowOrderingMode place, NSInteger other) {
+  if (place != NSWindowOut && Now() < documentPiPExpected && ![self isKindOfClass:NSClassFromString(@"CefNSWindow")]) {
+    documentPiPExpected = 0;
+    HoldDocumentPiPWindow(self);
+  }
+  ((void (*)(NSWindow*, SEL, NSWindowOrderingMode, NSInteger))orderWindowOriginal)(self, command, place, other);
+}
+static void SetAlphaHeld(NSWindow* self, SEL command, CGFloat alpha) {
+  ((void (*)(NSWindow*, SEL, CGFloat))setAlphaOriginal)(self, command, [documentPiPWindows containsObject:self] ? 0 : alpha);
+}
+static void ExpectDocumentPiP() {
+  documentPiPExpected = Now() + 2;
+  if (orderWindowOriginal) return;
+  documentPiPWindows = [NSHashTable weakObjectsHashTable];
+  Method order = class_getInstanceMethod(NSWindow.class, @selector(orderWindow:relativeTo:));
+  orderWindowOriginal = method_setImplementation(order, (IMP)OrderWindowHidden);
+  Method alpha = class_getInstanceMethod(NSWindow.class, @selector(setAlphaValue:));
+  setAlphaOriginal = method_setImplementation(alpha, (IMP)SetAlphaHeld);
+}
 // Physical WindowServer state is independent of CEF's logical visibility.
 static NSNumber* WindowOnScreen(NSWindow* window) {
   if (!window) return nil;
@@ -330,6 +582,19 @@ static NSNumber* WindowOnScreen(NSWindow* window) {
   return @NO;
 }
 static void State(Tab* t, NSDictionary* fields) { if (t && !t->internal) Event(@"page.state", t, fields); }
+
+// A muted tab stays muted. Chrome's SoundContentSettingObserver, on every new
+// main document (PrimaryPageChanged: a reload, a link, the first page of a tab
+// woken from sleep), lets a tab's mute back in unless Chrome's own tab code set
+// it with a reason (LastMuteMetadata: the speaker's kAudioIndicator, an
+// extension's kExtension). CefBrowserHost::SetAudioMuted records none, so the
+// page played aloud again while IsAudioMuted had answered true to media.mute
+// (feedback #2018: a muted pinned Slack pinging after its reload). Run after
+// that observer, at the document's commit, and whenever the page turns audible.
+static void KeepMuted(Tab* t, CefRefPtr<CefBrowser> b) {
+  if (!t || !b || !t->mutedWanted || b->GetHost()->IsAudioMuted()) return;
+  b->GetHost()->SetAudioMuted(true);
+}
 static void InstallTheme(std::string id) {
   auto tab = tabs.find(id);
   if (tab == tabs.end() || tab->second.closing || tab->second.crashed ||
@@ -367,44 +632,76 @@ static void CancelPending(int browser, NSString* reason) {
     dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, reason); });
   }
 }
+static bool PushDoorEvent(Tab& tab, NSString* method, NSDictionary* params);
+static bool DevToolsMessage(CefRefPtr<CefBrowser> browser, NSDictionary* message);
+static void DevToolsClosed(const std::string& tab);
 class Observer : public CefDevToolsMessageObserver {
  public:
   bool OnDevToolsMessage(CefRefPtr<CefBrowser> browser, const void* bytes, size_t size) override {
     NSDictionary* message = Decode(bytes, size);
+    if (DevToolsMessage(browser, message)) return true;
     NSString* session = S(message, @"sessionId");
     if (!session.length) return false;
     auto tab = Find(browser); if (!tab) return true;
     if (message[@"id"]) {
       auto found = pending.find([message[@"id"] intValue]);
+      Completion completion;
       if (found != pending.end() && found->second.browser == browser->GetIdentifier()) {
-        auto completion = found->second.completion; pending.erase(found);
-        id result = message[@"result"]; NSString* error = message[@"error"] ? JSON(message[@"error"]) : nil;
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(result, error); });
+        completion = found->second.completion; pending.erase(found);
       }
-    } else ScriptEvent(*tab, S(message, @"method"), message[@"params"] ?: @{}, session);
+      NSDictionary* result = message[@"result"];
+      NSArray<NSString*>* objects = ScriptResultObjects(result, !completion);
+      NSString* error = message[@"error"] ? JSON(message[@"error"]) : nil;
+      std::string owner = tab->id;
+      // A timed-out call can still finish in a live frame. Its response has
+      // no pending callback, but the handles it just created still need release.
+      if (completion || objects.count) dispatch_async(dispatch_get_main_queue(), ^{
+        ReleaseScriptObjects(owner, session, objects);
+        if (completion) completion(result, error);
+      });
+    } else {
+      ScriptEvent(*tab, S(message, @"method"), message[@"params"] ?: @{}, session);
+      AgentFilesEvent(*tab, S(message, @"method"), message[@"params"] ?: @{}, session);
+    }
     return true;
   }
-  void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int id, bool success, const void* bytes, size_t size) override {
+  void OnDevToolsMethodResult(CefRefPtr<CefBrowser> browser, int id, bool success, const void* bytes, size_t size) override {
     if (getenv("YAB_CEF_TRACE_CDP")) fprintf(stderr, "YabCore CDP result id=%d success=%d bytes=%zu\n", id, success, size);
-    auto p = pending.find(id); if (p == pending.end()) return;
-    auto completion = p->second.completion; pending.erase(p);
+    auto p = pending.find(id);
+    Completion completion;
+    if (p != pending.end()) { completion = p->second.completion; pending.erase(p); }
     NSDictionary* value = Decode(bytes, size);
+    NSArray<NSString*>* objects = ScriptResultObjects(success ? value : nil, !completion);
+    if (!completion && !objects.count) return;
+    auto tab = Find(browser);
+    std::string owner = tab ? tab->id : "";
     // Completions often send the next CDP command. Sending it from inside
     // CEF's observer notification nests a second notification whenever the
     // agent answers synchronously, which trips Chromium's observer-list
     // reentrancy check (seen in extension options pages and at shutdown).
     // The main queue keeps results in arrival order.
-    dispatch_async(dispatch_get_main_queue(), ^{ completion(success ? value : nil, success ? nil : JSON(value)); });
+    dispatch_async(dispatch_get_main_queue(), ^{
+      ReleaseScriptObjects(owner, @"", objects);
+      if (completion) completion(success ? value : nil, success ? nil : JSON(value));
+    });
   }
   void OnDevToolsEvent(CefRefPtr<CefBrowser> browser, const CefString& method, const void* bytes, size_t size) override {
     Tab* t = Find(browser); if (!t) return;
     NSString* m = Str(method); NSDictionary* p = Decode(bytes, size);
     ScriptEvent(*t, m, p, @"");
+    AgentFilesEvent(*t, m, p, @"");
+    if ([m isEqual:@"Page.domContentEventFired"]) ExtensionOptionsDocument(*t);
+    if (PushDoorEvent(*t, m, p)) return;
+    if ([m isEqual:@"Input.dragIntercepted"]) { DragIntercepted(*t, p); return; }
     if (ExtensionBridgeEvent(*t, m, p)) return;
     if ([m isEqual:@"Runtime.executionContextsCleared"] || [m isEqual:@"Page.frameNavigated"]) {
       if ([m isEqual:@"Page.frameNavigated"] && p[@"frame"][@"parentId"]) return;
       ++t->documentGeneration;
-      t->worlds.clear(); t->contextNames.clear(); t->drmFrames.clear();
+      // A document back from the back/forward cache keeps its contexts:
+      // Runtime announced them when the agent reattached, just before this.
+      if (![S(p, @"type") isEqual:@"BackForwardCacheRestore"]) {
+        t->worlds.clear(); t->contextNames.clear(); t->drmFrames.clear();
+      }
       if ([m isEqual:@"Page.frameNavigated"]) t->drmMainFrame = Key(S(p[@"frame"], @"id"));
     } else if ([m isEqual:@"Runtime.executionContextCreated"]) {
       NSDictionary* c = p[@"context"]; NSString* name = S(c, @"name");
@@ -436,7 +733,8 @@ class Observer : public CefDevToolsMessageObserver {
   void OnDevToolsAgentAttached(CefRefPtr<CefBrowser> browser) override {
     auto tab = Find(browser); if (!tab || tab->closing) return;
     std::string id = tab->id;
-    fprintf(stderr, "YabCore DevTools agent attached: %s url=%s\n", id.c_str(), Key(Str(browser->GetMainFrame()->GetURL())).c_str());
+    fprintf(stderr, "YabCore DevTools agent attached: %s\n", id.c_str());
+    Mark("agent-attached", id);
     // Never dispatch recursively while CEF is attaching its DevTools agent.
     // Cached profiles can create the browser synchronously inside a Views callback.
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -445,6 +743,9 @@ class Observer : public CefDevToolsMessageObserver {
       ScriptAttach(t, @"", [id](NSDictionary*, NSString* error) {
         auto current = tabs.find(id); if (current == tabs.end() || current->second.closing) return;
         current->second.domainsReady = !error;
+        Mark("domains-ready", id);
+        if (!error) ShieldSettle(id);
+        if (!error && !current->second.internal) DragAttach(current->second);
         if (error) { Event(@"script.error", &current->second, @{@"message": error}); return; }
         // The first document may have committed before this agent existed,
         // so no Page.frameNavigated was seen: learn the main frame now.
@@ -465,7 +766,7 @@ class Observer : public CefDevToolsMessageObserver {
     OriginalPDFPresenceClosed(browser->GetIdentifier());
     OriginalPDFBrowserClosed(browser->GetIdentifier(), @"Original PDF renderer detached");
     fprintf(stderr, "YabCore DevTools agent detached: browser %d\n", browser->GetIdentifier());
-    if (auto t = Find(browser)) { ++t->documentGeneration; t->drmReady = false; t->drmFrames.clear(); t->domainsReady = false; t->worlds.clear(); t->contextNames.clear(); t->scripts.contexts.clear(); t->scripts.sessions.clear(); t->scripts.identifiers.clear(); }
+    if (auto t = Find(browser)) { ++t->documentGeneration; t->drmReady = false; t->drmFrames.clear(); t->domainsReady = false; ShieldAgentGone(*t); t->worlds.clear(); t->contextNames.clear(); t->scripts.contexts.clear(); t->scripts.sessions.clear(); t->scripts.identifiers.clear(); t->scripts.consoleRelease.clear(); }
     CancelPending(browser->GetIdentifier(), @"Renderer detached");
   }
   IMPLEMENT_REFCOUNTING(Observer);
@@ -479,10 +780,27 @@ static NSDictionary* CreatedState(Tab& t) {
     @"mustAdopt": @YES, @"source": t.popupSource ?: (id)NSNull.null,
     @"url": url.length ? url : (t.creationURL ?: @"about:blank")} mutableCopy];
   if (t.extensionCreation) result[@"extensionCreation"] = t.extensionCreation;
-  result[@"creationPurpose"] = t.extensionCreation ? @"extension" : t.popupSource ? @"popup" : t.adopted ? @"client" : @"unrequested";
+  result[@"creationPurpose"] = t.extensionCreation ? @"extension" : t.popupSource ? @"popup" : t.fromNotice ? @"notification" : t.adopted ? @"client" : @"unrequested";
   return result;
 }
 #include "tab_creation.inc"
+static void BindPopupWindow(Tab& tab, CefRefPtr<CefBrowser> browser);
+// The tab's own window arrives some tasks after OnAfterCreated. Should it ever be
+// ordered in unseen by ExpectDocumentPiP, this still holds it within moments.
+static void ConcealDocumentPiP(std::string id, int turns) {
+  auto found = tabs.find(id);
+  if (found == tabs.end() || found->second.closing || !found->second.browser) return;
+  auto& tab = found->second;
+  if (!tab.native) {
+    NSView* native = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(tab.browser->GetHost()->GetWindowHandle());
+    tab.native = [(NSObject*)native isKindOfClass:NSWindow.class] ? (NSWindow*)(NSObject*)native : native.window;
+  }
+  if (tab.native) { HoldDocumentPiPWindow(tab.native); return; }
+  if (turns <= 0) return;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    ConcealDocumentPiP(id, turns - 1);
+  });
+}
 static void Attach(CefRefPtr<CefBrowser> b, std::string profile, std::string preferred,
                    std::string opener = "", NSString* creationURL = nil, bool foreground = true, NSDictionary* source = nil) {
   if (browserTabs.count(b->GetIdentifier())) return;
@@ -496,7 +814,7 @@ static void Attach(CefRefPtr<CefBrowser> b, std::string profile, std::string pre
     fprintf(stderr, "YabCore creation: %s\n", JSON(@{@"at": @(Now()), @"browser": @(b->GetIdentifier()),
       @"preferred": @(preferred.c_str()), @"spawned": @(spawned), @"profile": @(profile.c_str()),
       @"nativeOpener": @(b->GetHost()->GetOpenerIdentifier()), @"opener": @(opener.c_str()),
-      @"creationURL": creationURL ?: (id)NSNull.null, @"url": Str(b->GetMainFrame()->GetURL()),
+      @"creationURL": creationURL ?: (id)NSNull.null,
       @"source": source ?: (id)NSNull.null}).UTF8String);
     if (spawned) fprintf(stderr, "YabCore creation stack: %s\n", NSThread.callStackSymbols.description.UTF8String);
   }
@@ -507,16 +825,20 @@ static void Attach(CefRefPtr<CefBrowser> b, std::string profile, std::string pre
     value.opener = nativeOpener != browserTabs.end() ? nativeOpener->second : opener;
     value.creationURL = creationURL; value.foreground = foreground;
     value.popupSource = source;
+    value.documentPiP = [source[@"documentPiP"] boolValue];
     value.fitPage = true;
     t = tabs.emplace(preferred, std::move(value)).first;
   }
   t->second.browser = b;
   browserTabs[b->GetIdentifier()] = preferred;
   if (stopping || profile.empty()) { t->second.closing = true; b->GetHost()->CloseBrowser(true); return; }
+  BindPopupWindow(t->second, b);
 #if YABCORE_NATIVE_PAGE
   // The SDK already bound its exact native Browser before OnAfterCreated.
   // Refuse an unbound default client before tab.created, not a geometry fallback.
-  if (spawned && !CefBrowserView::GetForBrowser(b) && !AttachNativePage(t->second)) {
+  // Chrome's window for a floating document exists only after this returns,
+  // so it can't be bound yet: PollLayers finds it and shows its compositor.
+  if (spawned && !CefBrowserView::GetForBrowser(b) && !AttachNativePage(t->second) && !t->second.documentPiP) {
     t->second.closing = true;
     b->GetHost()->CloseBrowser(true);
     return;
@@ -526,6 +848,7 @@ static void Attach(CefRefPtr<CefBrowser> b, std::string profile, std::string pre
   dispatch_async(dispatch_get_main_queue(), ^{
     auto current = tabs.find(preferred); if (current == tabs.end() || current->second.closing) return;
     current->second.transportReady = true;
+    Mark("tab.created", preferred);
     // The native endpoint can accept LoadURL now. Page.enable can wait for
     // the first real renderer document; waiting for it here would prevent
     // that very first navigation on CEF's empty, unnavigated bootstrap.
@@ -534,7 +857,9 @@ static void Attach(CefRefPtr<CefBrowser> b, std::string profile, std::string pre
     if (request) Reply(request, @{@"tab": @(preferred.c_str())});
     CDP(current->second, @"Page.enable", @{}, Ignore);
   });
+  ApplyEarlyExtensionReceipt(t->second, b->GetIdentifier());
   if (spawned) FinishNativeCreation(preferred);
+  if (t->second.documentPiP) ConcealDocumentPiP(preferred, 400);
 #if YABCORE_NATIVE_PAGE
   if (t->second.externalPage) PublishOwnCEFSurface(t->second);
 #endif
@@ -542,10 +867,12 @@ static void Attach(CefRefPtr<CefBrowser> b, std::string profile, std::string pre
 #include "navigation.inc"
 #include "print_find.inc"
 #include "permissions.inc"
+#include "site_notices.inc"
 #include "questions.inc"
 #include "agent_dialogs.inc"
 #include "certificates.inc"
 #include "owncef_native.inc"
+#include "extension_tab_operations.inc"
 #include "native_text_input.inc"
 #include "original_pdf.inc"
 #include "original_pdf_presence.inc"
@@ -561,7 +888,7 @@ static void Attach(CefRefPtr<CefBrowser> b, std::string profile, std::string pre
 
 #include "request_read.inc"
 
-class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandler, public CefDisplayHandler, public CefRequestHandler, public CefDialogHandler, public CefJSDialogHandler, public CefFindHandler, public CefPermissionHandler, public CefDownloadHandler, public CefContextMenuHandler {
+class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandler, public CefDisplayHandler, public CefRequestHandler, public CefDialogHandler, public CefJSDialogHandler, public CefFindHandler, public CefPermissionHandler, public CefDownloadHandler, public CefContextMenuHandler, public CefKeyboardHandler, public CefCommandHandler {
   std::string profile_, tab_, opener_;
   NSString* creationURL_;
   bool foreground_;
@@ -572,11 +899,27 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  CefRefPtr<CefCommandHandler> GetCommandHandler() override { return this; }
+  bool OnChromeCommand(CefRefPtr<CefBrowser> b, int command,
+                       cef_window_open_disposition_t) override {
+    auto action = DevToolsCommand(command, cef_id_for_command_id_name);
+    if (!action) return false;
+    // Chrome accelerators can bypass OnKeyEvent (notably F12). Never let
+    // them construct an unrequested native DevTools BrowserView. Our
+    // popup delegate closes its unreserved Window without adding the view;
+    // CreateBrowser then dereferences that view's missing widget.
+    auto t = Find(b);
+    if (t && !t->internal && !t->closing && !t->devToolsFrontend)
+      Event(@"page.devToolsCommand", t, @{@"action": @(action)});
+    return true;
+  }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame>, CefRefPtr<CefRequest>,
       bool is_navigation, bool, const CefString&, bool&) override {
     if (auto policy = ReadPolicyForBrowser(b)) return new ReadResourceGuard(std::move(policy));
-    return HTMLRequestHandler(b, is_navigation);
+    if (auto html = HTMLRequestHandler(b, is_navigation)) return html;
+    return ShieldHandler();
   }
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
   CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
@@ -597,10 +940,9 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
   void OnResetDialogState(CefRefPtr<CefBrowser> b) override {
     if (auto tab = Find(b)) CancelNativeDialogs(tab->id);
   }
-  bool OnSelectClientCertificate(CefRefPtr<CefBrowser> b, bool, const CefString&, int,
-      const X509CertificateList&, CefRefPtr<CefSelectClientCertificateCallback> callback) override {
-    if (!IsReadBrowser(b)) return false;
-    callback->Select(nullptr); return true;
+  bool OnSelectClientCertificate(CefRefPtr<CefBrowser> browser, bool proxy, const CefString& host, int port,
+      const X509CertificateList& certificates, CefRefPtr<CefSelectClientCertificateCallback> callback) override {
+    return AskClientCertificate(Find(browser), proxy, Str(host), port, certificates, callback);
   }
   bool CanDownload(CefRefPtr<CefBrowser> b, const CefString&, const CefString&) override {
     return !IsReadBrowser(b);
@@ -618,9 +960,14 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
     if (pid <= 0 || proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info) || info.pbi_ppid != getpid()) return true;
     // Isolated worlds create contexts too. Their repeated PID report must
     // not cancel an input challenge for the very same renderer.
-    if (t->rendererPID != pid) HealthReset(t, true);
+    const bool swapped = t->rendererPID != pid;
+    if (swapped) HealthReset(t, true);
     t->rendererPID = pid;
     t->rendererBorn = info.pbi_start_tvsec * 1000000ULL + info.pbi_start_tvusec;
+#if YABCORE_OWNCEF_SURFACES
+    // A new renderer behind the same compositor: say who owns the surface.
+    if (swapped) PublishOwnCEFSurface(*t);
+#endif
     State(t, @{ @"rendererPID": @(pid), @"nativeDiscard": NativeHookCapabilities()[@"nativeDiscard"],
       @"audible": @(t->audible), @"audibleSource": YABCORE_NATIVE_AUDIBLE ? @"native" : @"page" });
     return true;
@@ -628,6 +975,9 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
   CefRefPtr<CefFindHandler> GetFindHandler() override { return this; }
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+#if defined(CEF_YAB_DOWNLOAD_NAMING_VERSION)
+  bool UseChromeDownloadNaming() override { return true; }
+#endif
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
   bool RunContextMenu(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame> frame, CefRefPtr<CefContextMenuParams> params,
                       CefRefPtr<CefMenuModel> model, CefRefPtr<CefRunContextMenuCallback> callback) override {
@@ -664,7 +1014,6 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
   }
   bool OnShowPermissionPrompt(CefRefPtr<CefBrowser> b, uint64_t prompt, const CefString& origin,
       uint32_t mask, CefRefPtr<CefPermissionPromptCallback> callback) override {
-    if (IsReadBrowser(b)) { callback->Continue(CEF_PERMISSION_RESULT_DENY); return true; }
     return AskPermission(Find(b), prompt, Str(origin), mask, callback);
   }
   void OnDismissPermissionPrompt(CefRefPtr<CefBrowser> b, uint64_t prompt, cef_permission_request_result_t) override {
@@ -685,13 +1034,13 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
       const CefString&) override { NativeFileClosed(Find(b), request); }
 #endif
   bool OnFileDialog(CefRefPtr<CefBrowser> b, FileDialogMode mode,
-                    const CefString&, const CefString&,
+                    const CefString&, const CefString& defaultPath,
                     const std::vector<CefString>&, const std::vector<CefString>&,
                     const std::vector<CefString>&,
                     CefRefPtr<CefFileDialogCallback> callback) override {
     if (IsReadBrowser(b)) { callback->Cancel(); return true; }
     auto t = Find(b);
-    if (!t || !t->extensionPath || ![Str(b->GetMainFrame()->GetURL()) isEqual:@"chrome://extensions/"]) return OpenFilePick(t, mode, callback);
+    if (!t || !t->extensionPath || ![Str(b->GetMainFrame()->GetURL()) isEqual:@"chrome://extensions/"]) return OpenFilePick(t, mode, callback, nil, Str(defaultPath));
     NSString* path = t->extensionPath;
     t->extensionPath = nil;
     callback->Continue({CefString(Key(path))});
@@ -702,22 +1051,30 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
       const CefPopupFeatures& features, CefWindowInfo&, CefRefPtr<CefClient>& client,
       CefBrowserSettings&, CefRefPtr<CefDictionaryValue>&, bool*) override {
     auto owner = Find(browser);
-    if (IsReadBrowser(browser) || stopping || !owner || owner->closing || tabs.size() >= 256) return true;
+    // No count of tabs refuses a window: Chrome has none, and every Chromium
+    // tab Yab put to sleep keeps its native tab, discarded, as Chromium keeps a
+    // discarded tab's WebContents. A fixed 256 here and in tab.create failed
+    // every new page past 256 such tabs (feedback #1984, 270 tabs).
+    if (IsReadBrowser(browser) || stopping || !owner || owner->closing) return true;
     // The disposition comes from Chromium's actual child WebContents, not
     // the target URL or a page binding. Preserve that live browser for PiP.
     NSDictionary* source = @{@"url": frame ? Str(frame->GetURL()) : @"", @"main": @(frame && frame->IsMain()), @"gesture": @(gesture),
       @"documentPiP": @(disposition == CEF_WOD_NEW_PICTURE_IN_PICTURE),
+      @"popup": @(disposition == CEF_WOD_NEW_POPUP || features.widthSet || features.heightSet),
       @"width": @(features.widthSet ? features.width : 480), @"height": @(features.heightSet ? features.height : 320)};
     client = new Client(owner->profile, "", owner->id, Str(target), disposition != CEF_WOD_NEW_BACKGROUND_TAB, source);
+    if (disposition == CEF_WOD_NEW_PICTURE_IN_PICTURE) ExpectDocumentPiP();
     return false;
   }
   void OnAfterCreated(CefRefPtr<CefBrowser> b) override {
+    PollHurry();
     // Chrome can reuse a Browser's Client when restoring/adding WebContents.
     // The original tab.create or OnBeforePopup request authorizes one browser.
     auto tab = tab_; tab_.clear();
     auto opener = opener_; opener_.clear();
     NSString* url = creationURL_; creationURL_ = nil;
     NSDictionary* source = popupSource_; popupSource_ = nil;
+    if (!opener.empty()) ShieldPopup(b->GetIdentifier(), true);
     Attach(b, profile_, tab, opener, url, foreground_, source);
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> b) override {
@@ -737,7 +1094,10 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
 #if YABCORE_CLOSE_PREFLIGHT
       LifecycleBeforeClose(*t);
 #endif
-      Event(@"tab.closed", t); std::string id = t->id;
+      DevToolsClosed(t->id);
+      // Whole-host shutdown is engine loss; keep tab rows for disconnect recovery.
+      if (!stopping) Event(@"tab.closed", t);
+      std::string id = t->id;
       CancelFilePick(id); CancelQuestions(id); CancelPageMenu(id);
       for (auto i = authAttempts.begin(); i != authAttempts.end();) {
         if (i->first.rfind(id + "|", 0) == 0) i = authAttempts.erase(i); else ++i;
@@ -747,6 +1107,7 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
       tabs.erase(id); ForgetReadPage(id);
     }
     browserTabs.erase(b->GetIdentifier());
+    earlyExtensionReceipts.erase(b->GetIdentifier());
     if (stopping && tabs.empty()) QuitOnce();
   }
   void OnAddressChange(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame> frame, const CefString& url) override {
@@ -756,6 +1117,19 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
     }
   }
   void OnMediaAccessChange(CefRefPtr<CefBrowser> b, bool video, bool audio) override { MediaAccess(Find(b), video, audio); }
+  bool OnCursorChange(CefRefPtr<CefBrowser> b, CefCursorHandle cursor, cef_cursor_type_t type, const CefCursorInfo& custom) override {
+    auto t = Find(b); if (!t || t->internal) return false;
+    CursorChanged(t, cursor, type, custom);
+    return true;
+  }
+  // After the page had its chance. Nothing here is Chrome's to act on: its
+  // shortcuts would work on a window nobody sees. The client's menu goes next.
+  bool OnKeyEvent(CefRefPtr<CefBrowser> b, const CefKeyEvent& event, CefEventHandle) override {
+    auto t = Find(b); if (!t || t->internal) return false;
+    if (!(event.modifiers & EVENTFLAG_COMMAND_DOWN)) return false;
+    if (event.type == KEYEVENT_RAWKEYDOWN) Event(@"page.keyUnhandled", t, @{@"keyCode": @(event.native_key_code)});
+    return true;
+  }
   void OnFullscreenModeChange(CefRefPtr<CefBrowser> b, bool fullscreen) override { MediaFullscreen(Find(b), fullscreen); }
 #if YABCORE_NATIVE_VIDEO_PIP
   void OnNativeVideoPiPState(CefRefPtr<CefBrowser> browser,
@@ -776,7 +1150,7 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
   }
 #endif
 #if YABCORE_NATIVE_AUDIBLE
-  void OnAudioStateChanged(CefRefPtr<CefBrowser> b, bool audible) override { NativeAudible(Find(b), audible); MediaNativeAudible(Find(b), audible); }
+  void OnAudioStateChanged(CefRefPtr<CefBrowser> b, bool audible) override { if (audible) KeepMuted(Find(b), b); NativeAudible(Find(b), audible); MediaNativeAudible(Find(b), audible); }
 #endif
 #if YABCORE_BACKGROUND_COLOR
   void OnBackgroundColorChange(CefRefPtr<CefBrowser> b, cef_color_t color, bool has) override { NativeBackground(Find(b), color, has); }
@@ -794,7 +1168,14 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
 #endif
 #if YABCORE_EXTENSION_HOOKS
   void OnExtensionPopup(CefRefPtr<CefBrowser> b, CefRefPtr<CefDictionaryValue> popup) override { NativeExtensionPopup(Find(b), popup); }
-  void OnExtensionTabCreated(CefRefPtr<CefBrowser> b, CefRefPtr<CefDictionaryValue> info) override { NativeExtensionTab(Find(b), info); }
+  void OnExtensionTabCreated(CefRefPtr<CefBrowser> b, CefRefPtr<CefDictionaryValue> info) override {
+    if (b && info && !Find(b) && earlyExtensionReceipts.size() < 64) {
+      fprintf(stderr, "YabCore extension receipt before its browser: browser=%d\n", b->GetIdentifier());
+      earlyExtensionReceipts[b->GetIdentifier()] = info;
+      return;
+    }
+    NativeExtensionTab(Find(b), info);
+  }
 #if YABCORE_NATIVE_PAGE
   void OnExternalPageFrame(CefRefPtr<CefBrowser> b, CefRefPtr<CefDictionaryValue> state) override { NativePageFrame(Find(b), state); }
 #endif
@@ -816,18 +1197,52 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
   }
   void OnFaviconURLChange(CefRefPtr<CefBrowser> b, const std::vector<CefString>& urls) override { State(Find(b), @{@"faviconURL": urls.empty() ? (id)NSNull.null : Str(urls[0])}); }
   void OnLoadingStateChange(CefRefPtr<CefBrowser> b, bool loading, bool back, bool forward) override {
-    if (loading) Event(@"page.started", Find(b));
     State(Find(b), @{@"loading": @(loading), @"canGoBack": @(back), @"canGoForward": @(forward)});
     if (!loading) if (auto t = Find(b)) InstallTheme(t->id);
   }
-  bool OnBeforeBrowse(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest>, bool, bool) override {
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request, bool gesture, bool redirect) override {
+    if (ExternalScheme(b, frame, request, gesture)) return true;
+#if YABCORE_CLOSE_PREFLIGHT
+    // A recovery approval belongs to the captured document tree. Native
+    // preflight may already have timed out while another tab's prompt is up;
+    // any frame navigation still retires our recovery token.
+    if (auto t = Find(b)) if (t->closeUnresponsive && !t->closing) CancelClosePreflight(*t);
+#endif
+    // Every hop, redirects and frames too: a sign-in leaves its cookies on
+    // hosts no document stays on, and CEF has no cookie change observer.
+    if (request) if (auto t = Find(b)) if (!t->internal) Event(@"cookies.touched", t, @{@"url": Str(request->GetURL()), @"main": @(frame && frame->IsMain())});
+    // A link to an app is Browser's question, as on WebKit. Chrome would ask in
+    // a window nobody sees, and the link would seem to do nothing.
+    if (request && frame && frame->IsMain() && OpensApplication(Str(request->GetURL()))) {
+      if (auto t = Find(b)) if (!t->internal) Event(@"page.externalLink", t, @{@"url": Str(request->GetURL()), @"gesture": @(gesture)});
+      return true;
+    }
     if(frame&&frame->IsMain())OriginalPDFPresenceSuspend(b->GetIdentifier());
     OriginalPDFBrowserClosed(b->GetIdentifier(), @"Original PDF native navigation started");
+    if (request && frame && frame->IsMain()) {
+      if (auto t = Find(b)) { t->browseGesture = gesture; t->browseRedirect = redirect; }
+      // Loading state includes child frames. Only a main-frame navigation
+      // retires the app's document metadata and script frame ownership;
+      // an iframe can start after the main document has already finished
+      // and will never send a matching main-document commit.
+      if (!redirect) Event(@"page.started", Find(b));
+      ShieldBegan(b, Find(b), request->GetURL().ToString());
+    }
     return false;
+  }
+  // A link followed another way than here: ⌘- and middle-clicks. Where it
+  // opens is Yab's to say; Chrome's new tab would land in a window nobody sees.
+  bool OnOpenURLFromTab(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame>, const CefString& url,
+      CefRequestHandler::WindowOpenDisposition disposition, bool gesture) override {
+    auto t = Find(b);
+    if (!t || t->internal || disposition == CEF_WOD_CURRENT_TAB) return false;
+    Event(@"page.openLink", t, @{@"url": Str(url), @"foreground": @(disposition != CEF_WOD_NEW_BACKGROUND_TAB), @"gesture": @(gesture)});
+    return true;
   }
   void OnLoadStart(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame> frame, TransitionType) override {
     if(frame->IsMain())OriginalPDFPresenceSuspend(b->GetIdentifier());
     OriginalPDFBrowserClosed(b->GetIdentifier(), @"Original PDF native document changed");
+    if (frame->IsMain()) ShieldPopup(b->GetIdentifier(), false);
     if (frame->IsMain()) if (auto t = Find(b)) {
       ++t->documentGeneration;
       CancelPrintFind(*t, @"Document changed");
@@ -835,7 +1250,9 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
       for (auto i = authAttempts.begin(); i != authAttempts.end();) {
         if (i->first.rfind(t->id + "|", 0) == 0) i = authAttempts.erase(i); else ++i;
       }
+      KeepMuted(t, b);
       Event(@"page.committed", t, @{@"url": Str(frame->GetURL())});
+      AccessibilityDocument(*t);
       MediaReset(t);
       t->themeReady = false; t->crashed = false;
 #if YABCORE_OWNCEF_SURFACES
@@ -850,6 +1267,7 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
   void OnLoadEnd(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame> frame, int) override {
     if (frame->IsMain()) if (auto t = Find(b)) {
       OriginalPDFPresenceDocumentEnded(b);
+      ExtensionOptionsDocument(*t);
       InstallTheme(t->id); Event(@"page.finished", t);
       // The blank document that brought up the agent is no Back entry.
       if (t->scripts.blankFirst && frame->GetURL() != "about:blank" && t->domainsReady) {
@@ -865,6 +1283,16 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
     }
   }
   void OnLoadError(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame> frame, ErrorCode code, const CefString& text, const CefString& url) override {
+    if (frame->IsMain() && code != ERR_ABORTED && ExtensionOAuthRedirect(Str(url))) {
+      // Let Chrome's tabs observer finish the OAuth handoff. Reporting this
+      // as a website failure races the extension with Yab's error/retry UI.
+      Event(@"page.oauthRedirect", Find(b), @{@"url": Str(url)});
+      return;
+    }
+    if (frame->IsMain() && code == ERR_ABORTED && ShieldStoppedTop(b)) {
+      Event(@"page.loadError", Find(b), @{@"code": @(ERR_BLOCKED_BY_CLIENT), @"message": @"This page is on the ad blocker's lists", @"url": Str(url)});
+      return;
+    }
     if (frame->IsMain()) Event(@"page.loadError", Find(b), @{@"code": @(code), @"message": Str(text), @"url": Str(url)});
   }
   bool OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> b,
@@ -889,7 +1317,7 @@ class Client : public CefClient, public CefLifeSpanHandler, public CefLoadHandle
     // The CAContext belongs to the native window compositor, not this
     // renderer. Only its native reset callback invalidates the cached handle.
     // page.crash clears the client host; main-frame load rebinds that handle.
-    if (auto t = Find(b)) { ++t->documentGeneration; t->rendererPID = 0; t->rendererBorn = 0; t->crashed = true; t->themeReady = false; t->worlds.clear(); t->contextNames.clear(); t->lastLayer = nil; Event(@"page.crash", t, @{@"status": @(status), @"code": @(code), @"message": Str(text)}); }
+    if (auto t = Find(b)) { ++t->documentGeneration; t->rendererPID = 0; t->rendererBorn = 0; t->crashed = true; t->shedding = false; t->themeReady = false; t->worlds.clear(); t->contextNames.clear(); t->lastLayer = nil; if (!t->closing) Event(@"page.crash", t, @{@"status": @(status), @"code": @(code), @"message": Str(text)}); }
     CancelPending(b->GetIdentifier(), @"Renderer crashed");
   }
   IMPLEMENT_REFCOUNTING(Client);
@@ -899,8 +1327,27 @@ static std::map<int, std::string> devToolsAsked;
 class Window : public CefWindowDelegate {
   std::string id_;
   CefRefPtr<CefBrowserView> view_;
+  CefRefPtr<CefWindow> window_;
+  bool popup_ = false, hosted_ = false;
  public:
   Window(std::string id, CefRefPtr<CefBrowserView> view) : id_(id), view_(view) {}
+  // Chromium hands over a page a site opened before it says the browser
+  // exists, so the window comes first and its tab joins it in OnAfterCreated.
+  explicit Window(CefRefPtr<CefBrowserView> popup) : view_(popup), popup_(true) {}
+  void Bind(Tab& tab) {
+    id_ = tab.id; popup_ = false;
+    tab.window = window_; tab.view = view_; tab.fitPage = false;
+    tab.externallyHosted = hosted_;
+    tab.native = Native(window_);
+    MediaProducerWindow(tab.native);
+    if (hosted_) {
+      tab.native.ignoresMouseEvents = YES;
+      if (tab.visible) window_->Show();
+    } else {
+      Conceal(tab.native); window_->Show(); Conceal(tab.native);
+      if (!tab.visible) [tab.native orderOut:nil];
+    }
+  }
   cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
   bool IsFrameless(CefRefPtr<CefWindow>) override { return true; }
 #if YABCORE_OWNCEF_SURFACES
@@ -913,6 +1360,14 @@ class Window : public CefWindowDelegate {
     auto t = tabs.find(id_); return CefRect(80, 120, t == tabs.end() ? 800 : t->second.width, t == tabs.end() ? 600 : t->second.height);
   }
   void OnWindowCreated(CefRefPtr<CefWindow> w) override {
+    window_ = w;
+    if (popup_) {
+#if YABCORE_EXTERNAL_HOST
+      hosted_ = w->EnableExternalHosting();
+#endif
+      w->AddChildView(view_);
+      return;
+    }
     auto t = tabs.find(id_); if (t == tabs.end()) { w->Close(); return; }
     t->second.window = w; t->second.view = view_;
 #if YABCORE_EXTERNAL_HOST
@@ -939,9 +1394,17 @@ class Window : public CefWindowDelegate {
     }
   }
   bool CanClose(CefRefPtr<CefWindow>) override { auto b = view_ ? view_->GetBrowser() : nullptr; return !b || b->GetHost()->TryCloseBrowser(); }
-  void OnWindowDestroyed(CefRefPtr<CefWindow>) override { view_ = nullptr; }
+  void OnWindowDestroyed(CefRefPtr<CefWindow>) override { view_ = nullptr; window_ = nullptr; }
   IMPLEMENT_REFCOUNTING(Window);
 };
+static std::map<int, CefRefPtr<Window>> popupWindows;
+static void BindPopupWindow(Tab& tab, CefRefPtr<CefBrowser> browser) {
+  auto found = popupWindows.find(browser->GetIdentifier());
+  if (found == popupWindows.end()) return;
+  auto window = found->second;
+  popupWindows.erase(found);
+  window->Bind(tab);
+}
 class View : public CefBrowserViewDelegate {
  public:
   cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
@@ -958,7 +1421,13 @@ class View : public CefBrowserViewDelegate {
       return true;
     }
     auto b = popup->GetBrowser(); if (auto t = Find(b)) { CefWindow::CreateTopLevelWindow(new Window(t->id, popup)); return true; }
-    return false;
+    if (!b) return false;
+    // A window of Yab's, as every page has: CEF's own default one reports no
+    // compositor, and the page would draw for nobody.
+    CefRefPtr<Window> window = new Window(popup);
+    popupWindows[b->GetIdentifier()] = window;
+    CefWindow::CreateTopLevelWindow(window);
+    return true;
   }
   IMPLEMENT_REFCOUNTING(View);
 };
@@ -985,6 +1454,18 @@ static std::string Create(std::string profile, NSString* url, NSString* request,
   return id;
 }
 #include "devtools.inc"
+static size_t openWidgets = 0;
+#include "site_push.inc"
+// A window with no compositor callback: its context is read from its layers.
+[[maybe_unused]] static void PublishWindowSurface(Tab& tab) {
+  uint32_t cid = Context(tab.native);
+  NSRect page = tab.nativeExtensions || tab.fitPage ? ExtensionPageRect(tab.native) : NSZeroRect;
+  NSDictionary* state = @{@"contextId": @(cid), @"width": @(tab.width), @"height": @(tab.height),
+    @"pageX": @(page.origin.x), @"pageY": @(page.origin.y),
+    @"scale": @(tab.native.backingScaleFactor), @"requestedScale": @(tab.scale), @"visible": @(tab.visible)};
+  NSString* encoded = JSON(state);
+  if (![encoded isEqual:tab.lastLayer]) { tab.lastLayer = encoded; if (!tab.internal) Event(@"layer.changed", &tab, state); }
+}
 static void PollLayers() {
   NSMutableSet* known = [NSMutableSet new];
   for (auto& [id, tab] : tabs) {
@@ -1000,19 +1481,24 @@ static void PollLayers() {
     MediaProducerWindow(tab.native);
     [known addObject:@(tab.native.windowNumber)];
     if (!tab.externallyHosted) Conceal(tab.native);
+    // Chrome made this window at the size the page asked for, which no popup
+    // feature carries, and nothing has resized it yet.
+    if (tab.documentPiP && !tab.documentPiPSized) {
+      NSRect page = ExtensionPageRect(tab.native);
+      if (page.size.width > 0 && page.size.height > 0) {
+        tab.documentPiPSized = true;
+        Event(@"documentPiP.size", &tab, @{@"width": @(page.size.width), @"height": @(page.size.height)});
+      }
+    }
     // A Chrome-created tab can still share its owner's native window before
     // adoption. Its default geometry must not compete with that owner.
-    if (tab.adopted && !tab.externalPage && (tab.nativeExtensions || tab.fitPage)) ResizeExtensionWindow(tab.native, tab.width, tab.height);
+    if (tab.adopted && !tab.externalPage && (tab.nativeExtensions || tab.fitPage) && (!tab.documentPiP || tab.documentPiPSized))
+      ResizeExtensionWindow(tab.native, tab.width, tab.height);
     if (!tab.themeReady && !tab.crashed && tab.browser && !tab.browser->IsLoading() && Now() - tab.themeAttempt > 0.5) InstallTheme(id);
-#if !YABCORE_OWNCEF_SURFACES
-    uint32_t cid = Context(tab.native);
-    NSRect page = tab.nativeExtensions || tab.fitPage ? ExtensionPageRect(tab.native) : NSZeroRect;
-    NSDictionary* state = @{@"contextId": @(cid), @"width": @(tab.width), @"height": @(tab.height),
-      @"pageX": @(page.origin.x), @"pageY": @(page.origin.y),
-      @"scale": @(tab.native.backingScaleFactor), @"requestedScale": @(tab.scale), @"visible": @(tab.visible)};
-    NSString* encoded = JSON(state);
-    if (![encoded isEqual:tab.lastLayer]) { tab.lastLayer = encoded; if (!tab.internal) Event(@"layer.changed", &tab, state); }
+#if YABCORE_OWNCEF_SURFACES
+    if (tab.documentPiP && !tab.externalPage)
 #endif
+    PublishWindowSurface(tab);
   }
   // Native Chrome widgets (including extension action popups) are independent
   // contexts. Report additions, movement, context replacement and disappearance.
@@ -1020,6 +1506,13 @@ static void PollLayers() {
   NSMutableDictionary* current = [NSMutableDictionary new];
   for (NSWindow* window in NSApp.windows) {
     if ([known containsObject:@(window.windowNumber)]) continue;
+    // Chrome's original browserless download picker stays interactive.
+    // NSOpenPanel is also an NSSavePanel subclass.
+    if ([window isKindOfClass:NSSavePanel.class]) continue;
+    // A context menu Chrome opens itself (an extension's action popup has no
+    // CefBrowser to ask Yab for one): concealed, it was there and invisible,
+    // and its Paste could not be reached. It tracks and closes on its own.
+    if (window.level == NSPopUpMenuWindowLevel || [NSStringFromClass(window.class) containsString:@"Menu"]) continue;
     Conceal(window);
     uint32_t cid = Context(window);
     if (getenv("YAB_CEF_TRACE_CDP")) {
@@ -1047,30 +1540,254 @@ static void PollLayers() {
   }
   for (NSString* key in previous) if (!current[key]) Event(@"popup.closed", nullptr, @{@"popup": key});
   previous = current;
+  openWidgets = current.count;
+  PublishPopupTextStates();
 }
-static void Input(Tab& tab, NSDictionary* p, NSString* request) {
-  const std::string tabID = tab.id;
-  NSWindow* w = tab.native;
-  NSView* view = FindView(w.contentView.superview ?: w.contentView, @"RenderWidgetHostViewCocoa");
-  if (!view) { Reply(request, nil, @"Page input view not ready"); return; }
+// What only a look can find: a window still being made, a health ping due, a
+// page that fits its window, a native widget that may be opening. Nothing of
+// the kind with the tabs at rest, so the walk goes from 10 times a second to once.
+static double hurriedUntil = 0, nextPoll = 0;
+static const double kPollBusy = 0.1, kPollResting = 1;
+static NSString* PollBusyReason() {
+  if (Now() < hurriedUntil) return @"window-activity";
+  if (openWidgets) return @"open-widget";
+  if (NSApp.modalWindow) return @"modal-window";
+  for (auto& [id, tab] : tabs) {
+    if (!tab.native) return @"unbound-window";
+    if (!tab.healthToken.empty()) return @"health-probe";
+    if (!tab.externallyHosted) return @"unhosted-window";
+    if (tab.nativeExtensions) return @"extension-window";
+    if (tab.fitPage) return @"fitted-window";
+    if (!tab.themeReady && !tab.crashed && tab.browser && !tab.browser->IsLoading() && tab.browser->HasDocument()) return @"theme";
+  }
+  return nil;
+}
+static bool PollBusy() { return PollBusyReason() != nil; }
+// Only native window work needs discovery at the interactive cadence. A
+// cookie read, status query or iframe load neither creates nor moves a window.
+// Treating all of them as window activity kept the poll busy while idle.
+static void PollHurry() {
+  ++pollHurries;
+  hurriedUntil = Now() + 2;
+  if (timer && nextPoll > Now() + kPollBusy) {
+    nextPoll = Now() + kPollBusy;
+    timer.fireDate = [NSDate dateWithTimeIntervalSinceNow:kPollBusy];
+  }
+}
+#include "accessibility.inc"
+#include "pointer_lock.inc"
+// Keep payloads outside NSEvent: AppKit can copy a posted event and discard
+// Objective-C associated objects. The queue's native event stamp survives that
+// copy. Older entries consumed by an AppKit modal text service are retired when
+// its next event is dispatched; closing a tab destroys its remaining entries.
+static void QueueKeyboard(Tab& tab, NSEvent* envelope, NSEvent* native,
+                          std::function<void()> edit = {}, std::function<void()> canceled = {}) {
+  envelope = KeyboardEnvelopeMark(envelope);
+  auto entry = std::make_shared<QueuedKeyboardEvent>();
+  entry->stamp = KeyboardEventStamp(envelope); entry->type = envelope.type; entry->code = envelope.keyCode;
+  entry->native = native; entry->edit = std::move(edit); entry->canceled = std::move(canceled);
+  tab.keyboard.push_back(entry);
+  [NSApp postEvent:envelope atStart:NO];
+}
+static std::shared_ptr<QueuedKeyboardEvent> TakeKeyboard(Tab& tab, NSEvent* event) {
+  const auto stamp = KeyboardEventStamp(event);
+  auto found = std::find_if(tab.keyboard.begin(), tab.keyboard.end(), [&](const auto& entry) {
+    return entry->stamp == stamp && entry->type == event.type && entry->code == event.keyCode;
+  });
+  if (found == tab.keyboard.end()) return {};
+  auto entry = *found;
+  tab.keyboard.erase(tab.keyboard.begin(), std::next(found));
+  return entry;
+}
+static NSEvent* DispatchHostedKeyboard(NSEvent* event) {
+  Tab* target = nullptr;
+#if YABCORE_EXTENSION_HOOKS
+  for (auto& [token, popup] : nativePopupInputs) {
+    if (popup.native == event.window) { target = &popup; break; }
+  }
+#endif
+  if (!target) {
+    for (auto& [id, tab] : tabs) {
+      if (tab.externallyHosted && tab.native == event.window) { target = &tab; break; }
+    }
+  }
+  if (target) {
+    Tab& tab = *target;
+    auto delivery = TakeKeyboard(tab, event);
+    // A retired envelope (or an unrelated key in a concealed widget)
+    // cannot be delivered to a replacement popup reusing its window.
+    if (!delivery && (KeyboardEnvelopeOwned(event) || !tab.browser)) return nil;
+    if (!delivery && !tab.keyboard.empty() && getenv("YAB_PROBE") && *getenv("YAB_PROBE"))
+      fprintf(stderr, "YabCore keyboard stamp mismatch: got=%llu expected=%llu pending=%zu\n",
+              (unsigned long long)KeyboardEventStamp(event), (unsigned long long)tab.keyboard.front()->stamp,
+              tab.keyboard.size());
+    NSView* content = event.window.contentView;
+    NSView* view = FindView(content.superview ?: content, @"RenderWidgetHostViewCocoa");
+    if (!view) return delivery ? nil : event;
+    if (delivery) {
+      delivery->canceled = {};
+      if (delivery->edit) { delivery->edit(); return nil; }
+    }
+    NSEvent* native = delivery && delivery->native ? delivery->native : event;
+    if (getenv("YAB_PROBE") && *getenv("YAB_PROBE") && event.type == NSEventTypeKeyDown &&
+        (event.characters.length > 1 || native.characters.length > 1))
+      fprintf(stderr, "YabCore keyboard payload: found=%d envelopeUnits=%lu nativeUnits=%lu\n", (bool)delivery,
+              (unsigned long)event.characters.length, (unsigned long)native.characters.length);
+    NSWindow* window = event.window;
+    NSResponder* target = [window.firstResponder isKindOfClass:NSView.class] &&
+        [(NSView*)window.firstResponder isDescendantOf:window.contentView] ? window.firstResponder : view;
+    if (event.type == NSEventTypeFlagsChanged) [target flagsChanged:native];
+    else if (event.type == NSEventTypeKeyDown) [target keyDown:native];
+    else [target keyUp:native];
+    return nil;
+  }
+  return KeyboardEnvelopeOwned(event) ? nil : event;
+}
+// A Chrome sad tab is Views UI in the browser window, not a renderer.
+// Dispatch its input through AppKit's native content view; CDP and
+// RenderWidgetHostViewCocoa no longer have a live target after a crash.
+static void SadTabInput(Tab& tab, NSDictionary* p, NSString* request) {
+  NSWindow* window = tab.native;
+  NSView* content = window.contentView;
+  if (!content || !tab.view) { Reply(request, nil, @"Native crash view is unavailable"); return; }
   NSString* kind = S(p, @"kind");
   NSEventModifierFlags flags = [p[@"modifiers"] unsignedLongLongValue];
-  double x = [p[@"x"] doubleValue], y = [p[@"y"] doubleValue];
-  NSPoint point = [view convertPoint:NSMakePoint(x, view.isFlipped ? y : view.bounds.size.height - y) toView:nil];
-  // The client's input context names the UTF-16 range an edit replaces in
-  // the focused field (a held letter's accent replaces the letter typed).
-  // The page view reads it as Chromium's own client does: ImeCommitText or
-  // ImeSetComposition with that range. Absent, it replaces nothing.
+  if ([kind isEqual:@"keyDown"] || [kind isEqual:@"keyUp"] || [kind isEqual:@"flagsChanged"]) {
+    const NSEventType type = [kind isEqual:@"flagsChanged"] ? NSEventTypeFlagsChanged :
+        [kind isEqual:@"keyDown"] ? NSEventTypeKeyDown : NSEventTypeKeyUp;
+    NSEvent* event = [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:flags
+        timestamp:Now() windowNumber:window.windowNumber context:nil
+        characters:S(p, @"characters") ?: @"" charactersIgnoringModifiers:S(p, @"unmodified") ?: @""
+        isARepeat:[p[@"repeat"] boolValue] keyCode:[p[@"keyCode"] unsignedShortValue]];
+    [window sendEvent:event];
+    Reply(request); return;
+  }
+  NSDictionary* types = @{@"mouseDown": @(NSEventTypeLeftMouseDown), @"mouseUp": @(NSEventTypeLeftMouseUp),
+    @"mouseMove": @(NSEventTypeMouseMoved), @"mouseDrag": @(NSEventTypeLeftMouseDragged)};
+  NSDictionary* selectors = @{@"mouseDown": @"mouseDown:", @"mouseUp": @"mouseUp:",
+    @"mouseMove": @"mouseMoved:", @"mouseDrag": @"mouseDragged:"};
+  if (!types[kind]) { Reply(request, nil, @"Input kind is not supported by the native crash view"); return; }
+  const double x = [p[@"x"] doubleValue], y = [p[@"y"] doubleValue];
+  if (!std::isfinite(x) || !std::isfinite(y)) { Reply(request, nil, @"Invalid native crash view point"); return; }
+  NSPoint local = NSMakePoint(x, content.isFlipped ? y : NSHeight(content.bounds) - y);
+  NSView* target = [content hitTest:local];
+  SEL selector = NSSelectorFromString(selectors[kind]);
+  if (!target || ![target respondsToSelector:selector]) { Reply(request, nil, @"No native crash view at point"); return; }
+  NSEvent* event = [NSEvent mouseEventWithType:(NSEventType)[types[kind] unsignedIntegerValue]
+      location:[content convertPoint:local toView:nil] modifierFlags:flags timestamp:Now()
+      windowNumber:window.windowNumber context:nil eventNumber:0
+      clickCount:MAX(1, [p[@"clickCount"] integerValue]) pressure:[kind isEqual:@"mouseUp"] ? 0 : 1];
+  ((void (*)(id, SEL, NSEvent*))objc_msgSend)(target, selector, event);
+  Reply(request);
+}
+static void Input(Tab& tab, NSDictionary* p, NSString* request, bool nativePopup = false) {
+  if (tab.closing) { Reply(request, nil, @"Page input target is no longer live"); return; }
+  if (tab.crashed && !nativePopup) { SadTabInput(tab, p, request); return; }
+  InstallPointerLockHooks();
+  if (!nativePopup && !tab.browser) { Reply(request, nil, @"Page input browser not ready"); return; }
+  NSString* kind = S(p, @"kind");
+  // AppKit replacement coordinates are UTF-16 offsets in the focused editor.
   NSRange replacement = NSMakeRange(NSNotFound, 0);
   if (p[@"replacementStart"] || p[@"replacementLength"]) {
-    double start = [p[@"replacementStart"] doubleValue], length = [p[@"replacementLength"] doubleValue];
-    if (![p[@"replacementStart"] isKindOfClass:NSNumber.class] || ![p[@"replacementLength"] isKindOfClass:NSNumber.class] ||
-        start < 0 || length < 0 || std::trunc(start) != start || std::trunc(length) != length || start + length > INT32_MAX) {
+    id startValue = p[@"replacementStart"], lengthValue = p[@"replacementLength"];
+    if (![startValue isKindOfClass:NSNumber.class] || ![lengthValue isKindOfClass:NSNumber.class] ||
+        CFGetTypeID((__bridge CFTypeRef)startValue) == CFBooleanGetTypeID() ||
+        CFGetTypeID((__bridge CFTypeRef)lengthValue) == CFBooleanGetTypeID()) {
+      Reply(request, nil, @"Invalid replacement range"); return;
+    }
+    double start = [startValue doubleValue], length = [lengthValue doubleValue];
+    if (!std::isfinite(start) || !std::isfinite(length) || start < 0 || length < 0 ||
+        std::trunc(start) != start || std::trunc(length) != length || start + length > INT32_MAX) {
       Reply(request, nil, @"Invalid replacement range"); return;
     }
     replacement = NSMakeRange((NSUInteger)start, (NSUInteger)length);
   }
-  if ([kind isEqual:@"text"]) {
+  if (nativePopup && ([@[@"dragIntercept", @"dragEnter", @"dragOver", @"drop", @"dragCancel"] containsObject:kind] ||
+                      [kind hasPrefix:@"middle"])) {
+    Reply(request, nil, @"Native popup does not support this input kind"); return;
+  }
+  const std::string tabID = tab.id;
+  const uint64_t generation = tab.documentGeneration;
+  NSWindow* w = tab.native;
+  NSView* content = w.contentView;
+  NSView* view = FindView(content.superview ?: content, @"RenderWidgetHostViewCocoa");
+  if (!view) { Reply(request, nil, @"Page input view not ready"); return; }
+  // An authenticated native popup has its own original AppKit view.
+  auto browser = tab.browser;
+  auto host = browser ? browser->GetHost() : nullptr;
+  NSEventModifierFlags flags = [p[@"modifiers"] unsignedLongLongValue];
+  double x = [p[@"x"] doubleValue], y = [p[@"y"] doubleValue];
+  NSPoint point = [view convertPoint:NSMakePoint(x, view.isFlipped ? y : view.bounds.size.height - y) toView:nil];
+  if ([kind isEqual:@"dragIntercept"]) {
+    if (!host) { Reply(request, nil, @"Page input browser not ready"); return; }
+    CDP(tab, @"Input.setInterceptDrags", @{@"enabled": @([p[@"enabled"] boolValue])}, [request](NSDictionary* value, NSString* error) { Reply(request, value, error); });
+    return;
+  }
+  if ([@[@"dragEnter", @"dragOver", @"drop", @"dragCancel"] containsObject:kind]) {
+    if (!host) { Reply(request, nil, @"Page input browser not ready"); return; }
+    int modifiers = (flags & NSEventModifierFlagOption ? 1 : 0) | (flags & NSEventModifierFlagControl ? 2 : 0) |
+                    (flags & NSEventModifierFlagCommand ? 4 : 0) | (flags & NSEventModifierFlagShift ? 8 : 0);
+    NSDictionary* data = p[@"data"] ?: @{@"items": @[], @"dragOperationsMask": @1};
+    std::string tabID = tab.id;
+    WithPageZoom(tab, request, [=](double zoom, double pinch) {
+      auto live = tabs.find(tabID);
+      if (live == tabs.end() || live->second.closing) { Reply(request, nil, @"Page closed during a drag"); return; }
+      CDP(live->second, @"Input.dispatchDragEvent", @{@"type": kind, @"x": @(x / zoom / pinch), @"y": @(y / zoom / pinch), @"data": data, @"modifiers": @(modifiers)},
+          [request](NSDictionary* value, NSString* error) { Reply(request, value, error); });
+    });
+    return;
+  }
+  if ([kind isEqual:@"editorKey"]) {
+    // Human Edit shortcuts and ordinary keys must share AppKit's FIFO.
+    // Dispatching this CDP key directly from the RPC can overtake backspaces
+    // already posted there, pasting before deletion has finished.
+    NSEvent* envelope = [NSEvent keyEventWithType:NSEventTypeKeyDown location:point
+      modifierFlags:[p[@"macModifiers"] unsignedLongLongValue] timestamp:Now()
+      windowNumber:w.windowNumber context:nil characters:S(p, @"key") charactersIgnoringModifiers:S(p, @"key")
+      isARepeat:NO keyCode:[p[@"nativeCode"] unsignedShortValue]];
+    NSMutableDictionary* key = [p mutableCopy]; key[@"kind"] = @"key";
+    QueueKeyboard(tab, envelope, nil, [tabID, generation, key, request] {
+      auto found = tabs.find(tabID);
+      if (found == tabs.end() || found->second.closing || found->second.documentGeneration != generation) {
+        Reply(request, nil, @"Editor input target changed"); return;
+      }
+      NSString* nativeEdit = S(key, @"nativeEdit");
+      if (nativeEdit.length) {
+        // Human editing in an extension window uses the same native view
+        // selectors as its action popup, after preceding keyboard events.
+        Input(found->second, @{@"kind": @"edit", @"command": nativeEdit}, request);
+      } else {
+        ScriptRequest(found->second, @"scripts.input", key, request);
+      }
+    }, [request] { Reply(request, nil, @"Editor input was consumed before dispatch"); });
+    return;
+  } else if ([kind isEqual:@"edit"]) {
+    // An Edit command for an extension's action popup. In Chrome the Edit
+    // menu sends paste: (and the rest) to this view; Blink on a Mac reads
+    // ⌘V as a plain key, and this process has no Edit menu, so a forwarded
+    // key pastes nothing. The client names the command; the view runs it on
+    // its focused frame, as Chromium's menu does.
+    static NSSet* const commands = [NSSet setWithArray:@[@"paste", @"pasteAndMatchStyle", @"copy", @"cut",
+                                                          @"selectAll", @"undo", @"redo"]];
+    NSString* command = S(p, @"command");
+    SEL action = command && [commands containsObject:command] ? NSSelectorFromString([command stringByAppendingString:@":"]) : nullptr;
+    if (!action) { Reply(request, nil, @"Unknown native edit command"); return; }
+    if (![view respondsToSelector:action]) { Reply(request, nil, @"Popup view has no such edit command"); return; }
+    if (w.firstResponder != view) [w makeFirstResponder:view];
+    if (getenv("YAB_PROBE") && *getenv("YAB_PROBE"))
+      fprintf(stderr, "yabcore popup edit %s: first responder %s\n", command.UTF8String, NSStringFromClass([w.firstResponder class]).UTF8String);
+    ((void (*)(id, SEL, id))objc_msgSend)(view, action, nil);
+  } else if ([kind isEqual:@"textSelection"]) {
+    // NSTextCheckingClient selects in the original native editor. Its
+    // accessibility selection uses the same editor-relative UTF-16 offsets;
+    // no DOM lookup or synthetic arrow-key sequence substitutes for it.
+    id focused = [view accessibilityFocusedUIElement];
+    if (replacement.location == NSNotFound || !focused ||
+        ![focused respondsToSelector:@selector(setAccessibilitySelectedTextRange:)]) {
+      Reply(request, nil, @"Native editor has no selectable text range"); return;
+    }
+    [(id<NSAccessibility>)focused setAccessibilitySelectedTextRange:replacement];
+  } else if ([kind isEqual:@"text"]) {
     if (![view respondsToSelector:@selector(insertText:replacementRange:)]) { Reply(request, nil, @"View has no text input client"); return; }
     [(id<NSTextInputClient>)view insertText:S(p, @"text") replacementRange:replacement];
   } else if ([kind isEqual:@"compose"] || [kind isEqual:@"unmark"]) {
@@ -1084,61 +1801,96 @@ static void Input(Tab& tab, NSDictionary* p, NSString* request) {
       NSUInteger length = MIN((NSUInteger)[p[@"selectionLength"] unsignedIntegerValue], text.length - location);
       [(id<NSTextInputClient>)view setMarkedText:text selectedRange:NSMakeRange(location, length) replacementRange:replacement];
     }
-  } else if ([kind isEqual:@"keyDown"] || [kind isEqual:@"keyUp"]) {
-    NSEvent* event = [NSEvent keyEventWithType:[kind isEqual:@"keyDown"] ? NSEventTypeKeyDown : NSEventTypeKeyUp
+  } else if ([kind isEqual:@"keyDown"] || [kind isEqual:@"keyUp"] || [kind isEqual:@"flagsChanged"]) {
+    bool lone = [kind isEqual:@"flagsChanged"];  // A modifier alone: BaseView's flagsChanged: makes its keydown or keyup.
+    NSEventType type = lone ? NSEventTypeFlagsChanged : [kind isEqual:@"keyDown"] ? NSEventTypeKeyDown : NSEventTypeKeyUp;
+    NSEvent* native = p[@"event"] ? KeyboardEventDecode(p, type) : nil;
+    if (p[@"event"] && !native) { Reply(request, nil, @"Invalid native keyboard event"); return; }
+    // AppKit's queue needs a window number from this process. Posting the
+    // decoded event itself carries Yab's foreign window and may never reach
+    // the local monitor. The envelope routes it; its payload is interpreted.
+    NSEvent* event = [NSEvent keyEventWithType:type
       location:point modifierFlags:flags timestamp:Now() windowNumber:w.windowNumber context:nil
-      characters:S(p, @"characters") charactersIgnoringModifiers:S(p, @"unmodified") isARepeat:[p[@"repeat"] boolValue] keyCode:[p[@"keyCode"] unsignedShortValue]];
-    if (tab.externallyHosted) {
-      // Same reason as the mouse: the producer window is not visible.
-      NSResponder* target = [w.firstResponder isKindOfClass:NSView.class] && [(NSView*)w.firstResponder isDescendantOf:w.contentView] ? w.firstResponder : view;
-      fprintf(stderr, "YabCore key %s: window visible %d, first responder %s\n", kind.UTF8String, (int)w.isVisible, NSStringFromClass(target.class).UTF8String);
-      if ([kind isEqual:@"keyDown"]) [target keyDown:event]; else [target keyUp:event];
-    } else {
-      [w sendEvent:event];
-    }
+      characters:lone ? @"" : S(p, @"characters") charactersIgnoringModifiers:lone ? @"" : S(p, @"unmodified") isARepeat:[p[@"repeat"] boolValue] keyCode:[p[@"keyCode"] unsignedShortValue]];
+    // Native correction panels consume subsequent events from AppKit's queue.
+    // Calling keyDown directly strands that nested event loop and keeps the
+    // input RPC unacknowledged, preventing the next key from reaching it.
+    QueueKeyboard(tab, event, native ?: event);
+
   } else if ([kind isEqual:@"wheel"]) {
-    CGEventRef cg = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 2, (int32_t)[p[@"deltaY"] doubleValue], (int32_t)[p[@"deltaX"] doubleValue]);
+    // The scroll's own CGEvent, whole: Chrome's WebMouseWheelEventBuilder
+    // and cc decide distance and glide, as in Chromium (wheel_event.h). Only
+    // where it is changes, below, for the window here.
+    CGEventRef cg = WheelEventCreate(p, Now());
     if (!cg) { Reply(request, nil, @"Cannot create wheel event"); return; }
-    CGEventSetIntegerValueField(cg, kCGScrollWheelEventScrollPhase, [p[@"phase"] longLongValue]);
-    CGEventSetIntegerValueField(cg, kCGScrollWheelEventMomentumPhase, [p[@"momentumPhase"] longLongValue]);
-    CGEventSetFlags(cg, static_cast<CGEventFlags>(flags));
-    NSPoint screen = [w convertPointToScreen:point];
-    CGEventSetLocation(cg, CGPointMake(screen.x, NSScreen.screens.firstObject.frame.size.height - screen.y));
-    CGEventSetIntegerValueField(cg, kCGMouseEventWindowUnderMousePointer, w.windowNumber);
-    CGEventSetIntegerValueField(cg, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, w.windowNumber);
-    NSEvent* event = [NSEvent eventWithCGEvent:cg];
-    if (!event.window) {
-      // A windowless NSEvent reports a screen point as locationInWindow.
-      // We invoke this view directly, so supply its window-base point instead.
-      CGEventSetLocation(cg, CGPointMake(point.x, NSScreen.screens.firstObject.frame.size.height - point.y));
-      event = [NSEvent eventWithCGEvent:cg];
-    }
-    fprintf(stderr, "YabCore wheel: event window %ld, target %ld, location %s, delta %.2f\n", (long)event.windowNumber, (long)w.windowNumber, NSStringFromPoint(event.locationInWindow).UTF8String, event.scrollingDeltaY);
+    NSEvent* event = WheelEventPlace(cg, w, point);
     [view scrollWheel:event]; CFRelease(cg);
-  } else {
-    NSDictionary* types = @{@"mouseDown": @"mousePressed", @"mouseUp": @"mouseReleased", @"mouseMove": @"mouseMoved", @"mouseDrag": @"mouseMoved", @"rightDown": @"mousePressed", @"rightUp": @"mouseReleased"};
-    if (!types[kind]) { Reply(request, nil, @"Unknown input kind"); return; }
+  } else if ([kind isEqual:@"magnify"] || [kind isEqual:@"smartMagnify"]) {
+    // The view, not CDP or a scale set from here: Chromium's own wheel and
+    // gesture filters then ask the page and the compositor scales the visual
+    // viewport about the fingers, with no layout and no renderer round trip.
+    bool pinch = [kind isEqual:@"magnify"];
+    tab.pinched = true;
+    YabGestureEvent* event = [YabGestureEvent new];
+    event.type = pinch ? NSEventTypeMagnify : NSEventTypeSmartMagnify;
+    event.phase = static_cast<NSEventPhase>([p[@"phase"] unsignedLongLongValue]);
+    event.magnification = [p[@"magnification"] doubleValue];
+    event.locationInWindow = point;
+    event.timestamp = p[@"timestamp"] ? [p[@"timestamp"] doubleValue] : Now();
+    event.modifierFlags = flags;
+    if (pinch) [view magnifyWithEvent:(NSEvent*)event];
+    else [view smartMagnifyWithEvent:(NSEvent*)event];
+  } else if ([kind isEqual:@"mouseLeave"]) {
+    // The host's tracking rectangles can remain inside the page while native
+    // UI covers it. Explicitly retire Chromium's hover, including :hover and
+    // renderer tooltips, rather than merely suppressing the next move.
     if (tab.externallyHosted) {
+      NSEvent* event = [NSEvent enterExitEventWithType:NSEventTypeMouseExited location:point
+        modifierFlags:flags timestamp:Now() windowNumber:w.windowNumber context:nil
+        eventNumber:0 trackingNumber:0 userData:nullptr];
+      [view mouseExited:event];
+    } else {
+      CefMouseEvent event;
+      event.x = static_cast<int>(x); event.y = static_cast<int>(y);
+      if (!host) { Reply(request, nil, @"Page input browser not ready"); return; }
+      host->SendMouseMoveEvent(event, true);
+    }
+  } else if (!nativePopup && tab.pointerLocked && IsPointerLockKind(kind)) {
+    // The page holds the pointer: the event goes to its view, whole, and
+    // Chrome's own code makes its movement (pointer_lock.inc).
+    NSEvent* event = PointerLockEvent(p, kind, w, point, flags);
+    if (!event) { Reply(request, nil, @"Cannot make the locked pointer's event"); return; }
+    tab.pointerPoint = point;
+    PointerLockDeliver(view, event);
+  } else {
+    NSDictionary* types = @{@"mouseDown": @"mousePressed", @"mouseUp": @"mouseReleased", @"mouseMove": @"mouseMoved", @"mouseDrag": @"mouseMoved", @"rightDown": @"mousePressed", @"rightUp": @"mouseReleased",
+      @"rightDrag": @"mouseMoved", @"middleDown": @"mousePressed", @"middleUp": @"mouseReleased", @"middleDrag": @"mouseMoved"};
+    if (!types[kind]) { Reply(request, nil, @"Unknown input kind"); return; }
+    if (nativePopup) {
       NSDictionary* nativeTypes = @{@"mouseDown": @(NSEventTypeLeftMouseDown), @"mouseUp": @(NSEventTypeLeftMouseUp),
         @"mouseMove": @(NSEventTypeMouseMoved), @"mouseDrag": @(NSEventTypeLeftMouseDragged),
-        @"rightDown": @(NSEventTypeRightMouseDown), @"rightUp": @(NSEventTypeRightMouseUp)};
-      NSEvent* event = [NSEvent mouseEventWithType:(NSEventType)[nativeTypes[kind] unsignedIntegerValue] location:point modifierFlags:flags timestamp:Now()
-      windowNumber:w.windowNumber context:nil eventNumber:0 clickCount:p[@"clickCount"] ? [p[@"clickCount"] integerValue] : 1 pressure:[kind hasSuffix:@"Down"] ? 1 : 0];
-      // An externally hosted producer window is never ordered in, and AppKit
-      // does not route mouse events to a window that is not visible. Deliver
-      // straight to the page view, taking first responder as AppKit would.
+        @"rightDown": @(NSEventTypeRightMouseDown), @"rightUp": @(NSEventTypeRightMouseUp),
+        @"rightDrag": @(NSEventTypeRightMouseDragged)};
       NSDictionary* selectors = @{@"mouseDown": @"mouseDown:", @"mouseUp": @"mouseUp:", @"mouseMove": @"mouseMoved:",
-        @"mouseDrag": @"mouseDragged:", @"rightDown": @"rightMouseDown:", @"rightUp": @"rightMouseUp:"};
+        @"mouseDrag": @"mouseDragged:", @"rightDown": @"rightMouseDown:", @"rightUp": @"rightMouseUp:",
+        @"rightDrag": @"rightMouseDragged:"};
       SEL action = NSSelectorFromString(selectors[kind]);
-      if (![view respondsToSelector:action]) { Reply(request, nil, @"Page view cannot take this mouse event"); return; }
+      if (!nativeTypes[kind] || ![view respondsToSelector:action]) {
+        Reply(request, nil, @"Popup view cannot take this mouse event"); return;
+      }
+      NSEvent* event = [NSEvent mouseEventWithType:(NSEventType)[nativeTypes[kind] unsignedIntegerValue]
+        location:point modifierFlags:flags timestamp:Now() windowNumber:w.windowNumber context:nil eventNumber:0
+        clickCount:p[@"clickCount"] ? [p[@"clickCount"] integerValue] : 1 pressure:[kind hasSuffix:@"Down"] ? 1 : 0];
       if ([kind hasSuffix:@"Down"] && w.firstResponder != view) [w makeFirstResponder:view];
-      fprintf(stderr, "YabCore mouse %s: window visible %d, event window %ld, target %ld, view window %ld\n", kind.UTF8String,
-              (int)w.isVisible, (long)event.windowNumber, (long)w.windowNumber, (long)view.window.windowNumber);
-      ((void (*)(id, SEL, NSEvent*))objc_msgSend)(view, action, event);
-      auto live = tabs.find(tabID);
-      if (live != tabs.end()) HealthInput(live->second);
+      // The client already hit-tested the visible popup. Its concealed
+      // producer is never key, so Cocoa would otherwise discard hover moves.
+      if ([kind isEqual:@"mouseMove"]) PointerLockDeliver(view, event);
+      else ((void (*)(id, SEL, NSEvent*))objc_msgSend)(view, action, event);
       Reply(request); return;
     }
+    if (!host) { Reply(request, nil, @"Page input browser not ready"); return; }
+    tab.pointerPoint = point; tab.pointerPointKnown = true;
+    bool middle = [kind hasPrefix:@"middle"];
     if (getenv("YAB_CEF_TRACE_INPUT")) {
       static int traced = 0;
       if (traced++ < 12) {
@@ -1150,27 +1902,49 @@ static void Input(Tab& tab, NSDictionary* p, NSString* request) {
     }
     // Cocoa's hidden producer view can discard even directly delivered mouse
     // events. The real page's trusted input route does not depend on that
-    // window being key or underneath the system pointer. Match the existing
-    // scripts.input route; the app still records the original native gesture.
+    // window being key or underneath the system pointer. This includes
+    // externally hosted pages: after a back/forward-cache restore their
+    // hidden Cocoa view can stop delivering clicks while the document still
+    // answers JavaScript. Target the current page through the same trusted
+    // route as scripts.input; retain the person's modifiers and click count.
     int modifiers = (flags & NSEventModifierFlagOption ? 1 : 0) | (flags & NSEventModifierFlagControl ? 2 : 0) |
                     (flags & NSEventModifierFlagCommand ? 4 : 0) | (flags & NSEventModifierFlagShift ? 8 : 0);
-    bool right = [kind hasPrefix:@"right"], moved = [kind isEqual:@"mouseMove"], dragged = [kind isEqual:@"mouseDrag"];
+    bool right = [kind hasPrefix:@"right"], moved = [kind isEqual:@"mouseMove"], dragged = [kind hasSuffix:@"Drag"];
     bool pressed = [types[kind] isEqual:@"mousePressed"];
-    double zoom = std::pow(1.2, tab.browser->GetHost()->GetZoomLevel());
     int clicks = moved || dragged ? 0 : std::max(1, [p[@"clickCount"] intValue]);
     // CDP acknowledges after the page's handler. Arm before dispatch so a
     // handler stuck on the renderer's main thread cannot postpone its probe.
     HealthInput(tab);
-    CDP(tab, @"Input.dispatchMouseEvent", @{@"type": types[kind], @"x": @(x / zoom), @"y": @(y / zoom),
-      @"button": moved ? @"none" : right ? @"right" : @"left", @"buttons": @(pressed ? (right ? 2 : 1) : dragged ? 1 : 0),
-      @"clickCount": @(clicks), @"modifiers": @(modifiers)},
-      [request](NSDictionary* value, NSString* error) { Reply(request, value, error); });
+    // Native AppKit coordinates are visual-viewport points. CDP scales its
+    // CSS points by both page zoom and pinch, as it does for drag input.
+    auto send = [=](double zoom, double pinch) {
+      auto live = tabs.find(tabID);
+      if (live == tabs.end() || live->second.closing || live->second.crashed ||
+          live->second.browser != browser || live->second.documentGeneration != generation) {
+        Reply(request, nil, @"Page changed during pointer input"); return;
+      }
+      CDP(live->second, @"Input.dispatchMouseEvent", @{@"type": types[kind], @"x": @(x / zoom / pinch), @"y": @(y / zoom / pinch),
+        @"button": moved ? @"none" : right ? @"right" : middle ? @"middle" : @"left",
+        @"buttons": @(pressed || dragged ? (right ? 2 : middle ? 4 : 1) : 0),
+        @"clickCount": @(clicks), @"modifiers": @(modifiers)},
+        [request](NSDictionary* value, NSString* error) { Reply(request, value, error); });
+    };
+    WithPageZoom(tab, request, send);
     return;
   }
+  // AppKit delivery can synchronously close, replace or navigate the page.
+  // Never touch the borrowed Tab after it; even a reused id is a new target.
   auto live = tabs.find(tabID);
-  if (live != tabs.end()) HealthInput(live->second);
+  if ((!tabID.empty() && (live == tabs.end() || live->second.closing || live->second.crashed ||
+       live->second.browser != browser || live->second.documentGeneration != generation)) ||
+      w.contentView != content || view.isHiddenOrHasHiddenAncestor ||
+      (view != content && ![view isDescendantOf:content])) {
+    Reply(request, nil, @"Page input target is no longer live"); return;
+  }
+  if (!tabID.empty()) HealthInput(live->second);
   Reply(request);
 }
+#include "page_snapshot.inc"
 static NSString* Validate(NSDictionary* p) {
   for (NSString* key in @[@"profile", @"tab", @"url", @"world", @"name", @"path", @"extension", @"kind", @"text", @"characters", @"unmodified", @"request", @"download", @"user", @"password"])
     if (p[key] && (![p[key] isKindOfClass:NSString.class] || [p[key] length] > 262144)) return @"Invalid string parameter";
@@ -1178,24 +1952,35 @@ static NSString* Validate(NSDictionary* p) {
   // separate bounded allowance; ordinary input strings keep their old limit.
   for (NSString* key in @[@"function", @"expression"])
     if (p[key] && (![p[key] isKindOfClass:NSString.class] || [p[key] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 1024 * 1024)) return @"Invalid script source";
-  for (NSString* key in @[@"width", @"height", @"scale", @"x", @"y", @"deltaX", @"deltaY", @"modifiers", @"keyCode", @"phase", @"momentumPhase", @"clickCount", @"replacementStart", @"replacementLength"])
+  for (NSString* key in @[@"width", @"height", @"scale", @"x", @"y", @"deltaX", @"deltaY", @"modifiers", @"keyCode", @"phase", @"momentumPhase", @"clickCount"])
     if (p[key] && (![p[key] isKindOfClass:NSNumber.class] || !std::isfinite([p[key] doubleValue]) || fabs([p[key] doubleValue]) > 1e15)) return @"Invalid numeric parameter";
   for (NSString* key in @[@"private", @"visible", @"enabled", @"accept", @"repeat", @"userGesture", @"muted", @"forward", @"allow"])
     if (p[key] && ![p[key] isKindOfClass:NSNumber.class]) return @"Invalid boolean parameter";
   return nil;
 }
+static NSDictionary* ProfileReply(const Profile& profile, NSString* name) {
+  return @{@"profile": name, @"private": @(profile.privateMode),
+           @"parent": profile.parent.empty() ? (id)NSNull.null : @(profile.parent.c_str())};
+}
 static void ProfileOpened(const std::string& key) {
   auto found = profiles.find(key);
   if (found == profiles.end()) return;
   found->second.ready = true;
+  Mark("profile.ready");
   NSString* name = @(key.c_str());
-  for (NSString* waiting : found->second.waiting) Reply(waiting, @{@"profile": name, @"private": @(found->second.privateMode)});
+  NSDictionary* opened = ProfileReply(found->second, name);
+  for (NSString* waiting : found->second.waiting) Reply(waiting, opened);
   found->second.waiting.clear();
 }
 class ProfileHandler : public CefRequestContextHandler {
   std::string key_;
  public:
   explicit ProfileHandler(std::string key) : key_(std::move(key)) {}
+  // What no tab's client sees: a service worker's and a shared worker's own loads.
+  CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(CefRefPtr<CefBrowser> b, CefRefPtr<CefFrame>, CefRefPtr<CefRequest>,
+      bool, bool, const CefString&, bool&) override {
+    return b ? nullptr : ShieldHandler();
+  }
   void OnRequestContextInitialized(CefRefPtr<CefRequestContext>) override {
     // Leave CEF's callback first: the caller's next request may create a tab.
     std::string key = key_;
@@ -1203,14 +1988,42 @@ class ProfileHandler : public CefRequestContextHandler {
   }
   IMPLEMENT_REFCOUNTING(ProfileHandler);
 };
+// Settings › Tabs › Energy Saver is Chrome's own: Local State's
+// performance_tuning.battery_saver_mode.state, which performance_manager's
+// BatterySaverModeManager watches. While it holds (below 20% on battery,
+// unplugged, or 3 for always) every frame sink is limited to 30 Hz, so
+// scrolling, video and animations run at 30, wake-ups are aligned and
+// background pages freeze. Chromium registers 1 (below 20%); Yab says 0
+// unless the person picks another, and Chromium keeps what it was told.
+static void EnergySaverRequest(NSDictionary* p, NSString* request) {
+  NSNumber* wanted = [p[@"state"] isKindOfClass:NSNumber.class] ? p[@"state"] : nil;
+  if (!wanted || wanted.doubleValue != wanted.intValue || wanted.intValue < 0 || wanted.intValue > 3) {
+    Reply(request, nil, @"state must be 0, 1, 2 or 3"); return;
+  }
+  auto prefs = CefPreferenceManager::GetGlobalPreferenceManager();
+  if (!prefs) { Reply(request, nil, @"Chromium's preferences are not ready"); return; }
+  static const char kState[] = "performance_tuning.battery_saver_mode.state";
+  auto read = [&] { auto value = prefs->GetPreference(kState); return value && value->GetType() == VTYPE_INT ? value->GetInt() : -1; };
+  int was = read();
+  auto value = CefValue::Create();
+  value->SetInt(wanted.intValue);
+  CefString error;
+  if (!prefs->SetPreference(kState, value, error)) { Reply(request, nil, @(error.ToString().c_str())); return; }
+  Reply(request, @{@"was": @(was), @"state": @(read())});
+}
 static void Request(NSDictionary* request) {
   NSString* id = S(request, @"id"); NSString* method = S(request, @"method");
   if (!id.length || id.length > 128 || requests.count(Key(id))) { wire.Close(); Shutdown(); return; }
-  requests.emplace(Key(id), Now() + 20);
+  // The client says how long a request may take (the ones a page's load
+  // waits on take long on a busy Mac); the rest keep 20 s.
+  double allowed = [request[@"timeout"] isKindOfClass:NSNumber.class] && std::isfinite([request[@"timeout"] doubleValue])
+    ? std::clamp([request[@"timeout"] doubleValue], 1.0, 300.0) : 20;
+  requests.emplace(Key(id), Running() + allowed);
   if (getenv("YAB_CEF_TRACE_CDP")) fprintf(stderr, "YabCore request id=%s method=%s tab=%s\n", id.UTF8String, method.UTF8String, ([request[@"params"] isKindOfClass:NSDictionary.class] ? S(request[@"params"], @"tab") : @"").UTF8String);
   if (![request[@"v"] isEqual:@1]) { Reply(id, nil, @"Unsupported protocol version"); return; }
   if (!hello) {
     if (![method isEqual:@"hello"]) { Reply(id, nil, @"hello must be the first request"); return; }
+    Mark("hello");
     hello = true;
     original_caller::Hello([request[@"params"] isKindOfClass:NSDictionary.class] ? request[@"params"] : @{});
     NativeSwitchGroupsHello();
@@ -1221,44 +2034,81 @@ static void Request(NSDictionary* request) {
 #endif
       if (!tab.adopted && tab.creationAnnounced) Event(@"tab.created", &tab, CreatedState(tab));
     }
-    Reply(id, @{@"version": @1, @"engine": @"CEF 156 Chrome style", @"capabilities": @[@"profiles", @"tabs", @"layerContexts", @"input", @"isolatedScripts", @"bindings", @"dialogs", @"extensionsExperimental"],
+    Reply(id, @{@"version": @1, @"eventFlow": @(wire.Flowing() ? 1 : 0), @"scriptBundles": @1, @"engine": @"CEF 156 Chrome style", @"capabilities": @[@"profiles", @"tabs", @"layerContexts", @"input", @"isolatedScripts", @"bindings", @"dialogs", @"extensionsExperimental"],
       @"layerContextSource": YABCORE_OWNCEF_SURFACES ? @"cefCallback" : @"windowTreePolling",
       @"externalHostingSupported": @(YABCORE_EXTERNAL_HOST), @"nativeHooks": NativeHookCapabilities(),
       @"nativeGroupSource": NativeSnapshotPeerIdentity(),
       @"nativeOriginalCaller": original_caller::Receipt(S(NativeSnapshotPeerIdentity(), @"helperOwner"), S(NativeSnapshotPeerIdentity(), @"connection")),
       @"limitations": @[@"nativeScaleOnly", @"nativeSelectNotHosted", @"focusAndIMEUnverified", @"extensionActionTabIdentityUnverified", @"developmentSigning"]}); return;
   }
-  if (requests.size() > 256) { Reply(id, nil, @"Too many pending requests"); return; }
+  // No count of requests in flight refuses one: the client already waits
+  // its turn past 128 (Client.swift, inFlight), the transport bounds bytes,
+  // and each request ends at its deadline. A fixed 256 here failed what the
+  // client had let go (cancelled, timed out on its side, switch.group).
   NSDictionary* p = request[@"params"] ?: @{};
   if (![p isKindOfClass:NSDictionary.class]) { Reply(id, nil, @"params must be an object"); return; }
   if (NSString* error = Validate(p)) { Reply(id, nil, error); return; }
   if (stopping) { Reply(id, nil, @"Helper is shutting down"); return; }
+  if ([method isEqual:@"debug.windowPoll"]) {
+    if (!getenv("YAB_PROBE")) { Reply(id, nil, @"Window-poll counters require a probe world"); return; }
+    Reply(id, @{@"ticks": @(pollTicks), @"fastTicks": @(fastPollTicks),
+      @"windowNotifications": @(windowNotifications), @"hurries": @(pollHurries),
+      @"reason": PollBusyReason() ?: @""});
+    return;
+  }
   if ([method isEqual:@"originalCaller.diagnostic"]) {
     auto diagnostic=original_caller::DiagnosticReceipt(S(NativeSnapshotPeerIdentity(), @"helperOwner"), S(NativeSnapshotPeerIdentity(), @"connection"));
     if (!diagnostic) Reply(id,nil,@"Original diagnostic connection unavailable");
     else Reply(id,diagnostic);
     return;
   }
+  if ([method isEqual:@"transport.metrics"]) { Reply(id, wire.Metrics()); return; }
+  if (ScriptBundleRequest(method, p, id)) return;
   if ([method isEqual:@"shutdown"]) { Reply(id); stopping = true; dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ Shutdown(); }); return; }
   if (ReadPageRequest(method, p, id)) return;
   if ([method isEqual:@"profile.open"]) {
+    Mark("profile.open");
     NSString* profile = S(p, @"profile");
     NSCharacterSet* invalid = [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"] invertedSet];
     if (!profile.length || profile.length > 100 || [profile rangeOfCharacterFromSet:invalid].location != NSNotFound) { Reply(id, nil, @"Profile must be a short alphanumeric identifier"); return; }
     auto found = profiles.find(Key(profile));
     bool privateMode = [p[@"private"] boolValue];
+    // A private profile's space: only a private one has a parent, and only
+    // an open, ready space profile is one. Absent, or without the SDK's
+    // capability, the private profile stands alone as before.
+    NSString* parentName = p[@"parent"] == nil || p[@"parent"] == NSNull.null ? nil : S(p, @"parent");
+    if (parentName && (!privateMode || !parentName.length || parentName.length > 100 ||
+                       [parentName rangeOfCharacterFromSet:invalid].location != NSNotFound)) {
+      Reply(id, nil, @"parent must name a space profile, for a private profile only"); return;
+    }
+    std::string parent = YABCORE_PRIVATE_EXTENSIONS && parentName ? Key(parentName) : std::string();
     if (found != profiles.end()) {
       if (found->second.privateMode != privateMode) Reply(id, nil, @"Profile already exists with different privacy");
+      else if (found->second.parent != parent) Reply(id, nil, @"Profile already exists with a different parent");
       else if (!found->second.ready) found->second.waiting.push_back(id);
-      else Reply(id, @{@"profile": profile, @"private": @(privateMode)});
+      else Reply(id, ProfileReply(found->second, profile));
       return;
     }
-    if (profiles.size() >= 64) { Reply(id, nil, @"Profile limit reached"); return; }
+    // No count of profiles: Chrome's ProfileManager has none. Every space and
+    // every private window is one; a fixed 64 refused the 65th for good.
+#if YABCORE_PRIVATE_EXTENSIONS
+    if (!parent.empty()) {
+      auto space = profiles.find(parent);
+      if (space == profiles.end() || space->second.privateMode || !space->second.ready) {
+        Reply(id, nil, @"Open the parent space profile first"); return;
+      }
+      auto context = space->second.context->CreateOffTheRecordContext(new ProfileHandler(Key(profile)));
+      if (!context) { Reply(id, nil, @"Cannot create the private side of the space profile"); return; }
+      Profile opened{context, true, false, {id}, parent};
+      profiles[Key(profile)] = std::move(opened); return;
+    }
+#endif
     CefRequestContextSettings settings;
     if (!privateMode) {
       // Chrome style requires immediate children of root_cache_path. Nested
       // paths silently fall back to an off-the-record profile in CEF 156.
       NSString* path = [dataRoot stringByAppendingFormat:@"/space-%@", profile];
+      SeedPreferences([path stringByAppendingPathComponent:@"Preferences"]);
       CefString(&settings.cache_path) = path.UTF8String;
       settings.persist_session_cookies = true;
     }
@@ -1266,10 +2116,13 @@ static void Request(NSDictionary* request) {
     if (!context) { Reply(id, nil, @"Cannot create profile"); return; }
     profiles[Key(profile)] = {context, privateMode, false, {id}}; return;
   }
+  if ([method isEqual:@"shield.configure"]) { ShieldConfigure(p); Reply(id); return; }
+  if ([method isEqual:@"power.energySaver"]) { EnergySaverRequest(p, id); return; }  // The browser's, no tab.
   if ([method isEqual:@"profile.close"]) {
     auto profile = profiles.find(Key(S(p, @"profile")));
     if (profile == profiles.end()) { Reply(id, nil, @"Unknown profile"); return; }
     for (auto& [key, t] : tabs) if (t.profile == profile->first) { Reply(id, nil, @"Close profile tabs first"); return; }
+    ExtensionProfileClosed(profile->first);
     profiles.erase(profile); Reply(id); return;
   }
   if ([method isEqual:@"extension.open"]) {
@@ -1277,25 +2130,44 @@ static void Request(NSDictionary* request) {
     auto found = profiles.find(profile);
     if (found == profiles.end()) { Reply(id, nil, @"Unknown profile"); return; }
     if (found->second.privateMode) { Reply(id, nil, @"Extension management is unavailable in private profiles"); return; }
-    if (tabs.size() >= 256) { Reply(id, nil, @"Tab limit reached"); return; }
     Create(profile, @"chrome://extensions/", id, true); return;
   }
+  if ([method isEqual:@"settings.open"]) {
+    std::string profile = Key(S(p, @"profile"));
+    auto found = profiles.find(profile);
+    if (found == profiles.end()) { Reply(id, nil, @"Unknown profile"); return; }
+    if (found->second.privateMode) { Reply(id, nil, @"Settings are unavailable in private profiles"); return; }
+    if (!SettingsPageAllowed(S(p, @"page"))) { Reply(id, nil, @"Unknown settings page"); return; }
+    Create(profile, [@"chrome://settings/" stringByAppendingString:S(p, @"page")], id, true); return;
+  }
   if ([method isEqual:@"tab.create"]) {
+    Mark("tab.create", Key(S(p, @"url")));
     std::string profile = Key(S(p, @"profile"));
     if (!profiles.count(profile)) { Reply(id, nil, @"Unknown profile"); return; }
-    if (tabs.size() >= 256) { Reply(id, nil, @"Tab limit reached"); return; }
     // Explicitly empty means CEF's native no-navigation bootstrap. Missing
     // URL retains the wire's previous default for other clients.
     Create(profile, p[@"url"] ? S(p, @"url") : @"about:blank", id); return;
   }
   if ([method isEqual:@"extension.consent.capabilities"]) {
-    Reply(id, @{@"nativeConsent": @(YABCORE_EXTENSION_CONSENT)}); return;
+    // A boolean on the wire, as the client compares it: boxed as the macro's
+    // 1 it read as "no", and Settings asked its own card before Chrome's (#2030).
+    Reply(id, @{@"nativeConsent": @(YABCORE_EXTENSION_CONSENT != 0)}); return;
   }
+  if (DownloadPublicationRequest(method, p, id)) return;
   if (DownloadRequest(S(p, @"tab"), method, p, id)) return;
 #if YABCORE_EXTENSION_CONSENT
   if ([method isEqual:@"extension.consent.reply"]) { ConsentReply(p, id); return; }  // Profile-level, no tab.
 #endif
+#if YABCORE_EXTENSION_DESKTOP_MEDIA
+  if ([method isEqual:@"extension.desktopMedia.reply"]) { DesktopMediaReply(p, id); return; }  // By token, no tab.
+#endif
+  if (WebAuthnRespond(method, p, id)) return;  // By the request's token, no tab.
+  if (GeolocationRequest(method, p, id)) return;  // The browser's, no tab.
+  if (ExtensionTabOperationRequest(method, p, id)) return;
   if ([method isEqual:@"tabs.group"]) { TabsGroupRequest(p, id); return; }
+  if (PermissionProfileRequest(method, p, id)) return;
+  if (PushRequest(method, p, id)) return;
+  if (SiteNoticeRequest(method, p, id)) return;
   if (OriginalPDFGlobalRequest(method, p, id)) return;
   if (NativeSwitchGroupRequest(method, p, id)) return;
   if (LifecycleBatchRequest(method, p, id)) return;
@@ -1310,6 +2182,9 @@ static void Request(NSDictionary* request) {
   if ([method isEqual:@"tab.readiness"]) { Readiness(t, p, id); return; }
   if (DevToolsRequest(t, method, p, id)) return;
   if (NavigationRequest(t, method, p, id)) return;
+  if (DragRequest(t, method, p, id)) return;
+  if (AccessibilityRequest(t, method, p, id)) return;
+  if (AccessibilityPlace(t, method, p, id)) return;
   if (OriginalPDFPresenceRequest(t, method, p, id)) return;
   if (OriginalPDFRequest(t, method, p, id)) return;
   if (PrintFindRequest(t, method, p, id)) return;
@@ -1323,6 +2198,9 @@ static void Request(NSDictionary* request) {
   if (NativeTextInputRequest(t, method, p, id)) return;
   if (NativeHookRequest(t, method, p, id)) return;
   if (DRMCookieCommand(t, method, p, id)) return;
+  if (SettingsRequest(t, method, p, id)) return;
+  if (SiteCookiesRequest(t, method, p, id)) return;
+  if (OriginDataRequest(t, method, p, id)) return;
   if (ExtensionBridgeCommand(t, method, p, id)) return;
   if (ExtensionActionCommand(t, method, p, id)) return;
   if ([method isEqual:@"extension.actions"] || [method isEqual:@"extension.pressAction"]) {
@@ -1344,7 +2222,7 @@ static void Request(NSDictionary* request) {
     State(&t, @{@"url": Str(b->GetMainFrame()->GetURL()), @"title": t.title,
       @"loading": @(b->IsLoading()), @"canGoBack": @(b->CanGoBack()), @"canGoForward": @(b->CanGoForward())});
   }
-  else if ([method isEqual:@"tab.close"]) { t.closing = true; Reply(id); b->GetHost()->CloseBrowser(true); }
+  else if ([method isEqual:@"tab.close"]) { t.closing = true; Reply(id); WatchCommittedClose(t.id); b->GetHost()->CloseBrowser(true); }
   else if ([method isEqual:@"tab.navigate"]) {
     if (!S(p, @"url").length) { Reply(id, nil, @"url is required"); return; }
     NSString* url = S(p, @"url");
@@ -1381,17 +2259,31 @@ static void Request(NSDictionary* request) {
     }
     InstallDRM(t, [id, tabID, url, referrer](NSDictionary*, NSString* error) {
       auto t = tabs.find(tabID);
-      if (error || t == tabs.end() || t->second.closing) { Reply(id, nil, error ?: @"Tab closed"); return; }
+      if (t == tabs.end() || t->second.closing) { Reply(id, nil, @"Tab closed"); return; }
+      // The hook only tells Yab a page was refused Widevine. A renderer too
+      // busy to take it in time costs that notice, never the navigation.
+      if (error) fprintf(stderr, "YabCore DRM hook before navigation: %s\n", error.UTF8String);
       ++t->second.documentGeneration; t->second.drmFrames.clear();
       if (referrer.length) {
         // LoadRequest requires an existing initiator origin in CEF. A fresh
         // replacement tab has none; Page.navigate accepts the referrer directly.
         DRMCDP(tabID, @"Page.navigate", @{@"url": url, @"referrer": referrer,
                 @"referrerPolicy": @"strictOriginWhenCrossOrigin"},
-          [id](NSDictionary* result, NSString* error) {
+          [id, tabID, url](NSDictionary* result, NSString* error) {
+            // A load the network refused or that another replaced (a click
+            // tracker's redirect, a download) is CEF's to say, in
+            // page.loadError, as for every other navigation: errorText here
+            // said it a second time as Yab's own failure (YabCoreError.remote, code 1).
             NSString* failure = S(result, @"errorText");
-            Reply(id, result, error ?: (failure.length ? failure : nil));
-          }, Now() + 10);
+            if (failure.length) fprintf(stderr, "YabCore Page.navigate: %s\n", failure.UTF8String);
+            auto t = tabs.find(tabID);
+            if (error && t != tabs.end() && !t->second.closing && t->second.browser) {
+              // No agent in time: the page still goes, as Chromium's would, only without the referrer.
+              fprintf(stderr, "YabCore Page.navigate unavailable, loading without referrer: %s\n", error.UTF8String);
+              t->second.browser->GetMainFrame()->LoadURL(Key(url)); Reply(id); return;
+            }
+            Reply(id, result, error);
+          }, Running() + 10);
       } else { t->second.browser->GetMainFrame()->LoadURL(Key(url)); Reply(id); }
 
     });
@@ -1401,7 +2293,8 @@ static void Request(NSDictionary* request) {
   else if ([method isEqual:@"tab.stop"]) { b->StopLoad(); Reply(id); }
   else if ([method isEqual:@"media.mute"]) {
     if (!p[@"muted"]) { Reply(id, nil, @"muted is required"); return; }
-    b->GetHost()->SetAudioMuted([p[@"muted"] boolValue]);
+    t.mutedWanted = [p[@"muted"] boolValue];
+    b->GetHost()->SetAudioMuted(t.mutedWanted);
     State(&t, @{@"audioMuted": @(b->GetHost()->IsAudioMuted())});
     Reply(id, @{@"muted": @(b->GetHost()->IsAudioMuted())});
   } else if ([method isEqual:@"page.killRenderer"]) {
@@ -1448,8 +2341,9 @@ static void Request(NSDictionary* request) {
     double width = [p[@"width"] doubleValue], height = [p[@"height"] doubleValue], scale = [p[@"scale"] doubleValue];
     if (width < 1 || height < 1 || width > 16384 || height > 16384 || scale < 0.5 || scale > 4 || (!t.window && !t.nativeExtensions && !t.fitPage && !t.externalPage)) { Reply(id, nil, @"Invalid size or unready window"); return; }
     t.width = width; t.height = height; t.scale = scale;
+    PageFollowScale(t, scale);
     const bool fitWindow = !t.externalPage && (t.nativeExtensions || t.fitPage);
-    if (fitWindow) ResizeExtensionWindow(t.native, width, height);
+    if (fitWindow && (!t.documentPiP || t.documentPiPSized)) ResizeExtensionWindow(t.native, width, height);
     NSString* serial = S(p, @"serial");
 #if YABCORE_OWNCEF_SURFACES
     // Arm before SetSize: a synchronous CA frame may arrive during it.
@@ -1467,18 +2361,39 @@ static void Request(NSDictionary* request) {
     if (!fitWindow) t.window->SetSize(CefSize((int)ceil(width), (int)ceil(height)));
     t.lastLayer = nil;
     Reply(id, @{@"requestedScale": @(scale), @"actualScale": @(t.native.backingScaleFactor),
-                @"resizeAck": @(YABCORE_OWNCEF_SURFACES && serial.length > 0)});
+                @"resizeAck": @(YABCORE_OWNCEF_SURFACES && serial.length > 0 && !t.documentPiP)});
 #if YABCORE_OWNCEF_SURFACES
-    AcknowledgeResize(t);  // A no-op size is already presented.
+    PublishOwnCEFSurface(t);
+    AcknowledgeResize(t);  // Publish the context before even a no-op ACK.
 #endif
   } else if ([method isEqual:@"tab.visible"]) {
+    Mark("tab.visible", t.id);
     t.visible = [p[@"visible"] boolValue];
-    if (!t.visible) CancelFilePick(t.id);
+    // Hidden from the page only, the window being out of sight. Its picker may be what covers it.
+    bool keep = [p[@"keep"] boolValue];
+    // Shown again, or kept drawn: a hide held for a picture is not run after it.
+    if (t.visible || keep) t.clearAfterCapture = false;
+#if YABCORE_NATIVE_PAGE
+    // WebContents visibility controls error-page recovery. Send it now,
+    // independently of the delayed compositor cleanup below. Repeated hides
+    // must reach it too, even when the view was already cleared.
+    if (t.externalPage && !b->GetHost()->SetExternalPageVisibility(t.visible)) {
+      Reply(id, nil, @"Native page visibility owner is unavailable"); return;
+    }
+#endif
+    if (!t.visible && !keep) CancelFilePick(t.id);
+    if (t.visible) {
+      ++t.visibleTurn; t.everShown = true;
+      if (t.viewCleared) { t.viewCleared = false; t.view->SetVisible(true); }
+    }
+    // A tab opened in the back has drawn nothing and hides at once, before it loads.
+    if (!t.visible && !keep && (t.externalPage || t.externallyHosted) &&
+        (t.viewCleared || (t.everShown && t.view && !getenv("YAB_KEEP_ON_HIDE")))) {
+      if (!t.viewCleared) HideClearing(t);
+      t.focused = false;
+    } else {
 #if YABCORE_NATIVE_PAGE
     if (t.externalPage) {
-      if (!b->GetHost()->SetExternalPageVisibility(t.visible)) {
-        Reply(id, nil, @"Native page visibility owner is unavailable"); return;
-      }
       if (!t.visible) t.focused = false;
     } else
 #endif
@@ -1486,6 +2401,7 @@ static void Request(NSDictionary* request) {
       if (t.visible) t.window->Show(); else { t.window->Hide(); t.focused = false; }
     } else {
       if (t.visible) { Conceal(t.native); [t.native orderFront:nil]; } else [t.native orderOut:nil];
+    }
     }
     t.lastLayer = nil;
 #if YABCORE_OWNCEF_SURFACES
@@ -1522,33 +2438,60 @@ static void Request(NSDictionary* request) {
     Reply(id);
   } else if ([method isEqual:@"input.send"]) Input(t, p, id);
   else if (NativeDialogRequest(t, method, p, id)) { return;
+  } else if ([method isEqual:@"page.frame"]) {
+    // Two animation frames: the second starts after the first was handed to the compositor.
+    Eval(t, @"new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))", 0, [id](NSDictionary*, NSString* e) { Reply(id, @{}, e); });
   } else if ([method isEqual:@"page.snapshot"]) {
     NSDictionary* proof = p[@"document"];
     if (!DocumentMatches(t, proof)) { Reply(id, nil, @"Snapshot document changed"); return; }
-    std::string tabID = t.id;
-    uint64_t generation = t.documentGeneration;
-    // CDP captures the renderer; AppKit cacheDisplay cannot read CALayerHost.
-    CDP(t, @"Page.captureScreenshot", @{@"format": @"png", @"captureBeyondViewport": @NO},
-      [id, tabID, generation, proof](NSDictionary* r, NSString* e) {
-        auto found = tabs.find(tabID);
-        if (found == tabs.end() || found->second.documentGeneration != generation || !DocumentMatches(found->second, proof)) {
-          Reply(id, nil, @"Snapshot document changed"); return;
-        }
-        Reply(id, r, e);
-      });
-  } else if (AgentRequest(t, method, id)) {
+    // A picture wakes a frozen page: DevTools holds it hidden but painting, which
+    // Blink's scheduler treats as visible, and nothing freezes it again afterward.
+    if (t.frozen) { Reply(id, nil, @"Page is frozen"); return; }
+    // A page out of sight whose view was let go, or that was opened in the
+    // back and never shown, draws nothing. Chromium keeps such a picture
+    // request until the page is shown again, minutes or never, and holds a
+    // "Capturing" wake lock on the display all that while: with Yab in front
+    // the Mac never slept (#1909). Its last picture is the client's to keep.
+    if (!t.visible && (t.viewCleared || !t.everShown)) { Reply(id, nil, @"Page is hidden"); return; }
+    Mark("page.snapshot", t.id + (t.viewCleared ? " cleared" : ""));
+    // Counted from here: a hide that comes next waits for this picture
+    // (HideClearing), so a picture asked before a hide is of the page as shown.
+    ++t.capturing;
+    // CDP copies the renderer's surface; AppKit cacheDisplay cannot read CALayerHost.
+    NSDictionary* clip = [p[@"clip"] isKindOfClass:NSDictionary.class] ? p[@"clip"] : nil;
+    SnapshotPage(t.id, t.documentGeneration, proof, id, [S(p, @"format") isEqual:@"jpeg"] ? 75 : 0, clip,
+                 [p[@"surface"] boolValue], [p[@"raw"] boolValue]);
+  } else if ([method isEqual:@"page.tone"]) {
+    PageTone(t, p, id);
+  } else if (AgentRequest(t, method, id) || AgentFilesRequest(t, method, p, id)) {
     return;
+  } else if ([method isEqual:@"page.actionReply"]) {
+    PageActionAnswered(S(p, @"request"), [p[@"allow"] boolValue], [p[@"url"] isKindOfClass:NSString.class] ? p[@"url"] : nil);
+    Reply(id);
+  } else if ([method isEqual:@"shield.status"]) {
+    Reply(id, ShieldStatus(&t));
+  } else if ([method isEqual:@"page.certificate"]) {
+    Reply(id, PageCertificate(t));
+  } else if ([method isEqual:@"page.emulate"]) {
+    PageEmulate(t, p, id);
+  } else if ([method isEqual:@"page.minimumFont"]) {
+    PageMinimumFont(t, [p[@"size"] intValue]);
+    Reply(id);
+  } else if ([method isEqual:@"page.fonts"]) {
+    PageFamilies(t, p);
+    Reply(id);
   } else if (ScriptRequest(t, method, p, id)) {
     return;
   } else if ([method isEqual:@"script.document"]) {
     if (!DocumentMatches(t, p[@"document"])) { Reply(id, nil, @"Target document changed"); return; }
     NSString* expression = S(p, @"expression");
     if (!expression.length) { Reply(id, nil, @"expression is required"); return; }
-    Eval(t, expression, [p[@"document"][@"context"] intValue], [id](NSDictionary* r, NSString* e) {
+    bool whole = [p[@"whole"] boolValue];
+    Eval(t, expression, [p[@"document"][@"context"] intValue], [id, whole](NSDictionary* r, NSString* e) {
       if (e) Reply(id, nil, e);
       else if (r[@"exceptionDetails"]) Reply(id, nil, JSON(r[@"exceptionDetails"]));
-      else Reply(id, r[@"result"][@"value"] ?: NSNull.null);
-    }, [p[@"userGesture"] boolValue]);
+      else Reply(id, whole ? WholeValue(r) : (r[@"result"][@"value"] ?: NSNull.null));
+    }, [p[@"userGesture"] boolValue], whole);
   } else if ([method isEqual:@"script.evaluate"] || [method isEqual:@"script.bind"]) {
     NSString* world = S(p, @"world");
     if (!world.length || world.length > 128 || [world hasPrefix:@"__yab"]) { Reply(id, nil, @"A non-reserved world name is required"); return; }
@@ -1566,8 +2509,30 @@ static void Request(NSDictionary* request) {
       ::id args = p[@"arguments"] ?: NSNull.null; bool gesture = [p[@"userGesture"] boolValue];
       if (!DocumentMatches(t, p[@"document"])) { Reply(id, nil, @"Target document changed"); return; }
       NSDictionary* document = p[@"document"];
-      WithWorld(t.id, world, [id, function, args, gesture, document](Tab& tab, int context) {
+      NSString* expression = S(p, @"expression");
+      // An agent's upload: the function returns the file field, given these paths.
+      NSArray* files = p[@"files"] ? AgentFilePaths(p[@"files"]) : nil;
+      if (p[@"files"] && (!files || expression.length)) { Reply(id, nil, @"files must be absolute file paths"); return; }
+      WithWorld(t.id, world, [id, function, args, gesture, document, expression, files](Tab& tab, int context) {
         if (!DocumentMatches(tab, document)) { Reply(id, nil, @"Target document changed"); return; }
+        if (expression.length) {
+          CDP(tab, @"Runtime.evaluate", @{@"expression": expression, @"contextId": @(context), @"awaitPromise": @YES,
+            @"returnByValue": @YES, @"replMode": @YES, @"userGesture": @(gesture)}, [id](NSDictionary* r, NSString* e) {
+              Reply(id, e ? nil : WholeValue(r), e ?: (r[@"exceptionDetails"] ? JSON(r[@"exceptionDetails"]) : nil));
+            });
+          return;
+        }
+        if (files) {
+          std::string owner = tab.id;
+          CDP(tab, @"Runtime.callFunctionOn", @{@"functionDeclaration": function, @"executionContextId": @(context),
+            @"arguments": @[@{@"value": args}], @"awaitPromise": @YES, @"returnByValue": @NO},
+            [id, files, owner](NSDictionary* r, NSString* e) {
+              auto current = tabs.find(owner);
+              if (current == tabs.end()) { Reply(id, nil, @"Tab closed"); return; }
+              AgentSetFiles(current->second, r, e, files, @"", id);
+            });
+          return;
+        }
         CDP(tab, @"Runtime.callFunctionOn", @{@"functionDeclaration": function, @"executionContextId": @(context),
           @"arguments": @[@{@"value": args}], @"awaitPromise": @YES, @"returnByValue": @YES, @"userGesture": @(gesture)},
           [id](NSDictionary* r, NSString* e) {
@@ -1595,7 +2560,7 @@ static void Request(NSDictionary* request) {
       if (current != tabs.end()) { current->second.extensionLoadPending = false; current->second.extensionPath = nil; }
       Reply(id, r[@"result"][@"value"] ?: NSNull.null, e);
     }, true);
-  } else if ([method isEqual:@"extension.list"] || [method isEqual:@"extension.review"] || [method isEqual:@"extension.setEnabled"] || [method isEqual:@"extension.remove"] || [method isEqual:@"extension.removalState"]) {
+  } else if ([method isEqual:@"extension.list"] || [method isEqual:@"extension.review"] || [method isEqual:@"extension.setEnabled"] || [method isEqual:@"extension.access"] || [method isEqual:@"extension.incognito"] || [method isEqual:@"extension.userScripts"] || [method isEqual:@"extension.command"] || [method isEqual:@"extension.remove"] || [method isEqual:@"extension.removalState"] || [method isEqual:@"extension.checkUpdates"]) {
     // Chrome's privileged extension-management UI is kept in this profile.
     // The caller supplies a chrome://extensions tab, never an arbitrary page.
     if (![Str(b->GetMainFrame()->GetURL()) isEqual:@"chrome://extensions/"]) { Reply(id, nil, @"Use a chrome://extensions management tab in the target profile"); return; }
@@ -1604,8 +2569,15 @@ static void Request(NSDictionary* request) {
     if (error) { Reply(id, nil, error); return; }
     // Propagate the native removal confirmation through Chrome's gesture check.
     // ExtensionExpression rejects removal without that explicit confirmation.
-    Eval(t, expression, 0, [id](NSDictionary* r, NSString* e) { Reply(id, r[@"result"][@"value"] ?: NSNull.null, e); },
-         [method isEqual:@"extension.remove"] && [p[@"userApproved"] isEqual:@YES]);
+    // The same for turning on one whose update asked for more: management
+    // refuses that without a gesture, and Yab asked first.
+    // Each command's exact key, from Chrome's own record (ext_commands.inc).
+    NSDictionary* commandKeys = [method isEqual:@"extension.list"] ? ExtensionCommandKeys(t) : nil;
+    Eval(t, expression, 0, [id, commandKeys](NSDictionary* r, NSString* e) {
+      ::id value = r[@"result"][@"value"];
+      if (commandKeys && !e) value = ExtensionRowsWithCommandKeys(value, commandKeys);
+      Reply(id, value ?: NSNull.null, e);
+    }, ([method isEqual:@"extension.remove"] || [method isEqual:@"extension.setEnabled"]) && [p[@"userApproved"] isEqual:@YES]);
   } else Reply(id, nil, @"Unknown method");
 }
 void Shutdown() {
@@ -1622,7 +2594,20 @@ void Shutdown() {
     else { Reply(t.createRequest, nil, @"Client exited during tab creation"); i = tabs.erase(i); }
   }
   fprintf(stderr, "YabCore shutdown: closing %zu browsers\n", browsers.size());
-  for (auto b : browsers) b->GetHost()->CloseBrowser(true);
+  for (auto b : browsers) {
+#if YABCORE_CLOSE_PREFLIGHT
+    // A successful Quit preflight leaves documents open until the client
+    // actually exits. Only now may its silent renderer be ended. Ordinary
+    // pages still get their normal unload, and Cancel never reaches here.
+    auto tab = Find(b);
+    if (tab && tab->quitUnresponsive && tab->documentGeneration == tab->closeDocumentGeneration) {
+      ForceCloseUnresponsive(*tab);
+      continue;
+    }
+#endif
+    b->GetHost()->CloseBrowser(true);
+    if (auto tab = Find(b)) WatchCommittedClose(tab->id);
+  }
   // Chrome menus, extension action widgets and native confirmation windows
   // are not necessarily children of a registered producer. Hide every extra
   // window at once; CEF's own teardown destroys them. Closing a views widget
@@ -1643,18 +2628,71 @@ void Shutdown() {
     _exit(3);
   });
 }
+// The wire's budget for waiting events was passed and this tab held the most
+// (transport.h): its waiting notifications are gone, so what the client knows
+// of its document can't be trusted. That document ends and says so; every
+// other page goes on. Hidden, it is discarded as Chromium discards a tab, and
+// comes back when shown; on screen, its renderer ends and the page shows it
+// crashed. Never from inside the Send that shed it.
+static void ShedPage(std::string id, size_t bytes) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    auto found = tabs.find(id);
+    if (found == tabs.end() || !found->second.browser || found->second.closing) return;
+    Tab& t = found->second;
+    if (t.shedding || t.discarded || t.crashed) return;
+    t.shedding = true;
+    fprintf(stderr, "YabCore shed tab=%s bytes=%zu visible=%d\n", id.c_str(), bytes, (int)t.visible);
+    Event(@"page.eventsShed", &t, @{@"bytes": @(bytes), @"budget": @(kEventBudget), @"visible": @(t.visible)});
+#if YABCORE_DISCARD
+    auto host = t.browser->GetHost();
+    if (!t.visible && host->CanDiscardPage()) { host->DiscardPage(new DiscardDone(t.id, nil)); return; }
+#endif
+    pid_t pid = t.rendererPID;
+    struct proc_bsdinfo info = {};
+    if (pid > 0 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) == sizeof(info) && info.pbi_ppid == getpid() &&
+        info.pbi_start_tvsec * 1000000ULL + info.pbi_start_tvusec == t.rendererBorn && kill(pid, SIGKILL) == 0) return;
+    t.shedding = false;
+    fprintf(stderr, "YabCore shed tab=%s: renderer identity unavailable, page left running\n", id.c_str());
+  });
+}
 class App : public CefApp, public CefBrowserProcessHandler {
   NSString* socket_;
   NSString* bundle_;
+  int bundleFolder_;
  public:
-  App(NSString* root, NSString* socket) : socket_(socket), bundle_(NSBundle.mainBundle.bundlePath) { dataRoot = root; }
+  App(NSString* root, NSString* socket) : socket_(socket), bundle_(NSBundle.mainBundle.bundlePath),
+      bundleFolder_(open(NSBundle.mainBundle.bundlePath.fileSystemRepresentation, O_EVTONLY | O_DIRECTORY | O_CLOEXEC)) { dataRoot = root; }
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
   CefRefPtr<CefClient> GetDefaultClient() override { return new Client("", ""); }
 #if YABCORE_EXTENSION_CONSENT
   void OnExtensionConsent(CefRefPtr<CefBrowser> b, CefRefPtr<CefDictionaryValue> request, CefRefPtr<CefExtensionConsentCallback> callback) override { NativeConsentRequest(Find(b), request, callback); }
   void OnExtensionConsentWithdrawn(const CefString& request) override { NativeConsentWithdrawn(request.ToString()); }
 #endif
+#if YABCORE_EXTENSION_DESKTOP_MEDIA
+  void OnExtensionDesktopMedia(CefRefPtr<CefBrowser> b, CefRefPtr<CefDictionaryValue> request,
+                               CefRefPtr<CefExtensionDesktopMediaCallback> callback) override {
+    NativeDesktopMediaRequest(b ? Find(b) : nullptr, request, callback);
+  }
+  void OnExtensionDesktopMediaWithdrawn(const CefString& request) override { NativeDesktopMediaWithdrawn(request.ToString()); }
+#endif
+#if YABCORE_WEBAUTHN_PROXY
+  bool OnWebAuthnRequest(CefRefPtr<CefBrowser> b, CefRefPtr<CefDictionaryValue> request, CefRefPtr<CefWebAuthnCallback> callback) override {
+    return WebAuthnRequest(Find(b), request, callback);
+  }
+  void OnWebAuthnRequestCanceled(const CefString& request) override { WebAuthnCanceled(request.ToString()); }
+#endif
+#if YABCORE_GEOLOCATION_SOURCE
+  void OnGeolocationSource(CefRefPtr<CefGeolocationSource> source) override { geolocationSource = source; }
+  void OnGeolocationWatch(bool watching, bool high) override {
+    if (hello) Event(@"geolocation.watch", nullptr, @{@"watching": @(watching), @"highAccuracy": @(high)});
+  }
+  void OnGeolocationPermissionRequested() override { if (hello) Event(@"geolocation.ask", nullptr, @{}); }
+#endif
   void OnBeforeCommandLineProcessing(const CefString&, CefRefPtr<CefCommandLine> command) override {
+    // Before Chrome starts: it launches its notification service while the
+    // context is still coming up, and a service launched without the stand-in
+    // reaches macOS itself, which asks about "YabCore Helper".
+    StartSiteNotices();
     // The global context must not follow Chrome's last-used space profile.
     command->AppendSwitchWithValue("profile-directory", "Default");
     command->AppendSwitch("no-first-run");
@@ -1664,16 +2702,64 @@ class App : public CefApp, public CefBrowserProcessHandler {
     command->AppendSwitch("yab-external-default-windows");
 #endif
     command->AppendSwitch("no-default-browser-check");
+#if YABCORE_GEOLOCATION_SOURCE
+    // Where the device is comes from Yab (geolocation_source.inc): Chrome
+    // makes no CoreLocation manager in this process, which macOS would see
+    // under Yab's bundle signed as YabCore (#1971).
+    command->AppendSwitch("yab-external-geolocation");
+#endif
+    // Any build without Google's branding counts as a developer's: a sampling
+    // thread in the helper, GPU, network and a fifth of the renderers, ten stacks
+    // a second for each one's first 30 s, then 2% of the time. Chrome Stable does
+    // this for 0.006% of its users.
+    command->AppendSwitch("disable-stack-profiler");
+    ::yabcore::ApplyGpuStabilityPolicy(*command);
+    // A folder picked in Yab's panel: no second question from a hidden window.
+    command->AppendSwitch("yab-plain-folder-upload");
     // Chrome-style CEF otherwise owns the hidden HTTP authentication prompt.
     command->AppendSwitch("disable-chrome-login-prompt");
     // The parent app owns macOS Now Playing. Preserve MediaSession actions
     // while preventing the hidden helper from registering a second OS player.
     std::string disabled = command->GetSwitchValue("disable-features").ToString();
     disabled += disabled.empty() ? "HardwareMediaKeyHandling" : ",HardwareMediaKeyHandling";
-    // Chrome's macOS notification bridge asks for the OS permission under the
-    // helper's name (blank icon, unasked). Yab owns that question.
-    disabled += ",NativeNotifications,SystemNotifications";
+    // These ask through a chooser or an account sheet of Chrome's own, in a
+    // window nobody sees, so the page would wait for ever. Without them a page
+    // finds the feature missing, as under WebKit, and says so or falls back.
+    std::string blink = command->GetSwitchValue("disable-blink-features").ToString();
+    blink += blink.empty() ? "WebUSB,WebHID,Serial,WebBluetooth,FedCm" : ",WebUSB,WebHID,Serial,WebBluetooth,FedCm";
+    command->AppendSwitchWithValue("disable-blink-features", blink);
+    // Nothing calls Google on its own: what Chrome fetches in the background
+    // is for Chrome's own omnibox, translate bubble and services, and Yab has
+    // none of them. docs/chromium-network.md lists every host and why.
+    disabled += ",NetworkTimeServiceQuerying,AimEnabled,AimServerEligibilityEnabled,TranslateRankerQuery,TranslateRankerEnforcement"
+                ",OptimizationHints,OptimizationHintsFetching,OptimizationGuideModelDownloading,AutofillServerCommunication";
+    // Save to Drive in the PDF viewer uploads with the Google account Chrome is
+    // signed in to, and Yab never signs Chrome in: with no account the button
+    // opens Chrome's sign-in popup through OpenURLFromTab, which this helper
+    // hands to Yab as a link, and Chrome's CHECK on the missing popup ended the
+    // helper (report 1524, cef-patches/0108). Download and Print stay.
+    disabled += ",PdfSaveToDrive";
+    // Payment Request's sheet, and the payment app it opens (Google Pay's
+    // pay.google.com handler), is a tab-modal dialog of Chrome's browser
+    // window (PaymentRequestDialogView), which nobody sees here: show() waited
+    // for ever and a checkout's Google Pay button did nothing (#1974). Chrome's
+    // own switch for the API (WebPreferences.payment_request_enabled): without
+    // it pay.js and Stripe go the way they go in Firefox, pay.google.com in a
+    // popup window, which is Yab's.
+    disabled += ",WebPayments";
     command->AppendSwitchWithValue("disable-features", disabled);
+    command->AppendSwitch("disable-component-update");
+    command->AppendSwitch("disable-domain-reliability");
+    command->AppendSwitch("disable-client-side-phishing-detection");
+    command->AppendSwitch("disable-sync");
+    // The list of on-device AI models is a component of its own, asked for
+    // with no regard to the switch above. Chrome's offer: read a local list.
+    command->AppendSwitchWithValue("optimization-guide-manifest-override",
+                                   Key([dataRoot stringByAppendingPathComponent:@"no-model-list"]));
+    // Chrome's speech recognition sends the microphone to Google under an API
+    // key this build has none of: it could only fail, after the audio left.
+    command->AppendSwitchWithValue("disable-blink-features",
+        "ScriptedSpeechRecognition,UnprefixedSpeechRecognition,WebShare,EyeDropperAPI");
 #if YABCORE_NATIVE_PRINT
     // Page-initiated prints go to the client, not Chrome's print preview.
     command->AppendSwitch("yab-native-print");
@@ -1682,59 +2768,148 @@ class App : public CefApp, public CefBrowserProcessHandler {
     // Chrome's install/uninstall dialogs go to the client instead of a hidden window.
     command->AppendSwitch("yab-extension-consent");
 #endif
-#if YABCORE_DISCARD
-    // Native discard is off by default on macOS. Keep any features already set.
-    std::string features = command->GetSwitchValue("enable-features").ToString();
-    features += features.empty() ? "WebContentsDiscard" : ",WebContentsDiscard";
-    command->AppendSwitchWithValue("enable-features", features);
+#if YABCORE_EXTENSION_DESKTOP_MEDIA
+    // An extension's chooseDesktopMedia goes to Yab's share box, not Chrome's
+    // picker over a hidden window (patch 0122).
+    command->AppendSwitch("yab-extension-desktop-media");
 #endif
+    // Keep any features already set.
+    std::string features = command->GetSwitchValue("enable-features").ToString();
+    // Each tab has a window of its own, so a hidden tab's compositor must let
+    // go of its back buffers: one page-sized surface per tab ever shown, or
+    // 900 MB in the GPU process at 12 tabs. Chrome gets this from Finch
+    // (DiscardCompositionBackBuffersMac); an official build has no field trials.
+    features += features.empty() ? "" : ",";
+    features += "NotifyCompositorOfWindowVisibilityOnMacOs,VizBufferQueueDiscardOnVisibilityChange";
+    // V8's old space starts at 16 MB (Finch: V8PreconfigureOldGen): 9 to 11 MB
+    // less per renderer, none of it slower in the stand.
+    features += ",V8PreconfigureOldGen:V8PreconfigureOldGenSize/16";
+    // Native AX text insertion is compiled but disabled by default. Without
+    // this, the Cocoa provider neither advertises nor handles AXTextOperation,
+    // and an assistive client's replacement returns kAXErrorNoValue.
+    features += ",MacAccessibilityTextOperation";
+    // Yab's floating window shows the video and nothing else. Chrome paints the
+    // site's favicon and address, over a dark scrim, on top of the video in the
+    // compositor Yab hosts, until the overlay gets a press or the site earns high
+    // media engagement, and the hidden overlay never gets a press. A trusted one
+    // leaves both hidden. Document Picture in Picture doesn't read this.
+    features += ",VideoPipForceTrustedForMediaPlaybackForTesting";
+#if YABCORE_DISCARD
+    // Native discard is off by default on macOS.
+    features += ",WebContentsDiscard";
+#endif
+    command->AppendSwitchWithValue("enable-features", features);
+  }
+  // The bundle this process runs from now. An update puts the new build in
+  // place while Yab runs and sets the running bundle aside as yab.app.old
+  // (Update.Swap): from then on the path this process started from holds
+  // another build, with another framework. A descriptor of the bundle folder,
+  // opened at launch, follows the rename. (The executable's own path is no
+  // help: macOS 26 can report a code-signing clone of the bundle there, from
+  // which no helper starts.)
+  NSString* CurrentBundle() const {
+    char bytes[MAXPATHLEN]{};
+    if (bundleFolder_ < 0 || fcntl(bundleFolder_, F_GETPATH, bytes) == -1 || !bytes[0]) return bundle_;
+    NSString* bundle = @(bytes);
+    BOOL folder = NO;
+    return [NSFileManager.defaultManager fileExistsAtPath:[bundle stringByAppendingPathComponent:@"Contents/Frameworks"]
+                                              isDirectory:&folder] && folder ? bundle : bundle_;
   }
   void OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> command) override {
     // An explicit browser_subprocess_path bypasses Chrome's bundle-name
     // inference. Route JIT processes to the role-specific signed executables,
     // rather than weakening the generic utility helper's entitlements.
     auto type = command->GetSwitchValue("type").ToString();
+    SiteNoticesToChild(command);
+    // Chrome's notification service runs in its " (Alerts)" helper
+    // (kChildProcessHelperAlerts), every other utility in the plain one. The
+    // explicit path below would otherwise put it in the plain helper too.
     NSString* name = type == "renderer" ? @"YabCore Helper (Renderer)" :
-      type == "gpu-process" ? @"YabCore Helper (GPU)" : nil;
-    if (!name) return;
-    NSString* path = [bundle_ stringByAppendingFormat:@"/Contents/Frameworks/%@.app/Contents/MacOS/%@", name, name];
+      type == "gpu-process" ? @"YabCore Helper (GPU)" : IsNoticeService(command) ? @"YabCore Helper (Alerts)" : @"YabCore Helper";
+    // Every child comes from the bundle this process runs from, never from
+    // the path it started at: after an update that path is the new build,
+    // whose helper and framework do not match this browser.
+    NSString* bundle = CurrentBundle();
+    NSString* path = [bundle stringByAppendingFormat:@"/Contents/Frameworks/%@.app/Contents/MacOS/%@", name, name];
     fprintf(stderr, "YabCore child %s: %s -> %s\n", type.c_str(), command->GetProgram().ToString().c_str(), path.UTF8String);
+    TraceLaunch(dataRoot, [@"core.child." stringByAppendingString:@(type.c_str())], path);
     command->SetProgram(Key(path));
+    // And it is told where that bundle is. CEF finds it as the first path
+    // component ending in .app, which in yab.app.old/ is the helper's own
+    // bundle: there is no framework in it, and the child CHECKs in
+    // BundleFromPath at startup (#1505, a renderer of yab.app.old).
+    command->AppendSwitchWithValue("main-bundle-path", Key(bundle));
+    command->AppendSwitchWithValue("framework-dir-path",
+        Key([bundle stringByAppendingPathComponent:@"Contents/Frameworks/Chromium Embedded Framework.framework"]));
   }
   void OnContextInitialized() override {
+    Mark("context-initialized");
     contextInitialized = true;
+    TraceLaunch(dataRoot, @"core.context-ready");
     if (stopping) { Shutdown(); return; }
     fprintf(stderr, "YabCore canonical root: %s\n", dataRoot.UTF8String);
     if (!wire.Start(socket_)) { fprintf(stderr, "Cannot bind private YabCore socket\n"); QuitOnce(); return; }
+    [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged)
+      handler:^NSEvent*(NSEvent* event) {
+        return DispatchHostedKeyboard(event);
+      }];
     wire.onRequest = Request;
+    wire.onShed = [](const std::string& tab, size_t bytes) { ShedPage(tab, bytes); };
     wire.onDisconnect = [] {
-      hello = false; requests.clear(); ClearOriginalPDFPresence(); ClearOriginalPDF();
+      hello = false; requests.clear(); ClearScriptBundles(); ClearOriginalPDFPresence(); ClearOriginalPDF();
       NativeSwitchGroupsDisconnected();
-      // Transport::Send can overflow from a synchronous native close callback.
+      // The wire can be lost (Transport::Shed, a broken peer) inside a synchronous native close callback.
       // Retire the connection now, defer all native shutdown mutation until
       // the validate/commit/final callback stack has returned.
-      if (nativeCloseDepth) dispatch_async(dispatch_get_main_queue(), ^{ ClearConsents(); BeginShutdown("client disconnected"); });
-      else { ClearConsents(); BeginShutdown("client disconnected"); }
+      if (nativeCloseDepth) dispatch_async(dispatch_get_main_queue(), ^{ ClearConsents(); ClearDesktopMedia(); ClearWebAuthn(); BeginShutdown("client disconnected"); });
+      else { ClearConsents(); ClearDesktopMedia(); ClearWebAuthn(); BeginShutdown("client disconnected"); }
     };
-    timer = [NSTimer timerWithTimeInterval:0.01 repeats:YES block:^(NSTimer*) {
+    // The socket wakes the loop by itself. This is only deadlines and the
+    // window watch, and a last look at the socket if a source ever stayed quiet.
+    timer = [NSTimer timerWithTimeInterval:kPollBusy repeats:YES block:^(NSTimer* clock) {
+      double late = nextPoll > 0 ? Now() - nextPoll - clock.tolerance : 0;
+      if (late > 0.5) heldFor += late;
       wire.Poll(); OriginalPDFPoll();
-      if (Now() - lastPoll >= 0.1) { PollLayers(); lastPoll = Now(); }
+      PollLayers();
+      if (!pushDoors.empty()) PushDoorPoll();
       std::vector<Completion> expired;
       for (auto i = pending.begin(); i != pending.end();) {
-        if (Now() > i->second.deadline) { expired.push_back(i->second.completion); i = pending.erase(i); } else ++i;
+        if (Running() > i->second.deadline) { expired.push_back(i->second.completion); i = pending.erase(i); } else ++i;
       }
       for (auto& completion : expired) completion(nil, @"CDP timeout");
       ExtensionBridgePoll();
       NSMutableArray* overdue = [NSMutableArray new];
-      for (auto& [id, deadline] : requests) if (Now() > deadline) [overdue addObject:@(id.c_str())];
+      for (auto& [id, deadline] : requests) if (Running() > deadline) [overdue addObject:@(id.c_str())];
       for (NSString* id in overdue) if (!LifecycleExpireRequest(id)) Reply(id, nil, @"Operation timed out");
+      bool busy = PollBusy();
+      ++pollTicks;
+      if (busy) ++fastPollTicks;
+      double wait = busy ? kPollBusy : kPollResting;
+      nextPoll = Now() + wait;
+      clock.fireDate = [NSDate dateWithTimeIntervalSinceNow:wait];
+      clock.tolerance = wait / 5;
     }];
+    timer.tolerance = 0.02;
     [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+    windowWatches = [NSMutableArray new];
+    for (NSNotificationName name in @[NSWindowDidChangeOcclusionStateNotification, NSWindowDidMoveNotification,
+          NSWindowDidResizeNotification, NSWindowDidBecomeKeyNotification, NSWindowWillCloseNotification]) {
+      id watch = [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:nil
+          usingBlock:^(NSNotification* note) {
+        if (![note.object isKindOfClass:NSWindow.class]) return;
+        auto changed = ^{ ++windowNotifications; PollHurry(); };
+        if (NSThread.isMainThread) changed();
+        else dispatch_async(dispatch_get_main_queue(), changed);
+      }];
+      [windowWatches addObject:watch];
+    }
   }
   ~App() override { TearDown(); }
   IMPLEMENT_REFCOUNTING(App);
 };
 void TearDown() {
+  for (id watch in windowWatches) [NSNotificationCenter.defaultCenter removeObserver:watch];
+  windowWatches = nil;
   ClearReadPages();
   ClearOriginalPDFPresence(); ClearOriginalPDF();
   ClearPDFStreams();

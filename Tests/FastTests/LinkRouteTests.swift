@@ -23,6 +23,36 @@ struct LinkRouteTests {
         #expect(LinkRoutes.best([route], for: docs)?.space == Self.work)
     }
 
+    /// Feedback #1305: Teams hands Yab its Safe Links page, the link in its
+    /// `url` query; a gitlab.com rule takes it, and the page still opens.
+    @Test func safeLinksPagesAreRoutedByTheLinkTheyCarry() throws {
+        let gitlab = LinkRoute(site: "gitlab.com", space: Self.work)
+        let available = [Self.work, Self.home]
+        let wrapped = [
+            "https://teams.public.onecdn.static.microsoft/evergreen-assets/safelinks/2/atp-safelinks.html?url=https%3A%2F%2Fgitlab.com%2Fgroup%2Fproject%2F-%2Fmerge_requests%2F12&locale=en-us&dest=https%3A%2F%2Fteams.microsoft.com%2Fv2%2F&pc=abc",
+            "https://statics.teams.cdn.office.net/evergreen-assets/safelinks/1/atp-safelinks.html?url=https%3A%2F%2Fgitlab.com%2F&locale=en-us",
+            "https://nam01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fwww.gitlab.com%2Fa&data=05%7C01&sdata=x&reserved=0",
+        ]
+        for address in wrapped {
+            let url = try #require(URL(string: address))
+            #expect(LinkRoutes.best([gitlab], for: url)?.space == Self.work, "\(address)")
+            #expect(LinkRoutes.destination(routes: [gitlab], for: url, available: available, recent: Self.home, fallback: Self.home) == Self.work)
+        }
+        let pattern = LinkRoute(site: "*merge_requests*", space: Self.home)
+        #expect(LinkRoutes.best([gitlab, pattern], for: URL(string: wrapped[0])!)?.space == Self.home)
+        // The page itself is what opens: only the rule looks through it.
+        #expect(LinkRoutes.carried(URL(string: wrapped[1])!).absoluteString == "https://gitlab.com/")
+        // Not a checker's page, or nothing to carry: matched as it is.
+        for address in [
+            "https://teams.public.onecdn.static.microsoft/evergreen-assets/other.html?url=https%3A%2F%2Fgitlab.com",
+            "https://example.com/redirect?url=https%3A%2F%2Fgitlab.com",
+            "https://statics.teams.cdn.office.net/evergreen-assets/safelinks/1/atp-safelinks.html?url=javascript%3Aalert(1)",
+            "https://nam01.safelinks.protection.outlook.com/?data=05",
+        ] {
+            #expect(LinkRoutes.best([gitlab], for: URL(string: address)!) == nil, "\(address)")
+        }
+    }
+
     @Test func oldRulesKeepTheirWindowBehaviorAndEditsRetainAnExplicitChoice() throws {
         let bytes = Data("[{\"site\":\"docs.google.com\",\"space\":\"\(Self.work.uuidString)\"}]".utf8)
         let old = try JSONDecoder().decode([LinkRoute].self, from: bytes)

@@ -311,7 +311,10 @@ final class SpaceTray: NSView {
 
     /// New Space, from a menu or the bench: the chain itself. `ownSignIns`:
     /// already chosen, for two accounts on one site (Teach.swift).
-    static func open(_ browser: Browser, ownSignIns: Bool = false) { open(browser, at: .start, own: ownSignIns) }
+    static func open(_ browser: Browser, ownSignIns: Bool = false) {
+        if ownSignIns { open(browser, at: .start, own: true) }
+        else { SettingsWindow.shared.showNewSpace(for: browser) }
+    }
 
     /// Tabs held over the capsule (SpaceDrop): the list, as where they go.
     static func openCarrying(_ browser: Browser, tabs: [Tab]) {
@@ -751,6 +754,11 @@ final class SpaceTray: NSView {
 
     /// New Space in the list: the same tray goes on into the chain.
     func startNew() {
+        if draft.tab == nil, draft.more.isEmpty, draft.folder == nil {
+            leave()
+            SettingsWindow.shared.showNewSpace(for: browser)
+            return
+        }
         draft.fromSpaces = true
         go(draft.tab == nil ? .name : .start)
     }

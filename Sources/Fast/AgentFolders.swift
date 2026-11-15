@@ -292,9 +292,14 @@ final class Folders: ObservableObject {
     /// view that watches the folders (KeptEverywhere.swift).
     private var forward: AnyCancellable?
 
-    init(emptiesFile: URL? = Store.file("empty-folders.json")) {
+    init(emptiesFile: URL? = Store.file("empty-folders.json"), forwardingTo first: Folders? = nil) {
         self.emptiesFile = emptiesFile
         shelf = Shelf()
+        // Private windows keep their own shelf and no file, but the column
+        // observes the same notification source as every other window.
+        if let first {
+            forward = objectWillChange.sink { [weak first] _ in first?.objectWillChange.send() }
+        }
     }
 
     /// The folders of a window other than the first: its own rows, places,
@@ -453,9 +458,11 @@ final class Folders: ObservableObject {
     @Published var naming: UUID?
     /// The last folder selected in this window's column, for ⌘I.
     @Published var focused: UUID?
-    /// The tab on screen put out of sight under its shut folder by the
-    /// folder's minus, as Arc's: back once another tab is on screen.
-    private var unpeeked: Tab.ID?
+    /// Rows put out of sight by a shut folder's minus, including opened
+    /// tabs while focus is outside it. Kept by folder so list changes and
+    /// unrelated selections cannot reveal them again.
+    private var unpeekedFolders: Set<UUID> = []
+    private var unpeekedAt: Tab.ID?
     /// Held here because opening a folder can replace its row between clicks.
     private var lastNestTap: (id: UUID, at: TimeInterval)?
     /// How many tabs are tucked away in shut folders: how far a drag may
@@ -601,7 +608,17 @@ final class Folders: ObservableObject {
             if again { work(again: false) }
             return
         }
-        if unpeeked != nil, unpeeked != browser.activeID { unpeeked = nil }
+        if unpeekedAt != browser.activeID {
+            // Only picking a tab inside a hidden folder releases its minus.
+            // Closing/creating/switching tabs elsewhere leaves it alone.
+            if let tab = browser.active {
+                unpeekedFolders.subtract(tab.nest?.chain.map(\.id) ?? [])
+            }
+            unpeekedAt = browser.activeID
+        }
+        let unpeeked = Set(browser.tabs.filter { tab in
+            tab.nest?.chain.contains { unpeekedFolders.contains($0.id) } == true
+        }.map(\.id))
         var (placed, hidden) = Folders.lay(made, isOpen: { Folders.isOpen($0, among: self.open) }, whole: whole,
                                            folding: Set(folding.keys), carried: carried, active: browser.activeID, unpeeked: unpeeked,
                                            awake: Folders.awake(in: browser.tabs),
@@ -1069,7 +1086,7 @@ final class Folders: ObservableObject {
     /// a task's folder holding some back says how many. A sealed folder's
     /// tabs are never shown, nor listed, not even the one you are on.
     static func lay(_ made: [Folder], isOpen: (Folder) -> Bool, whole: Set<String>, folding: Set<String>,
-                    carried: String? = nil, active: Tab.ID?, unpeeked: Tab.ID? = nil, awake: Set<Tab.ID> = [],
+                    carried: String? = nil, active: Tab.ID?, unpeeked: Set<Tab.ID> = [], awake: Set<Tab.ID> = [],
                     partner: (Tab.ID) -> Tab.ID? = { _ in nil }) -> (places: [Tab.ID: Place], tucked: Int) {
         var placed: [Tab.ID: Place] = [:]
         var hidden = 0
@@ -1134,10 +1151,10 @@ final class Folders: ObservableObject {
                 let inHand = chain.contains { $0.id == carried }
                 // The one on screen and its pair, unless the folder's minus
                 // put them away (`unpeeked`).
-                let peeking = active != unpeeked && (id == active || id == focusedPartner)
+                let peeking = !unpeeked.contains(id) && (id == active || id == focusedPartner)
                 // Opened tabs stay too (register 1451), unless the minus put
                 // that one away.
-                let shown = !inHand && (open || asking.contains(id) || peeking || (awake.contains(id) && id != unpeeked))
+                let shown = !inHand && (open || asking.contains(id) || peeking || (awake.contains(id) && !unpeeked.contains(id)))
                 let top = chain.first?.id ?? folder.id
                 let turn = turns[top, default: 0]
                 if shown { turns[top] = turn + 1 } else { hidden += 1 }
@@ -1389,7 +1406,11 @@ final class Folders: ObservableObject {
         var into: UUID?
     }
 
-    func nestLanding(_ nest: Nest, want: Double, deep: Int? = nil, among loose: [Tab], current: NestLanding? = nil) -> NestLanding {
+    /// `drawn`: the folders' rows as the column draws them now, for an
+    /// empty one in the hand (ColumnDrag.emptyDrawn); worked out here
+    /// without it.
+    func nestLanding(_ nest: Nest, want: Double, deep: Int? = nil, among loose: [Tab], current: NestLanding? = nil,
+                     drawn: [String: Int]? = nil) -> NestLanding {
         // A folder of today's lands among the kept as one of them (#440).
         let today = nest.today ? Set(loose.filter { $0.nest?.within(nest) == true }.map(\.id)) : []
         let rest = loose.filter { $0.nest?.within(nest) != true }
@@ -1399,22 +1420,60 @@ final class Folders: ObservableObject {
             guard let parent else { return true }
             return !parent.within(nest) && !parent.today && parent.depth + levels <= Nest.deepest
         }
-        // Over a shut folder's row as drawn now: into it.
+        // Over a shut folder's row as drawn now: its middle takes it in, its
+        // top and bottom put it just above or below that folder's run, as
+        // Arc's line between two folders, so it can go between two shut
+        // ones (#1981). The rows are as the column draws them: the one in
+        // the hand where it was last shown going, the rest making way.
+        var only: (index: Int, parent: Nest?)?
         if let current {
             let members = loose.filter { $0.nest?.within(nest) == true }
-            var order = rest
-            order.insert(contentsOf: members, at: min(max(0, current.index), keptIn))
-            let heads = slots(order, moved: Set(members.map(\.id)), kept: today).folders
-            // An empty one takes it open or shut, as it takes a held tab.
+            let heads: [String: Int]
+            if members.isEmpty, let drawn {
+                heads = drawn
+            } else if members.isEmpty {
+                // An empty one is a row of its own among the rest, not one of
+                // its tabs': out of where it stood, into the slot it is shown
+                // going to. Measured where it stood, the rows under the hand
+                // were a row off from those drawn, and every place between
+                // two shut folders was inside one (#1981).
+                let base = slots(rest, kept: today).folders
+                let own = base[nest.key]
+                heads = base.filter { $0.key != nest.key }.mapValues { at in
+                    let without = own.map { at > $0 ? at - 1 : at } ?? at
+                    return without >= current.slot ? without + 1 : without
+                }
+            } else {
+                var order = rest
+                order.insert(contentsOf: members, at: min(max(0, current.index), keptIn))
+                heads = slots(order, moved: Set(members.map(\.id)), kept: today).folders
+            }
             for folder in folders {
                 guard let other = folder.nest, other !== nest, !other.open || folder.members.isEmpty, !other.today, fits(other),
                       let head = heads[folder.id] else { continue }
-                let reach = current.into == other.id ? 0.6 : 0.4
-                if want >= Double(head) - reach, want <= Double(head) + reach {
+                let off = want - Double(head)
+                // An empty one, or one open with only folders right in it,
+                // has no shut run to be above or below: its whole row takes
+                // it, as a held tab's does.
+                guard !other.open, let start = rest.prefix(keptIn).firstIndex(where: { $0.nest?.within(other) == true }),
+                      let end = rest.prefix(keptIn).lastIndex(where: { $0.nest?.within(other) == true }) else {
+                    let reach = current.into == other.id ? 0.6 : 0.4
+                    if abs(off) <= reach {
+                        var into = current
+                        into.into = other.id
+                        return into
+                    }
+                    continue
+                }
+                guard abs(off) <= 0.5 else { continue }
+                // Once in, a little more room to stay in than to come in.
+                if abs(off) <= (current.into == other.id ? 0.3 : 0.25) {
                     var into = current
                     into.into = other.id
                     return into
                 }
+                if fits(other.parent) { only = (off < 0 ? start : end + 1, other.parent) }
+                break
             }
         }
         // The rows above each place, as `landing` counts them.
@@ -1451,7 +1510,9 @@ final class Folders: ObservableObject {
         prefix.append(slot)
         var best = NestLanding(index: 0, slot: 0, parent: nest.parent?.id)
         var gap = Double.infinity
-        for index in 0...keptIn {
+        // Over a shut folder's top or bottom: the place just above or below
+        // its run, among the folders it is in, wherever the nearest is.
+        for index in 0...keptIn where only.map({ $0.index == index }) ?? true {
             let before = index > 0 ? rest[index - 1].nest?.chain ?? [] : []
             let after = index < keptIn ? rest[index].nest?.chain ?? [] : []
             var common = 0
@@ -1461,7 +1522,7 @@ final class Folders: ObservableObject {
             for each in before.dropFirst(from) + after.dropFirst(from) where each.chain.allSatisfy(\.open) && fits(each) {
                 if !parents.contains(where: { $0 === each }) { parents.append(each) }
             }
-            for parent in parents {
+            for parent in parents where only.map({ $0.parent === parent }) ?? true {
                 var at = prefix[index]
                 for up in parent?.chain ?? [] where (first[up.key] ?? Int.max) >= index { at += 1 }
                 if let over = standsOver[index], let top = parent?.chain.first, index < keptIn, run(rest[index]) == top.key { at += over }
@@ -1481,6 +1542,9 @@ final class Folders: ObservableObject {
                     best = NestLanding(index: index, slot: at, parent: parent?.id)
                 }
             }
+        }
+        if only != nil, !gap.isFinite {
+            return nestLanding(nest, want: want, deep: deep, among: loose, current: nil)
         }
         return best
     }
@@ -1560,14 +1624,22 @@ final class Folders: ObservableObject {
         !nest.open && places.values.contains { $0.shown && $0.chain.last == nest.key }
     }
 
-    /// The minus of a folder that peeks: the tab on screen under it goes out
-    /// of sight with the folder's own clock, and stays on screen.
+    /// The minus targets this folder's rows, including opened tabs while
+    /// another folder owns focus. Pages stay loaded and selection stays put.
     func unpeek(_ nest: Nest) {
-        guard let active = browser?.activeID, peeks(nest) else { return }
+        guard let browser, peeks(nest) else { return }
         withAnimation(Folders.clock(opening: false)) {
-            unpeeked = active
+            unpeekedAt = browser.activeID
+            unpeekedFolders.insert(nest.id)
             work()
         }
+    }
+
+    /// An explicit pick also reveals a tab already active but hidden by minus.
+    func picked(_ tab: Tab) {
+        let before = unpeekedFolders
+        unpeekedFolders.subtract(tab.nest?.chain.map(\.id) ?? [])
+        if before != unpeekedFolders { work() }
     }
 
     func isOpen(_ id: String) -> Bool {
@@ -1898,7 +1970,14 @@ final class Folders: ObservableObject {
     /// ⌥ with it: the folders in it open or shut with it, as Finder's
     /// outline does.
     func tap(_ nest: Nest) {
-        let now = ProcessInfo.processInfo.systemUptime
+        // The press's own time, as Browser.tapTab reads it: the first
+        // click's open or shut can hold the main thread past the
+        // double-click interval in a long session, and the second click
+        // then read as a new single, so a folder could not be named by a
+        // double-click (feedback #1910).
+        let event = NSApp.currentEvent
+        let now = event.map { [.leftMouseUp, .leftMouseDown].contains($0.type) } == true
+            ? event!.timestamp : ProcessInfo.processInfo.systemUptime
         let second = lastNestTap.map { $0.id == nest.id && now - $0.at < NSEvent.doubleClickInterval } == true
         lastNestTap = second ? nil : (nest.id, now)
         toggle(nest.key, deep: NSApp.currentEvent?.modifierFlags.contains(.option) == true)
@@ -1909,6 +1988,7 @@ final class Folders: ObservableObject {
     /// it, open or shut, `open` what they all become.
     func openAll(_ nest: Nest, _ opening: Bool) {
         let inner = (browser?.nests ?? []).filter { $0 !== nest && $0.within(nest) }
+        if opening { unpeekedFolders.subtract(([nest] + inner).map(\.id)) }
         if nest.open != opening {
             for each in inner where each.open != opening { each.open = opening }
             toggle(nest.key)
@@ -1944,9 +2024,11 @@ final class Folders: ObservableObject {
             withAnimation(Folders.clock(opening: opening)) {
                 if let nest {
                     nest.open = opening
+                    if opening { unpeekedFolders.remove(nest.id) }
                     emptyChanged(nest)
                     for each in inner {
                         each.open = opening
+                        if opening { unpeekedFolders.remove(each.id) }
                         emptyChanged(each)
                     }
                 } else if opening {
@@ -2443,9 +2525,11 @@ struct FolderNeeds: View {
 
 /// The cross at a folder's end under the pointer: a tab's own (TabEnd),
 /// drawn the same, its square only under the pointer, its reach the whole
-/// height of the row.
+/// height of the row. A download's card in the column's stack wears it
+/// too, as Cancel (HoardStack).
 struct FolderCross: View {
     let close: () -> Void
+    var label = "Close Folder"
     @State private var pressed = false
     @State private var on = false
     @Environment(\.tone) private var tone
@@ -2470,8 +2554,8 @@ struct FolderCross: View {
         }
         .buttonStyle(Held(pressed: $pressed))
         .onHover { on = $0 }
-        .keyTip("Close Folder")
-        .accessibilityLabel("Close Folder")
+        .keyTip(label)
+        .accessibilityLabel(label)
     }
 }
 

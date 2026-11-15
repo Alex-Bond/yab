@@ -564,9 +564,8 @@ enum Metrics {
     /// at a row doesn't put the column away. Dia's card stays with the
     /// pointer 50 points past it, and goes at 70.
     static let floatSafe: CGFloat = 56
-    /// The corner the lights live in while the column is out: the hand goes
-    /// there for them out of habit, so resting there brings them back,
-    /// unless what is under it on the page takes a click (EdgeReach.rest).
+    /// The lights' corner, also used by the hidden top strip's hover target.
+    /// The hidden side column reveals only at the side edge (EdgeReach).
     static let lightsCorner = CGSize(width: 72, height: Metrics.strip)
 }
 

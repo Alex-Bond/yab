@@ -46,13 +46,17 @@ final class ColumnGrip {
         }
     }
 
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+    }
+
     func location(in view: NSView?) -> NSPoint { now }
 
     /// Listening while the page is in a window.
     func watch(_ on: Bool) {
         if on, monitor == nil {
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown]) { [weak self] event in
-                MainActor.assumeIsolated { self?.heard(event) ?? event }
+                AppKitMainThread.sync { self?.heard(event) ?? event }
             }
         } else if !on, let monitor {
             NSEvent.removeMonitor(monitor)
@@ -225,6 +229,11 @@ final class ColumnHand: NSObject {
     private var combine: Tab.ID?
     private var folding: Tab.ID?
     private var fold: CGFloat = 0
+    private var choice: TabDropChoice?
+    private var choiceWork: DispatchWorkItem?
+    private var formingNest: Nest?
+    private var formingPointerY: CGFloat?
+    private var choicePreviousActive: Tab.ID?
     private var carrying: NestCarry?
     private var nestTravel: CGFloat = 0
     private var pressedPin: Tab.ID?
@@ -327,6 +336,13 @@ final class ColumnHand: NSObject {
     var shape: ColumnLayout.Shape {
         if let browser, let shape = ColumnSpaceCarry.of(browser)?.shape(in: page.space) { return shape }
         var shape = ColumnLayout.Shape()
+        if let choice, choice.ready, let held = dragging, let nest = formingNest {
+            shape.forming = .init(target: choice.target, held: held, nest: nest)
+            if !nest.today {
+                shape.pinning.insert(held)
+                if let tab = browser?.tab(id: held), let mate = browser?.partner(of: tab) { shape.pinning.insert(mate.id) }
+            }
+        }
         if let carry {
             if carry.toPins {
                 shape.folded.insert(carry.tab)
@@ -420,15 +436,18 @@ final class ColumnHand: NSObject {
 
     func drawn(_ item: ColumnItem) -> Drawn {
         var out = Drawn()
+        if item.id.hasPrefix("choice child ") { return out }
         let step = ColumnLayout.step
         let moving = carrying != nil ? nestShifts : folderShifts
         switch item.kind {
         case .tab(let tab), .pair(let tab, _):
             let held = dragging == tab.id
             out.hold.lifted = held || resting == tab.id
+            out.hold.compact = held && choice?.revealed == true
             if folding == tab.id {
-                out.hold.turn = fold
+                out.hold.turn = choice?.revealed == true ? fold : nil
                 out.hold.made = combine == tab.id
+                out.hold.choice = choice?.revealed == true ? choice : nil
             }
             out.front = held || resting == tab.id
             let place = folders.place(of: tab)
@@ -442,6 +461,11 @@ final class ColumnHand: NSObject {
                 out.lean.x = indent(of: place) + (into ? 16 : 32 * tuck)
                 out.lean.y = into ? 14 : 0
                 out.lean.scale = into ? 0.88 : 1 - 0.12 * tuck
+                if choice?.revealed == true {
+                    out.lean.x = at.x + 10
+                    out.lean.y = SideBar.row / 2 + 12
+                    out.lean.scale = 1
+                }
             }
             if sinking == tab.id {
                 out.lean.scale = 0.6
@@ -462,6 +486,7 @@ final class ColumnHand: NSObject {
                 out.shift.height = rowShift(tab, index: index(of: tab), step: step, moving: moving)
             }
         case .nest(let nest, _, _):
+            if nest === formingNest { out.hold.choice = choice; return out }
             let lifted = carrying?.nest === nest
             out.hold.aimed = (aim?.into == nest.id && dragging != nil) || (herd?.into == nest.id && herd?.landed == false) || carrying?.into == nest.id
             out.hold.lifted = lifted
@@ -596,7 +621,7 @@ final class ColumnHand: NSObject {
         stopScrolling()
         scrollTick = CACurrentMediaTime()
         let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.scrollHeldRow() }
+            AppKitMainThread.sync { self?.scrollHeldRow() }
         }
         scrollTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -683,6 +708,7 @@ final class ColumnHand: NSObject {
             SplitDeck.shared.leave()
             decked = nil
         }
+        unfold()
         stopTimers()
         if carrying != nil { endCarry(cancelled: true) }
         // A pin held over the spaces goes nowhere.
@@ -803,6 +829,7 @@ final class ColumnHand: NSObject {
     }
 
     private func rowShift(_ tab: Tab, index: @autoclosure () -> Int, step: CGFloat, moving: Shifts?) -> CGFloat {
+        if formingNest != nil { return 0 }
         if dragging == tab.id { return sinking == tab.id ? travel : heldShift(tab) }
         if carrying != nil { return moving?.tabs[tab.id] ?? 0 }
         guard dragging != nil, carry == nil, herd == nil else { return 0 }
@@ -864,6 +891,8 @@ final class ColumnHand: NSObject {
     }
 
     private func stopTimers() {
+        choiceWork?.cancel()
+        choiceWork = nil
         springWork?.cancel()
         springWork = nil
         springFor = nil
@@ -884,6 +913,7 @@ final class ColumnHand: NSObject {
             aim = still(tab, at: index)
             fromSlot = aim?.slot ?? index
             shiftsKey = nil
+            unfold()
             stopTimers()
             bias = 0
             sprung = nil
@@ -910,6 +940,7 @@ final class ColumnHand: NSObject {
                     decked = nil
                 }
                 if carry != nil { drop() }
+                unfold()
                 stopTimers()
                 sprung = nil
                 bias = 0
@@ -932,6 +963,7 @@ final class ColumnHand: NSObject {
         // Over the space's capsule, or the tray it opens.
         let held = herd.map { herd in browser.tabs.filter { herd.members.contains($0.id) } } ?? [tab]
         if SpaceDrop.shared.track(held, browser: browser, at: spacePoint(point)) {
+            unfold()
             if let herd, !herd.landed {
                 page.hand(CGPoint(x: columnWidth / 2, y: point.y - herd.grip), ColumnMotion.follow)
             } else if herd == nil {
@@ -943,8 +975,10 @@ final class ColumnHand: NSObject {
             return
         }
         let out = browser.flank == .left ? point.x > width - SideBar.margin + 8 : point.x < -SideBar.margin - 8
+        if out { unfold() }
         if out, decked == nil, carry == nil, let herd, herd.ids.count == 1, !herd.landed,
            let deck = decking(tab, at: startAt.x), SplitDeck.shared.begin(deck, in: browser) {
+            unfold()
             decked = deck.id
             self.herd = nil
             target = from
@@ -963,6 +997,7 @@ final class ColumnHand: NSObject {
             SplitDeck.shared.leave()
             decked = nil
         } else if out, carry == nil, let deck = decking(tab, at: startAt.x), SplitDeck.shared.begin(deck, in: browser) {
+            unfold()
             decked = deck.id
             target = from
             travel = 0
@@ -1037,8 +1072,8 @@ final class ColumnHand: NSObject {
         let moved = Int((travel / step).rounded())
         if let current = aim {
             let want = slot(at: slotY(fromSlot) + travel)
-            dwell(tab, want: want, right: translation.width)
-            if combine != nil {
+            dwell(tab)
+            if choice != nil {
                 page.redraw(nil, held: dragging)
                 return
             }
@@ -1052,11 +1087,9 @@ final class ColumnHand: NSObject {
             let next = intoSprung(tab, want: want, current: current)
                 ?? folders.landing(tab, want: want, deep: deep, among: alone(tab), joined: !browser.pairs.isEmpty, current: current, drawn: fromSlot)
             spring(tab, next: next, want: want)
-            if next != current, withheld(tab, from: current, to: next, want: want) {
-                landedFor = .min
-                page.redraw(nil, held: dragging)
-                return
-            }
+            // The choice hit test above owns the row's middle. At its edge,
+            // let the normal landing reorder: the former centre-only gate
+            // left no place to swap once the choice claimed that middle.
             if next != current {
                 let crossed = next.kept != current.kept || (next.into != nil) != (current.into != nil)
                 NSHapticFeedbackManager.defaultPerformer.perform(crossed ? .levelChange : .alignment, performanceTime: .now)
@@ -1089,6 +1122,7 @@ final class ColumnHand: NSObject {
         let keptOnName = onName
         onName = false
         if TearOff.shared.finish(browser, event: grip.event) {
+            unfold()
             stopTimers()
             sprung = nil
             bias = 0
@@ -1105,6 +1139,7 @@ final class ColumnHand: NSObject {
         }
         torn = nil
         if SpaceDrop.shared.finish(browser) {
+            unfold()
             dragging = nil
             travel = 0
             target = from
@@ -1160,6 +1195,7 @@ final class ColumnHand: NSObject {
         sprung = nil
         bias = 0
         guard dragging == tab.id else { return }
+        if choice != nil, (point.x < 0 || point.x > columnWidth || choiceTarget(held: tab) != choice?.target) { unfold() }
         // Let go out over the pages with nothing there to take it: back.
         if point.x > width - SideBar.margin + 8 {
             combine = nil
@@ -1168,8 +1204,24 @@ final class ColumnHand: NSObject {
             aim = nil
             target = from
         }
+        if let choice, choice.revealed, choice.side == .split,
+           let other = browser.tab(id: choice.target), browser.canCarry(tab, beside: other) {
+            self.choicePreviousActive = nil
+            self.choice = nil
+            combine = nil
+            folding = nil
+            fold = 0
+            dragging = nil
+            aim = nil
+            travel = 0
+            browser.split(tab, with: other)
+            page.refresh(ColumnMotion.settle)
+            return
+        }
         if let id = combine, let other = browser.tabs.first(where: { $0.id == id }) {
             glide(tab) {
+                self.formingNest = nil
+                self.choice = nil
                 self.combine = nil
                 self.folding = nil
                 self.fold = 0
@@ -1378,108 +1430,123 @@ final class ColumnHand: NSObject {
         return into
     }
 
-    private static let folds: TimeInterval = 0.18
-    /// How far, in rows, the held row's middle may be from another's for
-    /// a rest there to make a folder of the two: its middle band only, as
-    /// in Arc. Nearer an edge it is a place between them; at 0.2 the row
-    /// makes way (withheld). It was 0.2 to 0.8, so a row resting just over
-    /// another's edge, about to be put in the kept, made a folder. `over`
-    /// below counts the other way, how far into the other row: 1 less this.
-    static let foldBand: ClosedRange<Double> = 0.2...0.45
-
-    private func dwell(_ tab: Tab, want: Double, right: CGFloat) {
+    private func dwell(_ tab: Tab) {
         guard let browser else { return }
-        let over = aim.map { abs(want - Double($0.slot)) } ?? 0
-        if let made = combine {
-            if let near = neighbor(of: tab, want: want), near.id == made, ((1 - Self.foldBand.upperBound - 0.1)...0.9).contains(over) { return }
-            unfold()
-            landedFor = .min
-            return
-        }
-        guard tab.keepable, herd == nil, carry == nil, aim?.into == nil else { return unfold() }
-        let kept = { (id: Tab.ID) in browser.tabs.first(where: { $0.id == id })?.kept == true }
-        if right > 18, let near = neighbor(of: tab, want: want), ((1 - Self.foldBand.upperBound)...0.9).contains(over) {
-            return kept(near.id) ? make(near.id) : unfold()
-        }
-        guard let under = rowUnder(want, held: tab), kept(under) else { return unfold() }
-        if folding == under, dwellWork != nil { return }
-        dwellWork?.cancel()
-        folding = under
-        fold = 0
-        page.redraw(nil, held: dragging)
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.folding == under, self.combine == nil else { return }
-            self.fold = 1
-            self.page.redraw(nil, held: self.dragging, turning: .linear(duration: Self.folds))
-        }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.dragging == tab.id, self.folding == under, self.combine == nil else { return }
-            self.make(under)
-        }
-        dwellWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.folds, execute: work)
-    }
-
-    private func make(_ id: Tab.ID) {
-        dwellWork?.cancel()
-        dwellWork = nil
-        level()
-        if folding != id {
-            folding = id
-            fold = 0
-            page.redraw(nil, held: dragging)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.folding == id else { return }
-                self.fold = 1
-                self.combine = id
-                self.page.redraw(ColumnMotion.settle, held: self.dragging, turning: Motion.settle)
+        guard tab.keepable, herd == nil, carry == nil, aim?.into == nil,
+              at.x >= 0, at.x <= columnWidth,
+              let under = choiceTarget(held: tab),
+              let other = browser.tab(id: under) else { return unfold() }
+        let canSplit = browser.canCarry(tab, beside: other)
+        let side: TabDropChoice.Side = canSplit && at.x >= columnWidth / 2 ? .split : .folder
+        if choice?.target == under {
+            if choice?.side != side {
+                if formingNest != nil { formingNest = nil; page.refresh(ColumnMotion.settle) }
+                choice?.side = side
+                choice?.fill = 0
+                choice?.ready = false
+                combine = nil
+                choiceWork?.cancel()
+                if choice?.revealed == true { choose(tab, other: other) }
             }
             return
         }
-        fold = 1
-        combine = id
-        page.redraw(ColumnMotion.settle, held: dragging, turning: Motion.settle)
+        unfold()
+        folding = under
+        fold = 0
+        choice = TabDropChoice(target: under, side: side, canSplit: canSplit)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.dragging == tab.id, self.choice?.target == under else { return }
+            self.dwellWork = nil
+            self.choice?.revealed = true
+            self.fold = 1
+            self.tick()
+            self.choose(tab, other: other)
+        }
+        dwellWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + TabDropChoice.revealDelay, execute: work)
+    }
+
+    /// Hit the row actually drawn under the pointer, leaving its edge for
+    /// reordering. Folder headers, pins and agent rows are not choices.
+    private func choiceTarget(held: Tab) -> Tab.ID? {
+        guard let browser else { return nil }
+        if let choice, choice.ready, let middle = formingPointerY,
+           abs(at.y - middle) < SideBar.row / 2 { return choice.target }
+        let partner = browser.partner(of: held)?.id
+        let moving = folderShifts
+        for item in page.items {
+            if item.id.hasPrefix("choice child ") { continue }
+            let tab: Tab
+            switch item.kind {
+            case .tab(let value), .pair(let value, _): tab = value
+            default: continue
+            }
+            guard tab.id != held.id, tab.id != partner, tab.keepable,
+                  !folders.theirs(tab), let middle = page.rowMiddle(item.id) else { continue }
+            let shift = rowShift(tab, index: index(of: tab), step: ColumnLayout.step, moving: moving)
+            if abs(at.y - middle - shift) < SideBar.row / 2 - 3 { return tab.id }
+        }
+        return nil
+    }
+
+    private func choose(_ tab: Tab, other: Tab) {
+        guard let choice else { return }
+        if choice.side == .split {
+            if choicePreviousActive == nil { choicePreviousActive = browser?.activeID }
+            browser?.select(other)
+            browser?.previewSplit(.right)
+        } else {
+            restoreChoicePreview()
+            self.choice?.fill = 0
+            page.redraw(nil, held: dragging)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.choice?.target == other.id, self.choice?.side == .folder else { return }
+                self.choice?.fill = 1
+                self.page.redraw(nil, held: self.dragging)
+            }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.dragging == tab.id, self.choice?.target == other.id,
+                      self.choice?.side == .folder else { return }
+                let nest = Nest(name: "New Folder")
+                nest.fleeting = !other.kept
+                self.formingNest = nest
+                self.formingPointerY = self.at.y
+                self.choice?.count = (self.browser?.partner(of: other) == nil ? 1 : 2) + (self.browser?.partner(of: tab) == nil ? 1 : 2)
+                self.choice?.ready = true
+                self.combine = other.id
+                self.level()
+                self.page.refresh(ColumnMotion.choiceFolder)
+            }
+            choiceWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + TabDropChoice.folderHold, execute: work)
+        }
+        page.redraw(ColumnMotion.choiceReveal, held: dragging, turning: ColumnMotion.choiceReveal.animation)
+        spaceCarry?.refreshHand()
+    }
+
+    private func restoreChoicePreview() {
+        guard choice?.side == .split || choicePreviousActive != nil else { return }
+        browser?.previewSplit(nil)
+        if let id = choicePreviousActive, let previous = browser?.tab(id: id) { browser?.select(previous) }
+        choicePreviousActive = nil
     }
 
     private func unfold() {
         dwellWork?.cancel()
         dwellWork = nil
-        guard let was = folding else { return }
+        choiceWork?.cancel()
+        choiceWork = nil
+        restoreChoicePreview()
+        let formed = formingNest != nil
+        formingNest = nil
+        formingPointerY = nil
+        choice = nil
         combine = nil
         fold = 0
+        folding = nil
+        if formed { page.refresh(ColumnMotion.settle) }
         page.redraw(ColumnMotion.quick, held: dragging, turning: Motion.quick)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self, self.folding == was, self.combine == nil, self.dwellWork == nil else { return }
-            self.folding = nil
-            self.page.redraw(nil, held: self.dragging)
-        }
-    }
-
-    private func neighbor(of held: Tab, want: Double) -> (id: Tab.ID, slot: Int)? {
-        guard let browser, held.keepable, let gap = aim?.slot else { return nil }
-        let up = want < Double(gap)
-        let partner = browser.partner(of: held)?.id
-        let near = up ? gap - 1 : gap + 1
-        // Where each row is drawn for the aim (`shiftsFor`).
-        _ = folderShifts
-        for tab in looseTabs where tab.id != held.id && tab.id != partner {
-            guard drawn[tab.id] == near, folders.place(of: tab)?.shown ?? true else { continue }
-            guard tab.keepable, tab.nest?.today != true, folders.place(of: tab).map({ Nest.isKey($0.folder) }) ?? true else { return nil }
-            return (tab.id, near)
-        }
-        return nil
-    }
-
-    private func withheld(_ tab: Tab, from aim: Folders.Landing, to next: Folders.Landing, want: Double) -> Bool {
-        guard next.into == nil, aim.into == nil, next.kept == aim.kept, next.nest == aim.nest, abs(next.slot - aim.slot) == 1,
-              let passed = neighbor(of: tab, want: want) else { return false }
-        return abs(want - Double(passed.slot)) > 0.2
-    }
-
-    private func rowUnder(_ want: Double, held: Tab) -> Tab.ID? {
-        guard let near = neighbor(of: held, want: want) else { return nil }
-        let off = abs(want - Double(near.slot))
-        return Self.foldBand.contains(off) ? near.id : nil
+        spaceCarry?.refreshHand()
     }
 
     private func decking(_ tab: Tab, at x: CGFloat) -> Tab? {
@@ -1556,7 +1623,8 @@ final class ColumnHand: NSObject {
         }
         carrying?.gap = nil
         let deep = SideBar.deep(from: nest.depth - 1, sideways: point.x - startAt.x)
-        var next = folders.nestLanding(nest, want: want, deep: deep, among: looseTabs, current: carrying?.landing)
+        var next = folders.nestLanding(nest, want: want, deep: deep, among: looseTabs, current: carrying?.landing,
+                                       drawn: carried.empty ? emptyDrawn?.then.folders : nil)
         let emptyBlock = emptyBlockLanding(carried, want: want, deep: deep, into: next.into)
         if let emptyBlock { next.slot = emptyBlock.slot; next.parent = nil }
         if next != carried.landing || emptyBlock != carried.emptyBlock {
@@ -1682,16 +1750,25 @@ final class ColumnHand: NSObject {
     /// Where the rows go for an empty folder in the hand: out of its slot
     /// and into the one it would be let go in, each row between a step.
     private var emptyShifts: Shifts? {
+        emptyDrawn.map { Self.shifts(now: $0.now, then: $0.then) }
+    }
+
+    /// The rows now and as drawn for an empty folder in the hand, which
+    /// nestLanding measures the hand against.
+    private var emptyDrawn: (now: (tabs: [Tab.ID: Int], folders: [String: Int]), then: (tabs: [Tab.ID: Int], folders: [String: Int]))? {
         guard let browser, let carried = carrying, carried.empty else { return nil }
         let base = folders.slots(looseTabs, joined: !browser.pairs.isEmpty)
         guard let from = base.folders[carried.nest.key] else { return nil }
         let rows = 1
         // Its slot in the rows without it.
         var to = carried.slot
+        // Over a shut folder, going in: the rows stay as drawn for where it
+        // was going, as for a held tab, so the folder stays under the hand
+        // (Folders.nestLanding measures them so). Put back where it came
+        // from, the row it was going into stepped away from under the hand
+        // and the next one along took it (#1981).
         if let gap = carried.gap {
             to = gap.slot > from ? gap.slot - rows : gap.slot
-        } else if carried.into != nil {
-            to = from
         } else if let id = carried.parent, let parent = folders.nest(id) {
             // At the end of that folder's run, where an empty one stands.
             let ends = base.tabs.filter { tab, _ in looseTabs.first { $0.id == tab }?.nest?.within(parent) == true }.map(\.value)
@@ -1708,7 +1785,7 @@ final class ColumnHand: NSObject {
         }
         var then: (tabs: [Tab.ID: Int], folders: [String: Int]) = (base.tabs.mapValues(moved), [:])
         for (key, slot) in base.folders { then.folders[key] = key == carried.nest.key ? to : moved(slot) }
-        return Self.shifts(now: base, then: then)
+        return (base, then)
     }
 
     private var nestShifts: Shifts? {
@@ -1898,6 +1975,7 @@ final class ColumnHand: NSObject {
     }
 
     private func lift(_ tab: Tab, toPins: Bool, index: Int, from: CGPoint, size: CGSize, to point: CGPoint, becoming shape: CGSize) {
+        unfold()
         level()
         carry = Carry(tab: tab.id, toPins: toPins, index: index)
         // A pair row going up folds into the square it will be, both marks;
@@ -2107,7 +2185,7 @@ final class ColumnHand: NSObject {
          "travel": Double(travel), "carry": carry.map { "\($0.toPins ? "up" : "down") \($0.index)" } ?? "",
          "herd": herd.map { "\($0.ids.count) at \($0.index ?? -1) pins \($0.pinAt ?? -1)" } ?? "",
          "nest": carrying.map { "\($0.nest.name) \($0.index)" } ?? "", "into": aim?.into?.uuidString ?? "",
-         "folding": folding?.uuidString ?? "", "combine": combine?.uuidString ?? "", "grip": grip.heard,
+         "choice": choice.map { "\($0.side) \($0.revealed) \($0.ready)" } ?? "", "folding": folding?.uuidString ?? "", "combine": combine?.uuidString ?? "", "grip": grip.heard,
          "grip_state": grip.state.rawValue]
     }
 }
@@ -2115,4 +2193,6 @@ final class ColumnHand: NSObject {
 extension ColumnMotion {
     /// The carried tab and the stack after the hand: a short spring.
     static let follow = Curve.spring(response: 0.16, damping: 0.9)
+    static let choiceReveal = Curve.timing(0.33, 1, 0.68, 1, duration: 0.18)
+    static let choiceFolder = Curve.timing(0.33, 1, 0.68, 1, duration: 0.24)
 }

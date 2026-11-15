@@ -1,0 +1,40 @@
+{
+  "name": "external-link-private",
+  "space": "private",
+  "spaces": [
+    {
+      "id": "private",
+      "name": "Private",
+      "emoji": "",
+      "tint": [
+        44,
+        42,
+        52
+      ],
+      "private": true,
+      "pins": [],
+      "kept": [],
+      "today": [
+        {
+          "id": "private-original",
+          "title": "Onboarding v3 · Welcome screens",
+          "site": "Figma",
+          "icon": "figma",
+          "url": "figma.com/design/xK29fLm8/Onboarding-v3",
+          "page": "figma",
+          "private": true
+        }
+      ],
+      "current": "private-original"
+    },
+    {
+      "id": "public",
+      "name": "Personal",
+      "tint": [
+        238,
+        233,
+        226
+      ]
+    }
+  ]
+}

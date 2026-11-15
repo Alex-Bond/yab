@@ -5,6 +5,19 @@ import Foundation
 /// for tests (`xcrun simctl openurl`), `yab-open://<the link, URL-encoded>`
 /// carries one in.
 enum Links {
+    /// An opt-in journal for the external-link lifecycle probes.
+    static func trace(_ event: @autoclosure () -> String) {
+        #if DEBUG
+        guard let path = ProcessInfo.processInfo.environment["YAB_LINK_JOURNAL"],
+              let data = "\(Date().timeIntervalSince1970) pid=\(ProcessInfo.processInfo.processIdentifier) \(event())\n".data(using: .utf8) else { return }
+        if let file = FileHandle(forWritingAtPath: path) {
+            defer { try? file.close() }
+            _ = try? file.seekToEnd()
+            try? file.write(contentsOf: data)
+        } else { try? data.write(to: URL(fileURLWithPath: path)) }
+        #endif
+    }
+
     static let scheme = "yab-open"
 
     /// The page a link opened from another app asks for, or nil when it isn't one.
@@ -44,6 +57,8 @@ extension AppModel {
     /// space, in front. A yab:// route (YabRoute) is one of the ways into
     /// Yab from outside it (Entrances).
     func openLink(_ url: URL) {
+        Links.trace("openLink url=\(url) before=\(browser.tab?.id ?? "nil")")
+        defer { Links.trace("openLink after=\(browser.tab?.id ?? "nil") url=\(browser.tab?.address ?? "nil")") }
         if let route = YabRoute(url) { return Entrances.perform(.route(route)) }
         if ["http", "https"].contains(url.scheme?.lowercased() ?? "") { DefaultBrowser.linkArrived() }
         if openNow(url) { return }
@@ -76,18 +91,22 @@ extension AppModel {
         if surfaces.settings { surfaces.closeSettings() }
         if surfaces.join { surfaces.closeJoin() }
         let tab = PageFixtures.tab(for: url, id: PageFixtures.newID(), isPrivate: space.isPrivate, in: world, fixturesEnabled: fixturesEnabled)
-        if let kept = keepLink(tab, in: space.id) { profile?.outsideTabIDs.insert(kept) }
+        // A remembered synced row can be removed by catch-up after this tap.
+        // Keep the incoming page under a fresh local identity until the line
+        // and scene are live; otherwise that old row can take the link with it.
+        let reuseExisting = space.isPrivate || sync.phase != .on || (privateLock.isActive && sync.line == .live)
+        if let kept = keepLink(tab, in: space.id, reuseExisting: reuseExisting) { profile?.outsideTabIDs.insert(kept) }
     }
 
     /// A link kept as a tab at the top of today's in this space. One page,
     /// one row: already in today's, it moves to the top instead.
     @discardableResult
-    func keepLink(_ page: Tab, in destinationID: Space.ID? = nil) -> Tab.ID? {
+    func keepLink(_ page: Tab, in destinationID: Space.ID? = nil, reuseExisting: Bool = true) -> Tab.ID? {
         guard let destination = browser.space(destinationID ?? browser.spaceID),
               !page.isPrivate || destination.isPrivate,
               !(page.isPrivate || destination.isPrivate) || privateLock.mayReveal else { return nil }
         let address = fixturesEnabled ? BrowserStore.samePage(page.address) : page.navigationURL?.absoluteString
-        if let address, let same = destination.allTabs.first(where: {
+        if reuseExisting, let address, let same = destination.allTabs.first(where: {
             $0.isPrivate == destination.isPrivate && (fixturesEnabled ? BrowserStore.samePage($0.address) : $0.navigationURL?.absoluteString) == address
         }) {
             browser.reorder(same.id, to: 0)

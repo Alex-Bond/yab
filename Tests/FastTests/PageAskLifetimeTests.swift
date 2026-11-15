@@ -120,6 +120,21 @@ struct PageAskLifetimeTests {
         }
     }
 
+    @Test func captureHasTwoAnswersAndNoCheckbox() {
+        fixture { browser, tab in
+            for reply: AskReply in [.yes(nil), .no] {
+                let question = PageAsk.capture(.cameraAndMicrophone, host: "meet.example.com")
+                #expect(question.box == nil)
+                #expect(AskCard.width(question) == 440)
+                var kept = false
+                browser.ask(question, on: tab) { _, answered in kept = answered.ticked }
+                browser.answer(tab, reply)
+                if case .yes = reply { #expect(kept) } else { #expect(!kept) }
+                browser.dropAsks(tab)
+            }
+        }
+    }
+
     @Test func leavingWhileMacOSAsksCancelsItsWaitOnce() {
         fixture { browser, tab in
             var question = PageAsk(kind: .capture(.camera), host: "vpn.example.com")

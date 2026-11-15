@@ -188,6 +188,42 @@ final class AgentHoldTests: XCTestCase {
         XCTAssertEqual(enter?["commit"] as? String, "Send")
     }
 
+    /// Ordinary pages that asked "Delete?" or "Send?" for nothing
+    /// (2026-11-14): a docs link, a filter box beside a key's Delete. A
+    /// chat box's Enter beside its Send still asks.
+    func testLinksAndFilterBoxesDontCommit() async throws {
+        _ = try await web.evaluateJavaScript("""
+        document.body.insertAdjacentHTML('beforeend', `
+          <nav><a id=doclink href="/docs/delete-key">Delete an API key</a><a id=feedback href="/feedback">Send feedback</a></nav>
+          <div><input id=filter placeholder="Filter keys"><button id=delkey>Delete</button></div>
+          <form id=find onsubmit="event.preventDefault()"><input id=findq><button>Search</button><button type=button>Delete</button></form>
+          <div><input id=chatline><button id=chatsend>Send</button></div>`);
+        true
+        """)
+        func weigh(_ id: String, _ action: String) async throws -> [String: Any]? {
+            let at = try await web.evaluateJavaScript("(() => { const r = document.querySelector('#\(id)').getBoundingClientRect(); return { x: r.x + 4, y: r.y + 4 }; })()") as? [String: Any]
+            return try await web.callAsyncJavaScript(AgentPage.weigh, arguments: ["action": action, "ref": "", "approved": false, "at": at ?? [:]],
+                                                     in: nil, contentWorld: AgentPage.world) as? [String: Any]
+        }
+        for (id, action) in [("doclink", "click"), ("feedback", "click"), ("filter", "key"), ("findq", "key")] {
+            let got = try await weigh(id, action)
+            XCTAssertNil(got?["commit"], id)
+        }
+        let chat = try await weigh("chatline", "key")
+        XCTAssertEqual(chat?["commit"] as? String, "Send")
+        let delete = try await weigh("delkey", "click")
+        XCTAssertEqual(delete?["commit"] as? String, "Delete")
+    }
+
+    func testTransferAndWithdrawAreNotPayments() {
+        for label in ["Transfer", "Transfer ownership", "Withdraw invitation", "Withdraw"] {
+            XCTAssertFalse(AgentRules.paying(label), label)
+        }
+        for label in ["Transfer money", "Withdraw funds", "Confirm transfer", "Send money"] {
+            XCTAssertTrue(AgentRules.paying(label), label)
+        }
+    }
+
     // The script can't reach the guard's controls or undo it.
 
     func testTheScriptCantTurnTheGuardOffOrEmptyIt() async throws {

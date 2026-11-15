@@ -48,4 +48,19 @@ struct ChromiumConsentTests {
         p["extensionId"] = .string("wrong")
         #expect(ChromiumConsentRequest.parse(p) == nil)
     }
+
+    // #2030: Chrome's permission prompt and uninstall dialog name no tab.
+    // With two windows of one sign-in the request was refused unseen; Chrome
+    // asks in its focused window, else its last.
+    @MainActor @Test func aRequestWithNoTabIsAskedWhereChromeWouldAsk() {
+        #expect(ChromiumConsent.owner(tab: nil as String?, tabMatches: false, focused: "b", windows: ["a", "b"]) == "b")
+        #expect(ChromiumConsent.owner(tab: nil as String?, tabMatches: false, focused: "other sign-in", windows: ["a", "b"]) == "b")
+        #expect(ChromiumConsent.owner(tab: nil as String?, tabMatches: false, focused: nil, windows: ["a"]) == "a")
+        #expect(ChromiumConsent.owner(tab: nil as String?, tabMatches: false, focused: "a", windows: []) == nil)
+    }
+
+    @MainActor @Test func aRequestFromATabIsAskedInItsWindowOrNotAtAll() {
+        #expect(ChromiumConsent.owner(tab: "a", tabMatches: true, focused: "b", windows: ["a", "b"]) == "a")
+        #expect(ChromiumConsent.owner(tab: "a", tabMatches: false, focused: "b", windows: ["a", "b"]) == nil)
+    }
 }

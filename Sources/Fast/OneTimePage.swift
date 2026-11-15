@@ -79,13 +79,11 @@ extension Browser {
     func readCodePage(host: String, user: String) {
         guard let tab = active, let site = tab.address?.host(), Vault.registrable(site) == Vault.registrable(host) else { return }
         let kind = PlaceEdit.Kind.code(host: host, user: user)
-        if let web = tab.built {
-            web.callAsyncJavaScript(OneTimePage.fill, arguments: ["code": "", "fill": false], in: nil, in: .defaultClient) { [weak self, weak tab] result in
-                MainActor.assumeIsolated {
-                    guard let self, let tab, case .success(let found) = result, found as? Bool == true,
-                          self.query.edit?.kind == kind else { return }
-                    self.query.edit?.fillTab = tab.id
-                }
+        if let web = tab.builtPage {
+            web.call(OneTimePage.fill, arguments: ["code": "", "fill": false], in: .client) { [weak self, weak tab] result in
+                guard let self, let tab, case .success(let found) = result, found as? Bool == true,
+                      self.query.edit?.kind == kind else { return }
+                self.query.edit?.fillTab = tab.id
             }
         }
         tab.builtPage?.snapshot(PageShot(afterUpdates: false)) { [weak self] image, _ in
@@ -102,11 +100,11 @@ extension Browser {
 
     /// The code just made, into the page's box, the keyboard back on the page.
     func fillCodePage(_ code: String, tab id: Tab.ID, host: String) {
-        guard let tab = autofillTab(id), let web = tab.built else { return }
+        guard let tab = autofillTab(id), let web = tab.builtPage else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             guard let site = tab.address?.host(), Vault.registrable(site) == Vault.registrable(host) else { return }
             web.window?.makeFirstResponder(web)
-            web.callAsyncJavaScript(OneTimePage.fill, arguments: ["code": code, "fill": true], in: nil, in: .defaultClient) { _ in }
+            web.call(OneTimePage.fill, arguments: ["code": code, "fill": true], in: .client) { _ in }
         }
     }
 }

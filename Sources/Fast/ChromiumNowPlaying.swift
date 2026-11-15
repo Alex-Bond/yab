@@ -62,8 +62,10 @@ final class ChromiumNowPlaying {
             sessionChanged = nativeTokens[key] != token
             nativeTokens[key] = token
         }
-        let permitted = ownership.receive(key, playing: report.playing || report.audible,
-                                          metadataAllowed: !page.privateMode && !report.hideMetadata,
+        // A page never heard (a muted preview, a session set up with nothing
+        // playing) doesn't become macOS's Now Playing, nor take it over.
+        let permitted = ownership.receive(key, playing: report.heard && (report.playing || report.audible),
+                                          metadataAllowed: report.heard && !page.privateMode && !report.hideMetadata,
                                           sessionChanged: sessionChanged)
         guard permitted else {
             if owner === page { clearOwner() }
@@ -87,22 +89,17 @@ final class ChromiumNowPlaying {
             if media.time >= 0 { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = media.time }
             if media.duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = media.duration }
         }
-        if !page.media.nativeSessionKnown, let cover = page.navigationTab?.tune?.cover {
-            let image = NSImage(cgImage: cover, size: NSSize(width: 112, height: 112))
-            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-        }
         center.nowPlayingInfo = info
         center.playbackState = report.playing || report.audible ? .playing : .paused
         refreshCommands(page)
         if let artwork = session?.artwork.first {
             let epoch = commandEpoch
-            Accent.of(artwork, shy: page.privateMode) { [weak self, weak page] found in
+            NowPlayingArtwork.load(artwork) { [weak self, weak page] found in
                 guard let self, let page, self.owner === page, self.commandEpoch == epoch,
                       !page.privateMode, !self.report.hideMetadata,
                       self.report.session?.artwork.first == artwork, let found else { return }
-                let image = NSImage(cgImage: found.image, size: NSSize(width: 112, height: 112))
                 var info = self.center.nowPlayingInfo ?? [:]
-                info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                info[MPMediaItemPropertyArtwork] = NowPlayingArtwork.item(found)
                 self.center.nowPlayingInfo = info
             }
         }

@@ -15,7 +15,7 @@ struct AgentScreenshotTests {
                 if checks == 1 {
                     // The first admission was for an ordinary page. The
                     // pixels about to be captured now contain protected text.
-                    _ = try? await page.call("document.body.innerHTML='<h1>Recovery phrase</h1><p>SYNTHETIC_WORDS_ONLY</p>'; return true;", in: .agent)
+                    _ = try? await page.call("document.body.innerHTML='<h1>Import wallet</h1><input name=seed_phrase value=SYNTHETIC_WORDS_ONLY>'; return true;", in: .agent)
                 }
                 return safe
             }

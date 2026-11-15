@@ -291,7 +291,7 @@ enum SnippetSuperhuman {
         // says so when there is none.
         guard Shell.cached == nil || Agents.installed else { return false }
         if Store.testing, ProcessInfo.processInfo.environment["YAB_SUPERHUMAN_URL"] != nil { return true }
-        return SnippetSource.superhuman.app != nil || !History.shared.pages(on: ["mail.superhuman.com"], limit: 1).isEmpty
+        return SnippetSource.superhuman.app != nil || !History.current.pages(on: ["mail.superhuman.com"], limit: 1).isEmpty
     }
 
     static func prompt(_ url: URL) -> String {

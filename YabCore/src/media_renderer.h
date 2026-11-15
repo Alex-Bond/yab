@@ -6,6 +6,7 @@
 #include "include/cef_browser.h"
 #include "include/cef_process_message.h"
 #include "include/cef_v8.h"
+#include "extension_options_renderer.h"
 
 // The renderer reports its own OS identity through CEF's authenticated IPC,
 // never through page JavaScript or a guessed process-list association.
@@ -118,6 +119,17 @@ class MediaRenderer : public CefApp, public CefRenderProcessHandler {
   CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
   void OnContextCreated(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
                         CefRefPtr<CefV8Context> context) override {
+    // One report and one watcher a document, in the page's own world. Every
+    // isolated world makes a context too, and hears the same elements' events.
+    auto pageWorld = frame->GetV8Context();
+    if (!pageWorld || !pageWorld->IsSame(context)) return;
+#if !defined(CEF_YAB_OPTIONS_CREATION_VERSION)
+    // The native extension API remains native; route only its missing options
+    // creation receipt through tabs.create until the SDK has patch 0056.
+    CefRefPtr<CefV8Value> optionsResult;
+    CefRefPtr<CefV8Exception> optionsException;
+    context->Eval(yab_extension_options::kInstall, frame->GetURL(), 0, optionsResult, optionsException);
+#endif
     if (frame->IsMain()) {
       auto message = CefProcessMessage::Create("yab.media.renderer");
       message->GetArgumentList()->SetInt(0, getpid());

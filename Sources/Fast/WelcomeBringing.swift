@@ -5,14 +5,8 @@ import SQLite3
 
 // MARK: - bringing things over
 
-/// What the other browser has, and what came. Everything is counted ahead of
-/// time, off the main thread, from the welcome's first frame, so Bring from X
-/// says what it brings before anything is brought: its pinned tabs and
-/// folders, the sites it is signed in to, its passwords, bookmarks, history
-/// and extensions, its colors and its places. The bringing itself starts
-/// with the one press: macOS asks for the other browser's key then and only
-/// then, and once it has said yes the welcome goes on while everything comes
-/// in behind it.
+/// Discovery lists browsers only. Files, counts and keychain items are read
+/// only after Bring In is pressed, for that operation and that browser.
 @MainActor
 final class Bringing: ObservableObject {
     /// What one browser holds, counted, not yet taken.
@@ -99,7 +93,7 @@ final class Bringing: ObservableObject {
     var allIn: Bool { if case .done = state { return true } else { return false } }
 
     /// The browsers on this Mac, their icons, and which one links go to.
-    /// Finding them walks folders on disk and asks macOS for icons, so it is
+    /// Finding them checks container metadata and asks macOS for icons, so it is
     /// done once, off the main thread; the chapter then reads what was found
     /// rather than asking again every time it is drawn.
     @Published private(set) var loaded = false
@@ -116,10 +110,8 @@ final class Bringing: ObservableObject {
     /// main thread is free for the peak.
     static let afterPour: Double = 1.2
 
-    /// What was found and counted last is shown at once (BringCache), and
-    /// looked at again behind it: the browsers found again, and each count
-    /// read again only when its files changed. Nothing here reads a file,
-    /// the keychain or a database on the main thread.
+    /// Refresh browser discovery only. No credential files or profile
+    /// metadata are read, on any thread, before the import button.
     func load() {
         guard !loaded, !loading else { return }
         if let kept = BringCache.browsers { show(kept) }
@@ -161,31 +153,9 @@ final class Bringing: ObservableObject {
 
     private func count(_ source: Chromium.Source?) {
         guard let source, counts[source.id] == nil else { return }
-        let kept = BringCache.entry(source)
-        var shown = kept?.counts ?? Counts(withOpen: true)
-        if let extensions = kept?.extensions { shown.extensions = Self.fresh(extensions) }
-        if shown.tabPlaces != nil { keptTabs.insert(source.id) }
-        counts[source.id] = shown
-        let before = kept?.stamps ?? [:]
-        let known = kept != nil
-        let aside = source.bundle == AsideImport.bundle
-        DispatchQueue.global(qos: .userInitiated).async {
-            let stamps = Hangs.time("bring.stamps") { BringStamp.stamps(source) }
-            let stale = Set(BringPart.allCases.filter { !known || before[$0] != stamps[$0] })
-            if stale.contains(.tabs) {
-                DispatchQueue.main.async { self.readTabs(source, stamp: stamps[.tabs]) { _ in } }
-            }
-            let parts = stale.subtracting([.tabs])
-            guard !parts.isEmpty || aside else { return }
-            let tally = Hangs.time("bring.count") { BringTally.read(source, parts) }
-            DispatchQueue.main.async {
-                guard var counts = self.counts[source.id] else { return }
-                tally.apply(to: &counts, aside: aside, fresh: Self.fresh)
-                // One change, once, and none when nothing changed.
-                if counts != self.counts[source.id] { self.counts[source.id] = counts }
-                BringCache.keep(source, counts: counts, extensions: tally.extensions, stamps: stamps.filter { parts.contains($0.key) })
-            }
-        }
+        // Discovery must not open or stat another browser's credential stores.
+        // Counts remain unknown until the person presses Bring In.
+        counts[source.id] = Counts(withOpen: true)
     }
 
     /// Its places read, and its pins' icons after them; `done` hears why
@@ -257,7 +227,7 @@ final class Bringing: ObservableObject {
     func caption(_ source: Chromium.Source) -> String {
         if brought.contains(source.id) { return "Brought in" }
         if defaultID == source.id { return "Your default browser" }
-        return Self.used(used[source.id])
+        return "Available to import"
     }
 
     /// "Used today", "Used 3 days ago", "Used in March", "Used in 2025".
@@ -347,7 +317,8 @@ final class Bringing: ObservableObject {
     static let fromKey = "bring.from", atKey = "bring.at"
 
     func bring(into browser: Browser, answer: @escaping (Answer) -> Bool) {
-        guard let source = chosen, !asking, !busy else { return }
+        guard let chosen, !asking, !busy else { return }
+        let source = chosen.authorizingImport()
         if counts[source.id] == nil { counts[source.id] = Counts() }
         asking = true
         // Dia is asked itself, now that Bring was pressed: its own file
@@ -361,7 +332,7 @@ final class Bringing: ObservableObject {
         }
         readTabs(source, ask: asksDia) { error in
             if let error { TabImport.note(error) }
-            guard self.chosen == source else { self.asking = false; return }
+            guard self.chosen?.id == source.id && self.chosen?.root == source.root else { self.asking = false; return }
             self.unlock(source, into: browser, answer: answer)
         }
     }
@@ -369,32 +340,27 @@ final class Bringing: ObservableObject {
     /// The key asked for, off the main thread: the passwords read with it,
     /// or the key alone when the sign-ins need it and there are no passwords.
     private func unlock(_ source: Chromium.Source, into browser: Browser, answer: @escaping (Answer) -> Bool) {
-        let counted = current
-        let readsPasswords = (counted.passwords ?? 1) > 0
-        let needsKey = readsPasswords || (counted.cookies ?? 1) > 0 || (counted.cards ?? 1) > 0
-        guard needsKey else {
-            // Nothing to ask: on, a turn later, once the press has been answered.
-            DispatchQueue.main.async {
-                self.asking = false
-                if answer(.allowed) { self.run(source, into: browser, passwords: nil) }
-            }
-            return
-        }
         DispatchQueue.global(qos: .userInitiated).async {
+            let tally = BringTally.read(source, Set(BringPart.allCases).subtracting([.tabs]))
+            let readsPasswords = (tally.passwords ?? 0) > 0
+            let needsKey = readsPasswords || (tally.cookies ?? 0) > 0 || (tally.cards ?? 0) > 0
             var found: Result<Chromium.Found, Error>?
             var unlocked = true
             if readsPasswords {
                 let outcome = Result { try Hangs.measure("passwords.read") { try Chromium.read(source) } }
                 if case .failure(Chromium.Trouble.noPassphrase) = outcome { unlocked = false }
                 found = outcome
-            } else {
+            } else if needsKey {
                 unlocked = Chromium.safeStorage(source) != nil
             }
             let passwords = found
             let given = unlocked
             DispatchQueue.main.async {
                 self.asking = false
-                guard self.chosen == source else { return }
+                guard self.chosen?.id == source.id && self.chosen?.root == source.root else { return }
+                var counts = self.counts[source.id] ?? Counts(withOpen: true)
+                tally.apply(to: &counts, aside: source.bundle == AsideImport.bundle, fresh: Self.fresh)
+                self.counts[source.id] = counts
                 guard given else {
                     _ = answer(.failed("The keychain is locked"))
                     return
@@ -614,6 +580,7 @@ extension Chromium {
     /// line, the kind a sign-in leaves, each site once whatever its
     /// subdomains.
     static func cookieTally(_ source: Source) -> (live: Int, sites: Int) {
+        guard source.credentialAccess else { return (0, 0) }
         var live = 0
         var sites = Set<String>()
         for folder in source.profiles {

@@ -129,31 +129,58 @@ enum Cli {
     static var usage: String {
         let c = AgentSetup.command
         return """
-        Yab, the browser, from a terminal. Agents: run `\(c) guide` first.
+        Use Yab from a terminal: delegate a task or drive browser tabs yourself.
 
-        usage: \(c) "what to do"                   a task, done by an agent in Yab: its steps, then its answer
-               \(c) https://…                      open a page in Yab
-               \(c) guide [mcp|setup]              how to use Yab, for an agent
-               \(c) exec -f FILE.js [--json]       run browser steps directly; exec --help for stdin and limits
-               \(c) session list [--json]|resume|steer|queue|stop
-               \(c) memory search|list|show|path|setup
-               \(c) skills list|show NAME|path        what agents know about sites
-               \(c) mail read THREAD | mail file THREAD [N|NAME] [--path]   a thread of your mail; a file of it: its path and words
-               \(c) files search [WORDS] | files read ID|PATH [--path]      what Files lists; one file's path and words
-               \(c) every "weekdays 9:00" "what to do"  a routine, run while Yab is open; every list|run ID|pause ID|resume ID|remove ID
-                                                  when: daily 9:00,18:00 · mon,thu 8:15 · monthly 1 9:00 · monthly last 18:00
-                                                  first monday 9:00 · every 3 days 9:00 · every 2 weeks mon 9:00 · yearly oct 6 9:00
-               \(c) setup [claude|codex|cursor|command]   put Yab in your agents and on the PATH
-               \(c) remove [claude|codex|cursor|command]  take it out again
-               \(c) mcp                            Yab's tools over MCP, on stdin and stdout
-               \(c) status [--json] | quit [--force]  whether Yab is running, hidden or open; quit a hidden one
-               \(c) serve [--no-person] | --stop   keep a hidden Yab for agents, however long nothing comes
-               \(c) import [BROWSER]               another browser's sign-ins, passwords and cookies, into Yab
+        Start here:
+          \(c) "Summarize my unread Slack messages" --access browser
+          \(c) exec 'const t = open("https://example.com"); return t.snapshot()'
+          \(c) guide                         examples and task/session reference
+          \(c) guide mcp                     browser tools and tab ownership
+          \(c) guide setup                   install or remove the command and integrations
 
-        task options: --cli claude|codex|cursor  -m MODEL  --effort low|medium|high|xhigh|max  --access full|browser
-                      --no-person        nobody is there: what needs a person fails at once
-                      --wait-person MIN  how long to wait for a sign-in or a yes in Yab (10; 0.25 when an agent runs it)
-        exit: 0 done · 1 failed · 2 usage · 3 needs you · 130 stopped
+        Commands (replace uppercase names with your values):
+          \(c) session list [--json]          running and recent task ids
+          \(c) session resume ID ["reply"]    continue a task, or follow its output
+          \(c) session steer ID "direction"  redirect current work
+          \(c) session queue ID "next task"  add work after the current request
+          \(c) session stop ID               stop a task
+          \(c) exec -f FILE.js [--json]       run browser steps; exec --help for all options
+          \(c) mcp                           local stdio MCP server for an assistant
+          \(c) memory search WORDS           search relevant remembered facts
+          \(c) memory list                   list memory pages
+          \(c) memory show FILE              read a page; memory path prints its folder
+          \(c) memory setup                  ask an agent to build the user's memory
+          \(c) skills list                   list site and system skills
+          \(c) skills show NAME              read a skill; skills path prints its folder
+          \(c) mail read THREAD              read mail and list its attachments
+          \(c) mail file THREAD [N|NAME] [--path]  retrieve an attachment
+          \(c) files search [WORDS]          find downloaded, attached or uploaded files
+          \(c) files read ID_OR_PATH [--path]  print a file's path and extracted text
+          \(c) every "weekdays 9:00" "task"  schedule a task while Yab is open
+          \(c) every list                    list routine ids and schedules
+          \(c) every run ID                  run a routine now
+          \(c) every pause ID                pause a routine; every resume ID enables it
+          \(c) every remove ID               remove a routine
+          \(c) status [--json]               check whether Yab is running and what it is doing
+          \(c) serve [--no-person]           keep Yab running in the background
+          \(c) serve --stop                  stop Yab, including active tasks
+          \(c) quit [--force]                quit hidden Yab; --force stops active tasks
+          \(c) import [BROWSER]              list browsers or import sign-ins (user approval required)
+          \(c) https://example.com           open a page in the user's window
+          \(c) setup [claude|codex|cursor|command]   install integrations or just the command
+          \(c) remove [claude|codex|cursor|command]  remove installed integrations
+          \(c) --version                     print this app's version
+
+        Task options:
+          --cli claude|codex|cursor    choose the task's AI plan
+          -m MODEL / --model MODEL    choose a model
+          --effort low|medium|high|xhigh|max
+          --access browser|full       browser tools, or files and terminal too (may need approval)
+          --no-person                 refuse requests that need a person
+          --wait-person MIN           wait for a sign-in/approval: 10 minutes in a terminal,
+                                      0.25 minutes when another agent calls Yab
+        Task exit codes: 0 done; 1 failed; 2 invalid usage; 3 needs the user; 130 stopped.
+        Not every command has --help. Use guide for reference; exec --help has exec-specific help.
         """
     }
 
@@ -437,7 +464,8 @@ enum Cli {
         open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         let bundle = Bundle.main.bundlePath
         open.arguments = bundle.hasSuffix(".app") ? ["-a", bundle, url] : [url]
-        do { try open.run() } catch { fail(error.localizedDescription) }
+        LaunchJournal.record("cli.open", target: Bundle.main.bundleURL)
+        do { try open.runValidated() } catch { fail(error.localizedDescription) }
         open.waitUntilExit()
         exit(open.terminationStatus)
     }

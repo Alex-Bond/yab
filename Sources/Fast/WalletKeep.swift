@@ -44,6 +44,21 @@ struct PayOffer: Equatable, Identifiable {
 
     var both: Bool { card != nil && address != nil }
     var anything: Bool { (card != nil && keepsCard) || (address != nil && keepsAddress) }
+
+    /// A form can report the same submission again after a SPA redraw or
+    /// refocus. It doesn't undo Not Now or replace the existing question.
+    func alreadyOffers(card: SavedCard?, address: StreetAddress?, site: String) -> Bool {
+        guard !refused, sites.contains(site), card != nil || address != nil else { return false }
+        if let card {
+            guard let old = self.card, old.number == card.number,
+                  old.month == card.month, old.year == card.year, old.name == card.name,
+                  old.csc == card.csc else { return false }
+        }
+        if let address {
+            guard self.address?.same(as: address) == true else { return false }
+        }
+        return true
+    }
 }
 
 /// A number of yours for a phone box on its own: from your card in
@@ -250,7 +265,7 @@ extension Browser {
                     DispatchQueue.main.async { [weak self, weak tab] in
                         guard let self, let tab, let number else { return }
                         let data: [String: Any] = ["number": number, "name": card.name, "month": card.month, "year": card.year, "csc": code,
-                                                   "postal": home?.postal ?? "", "country": home?.country ?? ""]
+                                                   "postal": home?.postal ?? "", "country": home?.country ?? "", "billing": home?.filling ?? [:]]
                         // Frames of a site that is neither the shop nor a payment
                         // company get nothing; their empty boxes say nothing why.
                         let passed = tab.walletPassed(.card)
@@ -391,6 +406,7 @@ extension Browser {
             }
             DispatchQueue.main.async { [weak self, weak tab] in
                 guard let self, let tab, card != nil || kept != nil else { return }
+                if tab.payOffer?.alreadyOffers(card: card, address: kept, site: site) == true { return }
                 var sites: Set<String> = [Browser.site(host)]
                 if let here = tab.address?.host() { sites.insert(Browser.site(here)) }
                 var offer = PayOffer(card: card, was: was, address: kept, sites: sites)

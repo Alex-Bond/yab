@@ -2,9 +2,8 @@ import Foundation
 
 // `yab guide`: what an agent reads before it uses yab.
 //
-// The skill Settings › Agents puts in Claude Code and Codex says only "run
-// `yab guide`", so the instructions always come from the binary they
-// describe and never go stale on disk. Plain Markdown, written for a model:
+// The installed skill gives a short workflow; `yab guide` provides examples
+// and reference from the binary they describe. Plain Markdown:
 // what yab is, which door to use for what, and the few rules that matter.
 
 enum Guide {
@@ -37,6 +36,8 @@ enum Guide {
     total, orders on the way and receipts, read from the mail kept on this Mac; Now shows a subscription
     not opened in a month the day before it renews, and its Do It stops the renewal after the user's
     yes on the merchant's last button. An agent's purchases tool reads the same lists.
+    Settings > Tabs > Energy Saver defaults to Off for smooth scrolling. Native setting energy-saver
+    accepts off, low (on battery below 20%), or unplugged. macOS Low Power Mode alone does not enable it.
     Settings opens with ⌘,; Cmd+T searches commands and settings pages, including Appearance.
     Settings > Appearance has Theme (System, Light, Dark), Window, Look (color, transparency, grain and
     Glass, the bead at the transparency slider's end that makes the window frame Liquid Glass tinted with
@@ -47,6 +48,9 @@ enum Guide {
     There is no separate font-size preference for Yab's interface.
     To make a website's text and content larger use Zoom In (⌘+), smaller Zoom Out (⌘-), reset Actual
     Size (⌘0). Zoom is remembered per site; it does not resize Yab's interface or change only fonts.
+    Site search: a site's alias (Settings > Field > Sites) then Tab searches that site from the field;
+    Space does too while Sites' Keyboard shortcut is Space or Tab; site-search-space
+    off makes it Tab alone.
     Cmd+T's Ask answers from supplied context; action requests can continue as a task with tools.
     Neither needs Mac access to explain or change supported Yab controls. Native tools read and change
     Yab itself: native_context gives current state, native_actions gives supported actions and schemas,
@@ -63,13 +67,17 @@ enum Guide {
     top of the space (oneStep: only out of the one they are in), folder.ungroup removes a folder and
     keeps its tabs open. None of them closes a tab. tabs.close closes the user's tabs when they ask
     ("close my YouTube tabs", duplicates by a tab's duplicateOf, unused for a week by its lastUsed), in
-    one call; pinned and kept tabs only when they named them (includePinned), up to 50 per call, never asked first.
+    one call; pinned and kept tabs only when they named them (includePinned), which puts those to sleep in
+    their places, as ⌘W does; up to 50 per call, never asked first.
     Yab's corner Undo and ⌘Z bring every one back where it was. The answer is plain words: "Closed 9 YouTube tabs."
     Live Folders (Settings > Live Folders) keep a folder of a site's items with the space's sign-ins:
     settings.set.live-folders turns them on or off, live.add adds a source (GitHub, Linear, Notion,
     Drive, Figma, YouTube or a feed), live.follow_repo follows a repository's pull requests, live.set
     renames one or picks its lists, repositories and time window, live.update reads it now, live.stop
     keeps its tabs as a plain folder. native_context's liveFolders lists them; another space's after space.switch.
+    Spaces' Sign-ins menu (Settings > Spaces > a Space) chooses Its own or the same profile as
+    another Space. Profile membership is shown by authStoreId in native_context. Changing it
+    changes access to signed-in accounts, so the person confirms that choice in Settings.
     Sync (Settings > Sync, /manual/sync) keeps spaces, tabs, bookmarks, settings, chats and, with their
     switches, two weeks of history, passwords and extensions the same on every Mac and on Yab for iPhone,
     end to end encrypted. Macs on one Apple ID join by themselves; another Mac or an iPhone joins with Add
@@ -146,154 +154,192 @@ enum Guide {
     static var command: String { AgentSetup.command }
 
     static var main: String { """
-    # Yab
+    # Use Yab from a terminal or an agent
 
-    \(productOverview)
+    Yab is a browser on this Mac. Use its signed-in websites without taking over the user's window.
+    Ask Yab's agent to do a whole task, or use MCP tools or `exec` to drive tabs yourself.
+    Tasks use the AI plan selected in Yab; MCP and exec do not start another model.
 
-    Yab is the user's web browser, on this Mac. They are signed in to their sites there, and it keeps
-    notes about them that you can search. You work in tabs of your own beside theirs: they appear at
-    the end of the user's row with a face on them, never take the front, and leave nothing in history.
-    `open` uses an agent tab, even when the user already has the same URL or site open.
-    Only use an existing user tab when the user explicitly asks to work in that tab or gives it
-    as the task's target. A site name or URL alone is not such a request. Do not search their tabs
-    by domain to choose a place to work; pinned and open tabs may hold unfinished work.
+    ## Install
 
-    There are three ways in:
-
-    - **The `\(AgentSetup.server)` MCP tools** (`mcp__\(AgentSetup.server)__*`, if they are in your tool list) let you drive tabs
-      yourself, step by step: `open`, `snapshot`, `click`, `type`, … You keep the work in your
-      current assistant and its model/account. `\(command) guide mcp` says how. Away from the Mac,
-      configure an MCP server with command `npx`, args `["-y", "yab-mcp", "--remote"]`.
-    - **`\(command) exec -f steps.js --json`** runs JavaScript through the same MCP `run` tool,
-      without starting another model. `exec -` reads stdin; `exec --help` lists limits and exit codes.
-      Each exec has fresh `keep`; the MCP connection preserves its own `keep` between calls.
-    - **`\(command) "task"`** (or remote `npx yab-mcp task "what to do"`) delegates a whole job to
-      the model selected for Tasks in Yab. ChatGPT via Codex consumes the user's ChatGPT limits;
-      Claude Code uses their Claude plan instead. Choose this when you intend that separate run.
-      The MCP `task` tool also delegates, including through `--remote`.
-
-    ## Tasks
+    With Yab in /Applications, run this once, then open a new terminal:
 
     ```bash
-    \(command) "Find the unread message from Alex in Slack and summarize it"
-    \(command) --cli codex --effort high "Check Stripe for failed charges this week"
-    \(command) https://github.com/notifications      # opens a tab in front of the user, nothing more
+    /Applications/yab.app/Contents/MacOS/yab setup
     ```
 
-    A task may also use this Mac's files and terminal, in the folder you run it from, unless the user
-    turned that off; `--access browser` keeps it to the browser. A file to put on a page (an icon, an
-    attachment) is named in the task by its full path, and the task uploads it itself.
+    This adds the command to PATH and installs the browser skill and MCP connection for Claude Code
+    and Codex when their CLIs are installed. Use `\(command) setup command` for just the command. For other clients, see
+    `\(command) guide setup`. Connect an AI plan in Yab before delegating tasks.
 
-    A task prints `session <id>` first, then a line per step, then its answer; it exits 0 when done.
-    While it runs, tell the user what it is doing about once a minute. ⌃C stops it.
+    ## Common tasks
 
-    When it needs the user it says so on a line. A question comes back to you as its answer, with
-    exit 3 and `answer: \(command) session resume <id> "…"`: ask your user, then resume with their
-    reply. A sign-in you cannot complete, a captcha, a code or a yes (Send, Pay) the user does in Yab, and a notification
-    tells them. Run by you (not a terminal), the command exits 3 after 15 seconds (`--wait-person MIN`)
-    with what Yab waits for and the way to carry on, and the task keeps waiting there: tell your user
-    at once, don't wait in silence. `--no-person` makes whatever needs the user fail at once.
-    With Yab closed, a task opens it hidden, no window and no Dock tile, and it quits by itself
-    after half an hour idle. `\(command) status` says what it is doing; `\(command) serve` keeps it
-    for good. If sites keep asking the user to sign in, `\(command) import` (the user types it)
-    brings their other browser's sign-ins.
+    1. Ask Yab to do a browser task:
 
     ```bash
-    \(command) session list                       # running and recent tasks (--json for a list to read)
-    \(command) session resume <id> "follow-up"    # carry on in the same task; without text, just follow it
-    \(command) session steer <id> "change of plan" # the task reads it at its next step
-    \(command) session queue <id> "and then …"    # after what it is doing now
-    \(command) session stop <id>
+    \(command) "Find the unread message from Alex in Slack and summarize it" --access browser
     ```
 
-    ## Routines
+    It prints `session <id>`, progress, then its answer. Ctrl-C stops it. Use `--access browser`
+    for website work. Request `--access full` only when the task needs this Mac's files or terminal;
+    name files by their full paths. Mac access may require approval in Yab.
+
+    2. Choose the task's AI plan:
 
     ```bash
-    \(command) every "weekdays 9:00" "Check my mail for anything that needs an answer today"
-    \(command) every list | remove <id> | run <id>
+    \(command) "Check Stripe for failed charges this week" --cli codex --effort high --access browser
     ```
 
-    A routine runs while Yab is open (once, the first time it is back, if it was closed at the time);
-    what it finds comes to the user's new tab. When, on this Mac's local time: `daily 9:00`, `weekdays 18:30`,
-    `weekends 10:00`, `mon,thu 8:15`, several times a day (`daily 9:00,18:00`), a day of the month
-    (`monthly 1 9:00`, `on the 15th 10:00`, `monthly last 18:00`; the 31st runs on a shorter month's last
-    day), a weekday of the month (`first monday 9:00`, `last friday 17:00`), every few days or weeks
-    (`every 3 days 9:00`, `every 2 weeks mon 9:00`), a date (`yearly oct 6 9:00`), `hourly`, `every 2h`,
-    `on open`. Never fake a monthly or yearly one with a daily routine that checks the date.
-
-    ## What Yab knows about the user
-
-    Memory is Markdown pages: USER.md (who the user is) and MEMORY.md (how to work for them), pages
-    under people/, companies/, sites/<host>, projects/, concepts/, and a day-by-day episodic/ log.
-    Before asking the user about themselves, their accounts, people or projects, look there:
+    3. Check running and recent tasks:
 
     ```bash
-    \(command) memory search "<words>"     # paragraphs that match, with page and line
-    \(command) memory list                 # the pages
-    \(command) memory show USER.md         # one whole: USER.md, people/jane-doe.md, sites/github.com.md
-    \(command) memory setup                # a task that looks the user up everywhere and files it
+    \(command) session list --json
     ```
 
-    Don't edit memory files yourself. What is worth keeping, a task remembers on its own, and a quiet
-    pass once a day files it where it belongs.
+    4. Continue, redirect or stop a task. Replace SESSION_ID with an id from the list:
 
-    ## What Yab knows about sites
+    ```bash
+    \(command) session resume SESSION_ID "Only include this week"
+    \(command) session steer SESSION_ID "Check the other workspace instead"
+    \(command) session queue SESSION_ID "Then summarize the results"
+    \(command) session stop SESSION_ID
+    ```
 
-    Yab has skills for the sites agents use most (Gmail, Google Docs and Sheets, Slack, Notion,
-    GitHub, Linear, LinkedIn, Amazon, …): how each works, its URLs, its traps. A tool answer names the
-    skill the first time you land on its site; read it before acting there.
+    Resume without text follows a running task or continues one that is waiting.
+    Steer changes its current work; queue adds work after it finishes the current request.
+
+    5. Run browser steps yourself, without another AI task:
+
+    ```bash
+    \(command) exec 'const t = open("https://example.com"); return t.snapshot()' --json
+    \(command) exec -f steps.js --json
+    ```
+
+    Create steps.js first if using the file example. `exec -` reads JavaScript from stdin.
+    Each exec has fresh variables and `keep`; to continue with a tab, use its returned id with
+    `tab(id)` in your next script. See `\(command) exec --help` for time and output limits.
+
+    6. Use MCP from your own assistant:
+
+    Configure a local stdio server with command `\(AgentSetup.executable)` and args `["mcp"]`.
+    Then call `open`, `snapshot`, `click` and `type` through that client's Yab tools.
+    `\(command) mcp` is a protocol server, not an interactive prompt. `\(command) guide mcp`
+    explains the tools. The MCP `task` tool delegates to Yab's agent, just like a CLI task.
+
+    7. Look up a site's instructions or relevant memory:
 
     ```bash
     \(command) skills list
     \(command) skills show gmail
+    \(command) memory search "project name"
     ```
 
-    \(Skills.systemGuide)
+    Read a site's skill before acting there. Search memory only when relevant to the user's request;
+    don't edit its files directly. `\(command) memory list` lists pages; `memory show USER.md` reads one.
 
-    ## The user's files and mail's
-
-    Files lists what was downloaded, the files mail brought (pictures pasted into a mail too) and
-    what was sent. Reading one gives its path on this Mac first, fetched from mail if need be, so a
-    picture or a video is there to look at or attach; then its words when it has some:
+    8. Schedule a task:
 
     ```bash
-    \(command) files search "signed lease"                  # each with its id, and its path when here
-    \(command) files read "<id or path>" [--path]           # its path and words; --path prints the path alone
-    \(command) mail read "<thread>"                         # a thread, its files numbered, inline ones marked
-    \(command) mail file "<thread>" <number|name> [--path]  # one of them: its path, then its words
+    \(command) every "weekdays 9:00" "Check my mail for anything that needs an answer today"
+    \(command) every list
     ```
 
-    ## Rules
+    Routines use this Mac's local time and run while Yab is open. If Yab was closed, a missed run
+    happens once when it next opens. With an id from the list, use `every pause ID`, `every resume ID`,
+    `every run ID` or `every remove ID`. Other schedules include `daily 9:00,18:00`, `monthly 1 9:00`,
+    `first monday 9:00`, `every 2 weeks mon 9:00` and `yearly oct 6 9:00`.
 
-    - Work in tabs of your own by default. Use the user's tab by its id only when they explicitly
-      asked to work there; never close it. A click of theirs takes over.
-    - Depending on the user's setting (Ask, Auto, Bypass), working in their tabs, signing in, sending,
-      paying, deleting and uploading may wait for their yes at the foot of the page; the tool call
-      waits with it. If they say not now, don't try another way round it.
-    - Signing in is the agent's to do: a page's Continue with Google or GitHub, when the snapshot says
-      `signs in with:` that space is signed in there, then the user's account.
-    - A captcha is the user's: hand the tab over at once (`handoff`), never try to solve it. One that
-      comes with unusual traffic or a rate limit stops the batch too; say so in your answer.
-    - Passwords: never type a saved one. `sign_in` has Yab fill one it keeps for the site; with none, or for captchas, passkeys and codes you cannot obtain, hand the tab to the user (`handoff`, one
-      short line); they do it and hand it back. A code sent by email can be read in the mail tab.
-      A new password the user gave you for signing up is theirs to give: type it.
-    - Spaces: the user may keep sets of tabs signed in as different people. `open` and `fetch`
-      without `space` already go where the site is signed in. Never tell the user they are signed
-      out before `spaces` with that site says so; for the wrong account, `open` with `space`.
-    - Sending, posting, paying, deleting: only when the user asked for exactly that.
-    - Yab is worked only through `\(command)` and these tools, hidden, in tabs of your own, whether
-      or not it shows a window. Never drive its windows by screen control (computer use, AppleScript,
-      keystrokes): they are the user's, other agents work in them too, and a key sent there lands in
-      whatever they have open. What only the user's own window can do, say, and leave to them.
-    - If `\(command)` says Yab isn't running it starts it; if it says agents are off, the user turns
-      them on in Yab › Settings › Agents.
+    9. Keep Yab available in the background:
+
+    ```bash
+    \(command) status
+    \(command) serve
+    ```
+
+    Tasks wake a closed Yab without bringing a window forward. It normally quits after 30 idle
+    minutes; serve keeps it running. `serve --no-person` refuses requests that need someone at Yab.
+    `serve --stop` stops Yab, including active tasks. Use it only when that is intended.
+
+    ## When Yab needs the user
+
+    Exit 3 means the task needs input. For a question, ask the user in your chat, then run
+    `\(command) session resume SESSION_ID "their answer"`. Sign-ins, captchas, codes and approvals
+    may need the user in Yab. Tell them what is waiting. A caller normally gets control back after
+    15 seconds (unless YAB_WAIT_PERSON overrides it); `--wait-person MIN` changes that wait,
+    not the pending request's lifetime.
+    `--no-person` refuses requests that need a person instead of waiting.
+
+    Task exit codes: 0 done, 1 failed, 2 invalid usage, 3 needs the user, 130 stopped.
+    Exec also uses 124 for a timeout. After an interrupted action, inspect the state before retrying.
+
+    ## Tab ownership and permissions
+
+    - Open agent tabs by default, even if the same site is already open. Use a user's tab only
+      when they explicitly name it as the target. Never close their tab with the page `close` tool.
+    - Read a snapshot before acting. Use refs from that snapshot; actions already wait for changes.
+    - Only send, post, pay or delete when the user asked. Respect refusals; don't try another route.
+    - Use `sign_in` for a saved password. Hand captchas and sign-ins you cannot complete to the user
+      with `handoff`. Never solve a captcha. Stop on unusual-traffic or rate-limit warnings.
+    - `open` and `fetch` choose a signed-in space when possible. Check `spaces(site)` before saying
+      the user is signed out; choose a space explicitly when they need a different account.
+    - Use Yab's tools, not desktop keystrokes, Computer Use or AppleScript, to control its tabs.
+    - If agents are disabled, ask the user to enable them in Settings › Developers.
+
+    ## More commands
+
+    `\(command) --help` lists commands and task options. `\(command) guide mcp` describes page tools;
+    `\(command) guide setup` covers installation and removal. Tool schemas are the parameter reference.
+    Use `native_context` and `native_actions` to inspect Yab settings and tabs before `native_apply`.
+    `more_tools("help")` gives product help; `more_tools` also discovers mail, files and other tools.
+
+    Files and mail commands use ids from their search results or tool output:
+
+    ```bash
+    \(command) files search "signed lease"
+    \(command) files read FILE_ID --path
+    \(command) mail read THREAD_ID
+    \(command) mail file THREAD_ID 1 --path
+    ```
+
+    Replace FILE_ID and THREAD_ID before running. Files read returns the local path and, unless
+    `--path` is given, extracted text. Mail file retrieves the numbered attachment.
+    `\(command) https://example.com` opens a page in the user's window; use MCP open for agent work.
+    `\(command) import` lists other browsers; the user can run `import chrome` to bring sign-ins over
+    after approving in Yab and macOS. An agent must not perform that import on their behalf.
     """ }
 
     static var tools: String { """
     # Yab's MCP tools
 
-    Tabs are ids. `tabs` lists the user's and yours. Open agent tabs by default; inspect or use an
-    existing user tab only when the user explicitly refers to it or asks about their open tabs.
+    MCP lets your current assistant drive Yab directly. Configure the local server as described in
+    `\(command) guide setup`. The calls below use tool notation, not shell commands. Read each
+    tool's schema for exact argument names. Use `more_tools` to discover tools not yet listed.
+
+    ## Open, read, act, check
+
+    1. Call `open` with a URL to create an agent tab. Keep the returned tab id.
+    2. Read its `snapshot`. Find the ref for the element you need, such as `e12`.
+    3. Call `click` or `type` with that tab id and ref.
+    4. Read the returned changes before the next action. No extra wait is normally needed.
+    5. Call `show` only to give the page to the user; otherwise close your agent tab when done.
+
+    If a node is missing, try `snapshot` with `interactive: false`, then `text`, then `screenshot`.
+    Use coordinates only from a fresh screenshot. Never guess refs. A user's existing tab is a
+    target only when they explicitly ask to work in it; a site name alone is not permission.
+
+    For several steps in one call, `run` accepts JavaScript. This example also works in a shell:
+
+    ```bash
+    \(command) exec 'const t = open("https://example.com"); return t.snapshot()'
+    ```
+
+    In run/exec, use `t.find("button label")` to look up a ref before clicking. If it returns null,
+    inspect the page instead of guessing. Each exec has fresh `keep`; MCP run preserves it for the
+    connection. Read `\(command) exec --help` for timeouts and output limits.
+
+    ## Tool reference
+
+    Tabs are ids. `tabs` lists the user's and yours; use it when the request concerns open tabs.
 
     - `open(url)` → a new tab of yours, loaded, with its snapshot.
     - `snapshot(tab)` → the page as an accessibility tree, one node a line, with refs like `e12` on
@@ -363,18 +409,41 @@ enum Guide {
     """ }
 
     static var setup: String { """
-    # Setting Yab up by hand
+    # Install Yab's CLI and MCP tools
 
-    Yab › Settings › AI does all of this in one click, Settings › Developers one piece at a time;
-    `\(command) setup` does it from here.
+    Install Yab in /Applications, then run:
 
-    Claude Code:
+    ```bash
+    /Applications/yab.app/Contents/MacOS/yab setup
+    ```
+
+    Open a new terminal so PATH includes ~/.local/bin. This installs the command plus a browser
+    skill and a local MCP server for installed Claude Code and Codex CLIs. It does not sign you in to
+    an AI plan.
+    Connect your plan in Yab before asking Yab's agent to do tasks.
+
+    Install only one part:
+
+    ```bash
+    \(command) setup command
+    \(command) setup claude
+    \(command) setup codex
+    \(command) setup cursor
+    ```
+
+    Cursor setup connects its CLI as a plan in Yab. For an MCP client, configure the server below.
+    Settings › Developers also has the command and agent controls. Let agents use Yab must be on.
+
+    ## Other local MCP clients
+
+    Use a stdio server with command `\(AgentSetup.executable)` and args `["mcp"]`.
+    For Claude Code, the equivalent manual command is:
 
     ```bash
     claude mcp add --scope user \(AgentSetup.server) -- "\(AgentSetup.executable)" mcp
     ```
 
-    Codex, in ~/.codex/config.toml:
+    For Codex, add this to ~/.codex/config.toml:
 
     ```toml
     [mcp_servers.\(AgentSetup.server)]
@@ -383,6 +452,14 @@ enum Guide {
     tool_timeout_sec = 900
     ```
 
-    Yab must allow it: Settings › Developers › Let agents use Yab.
+    Setup writes the skill to ~/.claude/skills/\(AgentSetup.skill)/SKILL.md and
+    ~/.agents/skills/\(AgentSetup.skill)/SKILL.md. The command is ~/.local/bin/\(command).
+    Development builds use yab-dev and yab-dev-browser so they can coexist with installed Yab.
+
+    ## Remove
+
+    `\(command) remove claude` or `\(command) remove codex` removes that integration.
+    `\(command) remove command` removes the command; `\(command) remove` removes all setup pieces.
+    This does not uninstall the browser. Start a new client session after changing its MCP setup.
     """ }
 }

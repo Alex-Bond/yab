@@ -1,0 +1,93 @@
+diff --git a/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.cc b/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.cc
+--- a/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.cc
++++ b/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.cc
+@@ -18,7 +18,16 @@ void ChromeWebContentsViewDelegateCef::ShowContextMenu(
+     return;
+   }
+ 
++  // On macOS a menu the client doesn't run (for example in an extension's
++  // action popup, which has no CefBrowser) is a native NSMenu that runs a
++  // nested loop inside this call, with tasks allowed. Closing the popup or
++  // the browser meanwhile destroys the WebContents and this delegate with it.
++  base::WeakPtr<ChromeWebContentsViewDelegateCef> self =
++      weak_ptr_factory_.GetWeakPtr();
+   ChromeWebContentsViewDelegateBase::ShowContextMenu(render_frame_host, params);
++  if (!self) {
++    return;
++  }
+ 
+   // The menu may not be running in the following cases:
+   // - If the menu is empty (e.g. cleared in OnBeforeContextMenu).
+diff --git a/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.h b/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.h
+--- a/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.h
++++ b/cef/libcef/browser/chrome/chrome_web_contents_view_delegate_cef.h
+@@ -7,6 +7,7 @@
+ #pragma once
+ 
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
+ #include "build/build_config.h"
+ 
+ #if BUILDFLAG(IS_MAC)
+@@ -33,6 +34,9 @@ class ChromeWebContentsViewDelegateCef
+ 
+  private:
+   const raw_ptr<content::WebContents> web_contents_;
++
++  base::WeakPtrFactory<ChromeWebContentsViewDelegateCef> weak_ptr_factory_{
++      this};
+ };
+ 
+ #endif  // CEF_LIBCEF_BROWSER_CHROME_CHROME_WEB_CONTENTS_VIEW_DELEGATE_CEF_H_
+diff --git a/cef/libcef/browser/chrome/extensions/chrome_mime_handler_view_guest_delegate_cef.cc b/cef/libcef/browser/chrome/extensions/chrome_mime_handler_view_guest_delegate_cef.cc
+--- a/cef/libcef/browser/chrome/extensions/chrome_mime_handler_view_guest_delegate_cef.cc
++++ b/cef/libcef/browser/chrome/extensions/chrome_mime_handler_view_guest_delegate_cef.cc
+@@ -5,6 +5,7 @@
+ 
+ #include "cef/libcef/browser/chrome/extensions/chrome_mime_handler_view_guest_delegate_cef.h"
+ 
++#include "base/memory/weak_ptr.h"
+ #include "cef/libcef/browser/browser_host_base.h"
+ #include "cef/libcef/browser/chrome/chrome_context_menu_handler.h"
+ #include "cef/libcef/browser/osr/web_contents_view_osr.h"
+@@ -44,15 +45,26 @@ bool ChromeMimeHandlerViewGuestDelegateCef::HandleContextMenu(
+     return true;
+   }
+ 
++  // On macOS the menu may be a native NSMenu that runs a nested loop inside
++  // this call (see ChromeWebContentsViewDelegateCef::ShowContextMenu). The
++  // guest, this delegate and |render_frame_host| can be destroyed meanwhile,
++  // so nothing of them is read afterwards except through weak pointers.
++  content::WebContents* web_contents =
++      content::WebContents::FromRenderFrameHost(&render_frame_host);
++  base::WeakPtr<content::WebContents> guest = web_contents->GetWeakPtr();
++  base::WeakPtr<content::WebContents> owner =
++      owner_web_contents_->GetWeakPtr();
++
+   [[maybe_unused]] bool result =
+       ChromeMimeHandlerViewGuestDelegate::HandleContextMenu(render_frame_host,
+                                                             params);
+   DCHECK(result);
+ 
+-  content::WebContents* web_contents =
+-      content::WebContents::FromRenderFrameHost(&render_frame_host);
++  if (!guest || !owner) {
++    return true;
++  }
+   ContextMenuDelegate* menu_delegate =
+-      ContextMenuDelegate::FromWebContents(web_contents);
++      ContextMenuDelegate::FromWebContents(guest.get());
+ 
+   // The menu may not be running in the following cases:
+   // - If the menu is empty (e.g. cleared in OnBeforeContextMenu).
+@@ -60,8 +72,8 @@ bool ChromeMimeHandlerViewGuestDelegateCef::HandleContextMenu(
+   // - When the above call blocks until the menu is dismissed (macOS behavior).
+   // We explicitly clean up in these cases instead of waiting for OnMenuClosed
+   // which will otherwise never be called for the first 2 cases.
+-  if (!menu_delegate->IsMenuRunning()) {
+-    context_menu::MaybeResetContextMenu(owner_web_contents_);
++  if (menu_delegate && !menu_delegate->IsMenuRunning()) {
++    context_menu::MaybeResetContextMenu(owner.get());
+   }
+ 
+   return true;

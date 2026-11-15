@@ -21,19 +21,22 @@ final class WarmClaude {
     let args: () -> [String]
     /// Set in its environment over the plan's.
     let env: [String: String]
+    let tidy: Bool
 
-    init(room: String, idle: TimeInterval, turns: Int? = nil, env: [String: String] = [:], args: @escaping () -> [String]) {
+    init(room: String, idle: TimeInterval, turns: Int? = nil, env: [String: String] = [:], tidy: Bool = false, args: @escaping () -> [String]) {
         self.room = room
         self.idle = idle
         self.turns = turns
         self.env = env
+        self.tidy = tidy
         self.args = args
         Self.instances.append(Weak(self))
     }
 
     private final class Weak { weak var value: WarmClaude?; init(_ value: WarmClaude) { self.value = value } }
     private static var instances: [Weak] = []
-    static func revoke() { instances.forEach { $0.value?.stop() } }
+    /// Revoking general provider consent does not revoke Tidy's own switch.
+    static func revoke() { instances.forEach { if $0.value?.tidy != true { $0.value?.stop() } } }
     private var permission: ProviderLaunchPermit?
     private var process: Process?
     private var input: FileHandle?
@@ -92,7 +95,8 @@ final class WarmClaude {
     private func start(_ ready: @escaping (Bool) -> Void) {
         // Claude Code runs unasked here: only once you connected it (a
         // test world's stand-in aside).
-        guard let permit = ProviderConsent.shared.permit("claude") else { return ready(false) }
+        guard let permit = tidy ? ProviderLaunchPermit.forTidy("claude") : ProviderConsent.shared.permit("claude"),
+              permit.valid else { return ready(false) }
         stopping?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.stop() }
         stopping = work
@@ -108,10 +112,11 @@ final class WarmClaude {
             all.forEach { $0(ok) }
         }
         Task { @MainActor [weak self] in
-            let found = await Shell.find()
+            let found = await AgentLaunch.environment()
             guard let self else { return }
             guard permit.valid else { return ready(false) }
-            guard let claude = found.claude else {
+            // The copy, account and environment a chat on Claude starts with.
+            guard let launch = AgentLaunch.resolve("claude", in: found) else {
                 self.said = "no claude"
                 self.usable = false
                 return ready(false)
@@ -121,9 +126,8 @@ final class WarmClaude {
                 "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                 "--no-session-persistence", "--tools", "", "--strict-mcp-config",
             ] + self.args()
-            Agents.throughShell(process, claude, args)
-            process.environment = AgentCopies.environment(for: claude,
-                base: PlanAccounts.shared.env(PlanAccounts.shared.pick("claude"), base: found.env).merging(self.env) { $1 })
+            Agents.throughShell(process, launch.binary, args)
+            process.environment = AgentCopies.environment(for: launch.binary, base: launch.env.merging(self.env) { $1 })
             let room = Store.file(self.room)
             try? FileManager.default.createDirectory(at: room, withIntermediateDirectories: true)
             process.currentDirectoryURL = room
@@ -158,10 +162,10 @@ final class WarmClaude {
                 guard try permit.start(process) else { return ready(false) }
                 self.permission = permit
             } catch {
-                self.said = "couldn't start \(claude): \(error.localizedDescription)"
+                self.said = "couldn't start \(launch.binary): \(error.localizedDescription)"
                 return ready(false)
             }
-            self.said = "started \(claude)"
+            self.said = "started \(launch.binary)"
             self.process = process
             self.input = into.fileHandleForWriting
             ready(true)

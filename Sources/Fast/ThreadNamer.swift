@@ -77,11 +77,12 @@ final class ThreadNamer {
         if cli == "claude" { return await claude.ask(prompt, within: 40) }
         guard cli == "codex" else { return nil }
         guard let permit = ProviderConsent.shared.permit("codex") else { return nil }
-        let found = await Shell.find()
-        guard permit.valid, let codex = found.codex else { return nil }
+        let found = await AgentLaunch.environment()
+        guard permit.valid, let launch = AgentLaunch.resolve(cli, in: found) else { return nil }
+        let codex = launch.binary
         let room = Store.file("agent/thread-names")
         try? FileManager.default.createDirectory(at: room, withIntermediateDirectories: true)
-        let env = PlanAccounts.shared.env(PlanAccounts.shared.pick(cli), base: found.env)
+        let env = launch.env
         let out = room.appendingPathComponent("name-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: out) }
         let args = PlanText.codexArgs(DayThreads.instructions + "\n\n" + prompt, out: out.path, model: LinkFolders.codexModel, effort: "low")

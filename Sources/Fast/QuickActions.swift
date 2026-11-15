@@ -349,7 +349,7 @@ final class QuickActions: ObservableObject {
                 return "Aliases use letters, digits or - without spaces."
             }
             if let other = actions.first(where: { $0.id != id && $0.alias == alias }) { return "Already used by \(other.name)." }
-            if let scope = Scopes.all.first(where: { $0.aliases.contains(alias) || $0.name.lowercased() == alias || $0.id == alias }) {
+            if let scope = Scopes.all.first(where: { $0.aliases.contains(alias) || $0.name.lowercased() == alias || $0.host == alias }) {
                 return "Already used by \(scope.name) search."
             }
             if let place = FieldPlace.allCases.first(where: { $0.names.contains(alias) }) { return "Already used by \(place.title)." }
@@ -443,7 +443,7 @@ final class QuickActions: ObservableObject {
 
     private func availableAlias(_ preferred: String) -> String {
         guard !actions.contains(where: { $0.alias == preferred }),
-              !Scopes.all.contains(where: { $0.aliases.contains(preferred) || $0.id == preferred }),
+              !Scopes.all.contains(where: { $0.aliases.contains(preferred) || $0.host == preferred }),
               !FieldPlace.allCases.contains(where: { $0.names.contains(preferred) }) else { return "" }
         return preferred
     }

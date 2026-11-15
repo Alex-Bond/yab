@@ -72,10 +72,11 @@ struct BoostAddMenuTests {
             let index = try #require(menu.items.firstIndex { $0.title == "Create with AI…" })
             Agents.connectedInTests = false
             menu.performActionForItem(at: index)
-            #expect(browser.chatAttach.words.isEmpty)
+            #expect(browser.chatAttach.words(for: browser.chatID).isEmpty)
             Agents.connectedInTests = true
             menu.performActionForItem(at: index)
-            #expect(browser.chatAttach.words == "Create a boost for example.test: ")
+            // The words are the new chat's own draft (#1238), shown by its field.
+            #expect(browser.chatAttach.words(for: browser.chatID) == "Create a boost for example.test: ")
         }
     }
 }

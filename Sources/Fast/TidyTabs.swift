@@ -42,8 +42,7 @@ extension Browser {
 
     /// Whether Tidy stands on the line now.
     var canTidyTabs: Bool {
-        guard prefs.tidyTabs, AIUse.allows(.background), !tabsTidying, dusting.isEmpty, tidyTabsLoose.count >= Browser.tidyTabsFrom else { return false }
-        return TidyTabs.can
+        prefs.tidyTabs && !tabsTidying && dusting.isEmpty && tidyTabsLoose.count >= Browser.tidyTabsFrom && TidyTabs.can
     }
 
     /// Tidy: today's tabs asked about, and put in folders by the answer.
@@ -59,6 +58,7 @@ extension Browser {
             guard let self else { return }
             TidyTabs.lastMs = Int(Date().timeIntervalSince(TidyTabs.lastAsked ?? Date()) * 1000)
             tabsTidying = false
+            guard prefs.tidyTabs else { return }
             if let groups { applyTidy(groups, of: loose) }
         }
     }
@@ -67,9 +67,11 @@ extension Browser {
     /// today's in the order its first tab stood, the rest after them as
     /// they were. One step for ⌘Z.
     func applyTidy(_ groups: [TidyTabs.Group], of loose: [Tab]) {
-        let here = Set(tabs.map(\.id))
-        let still = loose.filter { here.contains($0.id) && $0.pin == nil && !$0.kept && $0.nest == nil }
-        let free = Set(still.map(\.id))
+        // The model may answer after tabs were paired, moved between
+        // spaces, or taken by a task. Recheck the same eligibility used
+        // when asking: settle counts only this space's own tabs and would
+        // dissolve a group that is left with one own member.
+        let free = Set(tidyTabsLoose.map(\.id))
         var used = Set<Tab.ID>()
         var made: [(nest: Nest, tabs: [Tab])] = []
         for group in groups {
@@ -119,7 +121,26 @@ enum TidyTabs {
     static var lastBy = ""
 
     /// Whether anything can answer: an AI you connected, or this Mac's.
-    static var can: Bool { stand != nil || !LinkFolders.agents.isEmpty || FormModel.ready }
+    static var can: Bool {
+        if stand != nil { return true }
+        return available(stand: false, agents: agents, apple: FormModel.tidyReady)
+    }
+
+    static func available(stand: Bool, agents: [String], apple: Bool) -> Bool {
+        stand || !agents.isEmpty || apple
+    }
+
+    static var agents: [String] { connectedProviders(in: AgentSetupModel.shared) }
+
+    static func connectedProviders(in setup: AgentSetupModel) -> [String] {
+        // A connection made in Yab survives the general AI consent switch.
+        // A CLI merely installed on the Mac is not a connected model.
+        let connected = ["claude", "codex"].filter { cli in
+            setup.connected(cli) || (cli == "claude" ? setup.status.claude : setup.status.codex)
+                || setup.signedIn[cli] == true
+        }
+        return LinkFolders.order(preferred: Agents.preferred, connected: connected)
+    }
 
     /// A --test run's stand-in for the answer, its JSON with tabs counted
     /// from 0: given by the bench with the press, or YAB_TIDY_ANSWER.
@@ -145,23 +166,40 @@ enum TidyTabs {
     where the numbers are the tabs' numbers in the list.
     """
 
-    /// Claude's Haiku kept running for Tidy, never thinking, as the
-    /// folders' namer is (LinkFolders.namer).
-    static let sorter = WarmClaude(room: "agent/tidy-tabs", idle: 600, turns: 30, env: ["MAX_THINKING_TOKENS": "0"]) {
+    static let sorter = WarmClaude(room: "agent/tidy-tabs", idle: 600, turns: 30,
+                                   env: ["MAX_THINKING_TOKENS": "0"], tidy: true) {
         ["--model", "haiku", "--settings", #"{"alwaysThinkingEnabled":false}"#, "--append-system-prompt", instructions
             + "\nEach message is a new list of tabs, unrelated to the ones before."]
     }
 
-    /// The pointer near Tidy: Haiku started now, so the press doesn't wait
-    /// out Claude Code's start.
+    /// Tidy warms its own text-only worker under its own switch.
     static func warm() {
-        guard stand == nil, LinkFolders.agents.first == "claude" else { return }
+        guard Store.settings.object(forKey: "tidy.tabs") as? Bool ?? true,
+              stand == nil, agents.first == "claude" else { return }
         sorter.warm()
+    }
+
+    private static func providerAnswer(_ prompt: String, count: Int) async -> (text: String, cli: String?) {
+        for cli in agents {
+            let said: String
+            if cli == "claude" { said = await sorter.ask(prompt, within: 30) ?? "" }
+            else { said = await PlanText.tidy(prompt, system: instructions, only: cli).text }
+            if answer(said, count: count) != nil { return (said, cli) }
+        }
+        return ("", nil)
     }
 
     /// The groups for these tabs, or nil when nothing answered or the
     /// answer made no group.
     static func groups(_ lines: [String]) async -> [Group]? {
+        await groups(lines, writer: { await providerAnswer($0, count: lines.count) }, localModel: model)
+    }
+
+    /// The production dispatch path, with model boundaries injectable for tests.
+    static func groups(_ lines: [String],
+                       writer: (String) async -> (text: String, cli: String?),
+                       localModel: (String) async -> String?) async -> [Group]? {
+        guard Store.settings.object(forKey: "tidy.tabs") as? Bool ?? true else { return nil }
         let list = lines.prefix(60).enumerated().map { "\($0 + 1). \($1)" }.joined(separator: "\n")
         let prompt = "Tabs:\n" + list
         if let stand {
@@ -169,19 +207,12 @@ enum TidyTabs {
             try? await Task.sleep(for: .milliseconds(1200))
             return answer(stand, count: lines.count, from: 0)
         }
-        for cli in LinkFolders.agents {
-            var said = ""
-            if cli == "claude" {
-                said = await sorter.ask(prompt, within: 30) ?? ""
-            } else {
-                said = await PlanText.write(prompt, system: instructions, room: "agent/tidy-tabs", codexModel: LinkFolders.codexModel,
-                                            limit: 45, only: cli).text
-            }
-            lastSaid = said
-            lastBy = cli
-            if let groups = answer(said, count: lines.count) { return groups }
-        }
-        if let said = await model(prompt) {
+        let written = await writer(prompt)
+        lastSaid = written.text
+        lastBy = written.cli ?? ""
+        guard Store.settings.object(forKey: "tidy.tabs") as? Bool ?? true else { return nil }
+        if let groups = answer(written.text, count: lines.count) { return groups }
+        if let said = await localModel(prompt) {
             lastSaid = said
             lastBy = "mac"
             return answer(said, count: lines.count)
@@ -215,7 +246,7 @@ enum TidyTabs {
     }
 
     nonisolated static func model(_ prompt: String) async -> String? {
-        guard FormModel.ready else { return nil }
+        guard Store.settings.object(forKey: "tidy.tabs") as? Bool ?? true, FormModel.tidyReady else { return nil }
         #if canImport(FoundationModels)
         if #available(macOS 26, *) {
             let session = LanguageModelSession(instructions: instructions)

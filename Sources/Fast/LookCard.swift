@@ -131,6 +131,8 @@ final class LookCard: ObservableObject {
             "open": open, "step": browser.lookStep, "changed": opened.map { $0 != paint } ?? false,
             "mode": paint.mode, "shift": paint.shift, "site": paint.site, "glass": paint.glass, "swatch": paint.swatch,
             "windowDark": Links.window?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+            // This browser's own window, which `browserWindow` names.
+            "ownDark": BrowserWindows.shared.window(for: browser)?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
             "wornNow": paint.color(dark: Links.window?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua).hex,
             "drawings": paint.drawings, "strength": paint.drawingsStrength,
             "color": paint.color, "colors": paint.colors, "grain": paint.grain, "transparency": paint.transparency,

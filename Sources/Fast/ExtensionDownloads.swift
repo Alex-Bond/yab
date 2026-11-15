@@ -77,20 +77,64 @@ enum ExtensionDownloads {
 
     // MARK: - what happened, for the shim
 
-    private struct Event { let seq: Int; let name: String; let value: Any }
+    private struct Event { let seq: Int; let name: String; let value: Any; let target: ObjectIdentifier? }
     private static var log: [Event] = []
     private static var seq = 0
-    private struct Waiter { let extensionID: String; let worker: Bool; let after: Int; let resume: ([String: Any]) -> Void }
+    private struct Waiter { let extensionID: String; let worker: Bool; let after: Int; let target: ObjectIdentifier?; let resume: ([String: Any]) -> Void }
     private static var waiting: [UUID: Waiter] = [:]
     /// The last event each extension's worker heard; what came after waits
     /// for it to wake.
     private static var heard: [String: Int] = [:]
+    private struct ListenerKey: Hashable { let owner: ObjectIdentifier; let id: String }
+    private static var contextHeard: [ListenerKey: Int] = [:]
     /// Workers that listen, kept between launches, so one asleep is woken.
     private static var listeners: Set<String> = Set(Store.settings.stringArray(forKey: "extensions.downloadListeners") ?? [])
     /// Set by the first call from an extension; before it, only a worker
     /// known to listen makes the extensions start for this.
     weak static var owner: Extensions?
     private static var reach: Extensions? { owner ?? (listeners.isEmpty ? nil : Extensions.shared) }
+    private static var filenameListeners = Set(Store.settings.stringArray(forKey: "extensions.downloadFilenameListeners") ?? [])
+    private static var filenameRequests: [ObjectIdentifier: String] = [:]
+
+    static func listensForFilename(_ yes: Bool, extension id: String, owner: Extensions) {
+        if yes { filenameListeners.insert(id) } else {
+            filenameListeners.remove(id)
+            ExtensionDownloadNaming.unloaded(filenameParticipant(id, in: owner))
+        }
+        Store.settings.set(Array(filenameListeners).sorted(), forKey: "extensions.downloadFilenameListeners")
+    }
+
+    private static func filenameParticipant(_ id: String, in owner: Extensions) -> String {
+        "\(ObjectIdentifier(owner))/\(id)"
+    }
+
+    static func determineFilename(_ download: WKDownload, proposed: String, reply: @escaping (String) -> Void) {
+        let controller = download.webView?.configuration.webExtensionController
+        guard let owner = Extensions.all.first(where: { $0.controller === controller })
+                ?? owner ?? (filenameListeners.isEmpty ? nil : Extensions.shared),
+              let id = ids[ObjectIdentifier(download)], var item = items[id] else { reply(proposed); return }
+        let participants = owner.installed.filter {
+            $0.enabled && ($0.permissions.contains("downloads") || $0.permissions.contains("yab:downloads"))
+                && filenameListeners.contains($0.id)
+        }.sorted { ($0.installedAt ?? .distantPast) < ($1.installedAt ?? .distantPast) }.map(\.id)
+        let key = ObjectIdentifier(download)
+        guard let request = ExtensionDownloadNaming.begin(extensions: participants.map { filenameParticipant($0, in: owner) }, reply: { name in
+            filenameRequests[key] = nil
+            reply(name ?? proposed)
+        }) else { return }
+        filenameRequests[key] = request
+        item.filename = proposed
+        for id in participants { owner.wake(id) }
+        emit("onDeterminingFilename", ["request": request, "item": item.json], target: owner)
+    }
+
+    static func filenameSuggestion(_ request: String, by id: String, owner: Extensions, filename: String?) {
+        ExtensionDownloadNaming.suggest(request, by: filenameParticipant(id, in: owner), filename: filename)
+    }
+
+    static func unloaded(_ id: String, owner: Extensions) {
+        ExtensionDownloadNaming.unloaded(filenameParticipant(id, in: owner))
+    }
 
     // MARK: - from the browser
 
@@ -166,6 +210,7 @@ enum ExtensionDownloads {
 
     /// Ended without its file: refused a place, stopped, or broken.
     static func failed(_ download: WKDownload, resumable: Bool, canceled: Bool) {
+        if let request = filenameRequests.removeValue(forKey: ObjectIdentifier(download)) { ExtensionDownloadNaming.cancel(request) }
         guard let id = ids[ObjectIdentifier(download)], !pausing.contains(id), items[id]?.paused != true else { return }
         change(id) { item in
             item.received = max(download.progress.completedUnitCount, item.received)
@@ -385,10 +430,10 @@ enum ExtensionDownloads {
         if delta.count > 1 { emit("onChanged", delta) }
     }
 
-    private static func emit(_ name: String, _ value: Any) {
-        guard let owner = reach, !owner.contexts.isEmpty || !listeners.isEmpty else { return }
+    private static func emit(_ name: String, _ value: Any, target: Extensions? = nil) {
+        guard let owner = target ?? reach, !owner.contexts.isEmpty || !listeners.isEmpty else { return }
         seq += 1
-        log.append(Event(seq: seq, name: name, value: value))
+        log.append(Event(seq: seq, name: name, value: value, target: target.map(ObjectIdentifier.init)))
         if log.count > 400 { log.removeFirst(log.count - 400) }
         let current = seq
         DispatchQueue.main.async { flush(upTo: current) }
@@ -402,7 +447,7 @@ enum ExtensionDownloads {
     private static func flush(upTo current: Int) {
         for (key, waiter) in waiting {
             waiting[key] = nil
-            waiter.resume(answer(after: waiter.after))
+            waiter.resume(answer(after: waiter.after, target: waiter.target))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             guard let owner = reach else { return }
@@ -419,26 +464,30 @@ enum ExtensionDownloads {
         }
     }
 
-    private static func answer(after: Int) -> [String: Any] {
-        let events = log.filter { $0.seq > after }.map { ["name": $0.name, "value": $0.value] as [String: Any] }
+    private static func answer(after: Int, target: ObjectIdentifier? = nil) -> [String: Any] {
+        let events = log.filter { $0.seq > after && ($0.target == nil || $0.target == target) }.map { ["name": $0.name, "value": $0.value] as [String: Any] }
         return ["seq": seq, "events": events]
     }
 
     /// downloads.events: what happened after `after`, waiting up to 25 s
     /// for something to. Without `after`, a worker hears what it missed
     /// while asleep, and a page only learns where things stand.
-    static func events(after: Int?, worker: Bool, extension id: String) async -> [String: Any] {
+    static func events(after: Int?, worker: Bool, extension id: String, owner: Extensions? = nil) async -> [String: Any] {
         if worker, !listeners.contains(id) {
             listeners.insert(id)
             Store.settings.set(Array(listeners).sorted(), forKey: "extensions.downloadListeners")
         }
         if after == nil && !worker { return ["seq": seq, "events": []] }
-        let since = after ?? heard[id] ?? seq
+        let target = owner.map(ObjectIdentifier.init)
+        let listenerKey = target.map { ListenerKey(owner: $0, id: id) }
+        let previous = listenerKey.flatMap { contextHeard[$0] } ?? (listenerKey == nil ? heard[id] : nil)
+        let since = after ?? previous ?? (filenameListeners.contains(id) ? 0 : seq)
+        if worker, let listenerKey { contextHeard[listenerKey] = max(contextHeard[listenerKey] ?? 0, since) }
         if worker { heard[id] = max(heard[id] ?? 0, since) }
-        if log.contains(where: { $0.seq > since }) { return answer(after: since) }
+        if log.contains(where: { $0.seq > since }) { return answer(after: since, target: target) }
         let key = UUID()
         return await withCheckedContinuation { continuation in
-            waiting[key] = Waiter(extensionID: id, worker: worker, after: since) { continuation.resume(returning: $0) }
+            waiting[key] = Waiter(extensionID: id, worker: worker, after: since, target: target) { continuation.resume(returning: $0) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
                 guard let waiter = waiting.removeValue(forKey: key) else { return }
                 waiter.resume(["seq": seq, "events": []])

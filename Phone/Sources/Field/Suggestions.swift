@@ -88,7 +88,8 @@ enum Suggestions {
             scheme[host] = url.scheme
         }
         for place in input.places where place.device == nil || place.device != input.own {
-            guard offered(place.url, input), let url = URL(string: place.url) else { continue }
+            // Each address read once: a Mac's weeks of places are thousands.
+            guard let url = URL(string: place.url), offered(url, input) else { continue }
             let host = bare(url)
             mac[host, default: 0] += score(count: 1, typed: place.typed ? 1 : 0,
                                            last: Date(timeIntervalSince1970: place.last), now: input.now)
@@ -129,8 +130,12 @@ enum Suggestions {
 
     /// Whether a page may be offered at all.
     static func offered(_ url: String, _ input: Input) -> Bool {
-        guard let page = URL(string: url), ["http", "https"].contains(page.scheme?.lowercased() ?? ""),
-              !HistoryList.signInStep(page) else { return false }
+        guard let page = URL(string: url) else { return false }
+        return offered(page, input)
+    }
+
+    static func offered(_ page: URL, _ input: Input) -> Bool {
+        guard ["http", "https"].contains(page.scheme?.lowercased() ?? ""), !HistoryList.signInStep(page) else { return false }
         let host = bare(page)
         return !desktopOnly(host) && !input.removed.contains(host) && !host.hasPrefix("login.") && !host.hasPrefix("accounts.")
     }

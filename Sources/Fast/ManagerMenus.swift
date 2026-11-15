@@ -42,7 +42,7 @@ enum ManagerMenus {
 
     static func origin(_ provider: String) -> String? {
         guard let item = PasswordManagers.installed(provider), item.enabled,
-              let base = Extensions.here.contexts[item.id]?.baseURL else { return nil }
+              let base = ManagerExtensions.shared.base(item.id) else { return nil }
         return base.absoluteString
     }
 
@@ -162,7 +162,7 @@ enum ManagerMenus {
             }
             tab.page.runInYab("document.documentElement.removeAttribute('data-yab-manager-ui')")
         }
-        if let item = PasswordManagers.installed(id) { Extensions.here.press(item.id) }
+        if let item = PasswordManagers.installed(id) { ManagerExtensions.shared.press(item.id, on: tab) }
     }
 
     /// Each manager's own icon in a field, read from its code (2026-10-13).

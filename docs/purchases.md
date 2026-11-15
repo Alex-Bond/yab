@@ -47,18 +47,25 @@ The agent never pays, never changes the plan, never types a card.
 
 ## Reading mail
 
-`MailStore.purchaseCandidates` gives robots' mail of the last 400 days
-whose subject or snippet names a receipt, an order, a renewal or a
-shipment; `MailPurchases.read` makes each a purchase or nothing (a
+`MailStore.purchaseHeads` gives robots' mail of the last 400 days whose
+subject or snippet names a receipt, an order, a renewal or a shipment,
+without bodies; `MailPurchases.read` makes each a purchase or nothing (a
 person's mail and promotions never are). Mail older than 30 days is kept
 by its headers, so an old receipt is read from its subject and snippet.
 Read every ten minutes at most, counted from when the last reading ended,
-off the main thread; each subscription's site is looked up once in the
-diary (`AgentHistory.lastVisits`). Each mail is read once: what it read as
-is kept by its id, account and size in `purchases-read.json` (per build),
-so a refresh or a launch reads only mail that is new or changed. Reading
-all 400 days every time kept a core busy without rest on a Mac with two
-big accounts (2026-10-25).
+at background priority; each subscription's site is looked up once in the
+diary (`AgentHistory.lastVisits`).
+
+Each mail is read once: what it read as is kept by its id, account and how
+much of it is here in `purchases-read.json`, for as long as
+`MailPurchases.rules` stands. Raise that number when a change would read
+any mail differently; a build alone doesn't invalidate anything. Bodies
+come from the store 20 at a time and only for mail not read yet, the
+reading rests three times what it worked, and it saves every 200 mails, so
+a quit loses little and the lists fill in while a first reading runs.
+Reading all 400 days every time kept a core busy without rest on a Mac with
+two big accounts (2026-10-25); throwing the reading away at each build and
+saving only at the very end kept it so (2026-10-31).
 
 ## For agents
 

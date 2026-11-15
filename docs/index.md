@@ -11,6 +11,7 @@ short-lived for it:
 - [docs/sidebar-corners.md](sidebar-corners.md): every corner in the column and the rule behind it, with a live prototype of the column to check builds against.
 - [docs/column-door.md](column-door.md): the column's header row, its sidebar door (Arc's mark) that puts the column away, and where the row folds into "⋯" as the column narrows.
 - [docs/sidebar-smoothness.md](sidebar-smoothness.md): why the page lags and snaps when ⌘S slides the sidebar (feedback #162), the evidence, and the plan to fix it.
+- [docs/field-everywhere.md](field-everywhere.md): plan for the field from any app: ⌥⌘T opens ⌘T's field as a floating panel over any app, with Clipboard History and Emoji pasting into the app in front; how Raycast, Spotlight and open-source launchers do it.
 - [docs/field-like-arc.md](field-like-arc.md): plan for an Arc-like field: Settings › Search "Empty Field Shows" (Sections or Open Tabs), Arc's timing, ⌘K actions as a page named at the bottom left; Arc measured frame by frame.
 - [docs/sync.md](sync.md): Sync between your Macs, end-to-end encrypted: the key, what syncs, how records merge, protocol v1 and the Cloudflare server in `sync-server/`.
 - [docs/extensions-sign-ins.md](extensions-sign-ins.md): extensions per sign-in, as Arc keeps them per profile: a space with sign-ins of its own has its own list, storage and controller; the split on upgrade.
@@ -21,6 +22,7 @@ short-lived for it:
 - [docs/get-to-know.md](get-to-know.md): Yab's own agent looking you up once, out of sight in a shut folder, where it starts, how it ends, and the morning look that waits for it.
 - [docs/link-folders.md](link-folders.md): ⌘-clicking links makes folders, Dia-style auto groups: the page and its links in a folder of today's, named by the model on the Mac with Dia's shimmer.
 - [docs/undo.md](undo.md): what ⌘Z takes back in the window, newest first, and who has it before the window does.
+- [docs/cli.md](cli.md): install the yab command, run a task, drive tabs with MCP or exec, and manage sessions.
 - [docs/approvals.md](approvals.md): an agent's yes (pay, send, sign in) asked on the iPhone and other Macs too, proven with Face ID or Touch ID there; local agents as well as assistants, and the alert that carries the question sealed to the Lock Screen.
 - [docs/chat-asks.md](chat-asks.md): where an agent's question goes and how it finds you: its home first, the window's corner while Yab is in front, a Time Sensitive notification with its own sound and the Dock bouncing while it is behind, the iPhone only when you're away; never on the tab in front.
 - [docs/routines.md](routines.md): a task that comes back on its own, made in Settings, from a command, a chat's Repeat… or words that start with when, one chat for all its runs, and where what it finds waits.
@@ -40,6 +42,9 @@ short-lived for it:
 - [docs/column-appkit.md](column-appkit.md): the column's rows, pins and space name on AppKit and Core Animation, each space a page of its own kept alive, its rows reusable cells, the row of spaces sliding the live pages; the switch, what replaces what, and the evals that hold it to the SwiftUI column.
 - [docs/space-switching.md](space-switching.md): Arc's space switching measured frame by frame, one row of space pages a column wide, half the fingers, one spring of a fifth of a second, and how Yab's column now does the same in Core Animation.
 - [docs/page-engine.md](page-engine.md): the page engine seam, its current migration boundary, and the contract another engine must implement.
+- [docs/chromium-network.md](chromium-network.md): what Chromium would call by itself, and what stops each.
+- [docs/chromium-features.md](chromium-features.md): navigation policy, Shield, boosts, userscripts and tools on a Chromium tab, and the honest limits.
+- [docs/chromium-switch.md](chromium-switch.md): the default engines, and what crosses between WebKit and Chromium: cookies, a live page, origin storage, extensions.
 - [docs/chromium-webkit-only.md](chromium-webkit-only.md): WebKit-only features that do nothing on a Chromium tab, and how to give one a Chromium path.
 - [docs/haptics.md](haptics.md): what the trackpad's actuator can play, read from the framework's own table: one push of 4 to 8 ms at amplitude 14 to 70, longer feels as trains.
 - [docs/grain.md](grain.md): how much grain a space wears, set on a track under the lightness that ticks the trackpad and knocks at its ends, and what Arc does.

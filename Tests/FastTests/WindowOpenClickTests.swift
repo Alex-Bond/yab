@@ -4,8 +4,8 @@ import Testing
 
 @MainActor
 struct WindowOpenClickTests {
-    private func mouse(_ type: NSEvent.EventType, at time: TimeInterval, window: Int = 12, button: Int = 2) throws -> NSEvent {
-        let event = try #require(NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: .command,
+    private func mouse(_ type: NSEvent.EventType, at time: TimeInterval, window: Int = 12, button: Int = 2, flags: NSEvent.ModifierFlags = .command) throws -> NSEvent {
+        let event = try #require(NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: flags,
             timestamp: time, windowNumber: window, context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
         guard type == .otherMouseDown || type == .otherMouseUp else { return event }
         let made = try #require(event.cgEvent)
@@ -25,19 +25,31 @@ struct WindowOpenClickTests {
             targetIsMainFrame: nil, source: nil, modifierFlags: [], buttonNumber: 0,
             shouldPerformDownload: false, userInitiated: true)
         return Browser.modifiedForeground(for: action, isPopup: false, held: held,
-                                          afterClick: click.follows(at: time, in: window))
+                                          afterClick: click.follows(at: time, in: window), clickedButton: click.button(at: time, in: window),
+                                          clickedFlags: click.modifiers(at: time, in: window))
     }
 
-    @Test func clickThenOpenUsesHeldCommandAndShift() throws {
+    @Test func clickThenOpenUsesCapturedCommandAfterRelease() throws {
         for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp, .otherMouseDown, .otherMouseUp] {
             var click = PageView.WindowClick()
             let event = try mouse(type, at: 100)
             if type == .otherMouseDown || type == .otherMouseUp { #expect(event.buttonNumber == 2) }
             click.record(event)
             #expect(foreground(click, at: 100.1) == false)
-            #expect(foreground(click, at: 100.1, held: [.command, .shift]) == true)
-            #expect(foreground(click, at: 100.1, held: []) == nil)
+            #expect(foreground(click, at: 100.1, held: [.command, .shift]) == false)
+            #expect(foreground(click, at: 100.1, held: []) == false)
         }
+    }
+
+    @Test func middleClickKeepsScriptedDestinationBehind() throws {
+        var click = PageView.WindowClick()
+        click.record(try mouse(.otherMouseUp, at: 100, flags: []))
+        #expect(foreground(click, at: 100.1, held: []) == false)
+        #expect(foreground(click, at: 100.1, held: .shift) == false)
+        click.record(try mouse(.otherMouseUp, at: 100, flags: .shift))
+        #expect(foreground(click, at: 100.1, held: []) == true)
+        #expect(foreground(click, at: 100.501, held: []) == nil)
+        #expect(foreground(click, at: 100.1, window: 13, held: []) == nil)
     }
 
     @Test func keyThenOpenKeepsTheDefaultForeground() throws {

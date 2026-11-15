@@ -7,6 +7,8 @@ struct ProviderLaunchPermit: @unchecked Sendable {
     let epoch: String
     let settings: UserDefaults
     var connecting = false
+    /// A text-only Tidy request, authorized by its own feature switch.
+    var tidy = false
     private static let lock = NSRecursiveLock()
     private struct Child {
         let authority: String
@@ -21,10 +23,14 @@ struct ProviderLaunchPermit: @unchecked Sendable {
     private var connectionID: String { authority + "|" + cli + "|" + epoch }
     var valid: Bool {
         Self.lock.lock(); defer { Self.lock.unlock() }
+        if tidy { return settings.object(forKey: "tidy.tabs") as? Bool ?? true }
         if connecting { return Self.connections.contains(connectionID) }
         return settings.string(forKey: "agents.connection-generation." + cli) == epoch
             && (settings.stringArray(forKey: "agents.explicit-connections.v1") ?? []).contains(cli)
             && !(settings.stringArray(forKey: "agents.revoked-connections.v1") ?? []).contains(cli)
+    }
+    static func forTidy(_ cli: String, settings: UserDefaults = Store.settings) -> Self {
+        Self(authority: "tidy", cli: cli, epoch: UUID().uuidString, settings: settings, tidy: true)
     }
     static func connection(authority: String, cli: String, settings: UserDefaults) -> Self {
         lock.lock(); defer { lock.unlock() }
@@ -43,7 +49,7 @@ struct ProviderLaunchPermit: @unchecked Sendable {
     func start(_ process: Process) throws -> Bool {
         Self.lock.lock(); defer { Self.lock.unlock() }
         guard valid else { return false }
-        try process.run()
+        try process.runValidated()
         ConsentAudit.record("cli.start." + cli)
         Self.children[UUID().uuidString] = Child(authority: authority, cli: cli, epoch: epoch, connecting: connecting, process: process)
         Self.children = Self.children.filter { $0.value.process.isRunning }

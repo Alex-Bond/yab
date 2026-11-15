@@ -192,7 +192,7 @@ final class LiveFolders: ObservableObject {
         let held = members.map { tab in
             let came = tab.live?.came
             let opened = came.flatMap { came in tab.touched.timeIntervalSince(came) > 2 ? tab.touched : nil }
-            return LiveFolder.Held(id: tab.id, key: tab.live?.key ?? keyOf(tab.address), brought: tab.live != nil && tab.live?.yours != true,
+            return LiveFolder.Held(id: tab.id, key: tab.live?.key ?? keyOf(tab.address), brought: tab.broughtByFolder,
                                    words: tab.live?.words, busy: busy(tab, in: browser), came: came, opened: opened, said: tab.live?.said,
                                    news: tab.live?.news == true)
         }
@@ -472,7 +472,7 @@ final class LiveFolders: ObservableObject {
         guard let nest = make("github.pulls", in: browser, host: host) else { return }
         if tab.keepable {
             browser.keepTabs([tab], in: nest)
-            tab.live = LiveMark(key: LiveFolder.key(url) ?? url.absoluteString, words: nil, seen: nil, folder: nest.id, yours: true)
+            tab.live = LiveMark(key: LiveFolder.key(url) ?? url.absoluteString, words: nil, seen: nil, folder: nest.id, yours: true, moved: true)
         }
         browser.announce("Your pull requests, kept up to date here", mark: "folder")
     }
@@ -527,6 +527,7 @@ final class LiveFolders: ObservableObject {
     /// routine is gone a plain folder of yours again.
     func settle() {
         for browser in BrowserWindows.shared.browsers { settleRoutines(in: browser) }
+        LiveSeen.prune()
     }
 
     private func settleRoutines(in browser: Browser) {
@@ -677,6 +678,18 @@ final class LiveFolders: ObservableObject {
 }
 
 extension Tab {
+    /// Brought by a live folder (or a routine's), rather than kept there by
+    /// you: the folder's to take away.
+    var broughtByFolder: Bool { live.map { $0.yours != true } ?? false }
+
+    /// In its folder by the folder's doing, brought or moved in by it (the
+    /// pull request you just made), rather than by your hand: a row with
+    /// its status, never a tab you chose to keep, so once opened and left
+    /// it sleeps as today's tabs do (Browser.awake(because:)). Only a tab
+    /// you moved in by hand, or took out, keeps the kept rules. The mark
+    /// travels with the row in sync, so it holds on every Mac.
+    var placedByFolder: Bool { broughtByFolder || live?.moved == true }
+
     /// The page's own feed, RSS or Atom, as it names it in its head, and
     /// what the site calls itself.
     func feed(_ done: @escaping @MainActor (URL?, String?) -> Void) {

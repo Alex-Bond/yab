@@ -8,6 +8,10 @@ import AppKit
                                     "builtEngine": page.engine.rawValue,
                                     "title": page.title ?? "", "loading": page.isLoading,
                                     "window": page.window?.windowNumber ?? 0]
+        if let chromium = page as? ChromiumPage {
+            result["pressureBehavior"] = chromium.pressureConfiguration?.pressureBehavior.rawValue ?? -1
+            result["forceReleases"] = chromium.forceInput.releaseCount
+        }
         if let content = page.window?.contentView {
             let rect = page.convert(page.bounds, to: content)
             result["contentSize"] = [content.bounds.width, content.bounds.height]

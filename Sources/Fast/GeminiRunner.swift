@@ -84,6 +84,27 @@ enum GeminiSupport {
         """
     }
 
+    /// Yab's browser launcher, `open` and $BROWSER first on every agy run's
+    /// PATH (Configuration.prepare): a page agy opens is written to
+    /// $YAB_GEMINI_PAGE when the run gives one, and otherwise goes nowhere.
+    /// Never to the Mac's default browser: signed out, `agy -p /usage` (and
+    /// any `-p` run) opens Google's sign-in there itself and waits a minute
+    /// for it, a sign-in nobody in Yab can finish (#2038).
+    nonisolated static let launcherScript = """
+    #!/bin/sh
+    for url in "$@"; do
+      case "$url" in
+        https://*)
+          if [ -n "$YAB_GEMINI_PAGE" ]; then printf '%s\\n' "$url" > "$YAB_GEMINI_PAGE"; fi
+          exit 0 ;;
+      esac
+    done
+    exit 1
+
+    """
+    /// The launcher's folder in the profile, relative to its HOME.
+    nonisolated static let launcherPath = ".gemini/config/yab-launcher"
+
     /// Yab's own Gemini profile, shared by every Yab
     /// copy on this Mac so one sign-in serves them all. Google keeps the
     /// sign-in in the login keychain; this folder holds only what Yab
@@ -592,6 +613,8 @@ final class GeminiRunner {
                 (Self.settingsPath, try Self.settings(settings)),
                 (".gemini/config/mcp_config.json", try Self.json(["mcpServers": [String: Any]()])),
                 (Self.gatePath, Data(GeminiSupport.gate.utf8)),
+                (GeminiSupport.launcherPath + "/open", Data(GeminiSupport.launcherScript.utf8)),
+                (GeminiSupport.launcherPath + "/browser", Data(GeminiSupport.launcherScript.utf8)),
                 (".gemini/config/hooks.json", try Self.json(["yab-gate": [
                     "PreToolUse": [["matcher": "*", "hooks": [["type": "command", "command": "/bin/sh \"\(gate)\"", "timeout": 5]]]],
                 ]])),
@@ -641,7 +664,8 @@ final class GeminiRunner {
             let home = profile.appendingPathComponent("home", isDirectory: true)
             let cwd = workspace.deletingLastPathComponent().resolvingSymlinksInPath()
                 .appendingPathComponent(workspace.lastPathComponent, isDirectory: true)
-            for folder in [home.appendingPathComponent(".gemini/antigravity-cli"), home.appendingPathComponent(".gemini/config/agents"), cwd] {
+            for folder in [home.appendingPathComponent(".gemini/antigravity-cli"), home.appendingPathComponent(".gemini/config/agents"),
+                           home.appendingPathComponent(GeminiSupport.launcherPath), cwd] {
                 try fm.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             }
             for folder in [profile, home] { try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
@@ -689,7 +713,17 @@ final class GeminiRunner {
                 }
             }
             try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.appendingPathComponent(Self.gatePath).path)
-            return (AgentCopies.environment(for: binary, base: GeminiSupport.environment(environment, profile: profile)), cwd)
+            let launcher = home.appendingPathComponent(GeminiSupport.launcherPath)
+            for name in ["open", "browser"] {
+                try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: launcher.appendingPathComponent(name).path)
+            }
+            // Every page agy opens goes through Yab's launcher (see
+            // launcherScript), whatever PATH the agy copy's folder adds.
+            var env = AgentCopies.environment(for: binary, base: GeminiSupport.environment(environment, profile: profile))
+            env["PATH"] = launcher.path + ":" + (env["PATH"] ?? "/usr/bin:/bin")
+            env["BROWSER"] = launcher.appendingPathComponent("browser").path
+            env["YAB_GEMINI_PAGE"] = nil
+            return (env, cwd)
         }
     }
 
@@ -726,7 +760,7 @@ final class GeminiRunner {
         stream = GeminiStream(conversation: config.conversation, model: config.launchModel, yabTools: config.mcpArgs != nil)
         let prepared = try config.prepare()
         let child = Process(), out = Pipe(), errors = Pipe(), incoming = Pipe()
-        child.executableURL = URL(fileURLWithPath: config.binary)
+        child.executableURL = ProcessLaunch.executableURL(config.binary)
         child.arguments = config.arguments; child.environment = prepared.env; child.currentDirectoryURL = prepared.cwd
         child.standardOutput = out; child.standardError = errors; child.standardInput = incoming
         let generation = UUID(); self.generation = generation

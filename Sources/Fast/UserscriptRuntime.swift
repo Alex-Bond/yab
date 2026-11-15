@@ -10,7 +10,41 @@ enum UserscriptRuntime {
     /// The handler's name: its own world's, or one per script in the page's.
     static func handler(_ id: String, inPage: Bool) -> String { inPage ? "yabUserscript_" + id.replacingOccurrences(of: "-", with: "_") : "yabUserscript" }
 
-    static func source(_ script: Userscript, id: String, values: [String: Any], inPage: Bool, token: String, appVersion: String) -> String {
+    /// The events a script in the page's world and its bridge talk over.
+    private static func pipe(_ id: String, token: String) -> (ask: String, answer: String) {
+        ("yab-us-" + token + "-" + id, "yab-us-" + token + "-" + id + "-back")
+    }
+
+    /// In the script's own world, for a script in the page's on Chromium,
+    /// whose engine gives a page's world no relay.
+    static func bridge(_ id: String, token: String) -> String {
+        let (ask, answer) = pipe(id, token: token)
+        return #"""
+        const relay = window.webkit.messageHandlers.yabUserscript;
+        const back = (detail) => document.dispatchEvent(new CustomEvent(\#(BoostScript.json(answer)), { detail: JSON.stringify(detail) }));
+        document.addEventListener(\#(BoostScript.json(ask)), (event) => {
+          const { n, body } = JSON.parse(event.detail);
+          relay.postMessage(body).then((value) => back({ n, value }), (error) => back({ n, error: String(error && error.message || error) }));
+        });
+        """#
+    }
+
+    /// The bridge's other end, shaped like the handler a script otherwise holds.
+    private static func piped(_ id: String, token: String) -> String {
+        let (ask, answer) = pipe(id, token: token)
+        return #"""
+        { postMessage(body) { const n = Math.random().toString(36).slice(2) + performance.now();
+          return new Promise((resolve, reject) => {
+            const heard = (event) => { const said = JSON.parse(event.detail); if (said.n !== n) return;
+              document.removeEventListener(\#(BoostScript.json(answer)), heard);
+              if (said.error) reject(new Error(said.error)); else resolve(said.value); };
+            document.addEventListener(\#(BoostScript.json(answer)), heard);
+            document.dispatchEvent(new CustomEvent(\#(BoostScript.json(ask)), { detail: JSON.stringify({ n, body }) }));
+          }); } }
+        """#
+    }
+
+    static func source(_ script: Userscript, id: String, values: [String: Any], inPage: Bool, token: String, appVersion: String, piped pipes: Bool = false) -> String {
         let rules = script.runs
         let rule = { (list: [(String, String)]) in BoostScript.json(list.map { [$0.0, $0.1] }) }
         let info: [String: Any] = [
@@ -29,7 +63,8 @@ enum UserscriptRuntime {
         var resources: [String: [String: String]] = [:]
         for file in script.resources { resources[file.name] = ["text": file.text, "mime": file.mime] }
         let requires = script.requires.map { "/* @require \($0.url) */\n" + $0.text }.joined(separator: "\n;\n")
-        let handler = handler(id, inPage: inPage)
+        let handler = pipes ? "" : handler(id, inPage: inPage)
+        let found = pipes ? piped(id, token: token) : "window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[\(BoostScript.json(handler))]"
         return #"""
         /* yab-userscript: \#(id) */
         (() => {
@@ -37,7 +72,7 @@ enum UserscriptRuntime {
           const __test = (list) => list.some(([s, f]) => { try { return new RegExp(s, f).test(__href); } catch (e) { return false; } });
           if (!__test(\#(rule(rules.include))) || __test(\#(rule(rules.exclude)))) return;
           if (/(?:^|\/)(?:login|signin|sign-in|oauth|checkout|payment|wallet)(?:\/|$)/i.test(location.pathname)) return;
-          const __handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[\#(BoostScript.json(handler))];
+          const __handler = \#(found);
           if (!__handler) return;
           const __post = __handler.postMessage.bind(__handler);
           const __call = (op, args) => __post({ op, args: args || {}, token: \#(BoostScript.json(token)) }).then((r) => { if (r && r.error) throw new Error(r.error); return r ? r.value : undefined; });

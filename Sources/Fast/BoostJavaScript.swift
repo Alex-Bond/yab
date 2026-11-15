@@ -2,6 +2,10 @@ import WebKit
 
 @MainActor
 enum BoostJavaScript {
+    /// A tab's page, either engine's, in a world named the same on both.
+    static func evaluate(_ source: String, on page: any PageHandle, world: PageWorld) async throws -> Any? {
+        try await page.run(source, in: world)
+    }
     static func evaluate(_ source: String, on web: WKWebView, world: WKContentWorld = .page) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             web.evaluateJavaScript(source, in: nil, in: world) { result in continuation.resume(with: result) }

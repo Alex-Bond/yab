@@ -56,7 +56,7 @@ def main(app, out):
                 ask('hello')
                 ask('profile.open', profile='diagnostic')
                 tab = ask('tab.create', profile='diagnostic', url='chrome://extensions/')['tab']
-                ask('drm.cookies.list', tab=tab)
+                ask('drm.cookies.get', tab=tab, urls=['https://example.com/'])
                 report['checks']['initial_cookie_transport'] = True
                 # Do not wait for DevTools here: first navigation must queue its
                 # DRM hook safely while the new browser is still attaching.

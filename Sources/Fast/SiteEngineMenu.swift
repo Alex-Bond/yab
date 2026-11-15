@@ -105,7 +105,13 @@ extension Tab {
             return SiteEngineRowFacts(kind: chosenSiteEngine, said: "Chosen for \(IDN.shown(SiteFacts(tab: self).site))", chosen: true)
         }
         guard effectiveSiteEngine != recommendedSiteEngine else { return nil }
-        return SiteEngineRowFacts(kind: effectiveSiteEngine, said: engineDecision.reason.map { $0 == EngineBuiltInRule.protectedVideo ? "For its protected video" : $0 } ?? "For its protected video",
+        // Only a move Yab made says why: a built-in rule, or this site's
+        // player refusing Chromium. Any other difference (⌘K's Open in, a
+        // window a WebKit page opened) is no protected video (#1605).
+        let reason = engineDecision.reason
+            ?? (effectiveSiteEngine == .webKit && protectsVideo(at: address) ? EngineBuiltInRule.protectedVideo : nil)
+        guard let reason else { return nil }
+        return SiteEngineRowFacts(kind: effectiveSiteEngine, said: reason == EngineBuiltInRule.protectedVideo ? "For its protected video" : reason,
                                   chosen: false)
     }
 }

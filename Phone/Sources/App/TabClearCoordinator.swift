@@ -83,6 +83,7 @@ final class TabClearCoordinator {
         if !app.browser.space.isPrivate { invalidate() }
     }
     func becameActive() {
+        Links.trace("tabClearActive selected=\(app?.browser.tab?.id ?? "nil") clock=\(clock())")
         foreground = true
         automaticDeferred.removeAll()
         if let id = app?.browser.tab?.id { activity(id) }

@@ -31,6 +31,16 @@ extension StateCatalog {
         NamedState("zero.1", "Empty page", "The last of today's closed in a space with pins and kept: no pin in front, + New Tab on the plate, the space's emoji on the right, no back.") { app in
             await closeToday(app, leaving: nil)
         },
+        NamedState("zero.mark", "Empty page, mark pulled", "The empty page's flat mark held by a finger up and to the right: stretched toward it, the face looking along.") { app in
+            #if DEBUG
+            EmptyMark.pullInTests = CGSize(width: 100, height: -150)
+            #endif
+            await closeToday(app, leaving: nil)
+        },
+        NamedState("zero.sheet", "Empty page with the sheet", "As people see it: Settings top left, the computer top right, and one + New Tab pill where a page's plate stands.") { app in
+            FieldModel.sheetInTests = true
+            await closeToday(app, leaving: nil)
+        },
         NamedState("zero.pin", "Launch on a pin", "Today empty, a pin left in front: Yab comes up on the empty screen with the sheet.") { app in
             await closeToday(app, leaving: nil)
             if let pin = app.browser.space.visiblePins.first { app.browser.select(pin.id) }
@@ -131,7 +141,8 @@ extension StateCatalog {
             TabStack.of(app).openGallery()
             try? await Task.sleep(for: .milliseconds(1500))
         },
-        NamedState("stack.gallery", "All tabs", "The previous one (GitHub) in focus with its title, the current one on the right on top, older ones on the left under a veil; + in a capsule.") { app in
+        NamedState("stack.gallery", "All tabs", "As in Arc: the previous one (GitHub) in focus with its title, the current one on the right on top, older ones on the left under a veil; + in a capsule.") { app in
+            FieldModel.sheetInTests = true
             await visit(app, ["work-linear-method", "work-lumen", "work-hn", "work-gh-pr"])
             await showAllTabs(app)
         },

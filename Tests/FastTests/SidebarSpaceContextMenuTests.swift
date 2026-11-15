@@ -144,6 +144,7 @@ struct SidebarSpaceContextMenuTests {
             let before = columnScrollsHeard.values.reduce(0, +)
             let wheel = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line,
                 wheelCount: 2, wheel1: 1, wheel2: 0, wheel3: 0))
+            wheel.flags = []
             wheel.setIntegerValueField(.scrollWheelEventIsContinuous, value: 0)
             wheel.setIntegerValueField(.scrollWheelEventScrollPhase, value: 0)
             wheel.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)

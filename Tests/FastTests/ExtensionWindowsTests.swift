@@ -62,6 +62,27 @@ struct ExtensionWindowsTests {
         #expect(owner.told(b) == nil)
     }
 
+    @Test func firstNavigationRegistersTabBeforeTheRowBatch() {
+        let owner = Extensions.shared
+        let browser = Browser(windowID: UUID())
+        owner.follow(browser)
+        defer {
+            owner.unfollow(browser)
+            try? FileManager.default.removeItem(at: Store.file("session-window-\(browser.windowID!.uuidString).json"))
+        }
+        // No yield to the row's coalescing timer: document-start scripts
+        // must already have a tab when they call runtime.connect.
+        let front = browser.open(Self.page("First"), foreground: true)
+        #expect(owner.told(front) == browser.windowID)
+        let background = browser.open(Self.page("Background"), foreground: false)
+        #expect(owner.told(background) == browser.windowID)
+        let outside = browser.blankTab()
+        browser.outside.append(outside)
+        outside.go(to: Self.page("Outside"))
+        #expect(owner.told(outside) == browser.windowID)
+        #expect(owner.adapter(for: front) !== owner.adapter(for: background))
+    }
+
     @Test func aDiscardedPageIsClosedNotOnlyLetGo() async throws {
         let tab = Tab(configuration: Web.configuration(extensions: false), factory: .webKitOnly)
         let web = requireNativeWebKitFixture(tab, "ExtensionWindowsTests")

@@ -20,6 +20,23 @@ final class SpaceWash {
     /// animate it (App's backdrop).
     var turning = false
 
+    /// The spring a wash lands on: the column's row's (SpacePager), or,
+    /// while `onStrip`, the turn's across the top (StripTurn).
+    static var onStrip = false
+    static func landing(keyPath: String, from: Any, to: Any, velocity: CGFloat = 0) -> CASpringAnimation {
+        onStrip ? StripTurn.caSpring(keyPath: keyPath, from: from, to: to, velocity: velocity)
+            : SpacePaging.animation(keyPath: keyPath, from: from, to: to, velocity: velocity)
+    }
+
+    /// The old color over the new from `opacity`, cleared on the turn's
+    /// spring across the top: the capsule's width and name ride the same
+    /// one (StripTurn).
+    func clearOnStrip(_ paint: Paint?, from opacity: Float, base: Paint? = nil) {
+        Self.onStrip = true
+        defer { Self.onStrip = false }
+        clear(paint, from: opacity, spring: true, base: base)
+    }
+
     fileprivate weak var view: WashView?
     weak var backdrop: WindowBackdropView?
 
@@ -105,7 +122,7 @@ final class SpaceWash {
             // The spring's way from one end to the other, a frame at a time:
             // mass 1, as SpacePaging.animation has it, setting off at
             // `velocity` of the whole way a second, as the row does.
-            let spring = SpacePaging.animation(keyPath: "opacity", from: 0, to: 1, velocity: velocity)
+            let spring = SpaceWash.landing(keyPath: "opacity", from: 0, to: 1, velocity: velocity)
             let length = max(spring.duration, 1.0 / 60)
             let k = Double(spring.stiffness), c = Double(spring.damping)
             var x = 1.0, v = -Double(spring.initialVelocity), t = 0.0
@@ -167,6 +184,7 @@ final class SpaceWash {
     /// switch turns the column's color as it does on a color.
     static func grounded(_ paint: SpacePaint? = nil, in browser: Browser) -> Paint? {
         let prefs = browser.prefs
+        if browser.windowPurpose == .privateOnly { return Paint(color: ContentView.privateBackdrop, grain: prefs.grain) }
         let paint = paint ?? SpacePaint(prefs)
         return !prefs.sideShut || browser.sideCard ? card(paint, prefs: prefs) : worn(paint, prefs: prefs)
     }
@@ -279,7 +297,7 @@ final class SpaceWash {
         CATransaction.setDisableActions(true)
         if let paint { view.wear(paint) }
         layer.opacity = 0
-        layer.add(Self.since(began, SpacePaging.animation(keyPath: "opacity", from: opacity, to: Float(0), velocity: velocity), in: layer),
+        layer.add(Self.since(began, SpaceWash.landing(keyPath: "opacity", from: opacity, to: Float(0), velocity: velocity), in: layer),
                   forKey: "wash")
         CATransaction.commit()
     }
@@ -302,7 +320,7 @@ final class SpaceWash {
         CATransaction.setDisableActions(true)
         view.wear(paint)
         layer.opacity = 1
-        layer.add(SpacePaging.animation(keyPath: "opacity", from: opacity, to: Float(1), velocity: velocity), forKey: "wash")
+        layer.add(SpaceWash.landing(keyPath: "opacity", from: opacity, to: Float(1), velocity: velocity), forKey: "wash")
         CATransaction.commit()
     }
 
@@ -515,7 +533,7 @@ final class CardGroundView: NSView {
         overCoating.wear(paint)
         overOpacity = paint.opacity
         over.layer?.opacity = 1
-        over.layer?.add(SpacePaging.animation(keyPath: "opacity", from: opacity, to: Float(1), velocity: velocity), forKey: "wash")
+        over.layer?.add(SpaceWash.landing(keyPath: "opacity", from: opacity, to: Float(1), velocity: velocity), forKey: "wash")
         cover = 1
         base.layer?.opacity = baseOpacity(1)
         base.layer?.removeAnimation(forKey: "space-cover")
@@ -566,7 +584,7 @@ final class CardGroundView: NSView {
         }
         let linear = CAMediaTimingFunction(name: .linear)
         func curve(_ from: Float, _ to: Float) -> CAAnimation {
-            spring ? SpacePaging.animation(keyPath: "opacity", from: from, to: to, velocity: velocity)
+            spring ? SpaceWash.landing(keyPath: "opacity", from: from, to: to, velocity: velocity)
                    : Self.fade(from: from, to: to, duration: duration, timing: linear)
         }
         cover = 0

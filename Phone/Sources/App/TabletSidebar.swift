@@ -7,15 +7,16 @@ struct TabletSidebar: View {
     let width: CGFloat
     @State private var browseSpaces = false
     private var space: Space { app.browser.space }
+    private var shownPins: [Tab] { app.sync.pins(in: space) }
     private var pair: [Tab.ID] { app.workspace.paired ? [app.workspace.first, app.workspace.second].compactMap { $0 } : [] }
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if !space.visiblePins.isEmpty {
+                    if !shownPins.isEmpty {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 4), spacing: 7) {
-                            ForEach(space.visiblePins) { tab in
+                            ForEach(shownPins) { tab in
                                 Button { select(tab) } label: {
                                     mark(tab, size: 24).frame(maxWidth: .infinity).frame(height: Metrics.Tablet.pin)
                                         .background(Ink.surface.opacity(tab.id == space.current ? 0.95 : 0.5), in: RoundedRectangle(cornerRadius: 10))

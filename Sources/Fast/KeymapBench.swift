@@ -65,16 +65,28 @@ extension Bench {
 
         case "toolbar":
             guard Store.testing else { answer(["error": "toolbar only works on a --test run"]); return }
-            answer(SettingsWindow.shared.shortcutToolbarState)
+            answer(SettingsWindow.shared.toolbarState)
 
         case "search":
             // The search glass pressed, and how it stands a beat later:
             // an empty field that lost the keys has gone back to the glass.
             guard Store.testing else { answer(["error": "search only works on a --test run"]); return }
-            _ = SettingsWindow.shared.beginShortcutSearch()
+            _ = SettingsWindow.shared.beginToolbarSearch()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                answer(SettingsWindow.shared.shortcutToolbarState)
+                answer(SettingsWindow.shared.toolbarState)
             }
+
+        case "addsite":
+            // Engines for Sites' Add Site… pressed as a click presses it, and
+            // the card it opens; "close" takes the card down again.
+            guard Store.testing else { answer(["error": "addsite only works on a --test run"]); return }
+            if request["close"] as? Bool == true {
+                EngineSiteEditing.shared.close()
+            } else {
+                guard let button = SettingsWindow.shared.engineAddButton else { answer(["error": "open Settings on Engines for Sites first"]); return }
+                button.performClick(nil)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { answer(SettingsWindow.shared.toolbarState) }
 
         case "filters":
             // The filter button pressed as a click presses it, then the list
@@ -243,7 +255,7 @@ extension Bench {
             // until the main thread goes idle, and its CPU over the tenth of
             // a second after. Settings must be open on Shortcuts.
             guard Store.testing else { answer(["error": "filter only works on a --test run"]); return }
-            let native = SettingsWindow.shared.beginShortcutSearch()
+            let native = SettingsWindow.shared.beginToolbarSearch()
             guard let window = SettingsWindow.shared.window, let field = native ?? Self.field("Search by name or alias", in: window.contentView?.superview) ?? Self.field("Filter", in: window.contentView)
             else { answer(["error": "no filter field: open Settings on Shortcuts first"]); return }
             if native == nil { window.makeFirstResponder(field) }

@@ -315,7 +315,7 @@ struct SiteControlsView: View {
     /// Dark page: on, the site's own, or off here; or Dark Reader the
     /// extension doing it, with Yab's own a press away.
     private func darkRow(_ site: String) -> Setting? {
-        guard DarkPages.active(windowDark: DarkPages.windowDark, mode: prefs.darkPages), !tab.bench else { return nil }
+        guard DarkPages.active(windowDark: DarkPages.windowDark(for: tab), mode: prefs.darkPages), !tab.bench else { return nil }
         if extensions.installed.contains(where: { $0.id == DarkPages.extensionID && $0.enabled }) {
             return Setting(symbol: "moon", title: "Dark page", said: "Dark Reader does it here",
                            end: AnyView(Button("Use Yab\u{2019}s") { DarkPages.takeOverFromExtension(); forgets += 1 }
@@ -491,8 +491,6 @@ struct SiteControlsView: View {
     /// Everything this site keeps on this Mac, after a yes: the cookies go
     /// with it, so it signs you out.
     private func clearData() {
-        guard let web = tab.webKitOnly("Site data clearing", build: false) else { return }
-        let store = web.configuration.websiteDataStore
         let site = facts.site
         ExtensionPanel.shared.close()
         Task { @MainActor in
@@ -502,17 +500,7 @@ struct SiteControlsView: View {
                 glyph: "broom", yes: "Clear", danger: true, place: .plain
             )
             guard await Questions.shared.ask(question) else { return }
-            let types = WKWebsiteDataStore.allWebsiteDataTypes()
-            let records = await store.dataRecords(ofTypes: types)
-            let mine = records.filter { record in
-                let name = record.displayName.lowercased()
-                return name == site || name.hasSuffix("." + site) || site.hasSuffix("." + name)
-            }
-            await store.removeData(ofTypes: types, for: mine)
-            // A certificate it was excused for asks again.
-            CertificateExceptions.forget(site: site, in: store)
-            // Its service workers went with it, and their push subscriptions.
-            WebPush.shared.drop(site: site)
+            await browser.forgetSite(site, tab: tab)
             browser.reload(tab)
         }
     }
@@ -768,8 +756,7 @@ private struct ExtensionTile: View {
     var body: some View {
         Button {
             if let native {
-                ExtensionPanel.shared.close()
-                ChromiumColumn.shared.press(button.id, tab: native)
+                ChromiumColumn.shared.press(button.id, tab: native, list: ExtensionPanel.shared.handOver())
             } else { ExtensionPanel.shared.press(button.id) }
         } label: {
             ExtensionIcon(button: button, size: 18)
@@ -791,7 +778,11 @@ private struct ExtensionTile: View {
         }
         .buttonStyle(Door.Give())
         .focusable(false)
-        .onHover { hovering = $0 }
+        .onHover {
+            hovering = $0
+            // Its menu's own rows, read before a right click asks for them.
+            if $0, let native { ChromiumActionMenu.shared.refresh(button.id, tab: native) }
+        }
         .keyTip(button.label, keys: button.keys)
         .steadyMenu(actions: true) {
             if let native { ChromiumPinActions(id: button.id, name: button.name, tab: native) }
@@ -841,7 +832,11 @@ struct SiteFacts {
         return (scheme == "https" || scheme == "http") && !host.isEmpty
     }
     var secure: Bool { url?.scheme?.lowercased() == "https" || Dialogs.isLoopback(host) }
-    var trust: SecTrust? { url?.scheme?.lowercased() == "https" ? tab.webKitOnly("Native certificate trust", build: false)?.serverTrust : nil }
+    var trust: SecTrust? {
+        guard url?.scheme?.lowercased() == "https" else { return nil }
+        if let chromium = tab.builtPage as? ChromiumPage { return chromium.serverTrust }
+        return tab.webKitOnly("Native certificate trust", build: false)?.serverTrust
+    }
 
     struct Connection {
         let title: String
@@ -923,14 +918,18 @@ struct SiteFacts {
                 keys.forEach(Store.settings.removeObject)
             })
         }
-        let location = "location.\(host)"
-        if let said = Store.settings.object(forKey: location) as? Bool {
+        let locationKeys = [origin.map(Browser.locationKey), Browser.locationKey(host)].compactMap { $0 }
+        if let said = locationKeys.lazy.compactMap({ Store.settings.object(forKey: $0) as? Bool }).first {
             rows.append(Allowed(symbol: "location", title: "Location", said: said) {
-                Store.settings.removeObject(forKey: location)
+                locationKeys.forEach(Store.settings.removeObject)
             })
         }
         if let origin, let said = SiteNotices.said(origin) {
             rows.append(Allowed(symbol: "bell", title: "Notifications", said: said) { SiteNotices.forget(origin) })
+        }
+        for kind in SitePermission.allCases where kind.remembered {
+            guard let origin, let said = SitePermission.said(origin, kind) else { continue }
+            rows.append(Allowed(symbol: kind.symbol, title: kind.title, said: said) { SitePermission.forget(origin, kind) })
         }
         for (kind, title) in [(LocalNetwork.Kind.loopback, "Apps on this Mac"), (.local, "Devices on your network")] {
             guard let origin, let said = LocalNetwork.said(origin, kind) else { continue }
@@ -970,6 +969,7 @@ struct SiteControlsDoor: View {
     @ObservedObject private var state = SiteControlsState.shared
     /// The window's sign-in's extensions (ExtensionSignIns).
     @ObservedObject private var here = ExtensionsHere.shared
+    @ObservedObject private var nativePopup = ChromiumPopupHost.shared
     private var extensions: Extensions { Extensions.of(browser) }
     @Environment(\.tone) private var tone
     @State private var hovering = false
@@ -980,6 +980,7 @@ struct SiteControlsDoor: View {
         // in the panel hangs from it in the panel's place.
         let hung: Bool = {
             guard #available(macOS 15.4, *) else { return false }
+            if let tab, tab.engineKind == .chromium { return nativePopup.shownFromDoor(for: tab) }
             return ExtensionPopup.shared.hangs(from: box.view)
         }()
         let open = (state.openFor != nil && state.openFor == tab?.id && extensions.menuOpen) || hung
@@ -1070,6 +1071,8 @@ struct SidePlate: View {
     /// The address has slid in from where the question was.
     @State private var arrived = false
     @ObservedObject private var boostEditor = BoostEditor.shared
+    /// Pins a window of the extension's own stands under (ExtensionWindowFrame).
+    @ObservedObject private var hung = ExtensionWindowFrame.Hung.shared
 
     /// The plate's height at the column's density (Density), with the
     /// pins' corner under it (SideBar.corner).
@@ -1131,7 +1134,7 @@ struct SidePlate: View {
         // went the same way.
         let nativePopupID = nativePopup.shownExtension(for: tab)
         let popupID = tab.engineKind == .chromium ? nativePopupID : ExtensionPopup.shared.extensionID
-        let fromDoor = tab.engineKind == .chromium ? false : ExtensionPopup.shared.fromDoor
+        let fromDoor = tab.engineKind == .chromium ? nativePopup.shownFromDoor(for: tab) : ExtensionPopup.shared.fromDoor
         let popped: Bool = {
             if tab.engineKind == .chromium { return nativePopupID != nil }
             guard ExtensionPopup.shared.isShown else { return false }
@@ -1139,7 +1142,9 @@ struct SidePlate: View {
             guard let id = ExtensionPopup.shared.extensionID else { return false }
             return pinned.contains { $0.id == id }
         }()
-        let near = near || popped
+        // A window of an extension's own under its pin keeps the pins
+        // in, the one it stands under lit (PlatePin).
+        let near = near || popped || pinned.contains { hung.ids.contains($0.id) }
         // Only with the pointer in the column, as the link and the sliders:
         // a count or "!" kept one at rest, and it stood where it does in the
         // row, before the link and sliders faded out after it, in the middle
@@ -1489,8 +1494,11 @@ struct PlatePin: View {
     let act: () -> Void
     @Environment(\.tone) private var tone
     @State private var hovering = false
+    /// A window of its own stands under it (ExtensionWindowFrame): lit too.
+    @ObservedObject private var hung = ExtensionWindowFrame.Hung.shared
 
     var body: some View {
+        let lit = self.lit || hung.ids.contains(button.id)
         Button(action: act) {
             ExtensionIcon(button: button, size: 14)
                 .frame(width: 18, height: 18)
@@ -1501,7 +1509,11 @@ struct PlatePin: View {
         }
         .buttonStyle(Door.Give())
         .focusable(false)
-        .onHover { hovering = $0 }
+        .onHover {
+            hovering = $0
+            // Its menu's own rows, read before a right click asks for them.
+            if $0, let native { ChromiumActionMenu.shared.refresh(button.id, tab: native) }
+        }
         .keyTip(button.label, keys: button.keys)
         // Right-clicked, what its tile in the panel offers (ExtensionActions).
         .steadyMenu(actions: true) {

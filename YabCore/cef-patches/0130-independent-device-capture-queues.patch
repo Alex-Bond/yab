@@ -1,0 +1,267 @@
+--- a/third_party/blink/renderer/modules/mediastream/user_media_client.cc
++++ b/third_party/blink/renderer/modules/mediastream/user_media_client.cc
+@@ -276,6 +276,7 @@
+                                              user_media_processor,
+                                              this,
+                                              task_runner)),
++      pending_audio_requests_(pending_device_requests_),
+       pending_display_requests_(
+           MakeGarbageCollected<RequestQueue>(frame,
+                                              display_user_media_processor,
+@@ -287,6 +288,21 @@
+   frame_->SetIsCapturingMediaCallback(BindRepeating(
+       [](UserMediaClient* client) { return client && client->IsCapturing(); },
+       WrapWeakPersistent(this)));
++}
++
++// Microphone-only requests and camera requests use independent processors,
++// just as device capture and display capture do. A pending microphone prompt
++// must not keep a camera request in Blink, invisible to the embedder's UI.
++UserMediaClient::UserMediaClient(
++    LocalFrame* frame,
++    UserMediaProcessor* user_media_processor,
++    UserMediaProcessor* display_user_media_processor,
++    UserMediaProcessor* audio_user_media_processor,
++    scoped_refptr<base::SingleThreadTaskRunner> task_runner)
++    : UserMediaClient(frame, user_media_processor, display_user_media_processor,
++                      task_runner) {
++  pending_audio_requests_ = MakeGarbageCollected<RequestQueue>(
++      frame, audio_user_media_processor, this, std::move(task_runner));
+ }
+ 
+ UserMediaClient::UserMediaClient(
+@@ -318,6 +334,18 @@
+                   },
+                   WrapWeakPersistent(this)),
+               frame->GetTaskRunner(blink::TaskType::kInternalMedia)),
++          MakeGarbageCollected<UserMediaProcessor>(
++              frame,
++              BindRepeating(
++                  [](UserMediaClient* client)
++                      -> mojom::blink::MediaDevicesDispatcherHost* {
++                    // |client| is guaranteed to be not null because |client|
++                    // owns transitively this UserMediaProcessor.
++                    DCHECK(client);
++                    return client->GetMediaDevicesDispatcher();
++                  },
++                  WrapWeakPersistent(this)),
++              frame->GetTaskRunner(blink::TaskType::kInternalMedia)),
+           std::move(task_runner)) {}
+ 
+ void UserMediaClient::RequestUserMedia(UserMediaRequest* user_media_request) {
+@@ -402,7 +430,8 @@
+ }
+ 
+ bool UserMediaClient::IsCapturing() {
+-  return pending_device_requests_->IsCapturing() ||
++  return pending_audio_requests_->IsCapturing() ||
++         pending_device_requests_->IsCapturing() ||
+          pending_display_requests_->IsCapturing();
+ }
+ 
+@@ -414,6 +443,8 @@
+ 
+ void UserMediaClient::CancelUserMediaRequest(
+     UserMediaRequest* user_media_request) {
++  if (pending_audio_requests_ != pending_device_requests_)
++    pending_audio_requests_->CancelUserMediaRequest(user_media_request);
+   pending_device_requests_->CancelUserMediaRequest(user_media_request);
+   pending_display_requests_->CancelUserMediaRequest(user_media_request);
+ }
+@@ -422,6 +453,8 @@
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+   if (frame_)
+     frame_->SetIsCapturingMediaCallback(LocalFrame::IsCapturingMediaCallback());
++  if (pending_audio_requests_ != pending_device_requests_)
++    pending_audio_requests_->DeleteAllUserMediaRequests();
+   pending_device_requests_->DeleteAllUserMediaRequests();
+   pending_display_requests_->DeleteAllUserMediaRequests();
+ }
+@@ -437,6 +470,7 @@
+   ExecutionContextLifecycleObserver::Trace(visitor);
+   visitor->Trace(frame_);
+   visitor->Trace(media_devices_dispatcher_);
++  visitor->Trace(pending_audio_requests_);
+   visitor->Trace(pending_device_requests_);
+   visitor->Trace(pending_display_requests_);
+ }
+@@ -494,6 +528,9 @@
+       media_stream_type ==
+           mojom::blink::MediaStreamType::DISPLAY_AUDIO_CAPTURE) {
+     return pending_display_requests_.Get();
++  } else if (media_stream_type ==
++             mojom::blink::MediaStreamType::DEVICE_AUDIO_CAPTURE) {
++    return pending_audio_requests_.Get();
+   } else {
+     return pending_device_requests_.Get();
+   }
+--- a/third_party/blink/renderer/modules/mediastream/user_media_client.h
++++ b/third_party/blink/renderer/modules/mediastream/user_media_client.h
+@@ -90,6 +90,14 @@
+                   UserMediaProcessor* display_user_media_processor,
+                   scoped_refptr<base::SingleThreadTaskRunner> task_runner);
+ 
++  // A dedicated audio processor permits independent hardware permission
++  // requests. The two-processor overload keeps its original shared queue.
++  UserMediaClient(LocalFrame* frame,
++                  UserMediaProcessor* user_media_processor,
++                  UserMediaProcessor* display_user_media_processor,
++                  UserMediaProcessor* audio_user_media_processor,
++                  scoped_refptr<base::SingleThreadTaskRunner> task_runner);
++
+  private:
+   class Request final : public GarbageCollected<Request> {
+    public:
+@@ -143,6 +151,7 @@
+       media_devices_dispatcher_;
+ 
+   Member<RequestQueue> pending_device_requests_;
++  Member<RequestQueue> pending_audio_requests_;
+   Member<RequestQueue> pending_display_requests_;
+ 
+   THREAD_CHECKER(thread_checker_);
+--- a/third_party/blink/renderer/modules/mediastream/user_media_client_test.cc
++++ b/third_party/blink/renderer/modules/mediastream/user_media_client_test.cc
+@@ -783,6 +783,19 @@
+             static_cast<UserMediaProcessorUnderTest*>(user_media_processor)),
+         state_(state) {}
+ 
++  UserMediaClientUnderTest(LocalFrame* frame,
++                           UserMediaProcessor* user_media_processor,
++                           UserMediaProcessor* display_user_media_processor,
++                           UserMediaProcessor* audio_user_media_processor,
++                           RequestState* state)
++      : UserMediaClient(
++            frame, user_media_processor, display_user_media_processor,
++            audio_user_media_processor,
++            blink::scheduler::GetSingleThreadTaskRunnerForTesting()),
++        user_media_processor_(
++            static_cast<UserMediaProcessorUnderTest*>(user_media_processor)),
++        state_(state) {}
++
+   void RequestUserMediaForTest(UserMediaRequest* user_media_request) {
+     *state_ = kRequestNotComplete;
+     user_media_processor_->set_is_processing_user_media(true);
+@@ -1129,6 +1142,122 @@
+   RequestState state_ = kRequestNotStarted;
+   raw_ptr<FakeDeviceIds> fake_ids_ = FakeDeviceIds::GetInstance();
+ };
++
++// Hold the original dispatcher callbacks, as while a permission card is
++// unanswered. A second device must reach its own original dispatcher now,
++// without granting, completing or cancelling the first request.
++class CaptureQueueDispatcher : public MockMojoMediaStreamDispatcherHost {
++ public:
++  void CancelRequest(int32_t request_id) override {
++    cancelled_requests_.push_back(request_id);
++    MockMojoMediaStreamDispatcherHost::CancelRequest(request_id);
++  }
++  const Vector<int32_t>& cancelled_requests() const {
++    return cancelled_requests_;
++  }
++
++ private:
++  Vector<int32_t> cancelled_requests_;
++};
++
++class UserMediaIndependentDevicesTest : public UserMediaClientTest {
++ public:
++  UserMediaIndependentDevicesTest()
++      : audio_receiver_(&media_devices_dispatcher_),
++        video_receiver_(&media_devices_dispatcher_) {}
++
++  void SetUp() override {
++    UserMediaClientTest::SetUp();
++    user_media_client_impl_->ContextDestroyed();
++    user_media_client_receiver_.reset();
++    auto* frame = &dummy_page_holder_->GetFrame();
++    user_media_processor_ = MakeGarbageCollected<UserMediaProcessorUnderTest>(
++        frame, std::make_unique<WebMediaStreamDeviceObserver>(nullptr),
++        video_receiver_.BindNewPipeAndPassRemote(), &state_);
++    user_media_processor_->set_media_stream_dispatcher_host_for_testing(
++        video_dispatcher_.CreatePendingRemoteAndBind());
++    audio_processor_ = MakeGarbageCollected<UserMediaProcessorUnderTest>(
++        frame, std::make_unique<WebMediaStreamDeviceObserver>(nullptr),
++        audio_receiver_.BindNewPipeAndPassRemote(), &state_);
++    audio_processor_->set_media_stream_dispatcher_host_for_testing(
++        audio_dispatcher_.CreatePendingRemoteAndBind());
++    user_media_client_impl_ = MakeGarbageCollected<UserMediaClientUnderTest>(
++        frame, user_media_processor_, display_user_media_processor_,
++        audio_processor_, &state_);
++    user_media_client_impl_->SetMediaDevicesDispatcherForTesting(
++        user_media_client_receiver_.BindNewPipeAndPassRemote());
++    audio_dispatcher_.DoNotRunCallback();
++    video_dispatcher_.DoNotRunCallback();
++  }
++
++ protected:
++  UserMediaRequest* AudioRequest() {
++    return UserMediaRequest::CreateForTesting(CreateDefaultConstraints(),
++                                               MediaConstraints());
++  }
++  UserMediaRequest* VideoRequest() {
++    return UserMediaRequest::CreateForTesting(MediaConstraints(),
++                                               CreateDefaultConstraints());
++  }
++  CaptureQueueDispatcher audio_dispatcher_;
++  CaptureQueueDispatcher video_dispatcher_;
++  mojo::Receiver<mojom::blink::MediaDevicesDispatcherHost> audio_receiver_;
++  mojo::Receiver<mojom::blink::MediaDevicesDispatcherHost> video_receiver_;
++  WeakPersistent<UserMediaProcessorUnderTest> audio_processor_;
++};
++
++TEST_F(UserMediaIndependentDevicesTest, CameraReachesBrowserWhileMicrophoneWaits) {
++  user_media_client_impl_->RequestUserMediaForTest(AudioRequest());
++  user_media_client_impl_->RequestUserMediaForTest(VideoRequest());
++  EXPECT_EQ(1, audio_dispatcher_.request_stream_counter());
++  EXPECT_EQ(1, video_dispatcher_.request_stream_counter());
++}
++
++TEST_F(UserMediaIndependentDevicesTest, MicrophoneReachesBrowserWhileCameraWaits) {
++  user_media_client_impl_->RequestUserMediaForTest(VideoRequest());
++  user_media_client_impl_->RequestUserMediaForTest(AudioRequest());
++  EXPECT_EQ(1, audio_dispatcher_.request_stream_counter());
++  EXPECT_EQ(1, video_dispatcher_.request_stream_counter());
++}
++
++TEST_F(UserMediaIndependentDevicesTest, SameDeviceRequestsRemainSerialized) {
++  user_media_client_impl_->RequestUserMediaForTest(AudioRequest());
++  user_media_client_impl_->RequestUserMediaForTest(AudioRequest());
++  EXPECT_EQ(1, audio_dispatcher_.request_stream_counter());
++  EXPECT_EQ(0, video_dispatcher_.request_stream_counter());
++}
++
++TEST_F(UserMediaIndependentDevicesTest, CancelOneRequestKeepsTheOtherPending) {
++  auto* audio = AudioRequest();
++  auto* video = VideoRequest();
++  user_media_client_impl_->RequestUserMediaForTest(audio);
++  user_media_client_impl_->RequestUserMediaForTest(video);
++  const int32_t audio_id = audio->request_id();
++  user_media_client_impl_->CancelUserMediaRequest(audio);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_THAT(audio_dispatcher_.cancelled_requests(),
++              ::testing::ElementsAre(audio_id));
++  EXPECT_TRUE(video_dispatcher_.cancelled_requests().empty());
++  EXPECT_EQ(1, video_dispatcher_.request_stream_counter());
++  user_media_client_impl_->RequestUserMediaForTest(AudioRequest());
++  EXPECT_EQ(2, audio_dispatcher_.request_stream_counter());
++}
++
++TEST_F(UserMediaIndependentDevicesTest, DocumentTeardownRetiresBothQueues) {
++  auto* audio = AudioRequest();
++  auto* video = VideoRequest();
++  user_media_client_impl_->RequestUserMediaForTest(audio);
++  user_media_client_impl_->RequestUserMediaForTest(video);
++  const int32_t audio_id = audio->request_id();
++  const int32_t video_id = video->request_id();
++  LoadNewDocumentInFrame();
++  base::RunLoop().RunUntilIdle();
++  EXPECT_FALSE(user_media_client_impl_->IsCapturing());
++  EXPECT_THAT(audio_dispatcher_.cancelled_requests(),
++              ::testing::ElementsAre(audio_id));
++  EXPECT_THAT(video_dispatcher_.cancelled_requests(),
++              ::testing::ElementsAre(video_id));
++}
+ 
+ TEST_F(UserMediaClientTest, GenerateMediaStream) {
+   // Generate a stream with both audio and video.

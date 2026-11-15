@@ -35,6 +35,7 @@ struct WheelLatchTests {
                    dx: Int32 = 0, phase: Int64 = 0) throws -> NSEvent {
             let made = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line,
                 wheelCount: 2, wheel1: -1, wheel2: dx, wheel3: 0))
+            made.flags = []
             made.timestamp = CGEventTimestamp(time * 1e9)
             made.setIntegerValueField(.scrollWheelEventIsContinuous, value: 0)
             made.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)

@@ -28,7 +28,7 @@ struct NamedState: Sendable {
 enum StateCatalog {
     static var all: [NamedState] {
         page + field + chats + settings + sync + tasks + reports + design + history + back + shield + tabs + translate + voice
-            + entrances + workspace + approvals + fieldAnswers + launch + tabEdits
+            + entrances + workspace + approvals + fieldAnswers + launch + tabEdits + siteIcons
     }
 
     static func named(_ name: String) -> NamedState? { all.first { $0.name == name } }

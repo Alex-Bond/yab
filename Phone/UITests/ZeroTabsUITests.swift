@@ -128,7 +128,7 @@ final class ZeroTabsUITests: XCTestCase {
         app.launchArguments = ["-YabProfileDirectory", folder.path]
         app.launchEnvironment = ["YAB_TEST": "1", "YAB_HAPTICS_SILENT": "1"]
         app.launch()
-        XCTAssertTrue(app.buttons["welcome.start"].waitForExistence(timeout: 20), "no welcome")
+        XCTAssertTrue(app.buttons["welcome.skip"].waitForExistence(timeout: 20), "no welcome")
         app.passWelcome()
         XCTAssertTrue(app.textFields["field.input"].waitForExistence(timeout: 8), "no field after the welcome")
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 8), "no keyboard after the welcome")

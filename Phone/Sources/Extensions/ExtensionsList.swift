@@ -26,10 +26,10 @@ struct ExtensionsList: View {
                     }
                 }
                 // No way to the store here (register 617): adding an
-                // extension is on the Mac.
+                // extension is on the Mac, named as its menus name it (row 2604).
                 Section {
                 } footer: {
-                    Text("Add extensions in Yab on your Mac.")
+                    Text("Add extensions on your Mac, in Yab › Settings › Extensions › Add Extension.")
                 }
             }
             .navigationTitle("Extensions")

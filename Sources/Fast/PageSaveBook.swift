@@ -47,7 +47,7 @@ extension PageSave {
                        done: @escaping @MainActor (Result<URL, Error>) -> Void) {
         guard let first = tabs.first else { return done(.failure(Failure("No tabs to save"))) }
         let name = title.map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
-            ?? "\(first.title) and \(tabs.count - 1) more"
+            ?? (tabs.count == 1 ? first.title : "\(first.title) and \(tabs.count - 1) more")
         collectJoined(count: tabs.count, read: { index, reply in
             AgentPage.run(tabs[index], format == "md" ? markdown : text) { reply($0) }
         }) { result in

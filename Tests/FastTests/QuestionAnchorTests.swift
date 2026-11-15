@@ -136,4 +136,57 @@ struct QuestionAnchorTests {
         #expect(anchor.panel == nil)
         #expect(questions.shownIn.isEmpty)
     }
+
+    /// R2564: with keyboard navigation on, AppKit's first key view (what it
+    /// makes first responder as a window first goes on screen) was the Not
+    /// Now button. The panel names its field as initialFirstResponder before
+    /// it is ordered in, and keeps it as it resigns and becomes key again.
+    /// `KeyLoopFirst` stands for the button: a view that takes keys, first in
+    /// the key loop, whatever the Mac's keyboard navigation setting.
+    @MainActor @Test func theFieldTakesTheKeysAsTheCardGoesOnScreenAndKeepsThem() throws {
+        _ = NSApplication.shared
+        let screen = try #require(TestScreen.screen)
+        func panel() -> (QuestionAnchorPanel, KeyLoopFirst, NSTextField) {
+            let panel = QuestionAnchorPanel(contentRect: CGRect(x: screen.visibleFrame.minX + 40, y: screen.visibleFrame.minY + 40,
+                                                                width: 320, height: 120),
+                                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+            panel.isReleasedWhenClosed = false
+            let content = NSView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+            let notNow = KeyLoopFirst(frame: CGRect(x: 10, y: 90, width: 100, height: 22))
+            let hidden = NSTextField(frame: CGRect(x: 10, y: 60, width: 200, height: 22))
+            hidden.isHidden = true
+            let label = NSTextField(labelWithString: "Connect Apple Passwords")
+            let field = NSTextField(frame: CGRect(x: 10, y: 30, width: 200, height: 22))
+            [notNow, hidden, label, field].forEach(content.addSubview)
+            panel.contentView = content
+            return (panel, notNow, field)
+        }
+        func typing(_ panel: NSWindow) -> NSResponder? {
+            (panel.firstResponder as? NSTextView)?.delegate as? NSTextField ?? panel.firstResponder
+        }
+
+        // Left to AppKit: the first view of the key loop, as Not Now was.
+        let (plain, notNow, _) = panel()
+        plain.orderFront(nil)
+        #expect(typing(plain) === notNow)
+        plain.close()
+
+        let (card, _, field) = panel()
+        defer { card.close() }
+        card.prepareFirstResponder()
+        #expect(card.initialFirstResponder === field)
+        card.orderFront(nil)
+        #expect(typing(card) === field)
+        card.makeKey()
+        card.resignKey()
+        card.becomeKey()
+        #expect(typing(card) === field)
+    }
+}
+
+/// A view that takes keys and leads the key loop, as a button does with
+/// keyboard navigation on.
+private final class KeyLoopFirst: NSView {
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
 }

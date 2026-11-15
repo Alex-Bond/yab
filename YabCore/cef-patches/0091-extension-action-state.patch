@@ -1,0 +1,317 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1122,6 +1122,8 @@
+       "libcef/browser/views/ns_window.h",
+       "libcef/browser/views/ns_window.mm",
+       "libcef/browser/views/view_util_mac.mm",
++      "libcef/browser/views/external_action_watch.cc",
++      "libcef/browser/views/external_action_watch.h",
+       "libcef/browser/views/external_consent.cc",
+       "libcef/browser/views/external_consent.h",
+       "libcef/browser/views/external_crx.cc",
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -64,6 +64,7 @@
+ #define CEF_YAB_NATIVE_CLOSE_PREFLIGHT_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_SOURCE_VERSION 1
+ #define CEF_YAB_NATIVE_READ_AUTOPLAY_LOCK_VERSION 1
++#define CEF_YAB_EXTENSION_ACTION_STATE_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1378,6 +1379,23 @@
+                                      const CefRect& anchor,
+                                      bool focused,
+                                      bool close) = 0;
++
++  ///
++  /// The action of the enabled extension |extension_id| as Chrome holds it for
++  /// this browser's tab, read in the browser process: tabId, title, badge (the
++  /// text Chrome's toolbar shows, the declarativeNetRequest count included),
++  /// badgeBackgroundColor and badgeTextColor (ARGB), enabled, popup (it has
++  /// one), iconSet (an icon set by the extension, for this tab or every tab),
++  /// iconEverywhere (that icon is every tab's) and icon (that icon as a 1x PNG
++  /// data URL, at most 150 kB). Null if the extension, its action or this tab
++  /// is unavailable. The first read for a profile starts watching its actions:
++  /// CefBrowserProcessHandler::OnExtensionActionChanged reports each change.
++  /// Needs no extension process and never starts or keeps its service worker.
++  /// UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefDictionaryValue> GetExtensionActionState(
++      const CefString& extension_id) = 0;
+ #endif
+ };
+ 
+--- a/cef/include/cef_browser_process_handler.h
++++ b/cef/include/cef_browser_process_handler.h
+@@ -49,6 +49,7 @@
+ 
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_EXTENSION_CONSENT_VERSION 1
++#define CEF_YAB_EXTENSION_ACTION_CHANGED_VERSION 1
+ 
+ #if CEF_API_ADDED(CEF_EXPERIMENTAL)
+ ///
+@@ -212,6 +213,19 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual void OnExtensionConsentWithdrawn(const CefString& request) {}
++
++  ///
++  /// Chrome changed the action of the extension |extension_id| in the profile
++  /// at |profile_path| (its own or its off-the-record one): for |browser|'s
++  /// tab, or for every tab when |browser| is null. Reported only for profiles
++  /// a CefBrowserHost::GetExtensionActionState call has read, after the change
++  /// and never from inside it; read the new state with that call. Several
++  /// changes in a row may be reported once.
++  ///
++  /*--cef(added=experimental,optional_param=browser)--*/
++  virtual void OnExtensionActionChanged(CefRefPtr<CefBrowser> browser,
++                                        const CefString& extension_id,
++                                        const CefString& profile_path) {}
+ #endif
+ };
+ 
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -317,6 +317,8 @@
+                            const CefRect& anchor) override;
+   bool ControlExtensionPopup(const CefString& token, const CefRect& anchor,
+                              bool focused, bool close) override;
++  CefRefPtr<CefDictionaryValue> GetExtensionActionState(
++      const CefString& extension_id) override;
+ 
+   // CefBrowser methods:
+   bool IsValid() override;
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -36,6 +36,7 @@
+ #include "base/feature_list.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "cef/libcef/browser/views/external_print.h"
++#include "cef/libcef/browser/views/external_action_watch.h"
+ #include "cef/libcef/browser/views/external_host_mac.h"
+ #endif
+ #include "base/functional/callback_helpers.h"
+@@ -1272,6 +1273,16 @@
+ #endif
+ }
+ 
++CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetExtensionActionState(
++    const CefString& extension_id) {
++  CEF_REQUIRE_UIT_RETURN(nullptr);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::ActionState(this, extension_id.ToString());
++#else
++  return nullptr;
++#endif
++}
++
+ void CefBrowserHostBase::ReplaceMisspelling(const CefString& word) {
+   if (!CEF_CURRENTLY_ON_UIT()) {
+     CEF_POST_TASK(
+--- /dev/null
++++ b/cef/libcef/browser/views/external_action_watch.h
+@@ -0,0 +1,22 @@
++// Chrome's own extension action state for a page, and its changes, read in
++// the browser process: no DevTools session on the extension's service worker,
++// which Chrome never stops while one is attached.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_ACTION_WATCH_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_ACTION_WATCH_H_
++#pragma once
++
++#include <string>
++
++#include "cef/include/cef_values.h"
++
++class CefBrowserHostBase;
++
++namespace cef::external_host {
++// The action of |extension_id| as Chrome holds it for |browser|'s tab, or
++// null. Starts watching the profile's actions (idempotent); each change then
++// reaches CefBrowserProcessHandler::OnExtensionActionChanged. UI thread.
++CefRefPtr<CefDictionaryValue> ActionState(CefBrowserHostBase* browser,
++                                          const std::string& extension_id);
++}  // namespace cef::external_host
++
++#endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_ACTION_WATCH_H_
+--- /dev/null
++++ b/cef/libcef/browser/views/external_action_watch.cc
+@@ -0,0 +1,176 @@
++#include "cef/libcef/browser/views/external_action_watch.h"
++
++#include <map>
++#include <memory>
++#include <set>
++#include <string>
++#include <tuple>
++#include <utility>
++
++#include "base/base64.h"
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/ref_counted_memory.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "cef/include/cef_browser_process_handler.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/browser/thread_util.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "cef/libcef/common/app_manager.h"
++#include "chrome/browser/extensions/extension_action_dispatcher.h"
++#include "components/sessions/content/session_tab_helper.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/web_contents.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_manager.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_util.h"
++#include "extensions/common/extension.h"
++#include "ui/gfx/image/image.h"
++
++namespace cef::external_host {
++namespace {
++
++constexpr size_t kMaxIconBytes = 150000;
++
++using extensions::ExtensionAction;
++using extensions::ExtensionActionDispatcher;
++
++class Watch;
++using Watches = std::map<ExtensionActionDispatcher*, std::unique_ptr<Watch>>;
++Watches& GetWatches() {
++  static base::NoDestructor<Watches> watches;
++  return *watches;
++}
++
++// One per profile's dispatcher (shared with its off-the-record profile).
++// Changes are reported on a later task, never from inside Chrome's
++// notification, and repeats for the same tab and extension waiting for that
++// task are reported once: an extension that sets a badge on every tab, or
++// several properties at once, is one report each.
++class Watch : public ExtensionActionDispatcher::Observer {
++ public:
++  explicit Watch(ExtensionActionDispatcher* dispatcher)
++      : dispatcher_(dispatcher), key_(dispatcher) {
++    dispatcher_->AddObserver(this);
++  }
++  ~Watch() override {
++    if (dispatcher_) dispatcher_->RemoveObserver(this);
++  }
++
++  void OnExtensionActionUpdated(ExtensionAction* action,
++                                content::WebContents* web_contents,
++                                content::BrowserContext* context) override {
++    if (!action || !context) return;
++    CefRefPtr<CefBrowserHostBase> browser;
++    if (web_contents) {
++      browser = CefBrowserHostBase::GetBrowserForContents(web_contents);
++      // A page that is not a CEF browser (an extension's own view) is no
++      // client's tab.
++      if (!browser) return;
++    }
++    const int browser_id = browser ? browser->GetIdentifier() : 0;
++    const std::string path = context->GetPath().value();
++    if (!due_.insert({browser_id, action->extension_id(), path}).second) return;
++    if (due_.size() == 1) {
++      CEF_POST_TASK(CEF_UIT, base::BindOnce(&Watch::Report,
++                                            weak_factory_.GetWeakPtr()));
++    }
++  }
++
++  void OnShuttingDown() override {
++    dispatcher_->RemoveObserver(this);
++    dispatcher_ = nullptr;
++    due_.clear();
++    // Destroys this; nothing of it is touched after.
++    GetWatches().erase(key_.get());
++  }
++
++ private:
++  void Report() {
++    auto due = std::move(due_);
++    due_.clear();
++    auto app = CefAppManager::Get()->GetApplication();
++    auto handler = app ? app->GetBrowserProcessHandler() : nullptr;
++    if (!handler) return;
++    for (const auto& [browser_id, extension_id, path] : due) {
++      CefRefPtr<CefBrowser> browser;
++      if (browser_id) {
++        browser = CefBrowserHostBase::GetBrowserForBrowserId(browser_id).get();
++        if (!browser) continue;  // Closed meanwhile: nobody to tell.
++      }
++      handler->OnExtensionActionChanged(browser, extension_id, path);
++    }
++  }
++
++  raw_ptr<ExtensionActionDispatcher> dispatcher_;
++  // The registry's key, kept past the dispatcher's shutdown.
++  const raw_ptr<ExtensionActionDispatcher> key_;
++  std::set<std::tuple<int, std::string, std::string>> due_;
++  base::WeakPtrFactory<Watch> weak_factory_{this};
++};
++
++void StartWatching(content::BrowserContext* context) {
++  auto* dispatcher = ExtensionActionDispatcher::Get(context);
++  if (!dispatcher) return;
++  auto& watches = GetWatches();
++  if (watches.count(dispatcher)) return;
++  watches.emplace(dispatcher, std::make_unique<Watch>(dispatcher));
++}
++
++int Argb(SkColor color) {
++  return static_cast<int>(color);
++}
++
++}  // namespace
++
++CefRefPtr<CefDictionaryValue> ActionState(CefBrowserHostBase* browser,
++                                          const std::string& extension_id) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !browser) return nullptr;
++  auto* contents = browser->GetWebContents();
++  if (!contents || contents->IsBeingDestroyed()) return nullptr;
++  auto* context = contents->GetBrowserContext();
++  StartWatching(context);
++  scoped_refptr<const extensions::Extension> extension =
++      extensions::ExtensionRegistry::Get(context)->enabled_extensions().GetByID(
++          extension_id);
++  if (!extension || (context->IsOffTheRecord() &&
++                     !extensions::util::IsIncognitoEnabled(extension_id,
++                                                           context))) {
++    return nullptr;
++  }
++  auto* action = extensions::ExtensionActionManager::Get(context)
++                     ->GetExtensionAction(*extension);
++  const int tab = sessions::SessionTabHelper::IdForTab(contents).id();
++  if (!action || tab < 0) return nullptr;
++
++  auto state = CefDictionaryValue::Create();
++  state->SetInt("tabId", tab);
++  state->SetString("title", action->GetTitle(tab));
++  state->SetString("badge", action->GetDisplayBadgeText(tab));
++  state->SetInt("badgeBackgroundColor",
++                Argb(action->GetBadgeBackgroundColor(tab)));
++  state->SetInt("badgeTextColor", Argb(action->GetBadgeTextColor(tab)));
++  state->SetBool("enabled", action->GetIsVisible(tab));
++  state->SetBool("popup", action->HasPopup(tab));
++  // What Chrome's toolbar draws before the manifest icon: an icon the
++  // extension set (this tab's, else every tab's), then a declarative one.
++  gfx::Image icon = action->GetExplicitlySetIcon(tab);
++  const bool tab_icon = action->HasIcon(tab);
++  if (icon.IsEmpty()) icon = action->GetDeclarativeIcon(tab);
++  state->SetBool("iconSet", !icon.IsEmpty());
++  state->SetBool("iconEverywhere",
++                 !icon.IsEmpty() && !tab_icon &&
++                     action->HasIcon(ExtensionAction::kDefaultTabId));
++  if (!icon.IsEmpty()) {
++    scoped_refptr<base::RefCountedMemory> png = icon.As1xPNGBytes();
++    if (png && png->size() > 0 && png->size() <= kMaxIconBytes) {
++      state->SetString("icon", "data:image/png;base64," +
++                                   base::Base64Encode(base::span(*png)));
++    }
++  }
++  return state;
++}
++
++}  // namespace cef::external_host

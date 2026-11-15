@@ -54,4 +54,10 @@
     }
   });
   nav.addEventListener('navigatesuccess', function () { leaving = null; });
+  // A cached document keeps the departure that put it in the cache. That
+  // request is no longer in flight when Back brings the document back.
+  // Clear it before the application's pageshow handler can reload its view.
+  window.addEventListener('pageshow', function (event) {
+    if (event.persisted) { leaving = null; since = 0; }
+  }, true);
 })();

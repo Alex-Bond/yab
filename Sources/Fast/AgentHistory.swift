@@ -249,13 +249,13 @@ enum AgentHistory {
         return out
     }
 
-    /// Every visit with its page's title, here and in the other browsers
-    /// whose history is read (OtherHistory), for habits (Habits.swift).
+    /// Every visit with its page's title. Startup's habit composition reads
+    /// only Yab's diary; an explicit history action may include opted-in browsers.
     /// Slow: off the main thread only.
-    static func visits(days: Int) -> [Habits.Visit] {
+    static func visits(days: Int, includingOtherBrowsers: Bool = true) -> [Habits.Visit] {
         let since = Date().addingTimeInterval(-Double(days) * 86_400)
         var out = diaryVisits(since: since).map { Habits.Visit(url: $0.url, at: $0.at, title: $0.title) }
-        for source in OtherHistory.sources() {
+        for source in (includingOtherBrowsers ? OtherHistory.sources() : []) {
             out += chromiumVisits(source, since: since).map { Habits.Visit(url: $0.url, at: $0.at, title: $0.title) }
         }
         return out

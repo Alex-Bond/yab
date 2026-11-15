@@ -1,0 +1,28 @@
+--- a/cef/libcef/browser/net_service/stream_reader_url_loader.cc
++++ b/cef/libcef/browser/net_service/stream_reader_url_loader.cc
+@@ -19,6 +19,7 @@
+ #include "net/base/io_buffer.h"
+ #include "net/http/http_status_code.h"
+ #include "net/http/http_util.h"
++#include "services/network/public/cpp/parsed_headers.h"
+ #include "services/network/public/cpp/url_loader_completion_status.h"
+ 
+ namespace net_service {
+@@ -734,6 +735,17 @@
+                        consumer_handle) != MOJO_RESULT_OK) {
+       RequestComplete(net::ERR_FAILED);
+       return;
++    }
++
++    // Every network response carries its parsed headers, and the browser's
++    // URL loader throttles rely on them: GoogleURLLoaderThrottle CHECKs them
++    // for Chrome Web Store responses. Parse a custom response's headers as
++    // the network service does for its own. They come from the client's own
++    // handler in this process, not from the web, so parsing them here takes
++    // no untrusted input into the browser process.
++    if (!pending_response->parsed_headers) {
++      pending_response->parsed_headers =
++          network::PopulateParsedHeaders(pending_headers.get(), request_.url);
+     }
+ 
+     need_client_callback_ = true;

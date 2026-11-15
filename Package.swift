@@ -58,9 +58,15 @@ let package = Package(
             path: "Sources/YabUpdater",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .target(
+            name: "NativeTextInput",
+            path: "Sources/NativeTextInput",
+            publicHeadersPath: "include",
+            linkerSettings: [.linkedFramework("AppKit")]
+        ),
         .executableTarget(
             name: "Fast",
-            dependencies: ["SyncKit", "YabDesign", "YabStore", "MailCore", "YabUpdate", "YabCoreClient"],
+            dependencies: ["SyncKit", "YabDesign", "YabStore", "MailCore", "YabUpdate", "YabCoreClient", "NativeTextInput"],
             path: "Sources/Fast",
             // Same reasoning as the canvas app next door: the whole interface is
             // main-thread by nature, and Swift 6's strict isolation buys nothing

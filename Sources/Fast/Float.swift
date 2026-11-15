@@ -5012,7 +5012,7 @@ enum Isolate {
     /// For every frame of every page, at the start of each document.
     @MainActor static var script: WKUserScript {
         WKUserScript(
-            source: source.replacingOccurrences(of: "__KEY__", with: key),
+            source: PageScript.load("pip-placeholder") + "\n" + source.replacingOccurrences(of: "__KEY__", with: key),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false,
             in: world
@@ -5181,6 +5181,7 @@ enum Isolate {
       function listen(root) {
         if (!root.addEventListener || listening.has(root)) return;
         listening.add(root);
+        if (window.__yabPiPPlacard) window.__yabPiPPlacard.listen(root);
         ['pointerdown', 'click', 'keydown'].forEach(function (kind) { root.addEventListener(kind, input, true); });
         ['play', 'emptied', 'loadstart', 'ended'].forEach(function (kind) { root.addEventListener(kind, playback, true); });
       }
@@ -5426,23 +5427,33 @@ enum Isolate {
       // and scrolled. Called from the app, it counts as a press for a few
       // seconds. A press for a video inside a frame asks that frame to put
       // its own out, which WebKit lets it do on the press passed along with
-      // the message; a frame that can't answers 'frame', and the app lifts
-      // the page as before. Embedded players (a Vimeo or YouTube embed in
-      // an article, most streaming sites' player frames) used to always
-      // take the whole page out.
-      function pip(automatic) {
-        var mine = turn;
+      // the message; a frame that can't answers 'frame', leaving its page
+      // in place. Embedded players used to take the whole page out when
+      // native PiP was refused.
+      // A discovery started before fullscreen cannot resume after its exit:
+      // DOM fullscreen is already false while the native owner returns.
+      var fullscreenTurn = 0;
+      if (typeof document.addEventListener === 'function')
+        document.addEventListener('fullscreenchange', function () { fullscreenTurn++; }, true);
+      function pip(automatic, exclusiveFullscreen) {
+        // The Chromium owner arbitrates before dispatch. Candidate discovery
+        // is asynchronous: recheck at the renderer commit point as well.
+        // WebKit keeps its existing departure policy (no second argument).
+        if (automatic && exclusiveFullscreen && fullscreen()) return Promise.resolve('none');
+        var mine = turn, fullTurn = fullscreenTurn;
         return find(automatic).then(function (best) {
-          if (mine !== turn) return 'none';
+          if (mine !== turn || (automatic && exclusiveFullscreen &&
+              (fullTurn !== fullscreenTurn || fullscreen()))) return 'none';
           if (!best.el) return 'none';
           if (best.el.tagName === 'VIDEO' && !chosen(best.el, automatic, best.resting)) return 'none';
-          if (best.el.tagName !== 'VIDEO' && !automatic) {
-            return ask(best.el, 'pip', 0, 3000).then(
+          if (best.el.tagName !== 'VIDEO') {
+            return ask(best.el, 'pip', automatic || 0, 3000).then(
               function (answer) { return answer === 'pip' ? 'pip' : 'frame'; },
               function () { return 'frame'; }
             );
           }
           if (best.el.tagName !== 'VIDEO' || !best.el.requestPictureInPicture) return 'frame';
+          if (window.__yabPiPPlacard) window.__yabPiPPlacard.watch(best.el);
           return best.el.requestPictureInPicture().then(
             function () { return 'pip'; },
             function (e) { return 'refused:' + (e && e.name); }
@@ -5466,14 +5477,16 @@ enum Isolate {
         }, 250);
       }
 
-      function off() {
+      function off(nativeClosing) {
         turn++;
         clearInterval(watch);
         watch = null;
         // The engine may have put the video in its own floating window as
         // well, some players ask for that themselves. Leaving one and not
         // the other leaves you with two.
-        try {
+        // A native dismissal already owns the exit. Clear our bookkeeping
+        // without starting a second request while WebKit completes it.
+        if (!nativeClosing) try {
           if (document.pictureInPictureElement && document.exitPictureInPicture) {
             document.exitPictureInPicture().catch(function () {});
           }
@@ -5481,7 +5494,7 @@ enum Isolate {
             if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline');
           });
         } catch (e) {}
-        if (target && target.tagName !== 'VIDEO') ask(target, 'off', 0, 400).catch(function () {});
+        if (target && target.tagName !== 'VIDEO') ask(target, 'off', nativeClosing ? 1 : 0, 400).catch(function () {});
         var was = !!target;
         target = null;
         opened.forEach(function (track) { try { track.mode = 'disabled'; } catch (e) {} });

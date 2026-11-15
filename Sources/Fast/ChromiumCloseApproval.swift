@@ -34,7 +34,9 @@ struct ChromiumCloseOutcome {
 
     init?(_ value: JSONValue, requested: Set<String>) {
         func ids(_ key: String) -> Set<String>? {
-            guard case .array(let rows) = value[key], rows.count <= 256 else { return nil }
+            // As many as were asked to close: closing a folder of 300 tabs
+            // read as no answer past a fixed 256 and kept every row.
+            guard case .array(let rows) = value[key], rows.count <= requested.count else { return nil }
             let strings = rows.compactMap(\.string)
             guard strings.count == rows.count, Set(strings).count == rows.count else { return nil }
             return Set(strings)

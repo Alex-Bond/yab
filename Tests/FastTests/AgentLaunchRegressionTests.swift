@@ -5,6 +5,14 @@ import Testing
 /// These same public-behavior checks compile on the unmodified base commit.
 @MainActor
 struct AgentLaunchRegressionTests {
+    // A NUL inside an argument raised an Objective-C exception at launch that
+    // `try` couldn't catch: Yab died seconds after every start (0.46.13).
+    @Test func anArgumentWithANULRunsWithoutIt() async throws {
+        let ran = await Shell.timed("/bin/echo", ["a\u{0}b"], env: ["PATH": "/usr/bin:/bin", "NAME": "x\u{0}y"])
+        #expect(ran.code == 0)
+        #expect(ran.output.trimmingCharacters(in: .whitespacesAndNewlines) == "ab")
+    }
+
     @Test func nvmFallbackExistsWithoutTheShell() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let bin = root.appendingPathComponent(".nvm/versions/node/v22.15.0/bin")

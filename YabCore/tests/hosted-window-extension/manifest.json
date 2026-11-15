@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"Yab hosted window restore","version":"1.0","background":{"service_worker":"background.js"}}

@@ -2,6 +2,15 @@ import AppKit
 import YabStore
 import YabUpdate
 
+LaunchJournal.record("updater.entry")
+
+// This mode is deliberately separate from launchd's update check. Malformed
+// restart arguments never fall through to an update or accept a target path.
+if CommandLine.arguments.dropFirst().contains(where: { [Relaunch.flag, Relaunch.installFlag].contains($0) }) {
+    guard let request = Relaunch.Request(arguments: Array(CommandLine.arguments.dropFirst())) else { exit(2) }
+    exit(await Relaunch.run(request) ? 0 : 1)
+}
+
 // Updating Yab while it is closed. launchd starts this at login and every
 // four hours (Contents/Library/LaunchAgents/YabUpdater.plist, enrolled by
 // the app through SMAppService, Updater.Agent). It lives in Contents/MacOS,
@@ -22,13 +31,19 @@ let identifier = Bundle.main.bundleIdentifier ?? ""
 /// somewhere else, runs from a bundle the swap doesn't touch.
 func appOpen() -> Bool {
     let here = Swap.target.resolvingSymlinksInPath().standardizedFileURL
-    return NSRunningApplication.runningApplications(withBundleIdentifier: identifier).contains {
+    let bundles = [here, URL(fileURLWithPath: here.path + ".old")]
+    // The engine and its role-specific children can outlive the window's
+    // process. They have separate identities but still need this bundle.
+    let identities = [identifier, identifier + ".core"]
+        + ["", ".gpu", ".renderer", ".plugin", ".alerts"].map { identifier + ".helper" + $0 }
+    return identities.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }.contains {
         $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
-            && $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == here
+            && Relaunch.containsApplication(bundles, $0.bundleURL)
     }
 }
 
 func finish() -> Never {
+    LaunchJournal.record("updater.exit")
     settings.synchronize()
     exit(0)
 }

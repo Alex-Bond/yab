@@ -1,3 +1,17 @@
+#include "extension_options_renderer.h"
+// Chrome installs extension API bindings after the renderer context-created
+// callback on this SDK. Observe the owned document's ready event as well.
+// This never creates an API on a web page: the script requires the extension's
+// native runtime identity to match its actual chrome-extension origin.
+static void ExtensionOptionsDocument(Tab& tab) {
+#if !defined(CEF_YAB_OPTIONS_CREATION_VERSION)
+  if (!tab.browser || tab.closing) return;
+  auto frame = tab.browser->GetMainFrame();
+  if (!frame || frame->GetURL().ToString().rfind("chrome-extension://", 0) != 0) return;
+  ExtensionCDP(tab, @"Runtime.evaluate", @{@"expression": @(yab_extension_options::kInstall)}, Ignore);
+#endif
+}
+
 // Extension action state for Yab's own buttons.
 //
 // CEF_CTT_NONE has no Chrome toolbar, so nothing draws an action. Chrome's
@@ -9,7 +23,17 @@
 // getter: the worker's setIcon calls are recorded after the hook is in,
 // and the button keeps the extension's own icon until one arrives.
 // Only the profile's privileged chrome://extensions control tab may ask,
-// and the page must be an ordinary Yab tab of the same, non-private profile.
+// and the page must be an ordinary Yab tab of the same, non-private profile,
+// or of a private profile made as its off-the-record side.
+
+// A page whose actions this profile's control tab reads and presses: one
+// of its own, or one of a private profile made as its off-the-record side,
+// where an extension allowed in private tabs keeps its state per tab too.
+static bool ExtensionActionPageOf(const std::string& control, const std::string& page) {
+  if (page == control) return true;
+  auto found = profiles.find(page);
+  return found != profiles.end() && found->second.privateMode && found->second.parent == control;
+}
 
 static NSString* ExtensionActionScript = @R"JS(async (identity) => {
  const windowId = identity.windowId;
@@ -17,8 +41,8 @@ static NSString* ExtensionActionScript = @R"JS(async (identity) => {
  const g = globalThis;
  if (a && !g.__yabActionWatch) {
   const icons = new Map();
-  g.__yabActionWatch = {icons};
   const tell = tabId => { try { __yabExtensionBridge(JSON.stringify({op:'action.changed', tabId: Number.isInteger(tabId) ? tabId : null})) } catch (_) {} };
+  g.__yabActionWatch = {icons, tell};
   for (const m of ['setBadgeText','setBadgeBackgroundColor','setBadgeTextColor','setTitle','setPopup','enable','disable']) {
    const old = a[m]?.bind(a);
    if (!old) continue;
@@ -68,9 +92,16 @@ static NSString* ExtensionActionScript = @R"JS(async (identity) => {
                          () => { icons.delete(key); tell(details?.tabId); });
    return r;
   };
+ }
+ // The package's hook (ChromiumActionHook) is in from the worker's first line
+ // and leaves this to the first read: a listener added there would wake the
+ // worker for every page.
+ const watch = g.__yabActionWatch;
+ if (a && watch && !watch.follows) {
+  watch.follows = true;
   // Chrome drops a tab's own action values when it navigates.
-  chrome.tabs.onUpdated.addListener((tabId, change) => { if (change.url) { icons.delete(tabId); tell(tabId); } });
-  chrome.tabs.onRemoved.addListener(tabId => icons.delete(tabId));
+  chrome.tabs.onUpdated.addListener((tabId, change) => { if (change.url) { watch.icons.delete(tabId); watch.tell(tabId); } });
+  chrome.tabs.onRemoved.addListener(tabId => watch.icons.delete(tabId));
  }
  if (!a) return {action: false};
  let tabId;
@@ -93,7 +124,8 @@ static NSString* ExtensionActionScript = @R"JS(async (identity) => {
  // feedback access; Chrome answers a placeholder, never the number.
  const hidden = badge === '<<declarativeNetRequestActionCount>>';
  return {action: true, tabId, title, badge: hidden ? '' : badge, countHidden: hidden, background, color,
-         enabled, popup: !!popup, icon: icons ? (icons.get(tabId) ?? icons.get(-1) ?? null) : null};
+         enabled, popup: !!popup, icon: icons ? (icons.get(tabId) ?? icons.get(-1) ?? null) : null,
+         iconEverywhere: !!icons && !icons.has(tabId) && icons.has(-1)};
 })JS";
 
 static bool ExtensionValidID(NSString* id) {
@@ -121,7 +153,7 @@ static void ExtensionActionCollect(std::string control, std::string page, int wi
   auto c = tabs.find(control);
   if (c == tabs.end() || c->second.closing) { Reply(request, nil, @"Extension control tab closed"); return; }
   auto owner = tabs.find(page);
-  if (owner == tabs.end() || owner->second.closing || owner->second.profile != c->second.profile) {
+  if (owner == tabs.end() || owner->second.closing || !ExtensionActionPageOf(c->second.profile, owner->second.profile)) {
     Reply(request, nil, @"Extension action owner closed or changed profile"); return;
   }
   if (index >= ids.count) { Reply(request, @{@"windowId": @(windowId), @"actions": rows}); return; }
@@ -132,6 +164,11 @@ static void ExtensionActionCollect(std::string control, std::string page, int wi
   ExtensionWithWorker(c->second, extension, [extension, windowId, nativeTab, rows, next](ExtensionWorker worker) {
     NSDictionary* identity = nativeTab >= 0 ? @{@"windowId": @(windowId), @"tabId": @(nativeTab)} : @{@"windowId": @(windowId)};
     NSString* call = [NSString stringWithFormat:@"(%@)(%@)", ExtensionActionScript, JSON(identity)];
+#if !defined(CEF_YAB_OPTIONS_CREATION_VERSION)
+    // The same native creation compatibility route in the extension worker,
+    // before its action can delegate an Options press to the background.
+    call = [NSString stringWithFormat:@"(%s);%@", yab_extension_options::kInstall, call];
+#endif
     ExtensionEvaluate(worker, call, [extension, rows, next](NSDictionary* value, NSString* error) {
       NSMutableDictionary* row = [@{@"id": extension} mutableCopy];
       if (error) row[@"error"] = error;
@@ -152,23 +189,25 @@ static bool ExtensionActionCommand(Tab& t, NSString* method, NSDictionary* p, NS
   }
   if (profiles[t.profile].privateMode) { Reply(request, nil, @"Extension actions are unavailable in private profiles"); return true; }
   NSArray* ids = press ? @[S(p, @"extension")] : ([p[@"extensions"] isKindOfClass:NSArray.class] ? p[@"extensions"] : nil);
-  if (!ids || ids.count > 64) { Reply(request, nil, @"extensions must list at most 64 Chrome extension IDs"); return true; }
+  // As many as the person pinned: Chrome has no count of extensions, and a
+  // fixed 64 failed every button's state past it. The wire bounds bytes.
+  if (!ids) { Reply(request, nil, @"extensions must list Chrome extension IDs"); return true; }
   for (id value in ids) if (![value isKindOfClass:NSString.class] || !ExtensionValidID(value)) {
     Reply(request, nil, @"extensions must list Chrome extension IDs (32 lowercase letters a-p)"); return true;
   }
   auto page = tabs.find(Key(S(p, @"page")));
-  if (page == tabs.end() || !page->second.browser || page->second.closing || page->second.internal || !page->second.adopted || page->second.profile != t.profile) {
-    Reply(request, nil, @"page must be an open Yab tab of this profile"); return true;
+  if (page == tabs.end() || !page->second.browser || page->second.closing || page->second.internal || !page->second.adopted || !ExtensionActionPageOf(t.profile, page->second.profile)) {
+    Reply(request, nil, @"page must be an open Yab tab of this profile or its private side"); return true;
   }
   std::string control = t.id, pageID = page->second.id;
   auto open = [control, pageID, ids, request](int windowId) {
     auto c = tabs.find(control), page = tabs.find(pageID);
-    if (c == tabs.end() || page == tabs.end() || page->second.closing || page->second.profile != c->second.profile) {
+    if (c == tabs.end() || page == tabs.end() || page->second.closing || !ExtensionActionPageOf(c->second.profile, page->second.profile)) {
       Reply(request, nil, @"Extension action owner closed"); return;
     }
     ExtensionWithWorker(c->second, ids[0], [control, pageID, windowId, request](ExtensionWorker worker) {
       auto c = tabs.find(control), page = tabs.find(pageID);
-      if (c == tabs.end() || page == tabs.end() || page->second.closing || page->second.profile != c->second.profile) {
+      if (c == tabs.end() || page == tabs.end() || page->second.closing || !ExtensionActionPageOf(c->second.profile, page->second.profile)) {
         Reply(request, nil, @"Extension action owner closed"); return;
       }
       NSString* script = [NSString stringWithFormat:@"(async()=>{const a=chrome.action??chrome.browserAction;if(!a?.openPopup)throw Error('This action cannot open a popup');await a.openPopup({windowId:%d});return true})()", windowId];

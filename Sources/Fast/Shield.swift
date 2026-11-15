@@ -448,6 +448,44 @@ final class Shield: ObservableObject {
         Store.folder.appendingPathComponent("Shield/hiding-lists.txt")
     }
 
+    // MARK: - skips
+
+    /// The lists' $urlskip rules from the last build (Filters.Skip), kept
+    /// beside the lists and read at launch, when nothing is converted.
+    private nonisolated static var skipsFile: URL {
+        Store.folder.appendingPathComponent("Shield/skips.json")
+    }
+
+    var skipper: Filters.Skipper?
+
+    nonisolated static func writeSkips(_ skips: [Filters.Skip]) {
+        try? FileManager.default.createDirectory(at: skipsFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONEncoder().encode(skips).write(to: skipsFile, options: .atomic)
+        let skipper = Filters.Skipper(skips)
+        Task { @MainActor in Shield.shared.skipper = skipper }
+    }
+
+    private func readSkips() {
+        Task.detached(priority: .userInitiated) {
+            guard let data = try? Data(contentsOf: Shield.skipsFile),
+                  let skips = try? JSONDecoder().decode([Filters.Skip].self, from: data) else { return }
+            let skipper = Filters.Skipper(skips)
+            await MainActor.run { if Shield.shared.skipper == nil { Shield.shared.skipper = skipper } }
+        }
+    }
+
+    /// Where a tab's top document goes instead of `url`, a click tracker
+    /// with its destination inside (Filters.Skip), while Shield blocks on
+    /// the tracker's site. `persistent`: a WebKit tab's kind, whose blocking
+    /// an extension may have; nil for a Chromium tab, which Shield always
+    /// blocks for.
+    func skip(_ url: URL, persistent: Bool?) -> URL? {
+        guard enabled, let skipper, let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return nil }
+        if let persistent, blocker(persistent: persistent) != nil { return nil }
+        guard !isOff(on: PageScripts.host(of: url)), let out = skipper.destination(url.absoluteString) else { return nil }
+        return URL(string: out)
+    }
+
     private func readHidingSites() {
         let count = lists.count
         Task.detached(priority: .utility) {
@@ -471,6 +509,7 @@ final class Shield: ObservableObject {
         for controller in attached.allObjects {
             fit(controller, for: fitting(controller).host)
         }
+        ShieldChromium.tell()
     }
 
     /// For the bench, after it put these lists on and off a page by hand:
@@ -541,6 +580,7 @@ final class Shield: ObservableObject {
             ["visits": site.visits, "fresh": site.fresh, "keys": site.keys, "quiet": site.quiet, "since": site.since, "never": site.never]
         }
         out["hiding_sites"] = hidingSites.count
+        out["skips"] = skipper?.count ?? 0
         out["hiding_lists"] = hiding
         out["chosen"] = chosen ?? ""
         if case .extension(let id) = source { out["source"] = id } else { out["source"] = "builtIn" }
@@ -567,7 +607,9 @@ final class Shield: ObservableObject {
     /// code. `schema` goes up whenever Filters or `base` changes what a list
     /// comes out as, and the cached text is compiled again once: on the
     /// iPhone too, which keeps it in ShieldLists beside `base`.
-    static let schema = ShieldLists.schema + 1
+    /// +2: the build writes the lists' $urlskip rules (skips.json).
+    /// +3: YouTube's #player-ads bait is spared (YouTube.filters).
+    static let schema = ShieldLists.schema + 3
     private struct Made: Codable {
         var schema: Int
         var build: Int
@@ -593,6 +635,7 @@ final class Shield: ObservableObject {
     /// At launch. Looks the compiled lists up, the one thing done now, and
     /// leaves everything else for later.
     func start() {
+        readSkips()
         guard let made, made.count > 0 else {
             if let made, made.failed == true, made.schema == Shield.schema,
                Self.selectionMatches(made.selection, current: selectedSourceNames) {
@@ -749,18 +792,18 @@ final class Shield: ObservableObject {
 
         let t0 = CFAbsoluteTimeGetCurrent()
         var used = texts.count
-        var attempt = await compile(texts.map(\.text), as: { identifier(build, $0) }, in: store)
+        var attempt = await compile(texts.map { ($0.name, $0.text) }, as: { identifier(build, $0) }, in: store)
         report["convert_ms"] = attempt.convert
         report["compile_ms"] = attempt.compile
         report["parse_ms"] = attempt.parse
         if attempt.lists == nil, !texts.isEmpty {
             // Which one: each alone beside `base`, under names of its own,
             // thrown away after.
-            var good: [String] = []
+            var good: [(name: String, text: String)] = []
             for (index, source) in texts.enumerated() {
-                let probe = await compile([source.text], as: { "shield-probe-\(index)-\($0)" }, in: store)
+                let probe = await compile([(source.name, source.text)], as: { "shield-probe-\(index)-\($0)" }, in: store)
                 if let lists = probe.lists {
-                    good.append(source.text)
+                    good.append((source.name, source.text))
                     await MainActor.run { Shield.remove(lists.indices.map { "shield-probe-\(index)-\($0)" }) }
                 } else {
                     left[source.name] = source.digest
@@ -796,12 +839,14 @@ final class Shield: ObservableObject {
 
     /// `base` and these texts, converted and compiled one list after
     /// another under the names given. All of them, or nil and none kept.
-    private nonisolated static func compile(_ texts: [String], as name: @escaping @Sendable (Int) -> String, in store: WKContentRuleListStore) async -> Attempt {
+    private nonisolated static func compile(_ texts: [(name: String, text: String)], as name: @escaping @Sendable (Int) -> String, in store: WKContentRuleListStore) async -> Attempt {
         var attempt = Attempt()
         let t0 = CFAbsoluteTimeGetCurrent()
-        let rules = Filters.convert([base] + texts)
+        let rules = convert(texts)
         let split = Filters.lists(rules)
         attempt.convert = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+        ShieldChromium.write(rules)
+        writeSkips(rules.skips)
         attempt.rules = rules.count - (split?.left ?? 0)
         attempt.exceptions = rules.exceptions.count
         attempt.skipped = rules.skipped + (split?.left ?? 0)
@@ -860,8 +905,8 @@ final class Shield: ObservableObject {
     /// The lists as they are made now, from the text kept on disk, as
     /// arrays of rules: the same split Filters makes for WebKit.
     private nonisolated static func split() -> [[[String: Any]]] {
-        let texts = sources.compactMap { cached($0.name) }
-        guard let split = Filters.lists(Filters.convert([base] + texts)) else { return [] }
+        let texts: [(name: String, text: String)] = sources.compactMap { source in cached(source.name).map { (source.name, $0) } }
+        guard let split = Filters.lists(convert(texts)) else { return [] }
         return split.lists.map { list in
             (try? JSONSerialization.jsonObject(with: Data(list.utf8))) as? [[String: Any]] ?? []
         }
@@ -955,6 +1000,25 @@ final class Shield: ObservableObject {
     private nonisolated static func cached(_ name: String) -> String? {
         try? String(contentsOf: folder.appendingPathComponent(name + ".txt"), encoding: .utf8)
     }
+
+    /// The rules a build would make now, for what isn't WebKit: the Chromium
+    /// helper's copy, made here when no build wrote one yet.
+    nonisolated static func converted(sources: [Source]) -> Filters.Rules {
+        let texts: [(name: String, text: String)] = sources.compactMap { source in cached(source.name).map { (source.name, $0) } }
+        return convert(texts)
+    }
+
+    /// `base` and these lists converted, the $urlskip rules taken from
+    /// uBlock Origin's own lists only, the ones it trusts with them.
+    nonisolated static func convert(_ texts: [(name: String, text: String)]) -> Filters.Rules {
+        let trusted = Set(texts.indices.filter { trusts(texts[$0].name) }.map { $0 + 1 })
+        return Filters.convert([base] + texts.map(\.text), trusted: trusted)
+    }
+
+    nonisolated static func trusts(_ name: String) -> Bool {
+        name.hasPrefix("ublock-") && ShieldLists.sources.contains { $0.name == name }
+    }
+    var selected: [Source] { Self.selectedSources(disabling: disabledSources, custom: customSources) }
 
     @Published private(set) var refreshing = false
     @Published private(set) var refreshFailed = false

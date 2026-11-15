@@ -274,7 +274,7 @@ enum SyncShapes {
         RecordShapes.spaces(list.map { space in
             SyncSpace(id: space.id.uuidString, name: space.name, icon: space.icon, ownSignIns: space.ownSignIns,
                       paint: space.paint.flatMap { try? Value(encoding: $0) }.flatMap(SyncPaint.init), origin: space.origin,
-                      search: space.search, searchCustom: space.searchCustom, iconChoice: space.iconChoice, iconChoiceID: space.iconChoiceID)
+                      search: space.search, searchCustom: space.searchCustom, iconChoice: space.iconChoice, iconChoiceID: space.iconChoiceID, signInWith: space.signInWith?.uuidString)
         }, orders: previous)
     }
 
@@ -283,6 +283,7 @@ enum SyncShapes {
             guard let id = UUID(uuidString: space.id) else { return nil }
             return Space(id: id, name: space.name, icon: space.icon, ownSignIns: space.ownSignIns,
                          paint: try? space.paint?.raw.decode(SpacePaint.self), origin: space.origin,
+                         signInWith: space.signInWith.flatMap(UUID.init(uuidString:)),
                          search: space.search, searchCustom: space.searchCustom, iconChoice: space.iconChoice, iconChoiceID: space.iconChoiceID)
         }
     }
@@ -337,6 +338,22 @@ enum SyncShapes {
             }
         }
         return (tabs, folders, pairs)
+    }
+
+    /// Tabs or folders as `rows` wrote them, with the links their rows
+    /// couldn't draw put back: one whose record (`had`) names a folder this
+    /// journal has never held (`held`) and that the row wrote in no folder
+    /// still names it. A row shows a folder only once its record is here
+    /// (`row`); a folder known and removed lets its tabs go.
+    static func keepingLinks(_ out: Collection, had: [SyncKit.Record], held: Set<String>) -> Collection {
+        var out = out
+        for record in had {
+            guard var fields = out[record.id], fields["folder"]?.string == nil,
+                  let link = record["folder"]?.string, !held.contains(link) else { continue }
+            fields["folder"] = .string(link)
+            out[record.id] = fields
+        }
+        return out
     }
 
     /// Today's tabs another device opened without saying whose they are
@@ -469,7 +486,7 @@ enum SyncShapes {
     static func bookmarks(_ tree: [Bookmark], orders previous: [String: String]) -> Collection {
         func value(_ mark: Bookmark) -> SyncBookmark {
             SyncBookmark(id: mark.id.uuidString, title: mark.title, url: mark.url, added: mark.added?.timeIntervalSince1970,
-                         children: mark.children?.map(value))
+                         children: mark.children?.map(value), space: mark.space?.uuidString, importKey: mark.importKey)
         }
         return RecordShapes.bookmarks(tree.map(value), orders: previous)
     }
@@ -480,7 +497,7 @@ enum SyncShapes {
         func mark(_ value: SyncBookmark) -> Bookmark? {
             guard let id = UUID(uuidString: value.id) else { return nil }
             return Bookmark(id: id, title: value.title, url: value.url, children: value.children?.compactMap(mark),
-                            added: value.added.map(Date.init(timeIntervalSince1970:)))
+                            added: value.added.map(Date.init(timeIntervalSince1970:)), space: value.space.flatMap(UUID.init(uuidString:)), importKey: value.importKey)
         }
         return RecordShapes.bookmarks(from: records).compactMap(mark)
     }
@@ -501,7 +518,9 @@ enum SyncShapes {
         "search.engine", "search.custom", "scopes.off", "scopes.keywords", "scopes.templates", "scopes.learn", "scopes.recent",
         "shield", "devSites", "extensions.private",
         "passwords.save", "passwords.fill", "passwords.never", "autofill.save", "autofill.fill", "autofill.forms", "autofill.drafts",
-        "passkeys", "codes.mail",
+        // The passkeys switch by its own key (Preferences.passkeysKey):
+        // "passkeys" also carried the false of Macs that can't do them.
+        "passkeys.offer", "codes.mail",
         "agents.asking", "agents.askOpens", "agents.messages", "agents.forget", "agents.exceptions",
         "tidy.titles", "folders.names", "tidy.downloads",
         "mail.motion", "mail.signature.replies",

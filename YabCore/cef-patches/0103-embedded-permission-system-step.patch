@@ -1,0 +1,114 @@
+diff --git a/cef/libcef/browser/permission_prompt.cc b/cef/libcef/browser/permission_prompt.cc
+--- a/cef/libcef/browser/permission_prompt.cc
++++ b/cef/libcef/browser/permission_prompt.cc
+@@ -12,6 +12,7 @@
+ #include "cef/libcef/browser/browser_host_base.h"
+ #include "chrome/browser/file_system_access/file_system_access_permission_request_manager.h"
+ #include "chrome/browser/ui/permission_bubble/permission_prompt.h"
++#include "components/permissions/embedded_permission_prompt_flow_model.h"
+ #include "components/permissions/permission_request.h"
+ #include "components/permissions/permission_uma_constants.h"
+ #include "components/permissions/resolvers/permission_prompt_options.h"
+@@ -175,6 +176,90 @@ class CefPermissionPrompt : public permissions::PermissionPrompt {
+   base::WeakPtrFactory<CefPermissionPrompt> weak_ptr_factory_{this};
+ };
+ 
++// A step of the embedded permission flow (the page's <geolocation>,
++// <usermedia> or <permission> element) that is not a site decision: macOS has
++// not granted the app the permission yet (kOsPrompt), has refused it
++// (kOsSystemSettings), or policy decides it (kAdministrator*). After the user
++// allows the request, PermissionRequestManager keeps the same, already decided
++// requests and recreates the prompt for these variants. Chrome shows them as
++// information whose only exits are the OS prompt and closing the bubble
++// (Dismiss); no Accept or Deny. Handed to the client as an ordinary prompt,
++// its Allow or Deny decided the requests a second time: CHECK in
++// PermissionRequest::PermissionGranted/PermissionDenied on the
++// permission_decided_callback_ the first answer consumed. The client is not
++// asked; the step closes as Chrome's bubble does, once the manager has
++// installed it.
++class CefEmbeddedPermissionSystemStep : public permissions::PermissionPrompt {
++ public:
++  explicit CefEmbeddedPermissionSystemStep(Delegate* delegate)
++      : delegate_(delegate) {
++    DCHECK(delegate_);
++    CEF_POST_TASK(
++        CEF_UIT, base::BindOnce(&CefEmbeddedPermissionSystemStep::Close,
++                                weak_ptr_factory_.GetWeakPtr()));
++  }
++
++  CefEmbeddedPermissionSystemStep(const CefEmbeddedPermissionSystemStep&) =
++      delete;
++  CefEmbeddedPermissionSystemStep& operator=(
++      const CefEmbeddedPermissionSystemStep&) = delete;
++
++  // PermissionPrompt methods:
++  bool UpdateAnchor() override { return true; }
++  TabSwitchingBehavior GetTabSwitchingBehavior() override {
++    return TabSwitchingBehavior::kKeepPromptAlive;
++  }
++  permissions::PermissionPromptDisposition GetPromptDisposition()
++      const override {
++    return permissions::PermissionPromptDisposition::ELEMENT_ANCHORED_BUBBLE;
++  }
++  std::optional<gfx::Rect> GetViewBoundsInScreen() const override {
++    return std::nullopt;
++  }
++  std::vector<permissions::ElementAnchoredBubbleVariant> GetPromptVariants()
++      const override {
++    return {};
++  }
++  std::optional<permissions::feature_params::PermissionElementPromptPosition>
++  GetPromptPosition() const override {
++    return std::nullopt;
++  }
++  bool IsAskPrompt() const override { return false; }
++
++ private:
++  // Destroys this object: Dismiss finalizes the requests and deletes the view.
++  void Close() { delegate_->Dismiss(PromptOptions(std::monostate{})); }
++
++  // |delegate_| is the PermissionRequestManager, which owns this object.
++  const raw_ptr<Delegate> delegate_;
++
++  base::WeakPtrFactory<CefEmbeddedPermissionSystemStep> weak_ptr_factory_{
++      this};
++};
++
++// Whether the embedded flow's current variant asks for a site decision, the
++// only thing the client's Continue() can give.
++bool IsSiteDecision(permissions::PermissionPrompt::Delegate* delegate) {
++  const auto* model = delegate->GetEmbeddedPromptFlowModel();
++  if (!model) {
++    return true;
++  }
++  using Variant = permissions::EmbeddedPermissionPromptFlowModel::Variant;
++  switch (model->prompt_variant()) {
++    case Variant::kAsk:
++    case Variant::kPreviouslyGranted:
++    case Variant::kPreviouslyDenied:
++    case Variant::kUninitialized:
++      return true;
++    case Variant::kAdministratorGranted:
++    case Variant::kOsPrompt:
++    case Variant::kOsSystemSettings:
++    case Variant::kAdministratorDenied:
++      return false;
++  }
++  return true;
++}
++
+ // |notify_delegate| will be false if called from the CefPermissionPrompt
+ // destructor.
+ void ExecuteResult(CefRefPtr<CefBrowserHostBase> browser,
+@@ -288,6 +373,11 @@ std::unique_ptr<permissions::PermissionPrompt> CreatePermissionPromptImpl(
+ 
+     if (auto client = browser->GetClient()) {
+       if (auto handler = client->GetPermissionHandler()) {
++        if (!IsSiteDecision(delegate)) {
++          *default_handling = false;
++          return std::make_unique<CefEmbeddedPermissionSystemStep>(delegate);
++        }
++
+         auto permission_prompt =
+             std::make_unique<CefPermissionPrompt>(delegate);
+ 

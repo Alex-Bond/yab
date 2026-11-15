@@ -79,10 +79,17 @@
       var t = (el.getAttribute('type') || 'text').toLowerCase();
       if (['text', 'tel', 'email', 'number', 'search'].indexOf(t) < 0) return null;
     }
-    if (el.disabled || el.readOnly || el.getAttribute('aria-disabled') === 'true' || codeBox(el)) return null;
+    if (el.disabled || el.readOnly || el.getAttribute('aria-disabled') === 'true') return null;
     var auto = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/)
       .filter(function (w) { return w && w !== 'webauthn'; });
-    var named = auto.length ? AUTO[auto[auto.length - 1]] : null;
+    var named = auto.length && Object.prototype.hasOwnProperty.call(AUTO, auto[auto.length - 1]) ? AUTO[auto[auto.length - 1]] : null;
+    if (named && CARD[named]) return tag === 'textarea' ? null : named;
+    // Payment Elements identify fields even when autocomplete is disabled.
+    // Read only explicit field metadata, never the surrounding frame's title.
+    var stable = el.getAttribute('data-elements-stable-field-name');
+    var payment = { cardNumber: 'number', cardExpiry: 'exp', cardCvc: 'csc' };
+    if (tag === 'input' && stable && Object.prototype.hasOwnProperty.call(payment, stable)) return payment[stable];
+    if (codeBox(el)) return null;
     if (named) return tag === 'textarea' && named !== 'street' ? null : named;
     if (tag === 'textarea') return /address|street/.test(hint(el)) ? 'street' : null;
     var h = hint(el);
@@ -156,22 +163,59 @@
     return true;
   }
 
+  // Only shadow hosts reached from an actual field are known. Query their
+  // siblings by host type, never enumerate a page's unrelated elements.
+  var fieldHosts = new Set(), listenedRoots = new WeakSet(), heardEvents = new WeakSet();
+  function parent(el) { return el && (el.parentElement || (el.getRootNode && el.getRootNode().host)); }
+  function target(e) { return e.composedPath ? e.composedPath()[0] : e.target; }
+  function learn(el) {
+    for (var node = el; node; node = parent(node)) {
+      var root = node.getRootNode && node.getRootNode();
+      if (!root || !root.host) continue;
+      fieldHosts.add(root.host.localName);
+      if (listenedRoots.has(root)) continue;
+      listenedRoots.add(root);
+      ['focusin', 'focusout', 'input', 'change', 'submit'].forEach(function (type) {
+        root.addEventListener(type, function (e) {
+          if (e.composedPath().indexOf(document) >= 0 || heardEvents.has(e)) return;
+          heardEvents.add(e);
+          if (type === 'submit') { if (e.isTrusted) { send(e.target); answered(e.target, false); } }
+          else if (type === 'input' || type === 'change') { cardChanged(e); moved(); }
+          else if (type === 'focusout') setTimeout(caret, 0);
+          else focused();
+        }, true);
+      });
+    }
+  }
+  function fields(scope, selector) {
+    var out = [], hosts = Array.from(fieldHosts);
+    function visit(root) {
+      var nodes = root.querySelectorAll(selector + (hosts.length ? ',' + hosts.join(',') : ''));
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (el.matches(selector)) { out.push(el); learn(el); }
+        if (el.shadowRoot && fieldHosts.has(el.localName)) visit(el.shadowRoot);
+      }
+    }
+    visit(scope || document);
+    return out;
+  }
   // The boxes of a form, or of the page, each with its kind.
   function boxes(scope) {
-    var out = [], all = (scope || document).querySelectorAll('input, select, textarea, [role=combobox], [aria-haspopup=listbox]');
+    var out = [], all = fields(scope, 'input, select, textarea, [role=combobox], [aria-haspopup=listbox]');
     for (var i = 0; i < all.length; i++) {
       var k = kind(all[i]);
       if (k && shown(all[i])) out.push({ el: all[i], kind: k });
     }
     return out;
   }
-  function scopeOf(el) { return (el && (el.form || (el.closest && el.closest('form')))) || document; }
+  function scopeOf(el) { return formOf(el); }
 
   // Whether the boxes around this one ask for an address: three parts
   // of one at least, and where it is among them.
-  function addressy(scope) {
+  function addressy(scope, parts) {
     var kinds = {}, place = false;
-    boxes(scope).forEach(function (b) {
+    (parts || boxes(scope)).forEach(function (b) {
       if (CARD[b.kind]) return;
       kinds[b.kind] = 1;
       if (PLACE[b.kind]) place = true;
@@ -221,6 +265,7 @@
   var said = '', grounded = null, dark = null;
   function caret() {
     var el = active();
+    learn(el);
     // A drawn menu opens its own list where Yab's would hang: it is filled
     // from the form's other boxes.
     var g = !el || !el.tagName || picker(el) ? null : alonePhone(el) ? 'phone' : group(el) || (formy(el) ? 'form' : null);
@@ -256,11 +301,24 @@
   }
   var moving = false;
   function moved() {
+    // Only update a list that focus already discovered. A Todo/search
+    // field does not need its surrounding controls classified per frame.
+    if (!said) return;
     if (moving) return;
     moving = true;
     requestAnimationFrame(function () { moving = false; caret(); });
   }
-  document.addEventListener('focusin', caret, true);
+  function focused() {
+    var el = active();
+    if (el) kinds.delete(el);
+    learn(el);
+    if (!top && el && fillable(el)) {
+      fields(formOf(el), 'input, select, textarea').forEach(function (b) { frameFields.add(b); });
+      tell();
+    }
+    caret();
+  }
+  document.addEventListener('focusin', focused, true);
   document.addEventListener('focusout', function () { setTimeout(caret, 0); }, true);
   document.addEventListener('mouseup', function () { setTimeout(caret, 0); }, true);
   window.addEventListener('scroll', moved, true);
@@ -330,8 +388,9 @@
   // Sent: a form's submit, Return in one of its boxes, or a click on a
   // button. What the boxes held goes to yab, which keeps it only if
   // the page moves on, a payment that went through.
-  function send() {
-    var list = boxes(document);
+  function send(anchor) {
+    var at = anchor || active();
+    var list = boxes(formOf(at));
     var c = card(list), scope = null;
     for (var i = 0; i < list.length; i++) if (!CARD[list[i].kind]) { scope = scopeOf(list[i].el); break; }
     var a = scope && addressy(scope) ? address(list) : null;
@@ -345,70 +404,137 @@
   }
   // Only a person's own press counts, or an agent's real click: a
   // click a page's script makes is not someone paying.
-  document.addEventListener('submit', function (e) { if (e.isTrusted) send(); }, true);
+  document.addEventListener('submit', function (e) { if (e.isTrusted) send(e.target); }, true);
   document.addEventListener('keydown', function (e) {
     if (e.isTrusted && e.key === 'Enter' && group(active())) send();
   }, true);
   document.addEventListener('click', function (e) {
-    var el = e.target;
     if (!e.isTrusted) return;
-    if (el && el.closest && el.closest('button, input[type="submit"], input[type="image"], [role="button"]')) setTimeout(send, 0);
+    var b = (e.composedPath ? e.composedPath() : [e.target]).find(function (el) {
+      return el.matches && el.matches('button, input[type="submit"], input[type="image"], [role="button"]');
+    });
+    if (b && (sends(b, formOf(b)) || (!NOT_SEND.test(wordsOf(b)) && /pay|purchase|checkout|confirm|place.*order/i.test(wordsOf(b))))) send(b.form || b);
   }, true);
 
   // A card's boxes in a frame of their own: what they hold as it
   // changes, so the page around them can send it.
   var seeing = null;
-  function seen() {
+  function seen(scope) {
     clearTimeout(seeing);
     seeing = setTimeout(function () {
-      var list = boxes(document).filter(function (b) { return CARD[b.kind]; });
+      var list = boxes(scope).filter(function (b) { return CARD[b.kind]; });
       var c = card(list);
       if (c) post({ kind: 'seen', card: c });
     }, 300);
   }
+  // A box's kind, read once: a Todo list's or a chat's box fires input and
+  // change on every item and key, and hint() reads the words around it
+  // (innerText, a layout each time). Focus reads it again, and so does a
+  // change to the box's own attributes in a watched frame.
+  var kinds = new WeakMap();
+  function kindOf(el) {
+    if (!el || !el.tagName) return null;
+    if (!kinds.has(el)) kinds.set(el, kind(el));
+    return kinds.get(el);
+  }
   function cardChanged(e) {
-    var k = kind(e.target);
+    var el = target(e), k = kindOf(el);
     if (!CARD[k]) return;
     // The 300 ms collection below is for autofill suggestions. Mark
     // sensitive pixels at once, before an agent can ask for a screenshot.
-    if ((k === 'number' || k === 'csc') && e.target.value) post({ kind: 'sensitive' });
-    seen();
+    if ((k === 'number' || k === 'csc') && el.value) post({ kind: 'sensitive' });
+    seen(formOf(el));
   }
   document.addEventListener('input', cardChanged, true);
   document.addEventListener('change', cardChanged, true);
-  if (!top) {
-    // Said as soon as the boxes are there, not when the caret first
-    // comes in: a pick in the page around fills every such frame, the
-    // number's, the date's and the code's, each its own frame.
-    var told = '', looking = null;
-    var tell = function () {
-      var list = boxes(document);
-      // A frame with the security code alone counts: a kept card has its
-      // code, and Stripe's split fields put it in a frame of its own.
-      var card = list.some(function (b) { return CARD[b.kind]; });
-      var place = addressy(document);
-      var now = (card ? 'card' : '') + (place ? 'address' : '');
-      if (!now || now === told) return;
-      told = now;
-      post({ kind: 'fields', card: card, address: place });
-    };
-    tell();
-    window.addEventListener('load', tell);
-    setTimeout(tell, 700);
-    setTimeout(tell, 2200);
-    new MutationObserver(function () {
-      if (looking) return;
-      looking = setTimeout(function () { looking = null; tell(); }, 250);
-    }).observe(document.documentElement, { childList: true, subtree: true });
+  // Payment frames must announce boxes before focus, so the parent's card
+  // pick reaches split fields. Keep an incremental field set; only changed
+  // subtrees are queried, and a batch never re-queries the document.
+  var frameFields = new Set(), frameKinds = new Map(), lateFields = new Set(), told = '', looking = null;
+  var startWatch = function () {};
+  function tell() {
+    if (top) return;
+    // Reclassify only controls touched by this batch. Keeping all controls
+    // and rereading their geometry here still penalized a busy frame with
+    // thousands of unrelated Todo/search inputs.
+    frameFields.forEach(function (el) {
+      lateFields.delete(el);
+      if (!el.isConnected) { frameKinds.delete(el); return; }
+      var k = kindOf(el);
+      if (k && shown(el)) frameKinds.set(el, k);
+      else {
+        frameKinds.delete(el);
+        if (k) lateFields.add(el);
+      }
+    });
+    frameFields.clear();
+    var list = [];
+    frameKinds.forEach(function (k, el) {
+      if (!el.isConnected) { frameKinds.delete(el); return; }
+      list.push({ el: el, kind: k });
+    });
+    lateFields.forEach(function (el) { if (!el.isConnected) lateFields.delete(el); });
+    var card = list.some(function (b) { return CARD[b.kind]; });
+    var place = addressy(null, list) || list.some(function (b) {
+      return PLACE[b.kind] && /(^|\s)billing(\s|$)/i.test(b.el.getAttribute('autocomplete') || '');
+    });
+    var now = (card ? 'card' : '') + (place ? 'address' : '');
+    if (!now || now === told) return;
+    told = now;
+    post({ kind: 'fields', card: card, address: place });
+    startWatch();
   }
+  function addFields(node) {
+    if (node.nodeType !== 1) return false;
+    var selector = 'input, select, textarea', changed = false;
+    if (node.matches(selector)) { frameFields.add(node); changed = true; }
+    // One native subtree query also catches a whole form inserted at once.
+    var added = node.querySelectorAll(selector);
+    for (var i = 0; i < added.length; i++) { frameFields.add(added[i]); changed = true; }
+    return changed;
+  }
+  if (!top) {
+    // Only a frame holding a card's or an address's box is watched for
+    // more: a payment form's frame grows its boxes as it goes. Any other
+    // frame (a Todo list, an editor the caret went into) is read again at
+    // focus (focused()); a watch on its every change cost Speedometer's
+    // frames most of their score.
+    var frameWatched = false;
+    startWatch = function () {
+      if (frameWatched) return;
+      frameWatched = true;
+      watchFrame();
+    };
+    if (document.querySelector('input, select, textarea')) addFields(document.documentElement);
+    tell();
+  }
+  function watchFrame() {
+    new MutationObserver(function (records) {
+      var changed = false;
+      records.forEach(function (r) {
+        if (r.type === 'attributes') {
+          if (r.target.matches('input, select, textarea')) { kinds.delete(r.target); frameFields.add(r.target); changed = true; }
+          return;
+        }
+        r.addedNodes.forEach(function (n) { if (addFields(n)) changed = true; });
+        r.removedNodes.forEach(function (n) {
+          if (n.nodeType === 1 && (n.matches('input, select, textarea, form') || n.querySelector('input, select, textarea'))) changed = true;
+        });
+      });
+      if (!changed || looking) return;
+      looking = setTimeout(function () { looking = null; tell(); }, 0);
+    }).observe(document.documentElement, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ['type', 'name', 'autocomplete', 'id', 'disabled', 'readonly', 'hidden', 'style', 'class'] });
+  }
+  if (!top) window.addEventListener('load', function () { lateFields.forEach(function (el) { frameFields.add(el); }); tell(); }, { once: true });
 
   // Putting a value where a person would have typed it: through the
   // box's own setter, then the events a keystroke fires, so a page's
   // script sees it as typed.
   // While a whole form is filled, what each box held before, for undo.
   var recording = null;
-  function put(el, v) {
-    if (v == null || v === '') return false;
+  function put(el, v, allowEmpty) {
+    if (v == null || (v === '' && !allowEmpty)) return false;
     if (menu(el)) return choose(el, v);
     if (recording) recording.push({ el: el, value: el.value });
     var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
@@ -537,19 +663,53 @@
   };
   // A phone as it is kept, "+1 415 555 0100", in its parts.
   function phone(v) {
-    var t = String(v || '').trim(), m = t.match(/^\+(\d{1,3})[\s.(-]+(.*)$/);
-    if (m) return { code: '+' + m[1], national: m[2].replace(/\D/g, '') };
-    var d = t.replace(/\D/g, '');
-    if (t[0] === '+' && d.length === 11 && d[0] === '1') return { code: '+1', national: d.slice(1) };
+    var t = String(v || '').trim(), d = t.replace(/\D/g, '');
+    // Calling codes, not whitespace: Contacts may keep +14155952917 or
+    // +44 20 7946 0958. Neither formatting nor a trunk digit is a code.
+    var two = /^(20|27|30|31|32|33|34|36|39|40|41|43|44|45|46|47|48|49|51|52|53|54|55|56|57|58|60|61|62|63|64|65|66|81|82|84|86|90|91|92|93|94|95|98)/;
+    if (t[0] === '+') {
+      var n = /^[17]/.test(d) ? 1 : two.test(d) ? 2 : 3;
+      if (d.length > n) return { code: '+' + d.slice(0, n), national: d.slice(n) };
+    }
+    // With no explicit +, these are local digits. In particular an
+    // eleven-digit Chinese mobile also starts with 1: never guess +1.
     return { code: '', national: d };
   }
-  // A whole phone box: as kept, unless it asks for a country's own
-  // digits (a mask with no +, "(___) ___-____"): then those.
-  function phoneIn(el, v) {
+  // Choose the complete representation before dispatching input: a site's
+  // mask may discard excess digits as soon as it hears that event.
+  function phoneIn(el, v, split) {
     var shape = (el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('pattern') || '');
-    var p = phone(v);
-    if (p.code && /[_(#9]/.test(shape) && shape.indexOf('+') < 0) return p.national;
-    return v;
+    var p = phone(v), international = shape.indexOf('+') >= 0 || /international|e\.?164/i.test(hint(el));
+    var whole = p.code + p.national, max = el.maxLength > 0 ? el.maxLength : Infinity;
+    var national = split || kind(el) === 'telNational' || (!international &&
+      (p.code === '+1' || /[_(#9]/.test(shape) || whole.length > max));
+    var wanted = national ? p.national : whole;
+    // No prefix/suffix slicing: a field too short for either complete form
+    // cannot receive this number. Split area/local fields are handled below.
+    return wanted.length <= max ? wanted : null;
+  }
+  function putPhone(el, v) {
+    if (!v || (el.maxLength > 0 && String(v).length > el.maxLength)) return false;
+    var before = el.value;
+    if (!put(el, v)) return false;
+    // A page's mask is allowed to format, never to lose or add digits.
+    if (String(el.value).replace(/\D/g, '') === String(v).replace(/\D/g, '')) return true;
+    put(el, before, true);
+    return false;
+  }
+  function phoneCodeIn(el, v) {
+    var code = phone(v).code, digits = code.slice(1);
+    if (!code) return null;
+    if (menu(el)) {
+      // A country selector often stores "US" and displays "United States
+      // (+1)". Match its dialing code, not the saved address's country.
+      var option = el.options && [].find.call(el.options, function (o) {
+        return !o.disabled && (o.value === digits || o.value === code ||
+          (o.text || '').match(/\+(\d{1,3})(?:\D|$)/)?.[1] === digits);
+      });
+      return option ? option.value : [code, digits, '00' + digits];
+    }
+    return el.type === 'number' || (el.maxLength > 0 && el.maxLength < code.length) ? digits : code;
   }
   var STATES = {
     AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado', CT: 'Connecticut',
@@ -669,15 +829,15 @@
         case 'region': v = menu(el) ? regions(a.region) : regionIn(el, a.region); break;
         case 'postal': v = a.postal; break;
         case 'country': v = menu(el) ? countries(a.country) : a.country; break;
-        case 'tel': v = phoneIn(el, a.phone); break;
-        case 'telCode': v = phone(a.phone).code; break;
+        case 'tel': v = phoneIn(el, a.phone, parts.telCode); break;
+        case 'telCode': v = phoneCodeIn(el, a.phone); break;
         case 'telNational': v = phone(a.phone).national; break;
         case 'telArea': v = phone(a.phone).national.slice(0, 3); break;
         case 'telLocal': v = phone(a.phone).national.slice(3); break;
         case 'email': v = a.email; break;
       }
       if (keep && (keep(el) || (!menu(el) && v === el.value))) return;
-      if (v && (menu(el) ? choose(el, v) : put(el, v))) n++;
+      if (v && (menu(el) ? choose(el, v) : b.kind.indexOf('tel') === 0 ? putPhone(el, v) : put(el, v))) n++;
     });
     return n;
   }
@@ -688,25 +848,55 @@
   // each new empty box, and a first line still holding the whole street
   // it took before a second line was there for the flat. A box the
   // person typed in since is theirs.
-  function follow(a, scope, first) {
+  function follow(a, scope, first, accept) {
     var ours = new Map(), seen = new Set();
-    var list = function () { return boxes(scope).filter(function (b) { return !CARD[b.kind]; }); };
+    var list = function () { return boxes(scope).filter(function (b) { return !CARD[b.kind] && (!accept || accept(b)); }); };
+    // Record the initial boxes before input handlers reveal more. Newly
+    // revealed boxes must still get a follow-up even when they appear in
+    // the same event that fills the street.
+    list().forEach(function (b) { seen.add(b.el); });
     var n = first();
-    list().forEach(function (b) { seen.add(b.el); ours.set(b.el, b.el.value); });
-    var until = Date.now() + 3000;
-    (function again() {
-      if (Date.now() > until) return;
-      setTimeout(function () {
-        var now = list();
-        if (now.some(function (b) { return !seen.has(b.el); })) {
-          var mine = function (el) { return !value(el).value || ours.get(el) === el.value; };
-          var take = now.filter(function (b) { return mine(b.el); }).map(function (b) { return b.el; });
-          fillAddress(a, now, function (el) { return take.indexOf(el) < 0; });
-          now.forEach(function (b) { seen.add(b.el); if (take.indexOf(b.el) >= 0) ours.set(b.el, b.el.value); });
+    list().forEach(function (b) { if (seen.has(b.el)) ours.set(b.el, b.el.value); });
+    // Only a fill in progress watches for newly revealed address boxes.
+    // No polling over all fields on a page that is otherwise idle.
+    var pending = null, known = new Set(fields(scope, 'input, select, textarea'));
+    function again() {
+      pending = null;
+      var now = [];
+      known.forEach(function (el) {
+        if (!el.isConnected) { known.delete(el); return; }
+        var k = kind(el);
+        if (k && !CARD[k] && (!accept || accept({ el: el, kind: k })) && shown(el)) now.push({ el: el, kind: k });
+      });
+      if (!now.some(function (b) { return !seen.has(b.el); })) return;
+      var take = now.filter(function (b) { return !value(b.el).value || ours.get(b.el) === b.el.value; }).map(function (b) { return b.el; });
+      fillAddress(a, now, function (el) { return take.indexOf(el) < 0; });
+      now.forEach(function (b) { seen.add(b.el); if (take.indexOf(b.el) >= 0) ours.set(b.el, b.el.value); });
+    }
+    var observer = new MutationObserver(function (records) {
+      var changed = false;
+      records.forEach(function (r) {
+        if (r.type === 'attributes') {
+          known.forEach(function (el) { if (r.target === el || r.target.contains(el)) changed = true; });
+          return;
         }
-        again();
-      }, 200);
-    })();
+        r.addedNodes.forEach(function (el) {
+          if (el.nodeType !== 1) return;
+          if (el.matches('input, select, textarea')) { known.add(el); changed = true; }
+          fields(el, 'input, select, textarea').forEach(function (box) { known.add(box); changed = true; });
+          if (el.matches('option')) changed = true;
+        });
+        r.removedNodes.forEach(function (el) {
+          if (el.nodeType === 1 && el.matches('input, select, textarea, form, option')) changed = true;
+        });
+      });
+      if (changed && !pending) pending = setTimeout(again, 0);
+    });
+    observer.observe(scope === document ? document.body : scope, { childList: true, subtree: true,
+      attributes: true, attributeFilter: ['hidden', 'style', 'class', 'disabled'] });
+    // first() may have synchronously revealed fields before observation.
+    pending = setTimeout(again, 0);
+    setTimeout(function () { observer.disconnect(); clearTimeout(pending); }, 3000);
     return n;
   }
 
@@ -788,13 +978,17 @@
   // The form around a box: its <form>, or the nearest box holding three
   // boxes or more, for pages drawn without one.
   function formOf(el) {
-    var f = el && (el.form || (el.closest && el.closest('form')));
-    if (f) return f;
-    for (var up = el && el.parentElement; up && up !== document.body; up = up.parentElement) {
-      if (up.querySelectorAll('input, select, textarea').length >= 3) return up;
+    if (el && el.form) return el.form;
+    for (var node = el; node; node = parent(node)) {
+      if (node.matches && node.matches('form, [role=form]')) return node;
     }
-    return document;
+    for (var up = parent(el); up && up !== document.body && up !== document.documentElement; up = parent(up)) {
+      if (fields(up, 'input, select, textarea').length >= 3) return up;
+    }
+    // A single field in a payment iframe still belongs to that frame.
+    return el && el.getRootNode && el.getRootNode().host ? el.getRootNode() : document;
   }
+
   // A box a one-time code goes in: said so by the page, or one of a row
   // of four to eight one-character boxes (forms.js codeRow). The code's
   // own list hangs from it; it is never a form's box.
@@ -831,7 +1025,7 @@
   var formEls = [], formBefore = [];
   function describe(scope) {
     var out = [], radios = {}, els = [];
-    var all = (scope || document).querySelectorAll('input, select, textarea');
+    var all = fields(scope, 'input, select, textarea');
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
       if (!fillable(el) || !seeable(el) || codeBox(el)) continue;
@@ -984,7 +1178,16 @@
   // are made clear while it shows, by an attribute and one rule, and
   // come back as it goes.
   var hinted = new WeakMap(), ghostEl = null, ghostView = null, hintsOff = false, ghostCss = null, ghostTick = null;
-  var TABKEY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h14m-5-5 5 5-5 5M21 5v14"/></svg>';
+  function tabKey() {
+    var ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
+    var attrs = { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+      'stroke-width': '2.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    Object.keys(attrs).forEach(function (key) { svg.setAttribute(key, attrs[key]); });
+    var path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', 'M3 12h14m-5-5 5 5-5 5M21 5v14');
+    svg.appendChild(path);
+    return svg;
+  }
   function ghostable(el) {
     if (!el || !el.tagName) return false;
     if (el.tagName === 'TEXTAREA') return true;
@@ -1026,7 +1229,7 @@
     words.textContent = hint.value;
     key.style.cssText = 'flex: none; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px;' +
       ' border-radius: 5px; background: color-mix(in srgb, currentColor 14%, transparent); opacity: 0.8;';
-    key.innerHTML = TABKEY;
+    key.appendChild(tabKey());
     key.firstChild.style.cssText = 'width: 12px; height: 12px; display: block;';
     ghostView.appendChild(words);
     ghostView.appendChild(key);
@@ -1276,6 +1479,10 @@
   // click(), and the list hangs from the button, not the box nobody
   // sees. A box's click, even a script's, passes through here first.
   var pressed = null, fileAsked = null, fileAway = null, fileRingEl = null, fileRing = null;
+  // In a frame the press on a file box that sent for this script came first
+  // (WalletRelay.soon kept it): Files hangs from that box.
+  var fileFirst = window.__yabWalletFile;
+  if (fileFirst && fileFirst.el && fileFirst.el.isConnected) fileAsked = { el: fileFirst.el, near: fileFirst.el, t: fileFirst.t };
   function fileRingPlace() {
     if (!fileRing || !fileRingEl || !fileRingEl.isConnected) { if (fileRing) fileRing.style.display = 'none'; return; }
     var r = fileRingEl.getBoundingClientRect();
@@ -1353,8 +1560,8 @@
     // green dot, with where it came from over it.
     markSignIn: function (source) {
       var at = active();
-      var scope = (at && (at.form || (at.closest && at.closest('form')))) || document;
-      var boxes = scope.querySelectorAll('input');
+      var scope = formOf(at);
+      var boxes = fields(scope, 'input');
       for (var i = 0; i < boxes.length; i++) {
         var b = boxes[i], t = (b.type || 'text').toLowerCase();
         if (['text', 'email', 'tel', 'password'].indexOf(t) < 0 || !b.value) continue;
@@ -1610,7 +1817,7 @@
   }, true);
   document.addEventListener('click', function (e) {
     if (!e.isTrusted) return;
-    var b = e.target && e.target.closest && e.target.closest('button, input[type="submit"], input[type="image"], [role="button"]');
+    var b = (e.composedPath ? e.composedPath() : [e.target]).find(function (el) { return el.matches && el.matches('button, input[type="submit"], input[type="image"], [role="button"]'); });
     if (!b) return;
     // A button that sends its form: its form, or the boxes around it.
     var scope = b.form || formOf(b);
@@ -1628,22 +1835,62 @@
     // address goes only into the form the caret is in, when it is in
     // one: a page with a billing and a shipping form gets it once.
     fill: function (data, what) {
-      var list = boxes(document);
+      var at = active();
+      learn(at);
+      var list = boxes(what === 'card' ? document : formOf(at));
       // A number into the phone box the caret is in, or the page's one
       // phone box when the pick took the caret away.
       if (what === 'phone') {
         var at = active(), tels = list.filter(function (b) { return b.kind === 'tel' || b.kind === 'telNational'; });
         var box = tels.filter(function (b) { return b.el === at; })[0] || (tels.length === 1 ? tels[0] : null);
         if (!box) return 0;
-        return put(box.el, box.kind === 'telNational' ? phone(data.phone).national : phoneIn(box.el, data.phone)) ? 1 : 0;
+        // A separate calling-code box belongs to this form's number too.
+        var codes = list.filter(function (b) { return b.kind === 'telCode'; });
+        // Several telephone groups can share one form. Without a unique
+        // code box, leave their country choices alone rather than changing
+        // another number's country along with this number.
+        if (codes.length > 1) codes = [];
+        var filled = putPhone(box.el, phoneIn(box.el, data.phone, codes.length > 0)) ? 1 : 0;
+        if (filled) codes.forEach(function (b) {
+          var code = phoneCodeIn(b.el, data.phone);
+          if (menu(b.el) ? choose(b.el, code) : putPhone(b.el, code)) filled++;
+        });
+        return picks(filled);
       }
       if (what === 'card') {
         var n = fillCard(data, list.filter(function (b) { return CARD[b.kind]; }));
+        // The selected card's billing address belongs to this checkout too.
+        // Keep address forms scoped and leave unrelated single fields alone.
+        if (data.billing) {
+          var scopes = [];
+          list.forEach(function (b) {
+            var scope = scopeOf(b.el);
+            if (CARD[b.kind] || scopes.indexOf(scope) >= 0) return;
+            var parts = list.filter(function (part) { return scopeOf(part.el) === scope; });
+            var billing = parts.some(function (part) { return /(^|\s)billing(\s|$)/i.test(part.el.getAttribute('autocomplete') || ''); });
+            var checkout = parts.some(function (part) { return CARD[part.kind]; });
+            var place = parts.some(function (part) { return PLACE[part.kind]; });
+            if (((billing || checkout) && addressy(scope, parts)) || (billing && place)) scopes.push(scope);
+          });
+          scopes.forEach(function (scope) {
+            var billingBox = function (b) {
+              var auto = b.el.getAttribute('autocomplete') || '';
+              // Checkout contact details are not necessarily billing details.
+              var contact = b.kind === 'email' || b.kind.indexOf('tel') === 0;
+              return scopeOf(b.el) === scope && !CARD[b.kind] && !/(^|\s)shipping(\s|$)/i.test(auto)
+                && (!contact || /(^|\s)billing(\s|$)/i.test(auto));
+            };
+            n += follow(data.billing, scope, function () {
+              return fillAddress(data.billing, boxes(scope).filter(billingBox));
+            }, billingBox);
+          });
+        }
         // A billing ZIP or country on its own beside the card, as
         // Stripe asks, takes the kept address's: not part of an
         // address form, which the address's own pick fills.
         list.forEach(function (b) {
           if ((b.kind !== 'postal' && b.kind !== 'country') || value(b.el).value || addressy(scopeOf(b.el))) return;
+          if (/(^|\s)shipping(\s|$)/i.test(b.el.getAttribute('autocomplete') || '')) return;
           var v = b.kind === 'postal' ? data.postal : data.country;
           if (v && (menu(b.el) ? choose(b.el, countries(v)) : put(b.el, v))) n++;
         });
@@ -1688,5 +1935,5 @@
       return best && { x: best.x, y: best.y, dark: yabGround(best.el) };
     }
   };
-  caret();
+  focused();
 })();

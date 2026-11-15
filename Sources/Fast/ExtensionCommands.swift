@@ -59,7 +59,7 @@ enum ExtensionCommands {
         if let other = aliases(ids: ids)[word], other.id != id || other.command != command {
             return "Already \(Extensions.here.installed.first { $0.id == other.id }?.name ?? "another extension")"
         }
-        if let scope = Scopes.all.first(where: { $0.aliases.contains(word) || $0.name.lowercased() == word || $0.id == word }) {
+        if let scope = Scopes.all.first(where: { $0.aliases.contains(word) || $0.name.lowercased() == word || $0.host == word }) {
             return "Already \(scope.name)"
         }
         if let action = QuickActions.shared.actions.first(where: { $0.enabled && $0.alias == word }) { return "Already \(action.name)" }
@@ -91,8 +91,11 @@ extension Extensions {
         let title: String
         let keys: Hotkey?
         let kept: ExtensionCommands.Kept
+        /// Its key is Chrome's (ChromiumExtensionCommands): the extension
+        /// runs in Chromium, and Settings writes the key there.
+        var chromium = false
         var id: String { extensionID + "/" + command }
-        var press: Bool { ExtensionTip.pressCommands.contains(command) }
+        var press: Bool { ExtensionTip.pressCommands.contains(command) || ChromiumExtensionCommands.actionCommands.contains(command) }
 
         /// The existing Shortcuts filter also finds the alias shown in its row.
         func matches(_ filter: String) -> Bool {
@@ -103,14 +106,23 @@ extension Extensions {
     }
 
     /// Each extension that's on and has commands, in install order, with
-    /// them: from WebKit when it is loaded, from its manifest while it
-    /// sleeps or waits its turn.
+    /// them: from WebKit when it is loaded, from Chrome when it runs in
+    /// Chromium (its keys Chrome's), from its manifest while it sleeps or
+    /// waits its turn.
     func commandGroups() -> [(item: Installed, short: String, commands: [CommandEntry])] {
-        installed.filter(\.enabled).compactMap { item in
+        let native = ChromiumExtensionCommands.native(for: self)
+        return installed.filter(\.enabled).compactMap { item in
             let short = buttons.first { $0.id == item.id }?.label
                 ?? ExtensionTip.label(action: "", name: item.name, displayName: nil, shortName: tipFacts[item.id]?.shortName ?? "")
             let listed: [(id: String, title: String, keys: Hotkey?)]
-            if let context = contexts[item.id] {
+            var chromium = false
+            if contexts[item.id] == nil, let row = ChromiumExtensionCommands.row(item.id, in: native) {
+                // Chrome lists the button's first, then the rest by name.
+                chromium = true
+                listed = (row.commands.filter(\.action) + row.commands.filter { !$0.action }).map { command -> (id: String, title: String, keys: Hotkey?) in
+                    (command.name, command.action ? "" : command.description, command.hotkey)
+                }
+            } else if let context = contexts[item.id] {
                 let all = context.commands.map { command -> (id: String, title: String, keys: Hotkey?) in
                     (command.id, command.title, command.activationKey.map { Hotkey($0, command.modifierFlags) })
                 }
@@ -121,9 +133,10 @@ extension Extensions {
                 listed = []
             }
             let commands = listed.map { id, title, keys in
-                CommandEntry(extensionID: item.id, command: id,
-                             title: ExtensionTip.pressCommands.contains(id) ? "Open \(short)" : (title.isEmpty ? id : title),
-                             keys: keys, kept: ExtensionCommands.kept(item.id, id))
+                let press = ExtensionTip.pressCommands.contains(id) || ChromiumExtensionCommands.actionCommands.contains(id)
+                return CommandEntry(extensionID: item.id, command: id,
+                                    title: press ? "Open \(short)" : (title.isEmpty ? id : title),
+                                    keys: keys, kept: ExtensionCommands.kept(item.id, id), chromium: chromium)
             }
             return commands.isEmpty ? nil : (item, short, commands)
         }
@@ -140,6 +153,13 @@ extension Extensions {
     /// (`extensions.keys.<id>`), on the loaded command at once, and in what
     /// an asleep one answers to.
     func setKey(_ hotkey: Hotkey?, extension id: String, command: String) {
+        // One that runs in Chromium: Chrome keeps its keys, as
+        // chrome://extensions/shortcuts sets them.
+        if contexts[id] == nil, let native = ChromiumExtensionCommands.native(for: self),
+           ChromiumExtensionCommands.row(id, in: native)?.commands.contains(where: { $0.name == command }) == true {
+            ChromiumExtensionCommands.setKey(hotkey, extension: id, command: command, in: native, for: self)
+            return
+        }
         if let wk = contexts[id]?.commands.first(where: { $0.id == command }) {
             setKey(hotkey?.key, hotkey?.flags ?? [], for: wk)
         } else {
@@ -200,6 +220,13 @@ extension Browser {
         guard #available(macOS 15.4, *) else { return }
         let parts = what.dropFirst(4).split(separator: "\u{1F}", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return }
+        // A Chromium tab in front: the extension's Chromium copy runs it, for that tab.
+        if let tab = active, tab.engineKind == .chromium, !ExtensionCommands.off(parts[0], parts[1]),
+           ChromiumExtensionCommands.row(parts[0], in: ChromiumExtensionCommands.native(for: tab))?
+               .commands.contains(where: { $0.name == parts[1] }) == true {
+            ChromiumExtensionCommands.run(parts[0], command: parts[1], in: tab)
+            return
+        }
         Extensions.of(self).run(parts[0], command: parts[1])
     }
 

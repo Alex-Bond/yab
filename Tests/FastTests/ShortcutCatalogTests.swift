@@ -35,9 +35,12 @@ struct ShortcutCatalogTests {
     }
 
     @Test func pageOwnedCommandsAndSecondaryAliasesKeepTheirExistingPriority() {
-        #expect(!Shortcut.reservesPageKey(.back, readAs: Hotkey("[", .command)))
-        #expect(!Shortcut.reservesPageKey(.forward, readAs: Hotkey("]", .command)))
-        #expect(!Shortcut.reservesPageKey(.column, readAs: Hotkey("s", .command)))
+        // Arc's ahead of the page (evals/reserved-keys); ⌘R, ⌘F, ⌘Y the page's first, as in Arc and Chrome.
+        #expect(Shortcut.reservesPageKey(.back, readAs: Hotkey("[", .command)))
+        #expect(Shortcut.reservesPageKey(.forward, readAs: Hotkey("]", .command)))
+        #expect(Shortcut.reservesPageKey(.column, readAs: Hotkey("s", .command)))
+        #expect(!Shortcut.reservesPageKey(.find, readAs: Hotkey("f", .command)))
+        #expect(!Shortcut.reservesPageKey(.history, readAs: Hotkey("y", .command)))
         #expect(!Shortcut.reservesPageKey(.inspector, readAs: Hotkey("f12", [])))
         #expect(Shortcut.reservesPageKey(.nextTab, readAs: Hotkey("]", [.command, .shift])))
         #expect(Shortcut.reservesPageKey(.space1, readAs: Hotkey("1", .control)))
@@ -323,6 +326,55 @@ struct ShortcutCatalogTests {
             keymap.take(system: ["Close Tabs to the Left": "^~@b", "Close Tabs Above": "^~@a"])
             #expect(keymap.keys(.closeBefore) == Hotkey(sidebar ? "a" : "b", [.control, .option, .command]))
         }
+    }
+
+    /// Tabs › Share Page… is a row of Settings › Shortcuts with no key out of
+    /// the box, and takes ⌃S, as the reporter has Share in Arc (register
+    /// 2675, 1567): a key no Yab default or reservation holds. A key
+    /// another action has is taken from it, as for every row.
+    @MainActor @Test func sharePageHasNoDefaultAndTakesAChosenKey() throws {
+        let address = try #require(Shortcut.all.first { $0.title == "Address" })
+        let item = try #require(address.items.first { $0.action == .sharePage })
+        #expect(item.key == nil)
+        #expect(Shortcut.context(.sharePage) == .browser)
+        // The menu item's title, so an App Shortcut given it is its key too.
+        #expect(Shortcut.titles[.sharePage] == "Share Page\u{2026}")
+        #expect(Shortcut.titled["Share Page\u{2026}"] == .sharePage)
+        #expect(Hotkeys.action(forTitle: "Share Page\u{2026}") == .sharePage)
+
+        let controlS = Hotkey("s", .control)
+        #expect(Keymap.valid(controlS, for: .sharePage))
+        #expect(!Shortcut.kept(controlS, from: .sharePage))
+        #expect(controlS.menu != nil)
+        let defaults = Keymap.resolved(chosen: [:])
+        #expect(defaults[.sharePage] == nil)
+        #expect(!defaults.values.contains { Keymap.keysOverlap($0, controlS) })
+        let chosen = Keymap.resolved(chosen: [Shortcut.Action.sharePage.rawValue: controlS.stored])
+        #expect(chosen[.sharePage] == controlS)
+        for (action, key) in defaults { #expect(chosen[action] == key, "\(action.rawValue) lost its key") }
+        #expect(Keymap.resolved(chosen: [Shortcut.Action.sharePage.rawValue: ""])[.sharePage] == nil)
+        // A key without ⌘, ⌥ or ⌃ would be the page's typing.
+        #expect(!Keymap.valid(Hotkey("s", []), for: .sharePage))
+
+        // ⌘S given to it is no longer the sidebar's.
+        let commandS = Hotkey("s", .command)
+        let taken = Keymap.resolved(chosen: [Shortcut.Action.sharePage.rawValue: commandS.stored])
+        #expect(taken[.sharePage] == commandS)
+        #expect(taken[.column] == nil)
+
+        let keymap = Keymap.shared
+        let saved = keymap.chosen[Shortcut.Action.sharePage.rawValue]
+        defer {
+            if let saved { keymap.set(Hotkey(stored: saved), for: .sharePage) } else { keymap.reset(.sharePage) }
+        }
+        #expect(keymap.clash(controlS, for: .sharePage) == nil)
+        keymap.set(controlS, for: .sharePage)
+        #expect(keymap.keys(.sharePage) == controlS)
+        #expect(keymap.action(for: controlS) == .sharePage)
+        #expect(Hotkeys.shared.keys("Share Page\u{2026}") == "⌃S")
+        keymap.reset(.sharePage)
+        #expect(keymap.keys(.sharePage) == nil)
+        #expect(keymap.isDefault(.sharePage))
     }
 
     @Test func folderWithTabsIsControlCommandN() throws {

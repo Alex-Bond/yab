@@ -46,8 +46,9 @@ extension Extensions {
     /// The sign-in a space's pages are kept in: nil for the shared one,
     /// else the space's own id (`Spaces.store(for:)`).
     static func signIn(of space: UUID) -> UUID? {
-        if space == Space.firstID || space == Space.mailID || space == Space.pinsID || Spaces.sharing.contains(space) { return nil }
-        return Spaces.signIn(of: space)
+        if space == Space.mailID || space == Space.pinsID || Spaces.sharing.contains(space) { return nil }
+        let profile = Spaces.signIn(of: space)
+        return profile == Space.firstID ? nil : profile
     }
 
     /// A sign-in's extensions by the sign-in: the shared ones for nil.
@@ -113,6 +114,57 @@ extension Extensions {
         let waiting = unstarted
         unstarted = []
         for made in waiting { made.startSignIn(in: browser) }
+    }
+
+    // MARK: at rest on Chromium
+
+    private static var resting: [Extensions] = []
+    private static var webKitPageSeen = false
+
+    /// With Chromium the default, the pages have the CEF profile's extensions,
+    /// and these would only run beside them: a second worker of each, a second
+    /// of every reminder and sync, memory for nothing. They load when a page of
+    /// the default's own WebKit first appears (a rule, memory, a choice).
+    static var restsForChromium: Bool { PageEngineFactory.chromiumEnabled && !webKitPageSeen }
+
+    static func rest(_ extensions: Extensions) { resting.append(extensions) }
+
+    /// Those adopted into this store's Chromium profile, which stay asleep
+    /// here for good while Chromium is on: a WebKit page has the Chromium copy
+    /// bridged to it, and a WebKit copy woken beside it would bring back the
+    /// storage and account from before, after a sign-out or removal there.
+    static func restingInChromium(_ store: WKWebsiteDataStore) -> Set<String> {
+        guard PageEngineFactory.chromiumEnabled, store.isPersistent else { return [] }
+        return ChromiumExtensions.inChromium(profile: ChromiumPersistentProfiles.profile(store: store, placement: Space.firstID))
+    }
+
+    /// Removed or turned off in Chromium: off in the WebKit list too, so a
+    /// WebKit copy never runs what the person took away, Chromium on or off.
+    static func offInChromium(_ id: String, signIn: UUID?) {
+        let made: Extensions?
+        if let signIn { made = others[signIn] } else { made = shared }
+        if let made, made.installed.contains(where: { $0.id == id }) {
+            if made.installed.contains(where: { $0.id == id && $0.enabled }) { made.setEnabled(id, false) }
+            return
+        }
+        guard var saved = unread(signIn), let index = saved.firstIndex(where: { $0.id == id && $0.enabled }) else { return }
+        saved[index].enabled = false
+        try? JSONEncoder().encode(saved).write(to: list(of: signIn), options: .atomic)
+    }
+
+    /// A web page on WebKit is being built, one of those extensions act on.
+    static func webKitPageMade() {
+        guard !webKitPageSeen else { return }
+        webKitPageSeen = true
+        let waking = resting
+        resting = []
+        // What Chromium changed comes first: they start where it left off.
+        for extensions in waking {
+            inTurn {
+                await ChromiumExtensions.bringStorageHome(signIn: extensions.signIn)
+                await extensions.launch()
+            }
+        }
     }
 
     // MARK: one sign-in at a time
@@ -239,7 +291,7 @@ extension Extensions {
     static func splitOnce() {
         guard !Store.settings.bool(forKey: splitKey) else { return }
         Store.settings.set(true, forKey: splitKey)
-        let own = Spaces.read().filter(\.ownSignIns).map(\.id)
+        let own = Array(Set(Spaces.read().filter(\.ownSignIns).map(\.profileID)))
         guard let data = try? Data(contentsOf: list(of: nil)),
               let list = try? JSONDecoder().decode([Installed].self, from: data), !list.isEmpty else { return }
         split(list, into: own, lists: signIns, storage: storageRoot(of: nil), root: storageRoot)

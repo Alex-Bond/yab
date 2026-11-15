@@ -12,7 +12,7 @@ struct WhileYouBrowsePage: View {
     var body: some View {
         PageHero(page: .whileYouBrowse)
         Section {
-            row("Tidy tabs", "Group Today tabs into folders by topic.", $prefs.tidyTabs)
+            row("Tidy tabs", "Requires Apple Intelligence or a connected model (Claude or Codex).", $prefs.tidyTabs)
                 .settingsAnchor("tidy-tabs")
             row("Tidy tab titles", "Shorten titles of kept tabs.", $prefs.tidyTitles)
                 .settingsAnchor("tidy-titles")

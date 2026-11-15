@@ -1,10 +1,130 @@
 import AppKit
 import Testing
+import WebKit
 @testable import Fast
 
 @Suite(.serialized)
 @MainActor
 struct ChromiumScriptsTests {
+    @Test func savedSiteLooksChooseTheDocumentHostAndKeepTheirProfile() async throws {
+        _ = NSApplication.shared
+        let domain = UUID().uuidString.lowercased() + ".test"
+        let target = URL(string: "https://www.\(domain)/article")!
+        let tab = Tab(bench: true), otherProfile = UUID()
+        tab.restore(url: URL(string: "https://elsewhere.test/")!, title: "Source")
+        let store = BoostEditorLooks.shared
+        let profile = AddonProfiles.of(tab)
+        var look = BoostEditorLook()
+        look.hidden = [Veil(selector: "#www-banner", label: "Banner", date: Date())]
+        look.css = "h1 { color: purple; }"
+        store.set(look, host: target.host!, profile: profile)
+        var bareLook = BoostEditorLook()
+        bareLook.hidden = [Veil(selector: "#bare-banner", label: "Bare banner", date: Date())]
+        store.set(bareLook, host: domain, profile: profile)
+        var foreign = BoostEditorLook()
+        foreign.hidden = [Veil(selector: "#other-profile", label: "Other profile", date: Date())]
+        store.set(foreign, host: target.host!, profile: otherProfile)
+        defer {
+            store.set(BoostEditorLook(), host: target.host!, profile: profile)
+            store.set(BoostEditorLook(), host: domain, profile: profile)
+            store.set(BoostEditorLook(), host: target.host!, profile: otherProfile)
+            store.flush()
+            tab.close()
+        }
+        let source = try #require(store.chromiumSource(for: tab))
+        let addons = ChromiumAddons(for: tab)
+        #expect(addons.look == source)
+        #expect(addons.scripts.contains { $0.source == source && $0.world == .yab && $0.atEnd && $0.mainOnly })
+        #expect(!source.contains("#other-profile"))
+        // Register once, while the tab is on an unrelated host. Both new
+        // documents must choose their own saved look without any rearming.
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: Web.world))
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
+        defer { web.stopLoading() }
+        #expect(try await hiddenBanners(in: web, at: target) == ["none", "block", "block"])
+        #expect(try await hiddenBanners(in: web, at: URL(string: "https://\(domain)/")!) == ["block", "none", "block"])
+        #expect(try await hiddenBanners(in: web, at: URL(string: "https://constructor/")!) == ["block", "block", "block"])
+        let privateTab = Tab(shy: true, bench: true)
+        defer { privateTab.close() }
+        privateTab.restore(url: target, title: "Private")
+        #expect(ChromiumAddons(for: privateTab).look == nil)
+        // A rule in another sign-in profile must not supply this tab's look.
+        store.set(BoostEditorLook(), host: target.host!, profile: profile)
+        #expect(ChromiumAddons(for: tab).look?.contains("#www-banner") == false)
+        #expect(ChromiumAddons(for: tab).look?.contains("#other-profile") == false)
+        look.enabled = false
+        store.set(look, host: target.host!, profile: profile)
+        #expect(ChromiumAddons(for: tab).look?.contains("#www-banner") == false)
+    }
+
+    @Test func hiddenStylesChooseTheNewDocumentWithoutArmingForItsDestination() async throws {
+        _ = NSApplication.shared
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let ipv6 = URL(string: "https://[::1]/")!
+        let rules = ["one.test": "#www-banner { display: none !important; }",
+                     "two.test": "#bare-banner { display: none !important; }",
+                     PageScripts.host(of: ipv6)!: "#www-banner { display: none !important; }"]
+        let policy = Veiling.styles(rules)
+        let tab = Tab(shy: true, bench: true)
+        defer { tab.close() }
+        let previousCSS = "#other-profile { display: none !important; }"
+        let registrations = PageScripts.chromium(for: tab, .init(host: "previous.test", css: previousCSS), hiddenCSS: rules)
+        #expect(registrations.contains { $0.source == policy && $0.world == .yab && !$0.atEnd && $0.mainOnly })
+        #expect(!registrations.contains { $0.source == Veiling.style(previousCSS) })
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: policy, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Web.world))
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
+        defer { web.stopLoading() }
+        #expect(try await hiddenBanners(in: web, at: URL(string: "https://www.one.test/")!) == ["none", "block", "block"])
+        #expect(try await hiddenBanners(in: web, at: URL(string: "https://two.test/")!) == ["block", "none", "block"])
+        #expect(try await hiddenBanners(in: web, at: URL(string: "https://unrelated.test/")!) == ["block", "block", "block"])
+        #expect(try await hiddenBanners(in: web, at: ipv6) == ["none", "block", "block"])
+        let firstID = UUID(), secondID = UUID()
+        let first = Browser(windowID: firstID), second = Browser(windowID: secondID)
+        defer {
+            for browser in [first, second] { for tab in browser.tabs { tab.close() } }
+            for id in [firstID, secondID] {
+                try? FileManager.default.removeItem(at: Store.file("session-window-\(id.uuidString).json"))
+            }
+        }
+        #expect(first.curtain === second.curtain)
+    }
+
+    private func hiddenBanners(in web: WKWebView, at url: URL) async throws -> [String] {
+        web.loadHTMLString("<html><body><div id='www-banner'>WWW</div><div id='bare-banner'>Bare</div><div id='other-profile'>Other</div></body></html>", baseURL: url)
+        var ready = false
+        for _ in 0..<100 {
+            ready = (try? await BoostJavaScript.evaluate("location.href === \(BoostScript.json(url.absoluteString)) && document.readyState === 'complete' && !!document.querySelector('#other-profile')", on: web)) as? Bool == true
+            if ready { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(ready)
+        return try #require(try await BoostJavaScript.evaluate("['www-banner','bare-banner','other-profile'].map(id => getComputedStyle(document.getElementById(id)).display)", on: web) as? [String])
+    }
+
+    @Test func webKitSavedLookUsesTheSameIPv6HostSyntax() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = BoostEditorLooks(file: root.appendingPathComponent("site-looks.json"))
+        let tab = Tab(bench: true), url = URL(string: "https://[::1]/")!
+        defer { tab.close(); store.flush(); try? FileManager.default.removeItem(at: root) }
+        var look = BoostEditorLook()
+        look.hidden = [Veil(selector: "#www-banner", label: "Banner", date: Date())]
+        let host = try #require(BoostEditorLook.host(url))
+        store.set(look, host: host, profile: AddonProfiles.of(tab))
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController.addUserScript(try #require(store.script(for: tab, host: host)))
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
+        defer { web.stopLoading() }
+        #expect(try await hiddenBanners(in: web, at: url) == ["none", "block", "block"])
+        #expect(try await hiddenBanners(in: web, at: URL(string: "https://elsewhere.test/")!) == ["block", "block", "block"])
+    }
+
     @Test func worldNamesMatchEvaluationWorlds() {
         #expect(ChromiumScripts.world(.page) == "")
         #expect(ChromiumScripts.world(.client) == "yab-client")

@@ -326,7 +326,9 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// Compatibility for consumers still awaiting migration. These do not
     /// own a second page and never construct a WebKit page for another engine.
     var built: PageView? { builtPage?.webKit }
-    @ObservationIgnored private(set) var builtPage: (any PageHandle)?
+    @ObservationIgnored private(set) var builtPage: (any PageHandle)? {
+        didSet { ChromiumTabGroups.shared.changed() }
+    }
     /// Chromium keeps its browser/controller while the renderer is discarded.
     @ObservationIgnored private var sleepingChromium: ChromiumPage?
     @ObservationIgnored private var sleepAttempt: UUID?
@@ -352,8 +354,16 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     @ObservationIgnored var chromiumDRMEnabled: Bool
     /// ⌘K's Open in: this tab's engine whatever the rules say (EngineRules).
     @ObservationIgnored var engineHeld: PageEngineKind?
-    /// Auto gave this tab WebKit because memory was tight when it opened.
-    @ObservationIgnored var engineAutoSpared = false
+    /// The site (registrable domain) whose player refused Chromium's missing
+    /// Widevine in this tab: WebKit while the tab is on it, the default's
+    /// engine again once it goes elsewhere (Tab.routesToChromium).
+    @ObservationIgnored var engineProtectedSite: String?
+    /// The address Yab itself last sent this tab to (go(to:)): typed, a
+    /// bookmark, a link from another app. A person's navigation to routing.
+    @ObservationIgnored var engineSent: URL?
+    /// Memory was tight when this tab opened, so it is not on the default's
+    /// own engine: WebKit under Auto, Chromium under WebKit First.
+    @ObservationIgnored var engineMemoryMoved = false
     /// The default engine changed while this tab's page was up. It keeps that
     /// engine and takes this one when it next builds a page (waking).
     @ObservationIgnored var enginePendingDefault: PageEngineKind?
@@ -444,7 +454,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         guard builtPage == nil else { enginePendingDefault = kind; return }
         enginePendingDefault = nil
         chromiumDRMEnabled = kind == .chromium
-        engineAutoSpared = false
+        engineMemoryMoved = false
         guard EngineRules.followsDefault(address) else { return }
         engineKind = engineFactory.resolved(engineFactory.sites.decide(kind, at: address, held: engineHeld, tight: false).kind)
     }
@@ -471,8 +481,8 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// (docs/evidence/tab-open-2026-10-13.md). WebKit's own call for this,
     /// Safari's; the page that loads then goes in the same process.
     func warm() {
-        guard (builtPage?.engine ?? engineFactory.resolved(engineKind, at: address)) == .webKit else {
-            WebKitOnly.note("WebKit process warm-up", engine: engineKind); _ = page; return
+        guard (builtPage?.engine ?? engineFactory.upcoming(self, at: address)) == .webKit else {
+            (page as? ChromiumPage)?.warmUp(); return
         }
         guard let web = webKitOnly("WebKit process warm-up") else { return }
         if web.responds(to: Tab.launchSelector) { web.perform(Tab.launchSelector) }
@@ -481,6 +491,8 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         if #available(macOS 15.4, *) { ContentWarm.warm(web) }
     }
     private static let launchSelector = NSSelectorFromString("_launchInitialProcessIfNecessary")
+    /// The spare for a Chromium window: its helper is its own process, nothing shares the first frame with it.
+    var warmsSoon: Bool { (builtPage?.engine ?? engineFactory.upcoming(self, at: address)) == .chromium }
 
     /// A view whose process this tab's page is to be made in, when it is
     /// built (Browser.wakeInSpare), and what to do once the page is under
@@ -524,6 +536,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         if let madeConfiguration { return madeConfiguration }
         let made = Web.configuration(store: laterStore)
         madeConfiguration = made
+        paceHiddenTimers()
         return made
     }
     /// Where its cookies and sign-ins are kept.
@@ -570,16 +583,68 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     private(set) var count: Int? {
         willSet { relay.send(\.count, newValue) }
     }
+    /// A title count may decorate an icon only after this document shows a
+    /// count transition without an icon mutation. The Badging API owns its
+    /// count explicitly and does not need that evidence.
+    private(set) var showsOwnCount = false {
+        willSet { relay.send(\.showsOwnCount, newValue) }
+    }
+    @ObservationIgnored private var countIconProof = CountIconProof()
+    @ObservationIgnored private var countIconReady = false
+    @ObservationIgnored private var countTitle: String?
+
+    func observedCountIcon(title: String, icon: String) {
+        guard !awaitingDocumentMetadata else { return }
+        countTitle = title
+        // Use the very count selected for drawing, not an ignored title's
+        // number (Gmail's folder count differs from its Primary feed).
+        let observed = recount()
+        countIconProof.observe(count: observed, icon: icon)
+        updateCountIconPermission()
+    }
+
+    /// DOM evidence cannot authorize a count over the old cached icon
+    /// while the page's current icon is still being fetched.
+    func countIconFetchStarted() {
+        countIconReady = false
+        updateCountIconPermission()
+    }
+
+    func countIconLoaded() {
+        countIconReady = true
+        updateCountIconPermission()
+    }
+
+    private func updateCountIconPermission() {
+        let allowed = badge != nil || (countIconReady && countIconProof.unchanged)
+        if showsOwnCount != allowed { showsOwnCount = allowed }
+    }
+
+    private func resetCountIconProof() {
+        countIconProof = CountIconProof()
+        countIconReady = false
+        countTitle = nil
+        badge = nil
+        showsOwnCount = false
+    }
+
     /// What the page last gave the Badging API: once a page uses it, its
     /// title's number is left alone.
     @ObservationIgnored private var badge: Int?
+    var appBadgeCount: Int? { badge }
     /// What the site says with no page up, read with its cookies (Gmail's
     /// feed, Notion's inbox): the count of a pin asleep.
     @ObservationIgnored private var sourceCount: Int?
 
     func sourced(_ n: Int?) {
         sourceCount = n
-        recount()
+        let observed = recount()
+        // A live feed transition participates in the same icon interval;
+        // sleeping tabs have no document that can establish this evidence.
+        if builtPage != nil, let icon = countIconProof.icon {
+            countIconProof.observe(count: observed, icon: icon)
+            updateCountIconPermission()
+        }
     }
     // A failed extension callback stays visible to tabs.onUpdated until
     // another navigation starts, even if the engine restores the old URL.
@@ -589,6 +654,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         willSet { relay.send(\.address, newValue) }
         didSet {
             if address?.host() != oldValue?.host() { paceHiddenTimers() }
+            if address != oldValue { Browser.visitMoved(self) }
             settleAddressFlags()
         }
     }
@@ -628,7 +694,11 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// tab and a site kept awake (a chat, mail, music: AwakeSites) keep
     /// WebKit's pace, since they are wanted working out of sight.
     func paceHiddenTimers() {
-        guard Web.slowsHiddenTimers else { return }
+        // Restoring a sleeping row only records its address. Do not build
+        // WebKit controllers and rule lists just to set a preference on a
+        // page that does not exist yet. The configuration getter applies
+        // the current policy when that page is actually needed.
+        guard Web.slowsHiddenTimers, let configuration = madeConfiguration else { return }
         let slow = !bench && !AwakeSites.shared.keeps(address)
         guard slow != timersSlowed else { return }
         timersSlowed = slow
@@ -885,7 +955,12 @@ final class Tab: ObservableObject, Identifiable, Relaying {
             MainActor.assumeIsolated {
                 guard let self, let web, self.builtPage === web, self.toneGate.current(ticket),
                       case .success(let answer) = result,
-                      let read = PageToneReading(answer, size: web.bounds.size), read.href == web.url?.absoluteString else { return }
+                      let read = PageToneReading(answer, size: web.bounds.size), read.href == web.url?.absoluteString,
+                      // Covered for a moment, its full screen or a modal's
+                      // veil: the color it was last seen in stays. Its next
+                      // change (the veil gone, the screen given back) asks
+                      // again (site-tone.js's watch).
+                      !read.covered else { return }
                 @MainActor func offer(_ color: NSColor?) {
                     guard let color, self.builtPage === web, self.toneGate.current(ticket) else { return }
                     if self.toneGate.offer(color, ticket: ticket, now: CACurrentMediaTime()) {
@@ -917,7 +992,8 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     func retoneAsItSettles() {
         retoneArrival += 1
         let arrival = retoneArrival
-        for delay in [0.4, 1.0, 2.0, 3.5] {
+        // Each look at a Chromium page is a whole window read back and encoded.
+        for delay in builtPage?.engine == .chromium ? [1.0, 3.5] : [0.4, 1.0, 2.0, 3.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, self.retoneArrival == arrival else { return }
                 self.retone(fresh: true, color: self.tone == nil || self.lastY <= 1)
@@ -932,19 +1008,41 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// says nothing and the window's own look stands.
     private func reshade(_ web: any PageHandle, fresh: Bool) {
         let document = toneGate.document
+        // A Chromium page as it is shown, after a scroll: its helper reads it
+        // off the page's surface scaled to a few pixels, and says only how
+        // light it is (ChromiumPage.lightness). A fresh look, at an arrival,
+        // waits for the page's next frame, as the picture below does.
+        if !fresh, let page = web as? ChromiumPage, ChromiumPage.surfaceTone {
+            page.lightness { [weak self] result in
+                switch result {
+                case .success(let light):
+                    guard let self, self.builtPage === web, self.toneGate.document == document, !self.isBlank, let light else { return }
+                    self.reshaded(light)
+                case .failure(let error):
+                    // A helper without page.tone: the picture, from now on.
+                    if error is ChromiumPage.ToneUnavailable, !ChromiumPage.surfaceTone { self?.reshade(web, fresh: fresh) }
+                }
+            }
+            return
+        }
         web.snapshot(PageShot(width: 16, afterUpdates: fresh)) { [weak self] image, _ in
             MainActor.assumeIsolated {
                 guard let self, self.builtPage === web, self.toneGate.document == document, !self.isBlank,
                       let picture = image?.cgImage(forProposedRect: nil, context: nil, hints: nil),
                       let light = Tab.lightness(of: picture)
                 else { return }
-                let said: ColorScheme? = light < 0.4 ? .dark : light > 0.6 ? .light : self.shade
-                if self.shade != said { self.shade = said }
-                let below: ColorScheme = light < 0.5 ? .dark : .light
-                if self.under != below { self.under = below }
-                if let said, !self.shy, let host = self.address?.host() { Tab.shades[host] = said }
+                self.reshaded(light)
             }
         }
+    }
+
+    /// What a look at how light the page is says to the bar over it.
+    private func reshaded(_ light: CGFloat) {
+        let said: ColorScheme? = light < 0.4 ? .dark : light > 0.6 ? .light : shade
+        if shade != said { shade = said }
+        let below: ColorScheme = light < 0.5 ? .dark : .light
+        if under != below { under = below }
+        if let said, !shy, let host = address?.host() { Tab.shades[host] = said }
     }
 
     /// The perceived brightness of a picture, on average: 0 black, 1 white.
@@ -977,12 +1075,31 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         return CGFloat(sum) / CGFloat(cover * 1000)
     }
 
+    /// A destination's metadata must not inherit the previous document's
+    /// host fallback while its response is pending. Icon requests started
+    /// by that document lose ownership at the same boundary.
+    private(set) var awaitingDocumentMetadata = false
+
+    func prepareDocumentMetadata(for url: URL?) {
+        awaitingDocumentMetadata = true
+        resetCountIconProof()
+        engineTitle = nil
+        retainingEngineTitle = false
+        title = ""
+        Favicons.shared.navigationStarted(for: self)
+        icon = Tab.ownIcon(url) ?? url.flatMap(Favicons.shared.pageIcon)
+    }
+
+    /// Both engines commit a new document, even though their history and
+    /// script bookkeeping after that boundary are different.
+    func documentMetadataCommitted() { awaitingDocumentMetadata = false }
+
     /// The mark for where it is: Yab's own page's, or the site's kept icon.
     func adoptIcon() {
         if let own = Tab.ownIcon(address) { icon = own; return }
-        guard let host = address?.host()?.lowercased() else { return }
-        icon = Favicons.shared.cached(host)
-        guard icon == nil, let url = address else { return }
+        guard let url = address, Favicons.site(url) != nil else { return }
+        icon = Favicons.shared.cached(page: url)
+        guard icon == nil else { return }
         // Restored/imported tabs may sleep indefinitely without a bitmap
         // in the cache. Wait until restore has also set their custom mark
         // and privacy, then ask only for the site's public icon, never the
@@ -1125,9 +1242,14 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     func applyRememberedZoom() {
         let webpage = address?.scheme?.hasPrefix("http") == true
         let handle = page
-        if let web = WebKitOnly.page(handle, for: "Native minimum font size") {
+        let fonts = PageFonts.read()
+        if let chromium = handle as? ChromiumPage {
+            chromium.minimumFont(webpage ? min(24, max(0, fonts.minimum)) : 0)
+            chromium.pageFamilies(PageFamilies.names(fonts))
+        } else if let web = WebKitOnly.page(handle, for: "Native minimum font size") {
             web.configuration.preferences.minimumFontSize = webpage
-                ? CGFloat(min(24, max(0, PageFonts.read().minimum))) : 0
+                ? CGFloat(min(24, max(0, fonts.minimum))) : 0
+            PageFamilies.apply(fonts, to: web.configuration.preferences)
         }
         let kept = webpage ? PageAppearance.zoom(host: address?.host(), privatePage: shy) : 1
         guard abs(CGFloat(kept) - handle.pageZoom) > 0.004 else { return }
@@ -1166,6 +1288,9 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// The noise started or stopped, or was silenced or let back in: for
     /// the notes a tab sings as it starts (Chorus).
     @ObservationIgnored var onSound: ((Tab) -> Void)?
+
+    /// Supersedes a pending saved-credential lookup on a newer submission.
+    @ObservationIgnored var passwordOfferCheck = UUID()
 
     /// A password this tab has just signed in with, waiting to be kept,
     /// asked over the page while you are here, a key on the tab once put
@@ -1249,10 +1374,34 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// asked: from the second the card offers to stop them.
     @ObservationIgnored var pageDialogs = 0
 
+    /// A pin or a kept tab is one tab to the person, though every window
+    /// holds a tab and a page of its own for it (SharedPins.swift,
+    /// KeptEverywhere.swift): silenced in one window, it is silenced in
+    /// every one, like a single tab (feedback #2018: the pin muted
+    /// in one window pinged from the other's copy, or from the copy left
+    /// in its place when its page went over).
     func mute(_ on: Bool) {
+        muteHere(on)
+        for copy in copies { copy.muteHere(on) }
+    }
+
+    private func muteHere(_ on: Bool) {
         guard engineKind == .chromium || AudioWatch.canMute else { return }
         muted = on
-        (builtPage as? any PageAudioControl)?.setAudioMuted(on)
+        // Chromium discards the document but keeps its controller. A mute
+        // changed while asleep must reach that controller too, before its
+        // queued restore; otherwise it wakes with the old WebContents mute.
+        let audioPage: (any PageHandle)? = builtPage ?? sleepingChromium
+        (audioPage as? any PageAudioControl)?.setAudioMuted(on)
+    }
+
+    /// A copy made in another window, or this window's taken in under the
+    /// list's key, comes in silenced when one already there is. Only ever
+    /// silenced this way: two rows joined (Pins turned to In Every Space)
+    /// keep the mute either had, and letting it back in is `mute`'s.
+    func takeCopiesMute() {
+        guard !muted, copies.contains(where: \.muted) else { return }
+        muteHere(true)
     }
 
     /// What the page hands back when you point at something and click it.
@@ -1265,7 +1414,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// The site the sign-in was sent from, not the one it landed on,
     /// then the name and the password, and whether that page came over
     /// plain http.
-    @ObservationIgnored var onCredentials: ((Tab, String, String, String, Bool) -> Void)?
+    @ObservationIgnored var onCredentials: ((Tab, String, String, String, Bool, PageFrame?) -> Void)?
     /// The caret has entered or left a box a card or an address goes in.
     @ObservationIgnored var onWalletField: ((Tab, WalletField?) -> Void)?
     /// A card, an address or both went through on the page: the host it
@@ -1379,6 +1528,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     private let devRelay = DevRelay()
     private let recordRelay = RecordRelay()
     private let badgeRelay = BadgeRelay()
+    private let windowRelay = WindowRelay()
     private let iconRelay = IconRelay()
     private let watchRelay = WatchRelay()
     private let jsonRelay = JSONRelay()
@@ -1585,8 +1735,8 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// it: it stays in that space rather than going along into every one
     /// with the agent (Browser.travels).
     @ObservationIgnored var stays = false
-    /// The space a tab that goes along with you (a call, an agent at work
-    /// in it) came from, while it is in another: its folder and kept place
+    /// The space a tab that goes along with you (an agent at work in it)
+    /// came from, while it is in another: its folder and kept place
     /// are that space's, not drawn here (Folders.nests), and it goes back
     /// there once it no longer goes along (Browser.sendHome).
     @ObservationIgnored var homeSpace: UUID?
@@ -1726,12 +1876,16 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// One of the pins every space shares (SharedPins.swift): which one,
     /// the same key in every window, in the shared row's file and in sync.
     /// Nil for every other tab, a pin of a space with its own sign-ins too.
-    var everywhere: UUID?
+    var everywhere: UUID? {
+        didSet { if everywhere != oldValue, everywhere != nil { takeCopiesMute() } }
+    }
     /// A kept tab's or a space's own pin's key in the list every window of
     /// its space shares (KeptEverywhere.swift), where that isn't the tab's
     /// own id: this window's tab for an entry made in another window. Nil
     /// for every other tab.
-    var keptKey: UUID?
+    var keptKey: UUID? {
+        didSet { if keptKey != oldValue, keptKey != nil { takeCopiesMute() } }
+    }
 
     /// Kept, above the line in the column (Kept.swift): a row with its title
     /// that tidying up never takes, and ⌘W puts to sleep rather than closes.
@@ -1878,7 +2032,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         if let address, address.pathExtension.lowercased() == "pdf", !address.lastPathComponent.isEmpty { return address.lastPathComponent }
         // Until the page says it again, what it was called when last here,
         // as Arc does: a link opens on its name, not on its address.
-        if let address, !shy, let known = History.shared.title(of: address) { return known }
+        if let address, !shy, let known = History.profile(Spaces.ownSpace(of: store) ?? Space.firstID).title(of: address) { return known }
         if let address { return Address.shown(address) }
         // As the menu names what made it.
         return shy ? "New Private Tab" : "New Tab"
@@ -1960,6 +2114,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         (DevRelay.name, { .plain($0.devRelay) }),
         (RecordRelay.name, { .plain($0.recordRelay) }),
         (BadgeRelay.name, { .plain($0.badgeRelay) }),
+        (WindowRelay.name, { .plain($0.windowRelay) }),
         (IconRelay.name, { .plain($0.iconRelay) }),
         (WatchRelay.name, { .plain($0.watchRelay) }),
         (JSONRelay.name, { .plain($0.jsonRelay) }),
@@ -1971,6 +2126,17 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         (ExternalRelay.name, { _ in .replying(ExternalRelay.shared) }),
         (EyeDropperRelay.name, { _ in .replying(EyeDropperRelay.shared) }),
     ]
+
+    /// The relays whose page waits on an answer.
+    func chromiumScriptReplying(_ name: String) -> (any PageScriptReplying)? {
+        switch name {
+        case PushRelay.name: return PushRelay.shared
+        case PasskeyRelay.name:
+            passkeyRelay.tab = self
+            return passkeyRelay
+        default: return nil
+        }
+    }
 
     func chromiumScriptReceiver(_ name: String) -> (any PageScriptReceiving)? {
         scrollRelay.tab = self
@@ -1985,6 +2151,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         devRelay.log = devLog
         recordRelay.tab = self
         badgeRelay.tab = self
+        windowRelay.tab = self
         iconRelay.tab = self
         watchRelay.tab = self
         jsonRelay.tab = self
@@ -2029,10 +2196,12 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     }
 
     func buildWebKitPage() -> PageView {
+        if #available(macOS 15.4, *), engineFactory.followsGlobalSelection { Extensions.webKitPageMade() }
         let fonts = PageFonts.read()
         if !LinkGap.cut("prefs") {
             configuration.preferences.minimumFontSize = address?.scheme?.hasPrefix("http") == true
                 ? CGFloat(min(24, max(0, fonts.minimum))) : 0
+            PageFamilies.apply(fonts, to: configuration.preferences)
         }
         if !LinkGap.cut("bftrace") { BFTrace.prepare(configuration) }
         // Past Chrome's process count, a page on a site another tab is on
@@ -2057,9 +2226,9 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         let web = OpenTrace.time("build.webview") { PageView(frame: .zero, configuration: configuration) }
         if engineFactory.kinds.contains(.chromium) {
             let originalProfile = chromiumProfile
-            web.navigationEvents.routeSiteEngine = { [weak self] request in
+            web.navigationEvents.routeSiteEngine = { [weak self] request, byPerson in
                 guard let self, !self.gone, self.chromiumProfile == originalProfile else { throw CancellationError() }
-                return try await self.routeSiteEngine(request)
+                return try await self.routeSiteEngine(request, byPerson: byPerson)
             }
             web.navigationEvents.prepareChromiumCookies = { [weak self, weak web] url in
                 guard let self, let web, !self.gone, self.chromiumProfile == originalProfile else { throw CancellationError() }
@@ -2067,14 +2236,25 @@ final class Tab: ObservableObject, Identifiable, Relaying {
                 // bridges claims that directory, so wait for actual prior
                 // Chromium use or an explicit site-engine route.
                 guard ChromiumDRMCookies.needsPreparation(self) else { return }
-                let bridge = try ChromiumDRMCookies.of(self)
-                try await bridge.synchronizeForSwitching()
+                // What the bridges couldn't do costs a cookie or an extension on
+                // this page, never the page: a canceled hop of a sign-in looked
+                // like the site refusing it.
+                do { try await ChromiumDRMCookies.of(self).prepare(for: url, in: .webKit) }
+                catch { NSLog("Cookie bridge: not carried before a WebKit page: %@", String(describing: type(of: error))) }
+                guard !self.gone else { throw CancellationError() }
                 if !self.shy {
-                    let extensions = try self.chromiumDRMExtensions ?? ChromiumDRMExtensions(tab: self, web: web)
-                    self.chromiumDRMExtensions = extensions
-                    try await extensions.prepare(url)
+                    do {
+                        let extensions = try self.chromiumDRMExtensions ?? ChromiumDRMExtensions(tab: self, web: web)
+                        self.chromiumDRMExtensions = extensions
+                        try await extensions.prepare(url)
+                    } catch { NSLog("Chromium extensions: not ready for a WebKit page: %@", String(describing: type(of: error))) }
+                    guard !self.gone else { throw CancellationError() }
                 }
             }
+        }
+        if engineFactory.kinds.contains(.chromium) {
+            web.navigationEvents.redirected = { [weak self] url in ChromiumDRMCookies.session(of: self)?.touched(url, by: .webKit) }
+            web.navigationEvents.prepareFrame = { [weak self] url in await ChromiumDRMCookies.session(of: self)?.prepareFrame(url) }
         }
         if sibling != nil || spare != nil { configuration.perform(Tab.relatedSelector, with: nil) }
         if let spare {
@@ -2215,6 +2395,10 @@ final class Tab: ObservableObject, Identifiable, Relaying {
             guard let pointed = self?.pointedLink, pointed.at >= since - 1 else { return nil }
             return pointed.url
         }
+        web.onSplitLink = { [weak self] url in
+            guard let self else { return }
+            (self.delegate as? Browser)?.splitLink(url, from: self)
+        }
         web.onHideAt = { [weak self] point in
             guard let self else { return }
             self.page.runInYab("window.__yabVeil && window.__yabVeil.at(\(point.x), \(point.y))")
@@ -2295,6 +2479,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         devRelay.log = devLog
         devLog.heardStream = { [weak self] url, events in self?.netLog.heard(stream: url, events: events) }
         badgeRelay.tab = self
+        windowRelay.tab = self
         iconRelay.tab = self
         watchRelay.tab = self
         jsonRelay.tab = self
@@ -2334,9 +2519,13 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     private func applyPageAppearance() {
         guard let handle = builtPage else { return }
         let fonts = PageFonts.read()
-        if let web = WebKitOnly.page(handle, for: "Native page appearance preferences") {
+        if let chromium = handle as? ChromiumPage {
+            chromium.minimumFont(address?.scheme?.hasPrefix("http") == true ? min(24, max(0, fonts.minimum)) : 0)
+            chromium.pageFamilies(PageFamilies.names(fonts))
+        } else if let web = WebKitOnly.page(handle, for: "Native page appearance preferences") {
             web.configuration.preferences.minimumFontSize = address?.scheme?.hasPrefix("http") == true
                 ? CGFloat(min(24, max(0, fonts.minimum))) : 0
+            PageFamilies.apply(fonts, to: web.configuration.preferences)
             PageAppearance.install(fonts, in: web.configuration.userContentController)
         }
         handle.run(PageAppearance.script(fonts), in: .yab) { _ in }
@@ -2371,7 +2560,8 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         // A new document: what the pointer was on is the last one's.
         if SiteItems.shared.pointed[id] != nil { SiteItems.shared.pointed[id] = nil }
         if let chromium = builtPage as? ChromiumPage {
-            chromium.scripts.arm(css: css, host: host ?? PageScripts.host(of: url ?? address))
+            chromium.scripts.arm(css: css, host: host ?? PageScripts.host(of: url ?? address), to: url)
+            Userscripts.shared.newDocument(self)
             return
         }
         guard let built else { return }
@@ -2427,6 +2617,13 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// The box asks for an email (its type, its autocomplete or its label
     /// says so): with no login for the site, your addresses are offered.
     @ObservationIgnored var fieldEmail = false
+    /// The page marked that box for passkey autofill (autocomplete="…
+    /// webauthn"): a pending conditional get's passkeys are listed under it
+    /// (ChromiumWebAuthn+Conditional.swift).
+    @ObservationIgnored var fieldWebAuthn = false
+    /// Its form takes passkeys (a box of it marked webauthn): nothing goes
+    /// in by itself, as Chromium waits for a pick on such a form.
+    @ObservationIgnored var fieldWebAuthnForm = false
     @ObservationIgnored var fieldAutomatic = false
     @ObservationIgnored var fieldDocument: String?
     @ObservationIgnored var fieldIdentity: String?
@@ -2515,6 +2712,8 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         fieldAutomatic = body["automatic"] as? Bool ?? false
         fieldDocument = document
         fieldEmail = Tab.asksEmail(body)
+        fieldWebAuthn = body["webauthn"] as? Bool ?? false
+        fieldWebAuthnForm = body["webauthnForm"] as? Bool ?? false
         fieldIdentity = body["field"] as? String
         fieldAccount = (body["account"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let box = CGRect(x: x, y: y, width: w, height: h)
@@ -2611,22 +2810,23 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// box refused it, and only the first is worth remembering. `back`:
     /// the paths a refused sign-in comes back to, the sign-in page's own
     /// and its form's.
-    @ObservationIgnored private var sent: (host: String, user: String, password: String, clear: Bool, at: Date, back: Set<String>)?
+    @ObservationIgnored private var sent: (host: String, user: String, password: String, clear: Bool, at: Date, back: Set<String>, frame: PageFrame?, address: URL?)?
 
     /// `frame`: a sign-in in another site's frame (App Store Connect's is
     /// Apple's), whose password belongs to the frame's site, not the page's.
-    func sentSignIn(user: String, password: String, action: String = "", frame: (host: String, clear: Bool)? = nil) {
+    func sentSignIn(user: String, password: String, action: String = "", frame: PageFrame? = nil) {
         // The host now, while the page is still the sign-in page: a moment
         // later it may be somewhere else entirely, and that is not where
         // the password belongs.
-        guard let host = frame?.host ?? address?.host()?.lowercased() else { return }
+        guard let host = frame?.origin.host.lowercased() ?? address?.host()?.lowercased() else { return }
         let bare = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
         // The password step of a two-step sign-in has no name box left; the
         // name is the one the step before was given.
         let user = user.isEmpty ? account(on: host) ?? "" : user
         if !user.isEmpty { namedAccount(user, on: host) }
         let back = Set([address?.path, action.isEmpty ? nil : URL(string: action, relativeTo: address)?.path].compactMap { $0 })
-        sent = (bare, user, password, frame?.clear ?? (address?.scheme?.lowercased() == "http"), Date(), back)
+        passwordOfferCheck = UUID()
+        sent = (bare, user, password, (frame?.origin.scheme ?? address?.scheme)?.lowercased() == "http", Date(), back, frame, address)
     }
 
     /// The page has moved on, a new document has loaded, or the sign-in
@@ -2642,13 +2842,17 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// script, as single-page apps do, has none yet when it finishes
     /// loading, the one that says the password was wrong too. Anywhere
     /// else, where a sign-in that took goes, it is asked about at once.
-    func settleSignIn(navigated: Bool = true, looked: Bool = false) {
+    func settleSignIn(navigated: Bool = true, looked: Bool = false, frame: PageFrame? = nil) {
         guard let sent else { return }
-        guard Date().timeIntervalSince(sent.at) < 45 else {
+        guard Date().timeIntervalSince(sent.at) < 45,
+              sent.frame == nil || Self.origin(of: sent.address) == Self.origin(of: address) else {
             self.sent = nil
             return
         }
         guard navigated else {
+            // A different document's settled form says nothing about this
+            // submission. The recheck always uses the sender's engine handle.
+            guard (sent.frame == nil) == (frame == nil), sent.frame?.origin == frame?.origin else { return }
             let stamp = sent.at
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 // Only if nothing newer went out in the meantime.
@@ -2657,14 +2861,20 @@ final class Tab: ObservableObject, Identifiable, Relaying {
             }
             return
         }
-        page.runInYab("!!(window.__yabForms && window.__yabForms.hasPassword())") { [weak self] still in
+        guard let page = builtPage else { return }
+        let script = sent.frame == nil
+            ? "!!(window.__yabForms && window.__yabForms.hasPassword())"
+            : "window.__yabForms ? window.__yabForms.hasPassword() : null"
+        page.run(script, in: .yab, frame: sent.frame) { [weak self, weak page] result in
             MainActor.assumeIsolated {
-                guard let self, let sent = self.sent else { return }
+                guard let self, let page, self.builtPage === page, self.sent?.at == sent.at,
+                      sent.frame == nil || Self.origin(of: self.address) == Self.origin(of: sent.address),
+                      case .success(let value) = result, let still = value as? Bool else { return }
                 // The box is still there, on the page the sign-in came back
                 // to or put back after a moment: refused. Forgotten, so a
                 // page without one opened next, the person giving up on it,
                 // is not taken for the wrong password having worked.
-                if (still as? Bool) == true {
+                if still {
                     self.sent = nil
                     return
                 }
@@ -2677,7 +2887,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
                     return
                 }
                 self.sent = nil
-                self.onCredentials?(self, sent.host, sent.user, sent.password, sent.clear)
+                self.onCredentials?(self, sent.host, sent.user, sent.password, sent.clear, sent.frame)
             }
         }
     }
@@ -2690,13 +2900,15 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     ///
     /// With Touch ID asked for in Settings, nothing goes in until it is
     /// given (see `Vault.proveToFill`), and then only if the page is still
-    /// on the site it was asked for.
+    /// on the site it was asked for. `proven`: the password manager that
+    /// gave it asked the person for it just now, with its own Touch ID, so
+    /// Yab doesn't ask a second time.
     ///
     /// `caret`: into the box the caret is in, a frame's too (`fieldFrame`),
     /// for Yab's own list, which listed that frame's site. Everyone else,
     /// an agent, a place, a manager, fills the page itself.
     func fill(user: String, password: String, agent: Bool = false, automatic: Bool = false, caret: Bool = false,
-              done: ((Filled) -> Void)? = nil) {
+              proven: Bool = false, done: ((Filled) -> Void)? = nil) {
         guard builtPage != nil else { done?(.gone); return }
         let frame = caret ? fieldFrame : nil
         let target = frame.flatMap { Tab.url(of: $0.origin) } ?? address
@@ -2704,7 +2916,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         let document = automatic ? fieldDocument : nil
         let identity = automatic ? fieldIdentity : nil
         if automatic, document == nil || identity == nil { done?(.gone); return }
-        Vault.proveToFill(on: target?.host()?.lowercased() ?? "", agent: agent) { [weak self] proven in
+        Vault.proveToFill(on: target?.host()?.lowercased() ?? "", agent: agent, already: proven) { [weak self] proven in
             // Closed or put to sleep while it was asked: nothing to fill,
             // and whoever waits (an agent's sign-in) hears so. An agent's
             // sign-in holds the tab while it waits, so `self` being there
@@ -2922,6 +3134,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// Cleared here and again when it commits, since a link followed while
     /// the last page was still loading never takes `loading` down to up.
     func navigationStarted(_ navigation: PageNavigation?) {
+        if !awaitingDocumentMetadata { prepareDocumentMetadata(for: nil) }
         standingAtFailure = false
         if videoOpening.navigationStarted() { built?.endVideoOpening() }
         toneGate.invalidate()
@@ -2941,6 +3154,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     }
 
     func navigationCommitted(_ navigation: PageNavigation?, behind: Bool = false) {
+        documentMetadataCommitted()
         toneGate.invalidate()
         stepEnded(committed: true)
         steppedAgain = nil
@@ -3290,7 +3504,17 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         // Explicit recovery to another address can leave a view whose
         // termination callback is pending. Keep the usual route checks
         // above, then detach that old document before loading the new one.
+        // A warm spare already owns an about:blank Chromium renderer.
+        // WebUI needs a browser created at its URL; only an empty document
+        // can be discarded here. Live Chromium pages are preserved by send.
+        if ChromePages.needsChromium(url), let builtPage, builtPage.engine == .chromium,
+           builtPage.url == nil || builtPage.url?.absoluteString == "about:blank" {
+            // rest() has no address to retire on an untouched spare.
+            discard()
+            return goFresh(to: url)
+        }
         httpNavigation = onNavigate?(url) ?? HTTPNavigation(input: nil, destination: url)
+        engineSent = url
         if fresh { return goFresh(to: url) }
         // A page that doesn't answer would never read where to go.
         if deaf != nil, builtPage != nil { return goFresh(to: url) }
@@ -3299,7 +3523,10 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         // stop being blank in the same frame the field disappears, or the empty
         // state flashes back for an instant on its way out.
         address = url
-        title = ""
+        // A coalesced title write may still be queued for the preceding
+        // document. Until this navigation supplies its own title, that
+        // write must read an empty cache rather than rename the new page.
+        prepareDocumentMetadata(for: url)
         failure = nil
         reading = 0
         lastY = 0
@@ -3316,10 +3543,10 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         depthTo = nil
         forgetPicture()
         cover = nil
-        adoptIcon()
+        // Destination metadata was selected before the load began.
         goSerial &+= 1
         let serial = goSerial
-        if (builtPage?.engine ?? engineFactory.resolved(engineKind, at: url)) != .webKit {
+        if (builtPage?.engine ?? engineFactory.upcoming(self, at: url)) != .webKit {
             page.navigate(to: URLRequest(url: url))
             return
         }
@@ -3341,10 +3568,13 @@ final class Tab: ObservableObject, Identifiable, Relaying {
                 // A spare's view was built before it knew the site: the
                 // site's zoom and smallest font, before its first layout.
                 if let built = self.webKitOnly("Authenticated WebKit frame context", build: false), built.url == nil { self.applyRememberedZoom() }
-                OpenTrace.time("load") { self.webKitOnly("WebKit navigation")?.open(url) }
+                guard let web = self.webKitOnly("WebKit navigation") else { return }
+                extensions.willLoad(self)
+                OpenTrace.time("load") { web.open(url) }
             }
         } else {
             guard let web = webKitOnly("Native WebKit navigation") else { page.navigate(to: URLRequest(url: url)); return }
+            if #available(macOS 15.4, *) { Extensions.of(store: pageStore).willLoad(self) }
             if let back = backList {
                 backList = nil
                 web.interactionState = back
@@ -3356,9 +3586,13 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// Brought back from the last session: everything the row needs to draw
     /// it. A missing public icon is queued separately; its page stays asleep.
     func restore(url: URL, title: String, history: Any? = nil) {
+        resetCountIconProof()
         cancelVideoOpening()
         goSerial &+= 1
         address = url
+        // A retired page's queued title must not replace the restored one.
+        engineTitle = nil
+        retainingEngineTitle = true
         self.title = title
         pending = url
         unopened = true
@@ -3455,6 +3689,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// tab shows no page at all.
     func settleOnShown() -> Bool {
         guard let shown = builtPage?.url, shown.absoluteString != "about:blank" else { return false }
+        awaitingDocumentMetadata = false
         address = shown
         title = pageTitle
         adoptIcon()
@@ -3505,6 +3740,13 @@ final class Tab: ObservableObject, Identifiable, Relaying {
             sleepAttempt = attempt
             Task { @MainActor [weak self, weak chromium] in
                 guard let self, let chromium else { done?(false); return }
+                guard self.sleepAttempt == attempt else { done?(false); return }
+                // Revalidate when the queued task starts, before Chromium
+                // destroys the document. A visit may have superseded the request.
+                guard maySleep?() != false else {
+                    self.sleepAttempt = nil
+                    done?(false); return
+                }
                 let accepted = await chromium.discardForSleep()
                 guard self.sleepAttempt == attempt else { done?(false); return }
                 self.sleepAttempt = nil
@@ -3516,6 +3758,10 @@ final class Tab: ObservableObject, Identifiable, Relaying {
                 }
                 self.carriedEntry = self.currentEntry
                 self.notePlace(); self.keep(picture)
+                // Its last frame goes, as a WebKit page's does (discard): it
+                // sleeps under its picture, and a still kept for every tab
+                // that ever slept filled the stills' budget in the app.
+                PageStills.shared.forget(self.id)
                 self.pending = url
                 self.sleepingChromium = chromium
                 self.builtPage = nil
@@ -3617,7 +3863,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// on, can still be pictured. Nil when there is nothing to draw.
     func snapshot(_ done: @escaping (Data?) -> Void) {
         guard let builtPage else { return done(nil) }
-        builtPage.snapshot(PageShot()) { image, _ in
+        let encode = { (image: NSImage?) in
             guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
                 return done(nil)
             }
@@ -3626,6 +3872,19 @@ final class Tab: ObservableObject, Identifiable, Relaying {
                 DispatchQueue.main.async { done(data) }
             }
         }
+        // Chromium draws only what is on screen (as `glance` says). Asked for
+        // a page in the back (a tab going to sleep), its screenshot waits for a
+        // frame its hidden window never presents, and the capture holds that
+        // window's compositor awake meanwhile, so the window kept its last
+        // frame in the GPU process for as long as the tab slept (CEF 0117,
+        // evals/chromium-memory). The picture of a page in the back is the
+        // last frame it showed, as ⌃Tab's is.
+        if let native = builtPage as? ChromiumPage, native.window == nil || native.isHiddenOrHasHiddenAncestor {
+            let kept = native.lastPicture
+            PageStills.shared.picture(of: id, width: .greatestFiniteMagnitude) { encode($0 ?? kept) }
+            return
+        }
+        builtPage.snapshot(PageShot()) { image, _ in encode(image) }
     }
 
     /// A small picture for the ⌃Tab switcher. A page that is there is drawn
@@ -3633,8 +3892,15 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// page asleep offers the picture it went to sleep with. A tab brought
     /// back from last session and never opened has none.
     func glance(width: CGFloat, _ done: @escaping (NSImage?) -> Void) {
-        let kept = cover ?? lookAtPicture()
+        let native = builtPage as? ChromiumPage
+        let kept = native?.lastPicture ?? cover ?? lookAtPicture()
         guard let builtPage, builtPage.bounds.width > 0 else { return done(kept) }
+        // Chromium draws only what is on screen: a page in the back is the
+        // last frame it showed, kept when it was left, or the one taken while it was in front.
+        if let native, native.window == nil || native.isHiddenOrHasHiddenAncestor {
+            PageStills.shared.picture(of: id, width: width) { done($0 ?? kept) }
+            return
+        }
         builtPage.snapshot(PageShot(width: width, afterUpdates: false)) { image, _ in
             MainActor.assumeIsolated { done(image ?? kept) }
         }
@@ -4008,11 +4274,11 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         let serial = goSerial
         if let sleeping = sleepingChromium, sleeping.remoteID != nil,
            sleeping.profile == chromiumProfile,
-           engineFactory.resolved(engineKind, at: url) == .chromium {
+           engineFactory.upcoming(self, at: url) == .chromium {
             _ = page // Restore the same native controller, never replay its URL.
             return true
         }
-        if (builtPage?.engine ?? engineFactory.resolved(engineKind, at: url)) != .webKit {
+        if (builtPage?.engine ?? engineFactory.upcoming(self, at: url)) != .webKit {
             page.navigate(to: URLRequest(url: url))
             return true
         }
@@ -4077,7 +4343,9 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// the address back instead: there is nothing else for it to reload.
     func reload() {
         cancelVideoOpening()
-        if engineKind != .webKit { if !wake() { page.reload(fromOrigin: true) }; return }
+        // ⌘R as Chromium does it: revalidated, through the site's service worker, so a
+        // page that works offline reloads offline. ⇧⌘R is the one past both.
+        if engineKind != .webKit { if !wake() { page.reload(fromOrigin: false) }; return }
         // A pin put down with ⌘W has no view left to reload; waking it is
         // the reload.
         guard !wake(), let web = webKitOnly("WebKit reload") else { return }
@@ -4095,7 +4363,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// the network process walking every entry of the disk cache, every
     /// site's, seconds in a profile used for a while (register row 998).
     func hardReload() {
-        if engineKind != .webKit { return reload() }
+        if engineKind != .webKit { if !wake() { page.reload(fromOrigin: true) }; return }
         guard !wake() else { return }
         guard let host = address?.host?.lowercased(), !hollow else { return reload() }
         guard let web = webKitOnly("WebKit service-worker reset") else { return }
@@ -4132,20 +4400,20 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// clearCookiesAndRefresh). A record is named for the site,
     /// "example.com", and holds its subdomains' cookies too.
     func clearCookiesAndReload() {
-        guard engineKind == .webKit else { WebKitOnly.note("Site cookie clearing", engine: engineKind); return }
         guard !wake() else { return }
         guard let host = address?.host?.lowercased(), !hollow else { return reload() }
-        guard let web = webKitOnly("Site cookie clearing") else { return }
-        let store = web.configuration.websiteDataStore
+        let store = pageStore
         let types: Set<String> = [WKWebsiteDataTypeCookies]
-        store.fetchDataRecords(ofTypes: types) { [weak self] records in
+        Task { @MainActor [weak self] in
+            let records = await store.dataRecords(ofTypes: types)
             let theirs = records.filter {
                 let name = $0.displayName.lowercased()
                 return host == name || host.hasSuffix("." + name)
             }
-            store.removeData(ofTypes: types, for: theirs) {
-                MainActor.assumeIsolated { self?.reload() }
-            }
+            await store.removeData(ofTypes: types, for: theirs)
+            // Both engines share the sign-in, whichever shows this page.
+            await ChromiumSiteData.clearCookies(site: Browser.site(host), page: self?.builtPage as? ChromiumPage)
+            self?.reload()
         }
     }
     func stop() { cancelVideoOpening(); page.stopLoading() }
@@ -4183,6 +4451,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         Userscripts.shared.closed(self)
         if !shy { FeedbackDiagnostics.shared.record(.tabClosed) }
         gone = true
+        Browser.visitMoved(self)
         onBackAtStart = nil
         onCloseUnshown = nil
         backSourceAvailable = false
@@ -4215,19 +4484,30 @@ final class Tab: ObservableObject, Identifiable, Relaying {
     /// The page's badge, as its Badging API call said.
     func badged(_ n: Int?) {
         badge = n ?? 0
+        showsOwnCount = true
         recount()
     }
 
     /// The count from the badge, else from the title. Published only when
     /// the number changes; which marks show it is theirs to say (MarkCorners).
-    private func recount() {
+    @discardableResult
+    private func recount() -> Int? {
         // Gmail's title counts the folder being viewed, including Spam.
         // Its existing Primary feed is the pin's unread count in every folder.
         let n: Int?
-        if builtPage == nil { n = sourceCount }
-        else if address?.host()?.lowercased() == "mail.google.com" { n = badge ?? sourceCount }
-        else { n = badge ?? Counts.fromTitle(title) ?? sourceCount }
+        let observed: Int?
+        if builtPage == nil {
+            n = sourceCount
+            observed = n
+        } else if address?.host()?.lowercased() == "mail.google.com" {
+            n = badge ?? sourceCount
+            observed = n // Missing feed data is unknown, not an observed zero.
+        } else {
+            n = badge ?? Counts.fromTitle(countTitle ?? title) ?? sourceCount
+            observed = n ?? 0 // A live title without a count represents none.
+        }
         if count != n { count = n }
+        return observed
     }
 
     /// A replacement has the same row id but a different owner. Native CEF
@@ -4264,7 +4544,7 @@ final class Tab: ObservableObject, Identifiable, Relaying {
         camera = .none
         microphone = .none
         screen = .none
-        badge = nil
+        resetCountIconProof()
         if count != nil { count = nil }
         ears.stop()
         tuneWatch.stop()
@@ -4360,8 +4640,8 @@ final class Farewell: NSObject, WKNavigationDelegate {
 
     private func start(call: Bool) {
         guard call else { return leave() }
-        web.setMicrophoneCaptureState(.muted, completionHandler: nil)
-        web.setCameraCaptureState(.muted, completionHandler: nil)
+        web.setMicrophoneCaptureState(.muted, completionHandler: {})
+        web.setCameraCaptureState(.muted, completionHandler: {})
         CallStage.run("leave", on: web) { [weak self] pressed in
             self?.trace("left the call \(pressed ?? "nil")")
             self?.leave()
@@ -4740,7 +5020,15 @@ final class ScrollRelay: NSObject, PageScriptReceiving {
       window.addEventListener('resize', soon);
       if (window.ResizeObserver) new ResizeObserver(soon).observe(document.documentElement);
       window.__yabReading = soon;
-      tell();
+      // Reading the height lays the page out, which a tab in the back is
+      // otherwise spared until it is shown: its layout stays unbuilt, 25 MB
+      // a tab in Chromium, and nobody is reading it yet.
+      if (!document.hidden) { tell(); return; }
+      document.addEventListener('visibilitychange', function shown() {
+        if (document.hidden) return;
+        document.removeEventListener('visibilitychange', shown);
+        tell();
+      });
     })();
     """
 
@@ -4801,12 +5089,24 @@ extension Tab: PageStateEvents {
         case .title(let value):
             retainingEngineTitle = false
             engineTitle = value
+            // A Chromium document reset must also beat a queued retitle from
+            // the old document. Ordinary title changes keep their throttle.
+            if page.engine == .chromium, value?.isEmpty != false {
+                title = ""
+                return
+            }
             held("title") { [weak self] in
                 guard let self, self.builtPage === page else { return }
                 self.retitle()
             }
         case .url(let value):
             if value != engineURL { toneGate.invalidate() }
+            // Reset at receipt time, before the new document's title event.
+            // A held URL write may run after that title has already arrived.
+            if awaitingDocumentMetadata, let fresh = value, fresh.absoluteString != "about:blank",
+               fresh != address, !Browser.sameDocument(fresh, address) {
+                prepareDocumentMetadata(for: fresh)
+            }
             engineURL = value
             held("url") { [weak self] in
                 guard let self, self.builtPage === page, let fresh = self.engineURL else { return }
@@ -4823,9 +5123,15 @@ extension Tab: PageStateEvents {
                 Boosts.shared.moved(self)
                 if moved {
                     self.tone = nil
-                    self.adoptIcon()
+                    self.icon = Tab.ownIcon(fresh) ?? Favicons.shared.pageIcon(fresh)
                     self.shade = fresh.host().flatMap { Tab.shades[$0] }
                     self.under = self.shade
+                } else if Tab.ownIcon(fresh) == nil, let mine = Favicons.shared.pageIcon(fresh), mine !== self.icon {
+                    // Another page of the site, which wore an icon of its
+                    // own when last seen: that one until the page names
+                    // its icons, as Chromium finds a page's in its history
+                    // at commit (Docs to Slides on docs.google.com).
+                    self.icon = mine
                 }
                 // pushState moves nothing the page's own script can hear.
                 self.builtPage?.run("window.__yabReading && window.__yabReading()", in: .yab, gesture: false)

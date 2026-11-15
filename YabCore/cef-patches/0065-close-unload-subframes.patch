@@ -1,0 +1,108 @@
+--- a/cef/libcef/browser/external_close.cc
++++ b/cef/libcef/browser/external_close.cc
+@@ -31,6 +31,12 @@ CefExternalClose::Documents CefExternalClose::CurrentDocuments() const {
+ }
+ bool CefExternalClose::ExactDocuments() const {
+   auto current=CurrentDocuments();
++  // Frames the page added after the press were never asked and hold nothing
++  // typed before it. The asked tree itself must still be exact.
++  std::erase_if(current,[this](const auto& entry) {
++    auto* frame=entry.second.AsRenderFrameHostIfValid();
++    return frame && created_.count(frame->GetFrameTreeNodeId());
++  });
+   if(current.empty() || current.size()!=documents_.size() || !primary_.AsRenderFrameHostIfValid() ||
+      primary_.AsRenderFrameHostIfValid()!=web_contents()->GetPrimaryMainFrame()) return false;
+   for(const auto& [id,doc]:documents_) {
+@@ -56,6 +62,9 @@ CefRefPtr<CefDictionaryValue> CefExternalClose::Begin() {
+     auto state=State();state->SetBool("accepted",false);return state;
+   }
+   documents_=CurrentDocuments();
++  asked_.clear();created_.clear();
++  for(const auto& [id,doc]:documents_)
++    if(auto* frame=doc.AsRenderFrameHostIfValid())asked_.insert(frame->GetFrameTreeNodeId());
+   auto* primary=web_contents() ? static_cast<content::RenderFrameHostImpl*>(web_contents()->GetPrimaryMainFrame()):nullptr;
+   if(documents_.empty() || !primary || primary->is_waiting_for_beforeunload_completion() ||
+      primary->IsWaitingForUnloadACK() || web_contents()->GetController().GetPendingEntry() ||
+@@ -149,7 +158,12 @@ bool CefExternalClose::Commit(const std::string& token) {
+ }
+ bool CefExternalClose::CloseCompleted() {
+   if(phase_!="committing")return false;
+-  const bool exact=ExactDocuments();
++  // Unload tears down the approved child frames before the main-frame ACK.
++  // The original primary document still owns that ACK; a disappearing child
++  // is completion of the committed close, not a replacement document.
++  auto* primary=primary_.AsRenderFrameHostIfValid();
++  const bool exact=web_contents() && primary && primary->IsActive() &&
++      primary==web_contents()->GetPrimaryMainFrame();
+   phase_=exact?"closed":"retained";reason_=exact?"native-unload-completed":"document-retired-before-close";
+   // Final success must be delivered before the following native Close destroys
+   // this observer. The embedder only writes this immutable receipt here.
+@@ -170,10 +184,38 @@ void CefExternalClose::Flush() {
+   }
+ }
+ void CefExternalClose::DidStartNavigation(content::NavigationHandle* handle) {
+-  if(!handle->IsSameDocument())Invalidate("navigation-started");
++  if(handle->IsSameDocument())return;
++  // After commit, an unload handler's subframe navigation is the committed
++  // page tearing down. Only the original primary's own navigation replaces it.
++  if(phase_=="committing" && !handle->IsInPrimaryMainFrame())return;
++  // A frame added after the press loading its first page replaces nothing.
++  if(created_.count(handle->GetFrameTreeNodeId()))return;
++  Invalidate("navigation-started");
++}
++void CefExternalClose::RenderFrameCreated(content::RenderFrameHost* frame) {
++  // After commit, a frame an unload handler adds belongs to the page being
++  // closed; CloseCompleted still requires the original active primary.
++  if(phase_=="committing")return;
++  // Before commit, a frame the page adds outside the asked tree (busy pages
++  // add ads and embeds for seconds) holds nothing typed before the press: it
++  // is left out of the exact tree. A new document in an asked frame is not.
++  if((phase_=="pending" || phase_=="approved") && !asked_.count(frame->GetFrameTreeNodeId())) {
++    created_.insert(frame->GetFrameTreeNodeId());
++    return;
++  }
++  Invalidate("frame-created");
++}
++void CefExternalClose::RenderFrameDeleted(content::RenderFrameHost* frame) {
++  // Before commit the asked document tree must remain exact. After commit,
++  // deletion of an original subframe is the native unload doing its work.
++  // Inactive or excluded frames may also disappear during unload. Only
++  // retirement of the original primary can invalidate this committed close.
++  auto* primary=primary_.AsRenderFrameHostIfValid();
++  if(phase_=="committing" && primary && frame!=primary) return;
++  // A frame added after the press going away again changes nothing asked.
++  if(created_.count(frame->GetFrameTreeNodeId()))return;
++  Invalidate("frame-deleted");
+ }
+-void CefExternalClose::RenderFrameCreated(content::RenderFrameHost*) {Invalidate("frame-created");}
+-void CefExternalClose::RenderFrameDeleted(content::RenderFrameHost*) {Invalidate("frame-deleted");}
+ void CefExternalClose::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {Invalidate("renderer-gone");}
+ void CefExternalClose::WebContentsDestroyed() {
+   if(phase_=="committing") {phase_="closed";reason_="browser-destroyed";changed_.Run(State());}
+--- a/cef/libcef/browser/external_close.h
++++ b/cef/libcef/browser/external_close.h
+@@ -2,12 +2,14 @@
+ #define CEF_LIBCEF_BROWSER_EXTERNAL_CLOSE_H_
+ #include <deque>
+ #include <map>
++#include <set>
+ #include <string>
+ #include "base/functional/callback.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/timer/timer.h"
+ #include "base/unguessable_token.h"
+ #include "cef/include/cef_values.h"
++#include "content/public/browser/frame_tree_node_id.h"
+ #include "content/public/browser/global_routing_id.h"
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents_observer.h"
+@@ -39,6 +41,9 @@ class CefExternalClose final : public content::WebContentsObserver {
+   CefRefPtr<CefDictionaryValue> State(bool decision=false,bool withdrawn=false) const;
+   Changed changed_;
+   Documents documents_;
++  // Frame tree nodes asked at Begin, and those the page added after the
++  // press (an ad, an embed): those hold nothing typed before it.
++  std::set<content::FrameTreeNodeId> asked_,created_;
+   content::WeakDocumentPtr primary_;
+   base::UnguessableToken registration_;
+   std::string request_,token_,document_,phase_="idle",reason_;

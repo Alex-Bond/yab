@@ -72,7 +72,7 @@ struct Page: View {
             // lands on the stage's host as a second mask on the same curve.
             WebStage(
                 page: page, corner: corner, flatTop: flatTop, covered: covered,
-                owner: tab.id, away: tab.floating,
+                owner: tab.id, tab: tab, away: tab.floating,
                 holding: holding, following: following, tracking: tracking,
                 protectsViewportGrowth: protectsViewportGrowth,
                 sidebarPin: sidebarPin,
@@ -191,6 +191,9 @@ struct WebStage: NSViewRepresentable {
     /// Whose page it is. A new owner is a new tab picked, and only that
     /// turns; the same tab going from blank to loaded does not.
     var owner: Tab.ID?
+    /// A live ownership reference: an old SwiftUI value can outlive a
+    /// window transfer, but this tab's delegate changes at the handoff.
+    var tab: Tab?
     /// The page is out in the little window. Passed down, rather than the page
     /// being passed as nil, so that its coming home is a change SwiftUI can
     /// see: the page alone is the same reference before and after, and the
@@ -243,7 +246,7 @@ struct WebStage: NSViewRepresentable {
         // DEFER_SWITCH): until it is written, an update for the tab still
         // in front doesn't take the stage back from it.
         if let held = view.heldFor, owner != held { return }
-        view.show(page, of: owner)
+        view.show(page, of: owner, tab: tab)
     }
 }
 
@@ -583,9 +586,11 @@ final class StageView: NSView {
         }
         // SplitRule moves an outline without relaying out SwiftUI. Feed
         // that target to the same viewport coordinator as a normal drag,
-        // rather than resizing WebKit later from a separate timer.
+        // rather than resizing WebKit later from a separate timer. A
+        // Chromium page too: left to the carry below, its half grew empty
+        // beside it until the divider was let go (feedback #1900).
         if device == nil, Self.geometryFollowing, Self.follows,
-           tracking || trackingPreview, let web = wanted as? WKWebView {
+           tracking || trackingPreview, let web = wanted, web is WKWebView || web is ChromiumPage {
             trackingPreview = rect != nil
             shifted = .zero
             follow(from: web.frame, to: target, duration: duration)
@@ -730,6 +735,10 @@ final class StageView: NSView {
     /// Now there is one fact and one rule: show `wanted`, and put that right on
     /// every layout. Nothing to fall out of step with.
     private weak var wanted: NSView?
+    private weak var claimant: Tab?
+    /// Keep the host scope through detach/close, when the registry may
+    /// already have retired its window but SwiftUI can still update us.
+    private var hostWindowID: UUID?
     /// `wanted` is in the little window, on purpose. Left to itself the
     /// stage would take it back on its next layout, from under a window
     /// still showing it.
@@ -1002,7 +1011,11 @@ final class StageView: NSView {
         guard let key = stillKey(page), page.superview === self,
               abs(page.frame.width - bounds.width) < 0.5, abs(page.frame.height - bounds.height) < 0.5 else { return }
         let shy = page.privateMode
-        DispatchQueue.main.async { PageStills.shared.take(page, owner: owner, key: key, shy: shy) }
+        // Asked here, not on the next turn: the page leaving this stage queues
+        // its hide when it goes (ChromiumPage.syncGeometry), and Chromium
+        // pictures a page only while it is shown. Asked first, the picture
+        // reaches the helper ahead of the hide, which waits for it.
+        PageStills.shared.take(page, owner: owner, key: key, shy: shy)
     }
 
     /// The page on show moved, scrolled or loaded: pictured again once it
@@ -1079,11 +1092,26 @@ final class StageView: NSView {
               coming.failure == nil, coming.untrusted == nil, coming.cover == nil else { return no("tab") }
         guard let key = stage.stillKey(web), PageStills.shared.has(coming.id, matching: key) else { return no("no still") }
         stage.flushing = true
-        stage.show(web, of: coming.id)
+        stage.show(web, of: coming.id, tab: coming)
         stage.flushing = false
         // On screen now, not at the end of the switch's pass.
         CATransaction.flush()
         return stage.still != nil
+    }
+
+    /// A Chromium page comes with no still: its renderer draws by itself, so
+    /// it goes on the stage as it is, ahead of the switch, and on screen now.
+    static func earlyChromium(from left: Tab?, to coming: Tab, single: Bool) -> StageView? {
+        guard single, let left, left.id != coming.id, let leftPage = left.builtPage,
+              let stage = leftPage.superview as? StageView, stage.shows == left.id, stage.wanted === leftPage,
+              let page = coming.builtPage as? ChromiumPage, page.superview == nil,
+              !coming.asleep, !coming.isBlank, !coming.gone, !coming.floating, coming.device == nil,
+              coming.failure == nil, coming.untrusted == nil, coming.cover == nil else { return nil }
+        stage.flushing = true
+        stage.show(page, of: coming.id, tab: coming)
+        stage.flushing = false
+        CATransaction.flush()
+        return stage
     }
 
     /// The tab `Browser.open` is about to put in front, or a sleeping one
@@ -1128,7 +1156,7 @@ final class StageView: NSView {
     static func earlyOpen(from left: Tab?, to coming: Tab) -> Bool {
         guard let left, let stage = left.webKitOnly("WebKit first-frame scheduling", build: false)?.superview as? StageView, stage.shows == left.id,
               stage.wanted === left.webKitOnly("WebKit first-frame scheduling", build: false), let web = coming.webKitOnly("WebKit first-frame scheduling", build: false), web.superview == nil else { return false }
-        stage.show(web, of: coming.id)
+        stage.show(web, of: coming.id, tab: coming)
         let shown = stage.shows == coming.id && web.superview === stage
         mark("early.open", ["shown": shown, "waiting": stage.awaitingPaint === web])
         return shown && stage.awaitingPaint === web
@@ -1141,6 +1169,15 @@ final class StageView: NSView {
         revealed = (web, done)
     }
     private var revealed: (web: WKWebView, done: () -> Void)?
+
+    /// A window transfer ends this stage's ownership before another takes
+    /// the page. Removing just the NSView leaves `wanted` behind, so a
+    /// later layout of the old stage can take the live page back.
+    func relinquish(_ page: NSView) {
+        guard wanted === page else { return }
+        heldFor = nil
+        show(nil)
+    }
 
     override func willRemoveSubview(_ subview: NSView) {
         guard !tearingDown else { super.willRemoveSubview(subview); return }
@@ -1240,7 +1277,33 @@ final class StageView: NSView {
         settle(from: landed ? nil : old)
     }
 
-    func show(_ page: NSView?, of owner: Tab.ID? = nil) {
+    private func belongsHere(_ page: NSView, tab: Tab?, owner: Tab.ID?) -> Bool {
+        if let window, let browser = BrowserWindows.shared.browser(for: window) {
+            hostWindowID = browser.windowID ?? BrowserWindows.primaryID
+        }
+        guard let tab else { return owner == nil || hostWindowID == nil }
+        guard (owner == nil || tab.id == owner), tab.builtPage === page else { return false }
+        guard let hostWindowID else { return true }
+        guard let browser = tab.delegate as? Browser else { return false }
+        return (browser.windowID ?? BrowserWindows.primaryID) == hostWindowID
+    }
+
+    func show(_ page: NSView?, of owner: Tab.ID? = nil, tab: Tab? = nil) {
+        // Validate current ownership, not the owner captured in an older
+        // WebStage value. Otherwise that value can recreate `wanted` after
+        // relinquish and take the destination's live view back.
+        let claiming: Tab?
+        if page == nil { claiming = nil }
+        else if let tab { claiming = tab }
+        else if wanted === page, let claimant { claiming = claimant }
+        else if let browser = window.flatMap({ BrowserWindows.shared.browser(for: $0) }) {
+            claiming = (browser.everyTab + browser.outside).first { $0.id == owner && $0.builtPage === page }
+        } else { claiming = nil }
+        if let page, !belongsHere(page, tab: claiming, owner: owner) {
+            note("ownership.rejected", ["tab": owner?.uuidString ?? "", "window": window?.windowNumber ?? 0])
+            return
+        }
+        claimant = claiming
         // A mini page already has visible pixels. Its flight handles the
         // animation, and the direct path must keep those pixels while its
         // WebContent process is busy, instead of waiting at opacity zero.
@@ -1412,7 +1475,7 @@ final class StageView: NSView {
                 guard let self, let remote, self.pageTurns == generation, self.wanted === remote else { return }
                 self.liftStill(to: nil, painted: painted)
             }
-            remote.snapshot(PageShot(width: 1, afterUpdates: true)) { image, error in reveal(image != nil && error == nil) }
+            remote.afterNextFrame { reveal($0) }
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintWait) { reveal(false) }
         } else if still != nil {
             // Put up for a page that didn't stay here after all.
@@ -1430,6 +1493,12 @@ final class StageView: NSView {
     private var changing = false
 
     private func settle(from old: CGRect? = nil) {
+        // The tab can move between this stage's show and its next layout.
+        // A stage in the old window has no authority to reparent it then.
+        if let wanted, !belongsHere(wanted, tab: claimant, owner: owner) {
+            note("ownership.rejected-layout", ["tab": owner?.uuidString ?? "", "window": window?.windowNumber ?? 0])
+            return
+        }
         // The page stepping off under the one coming keeps its place from
         // the top, as every page here is put: this view's y runs up, and a
         // stage made taller in the same change (the Developer Tools card,
@@ -1539,6 +1608,10 @@ final class StageView: NSView {
                 scaled = scale
                 scaledPage = web
             }
+        } else if let chromium = wanted as? ChromiumPage, let device, held == nil {
+            let rect = device.frame(in: bounds.size)
+            frame = CGRect(x: rect.minX, y: bounds.height - rect.maxY, width: rect.width, height: rect.height)
+            chromium.emulate(device, scale: device.width > 0 ? rect.width / device.width : 1)
         }
         if held != nil, tracking || following, !docked, device == nil,
            Self.geometryFollowing, Self.follows, let old, old != bounds {
@@ -1546,7 +1619,9 @@ final class StageView: NSView {
             return
         }
         let before = wanted.frame.size
-        if sidebarPin != pinned, let old, old != bounds, let web = wanted as? WKWebView {
+        if sidebarPin != pinned, let old, old != bounds,
+           wanted is WKWebView || wanted is ChromiumPage {
+            let web = wanted
             pinned = sidebarPin
             stopFollowing()
             held = old.size
@@ -1656,17 +1731,18 @@ final class StageView: NSView {
     /// Over the part of a page made larger that WebKit has not drawn yet,
     /// the ground a held page shows, carried with the page.
     private var followVeil: CAShapeLayer?
-    private weak var resizingPage: WKWebView?
+    private weak var resizingPage: NSView?
     private var nativeLag: CFTimeInterval = 1.0 / 60
 
     private func follow(from old: CGRect, to target: CGRect? = nil, duration: CFTimeInterval? = nil) {
-        guard StageView.follows, let held, wanted is WKWebView else { return }
+        guard StageView.follows, let held, wanted is WKWebView || wanted is ChromiumPage else { return }
         let target = target ?? bounds
         let duration = duration ?? (tracking ? 0 : Reshape.duration)
         // Laid out again on the way, the page carried afresh from where
         // that put it: the same from here, but a size still with WebKit
         // is still waited for.
         let native = device == nil && Self.geometryFollowing
+        guard native || wanted is WKWebView else { return }
         guard native || abs(old.width - target.width) > 0.5 || abs(old.height - target.height) > 0.5 else { return }
         if let follower, follower.native != native { stopFollowing() }
         var next = Follow(native: native, from: old, to: target, start: Reshape.started, duration: duration,
@@ -1676,7 +1752,7 @@ final class StageView: NSView {
         next.pendingFrame = follower?.pendingFrame
         next.protectsGrowth = protectsViewportGrowth || follower?.protectsGrowth == true
         follower = next
-        if native, let web = wanted as? WKWebView {
+        if native, let web = wanted {
             // The content process is asynchronous. Keep the old origin
             // until its next viewport has committed, then move the page in
             // that same CA transaction (not one frame after presentation).
@@ -1782,11 +1858,22 @@ final class StageView: NSView {
         }
     }
 
-    private func beginNativeFollowing(_ web: WKWebView) {
+    /// Both engines keep one viewport in flight. Chromium's native receipt
+    /// identifies the canvas size; the coordinator still waits for its own CA
+    /// commit before requesting another size or releasing the final hold.
+    private static func afterViewportPaint(_ page: NSView, _ done: @escaping () -> Void) {
+        if let web = page as? WKWebView {
+            afterNextDrawing(web, requirePaint: true, done)
+        } else if let chromium = page as? ChromiumPage {
+            chromium.afterViewportPaint(done)
+        }
+    }
+
+    private func beginNativeFollowing(_ web: NSView) {
         guard resizingPage !== web else { return }
-        resizingPage?.viewDidEndLiveResize()
+        (resizingPage as? WKWebView)?.viewDidEndLiveResize()
         resizingPage = web
-        web.viewWillStartLiveResize()
+        (web as? WKWebView)?.viewWillStartLiveResize()
     }
 
     /// One viewport in flight. Origin changes in WebKit's layer-tree
@@ -1842,7 +1929,7 @@ final class StageView: NSView {
             StageView.steps.append([(now - step.start) * 1000, Double(width), 0, (CACurrentMediaTime() - setting) * 1000])
         }
         let generation = followTurn
-        Self.afterNextDrawing(web, requirePaint: true) { [weak self, weak web] in
+        Self.afterViewportPaint(web) { [weak self, weak web] in
             guard let self, let web, self.followTurn == generation, self.wanted === web, web.superview === self,
                   let current = self.follower, current.native, let shown = current.pendingFrame else { return }
             CATransaction.begin()
@@ -1969,7 +2056,8 @@ final class StageView: NSView {
     private func stopFollowing() {
         followLink?.invalidate()
         followLink = nil
-        resizingPage?.viewDidEndLiveResize()
+        (resizingPage as? WKWebView)?.viewDidEndLiveResize()
+        (resizingPage as? ChromiumPage)?.cancelViewportPaint()
         resizingPage = nil
         guard let step = follower else { return }
         followTurn += 1
@@ -2299,6 +2387,10 @@ struct DragStrip: NSViewRepresentable {
     /// real view takes the click first, so the run the tabs occupy is refused
     /// here and falls through to them.
     var reserved: CGFloat = 0
+    /// Only the six-point air above and below the top-row pills.
+    var tabAir = false
+    /// Real controls in a toolbar, in this view's top-left coordinates.
+    var exclusions: [CGRect] = []
     /// How much of the top belongs to whatever is drawn there, measured from
     /// the top edge. The column of tabs uses this the way the strip uses the
     /// leading run.
@@ -2324,6 +2416,8 @@ struct DragStrip: NSViewRepresentable {
 
     func updateNSView(_ view: NSView, context: Context) {
         (view as? Strip)?.reserved = reserved
+        (view as? Strip)?.tabAir = tabAir
+        (view as? Strip)?.exclusions = exclusions
         (view as? Strip)?.below = below
         (view as? Strip)?.trailing = trailing
         (view as? Strip)?.notch = notch
@@ -2333,8 +2427,10 @@ struct DragStrip: NSViewRepresentable {
         (view as? Strip)?.doubled = doubled
     }
 
-    private final class Strip: NSView, WindowHandle {
+    final class Strip: NSView, WindowHandle {
         var reserved: CGFloat = 0
+        var tabAir = false
+        var exclusions: [CGRect] = []
         var below: CGFloat = 0
         var trailing: CGFloat = 0
         var notch: CGRect = .zero
@@ -2364,6 +2460,9 @@ struct DragStrip: NSViewRepresentable {
 
         override func hitTest(_ point: NSPoint) -> NSView? {
             let inside = convert(point, from: superview)
+            if tabAir, !StripPress.inTabAir(inside, bounds: bounds) { return nil }
+            let topPoint = CGPoint(x: inside.x, y: bounds.height - inside.y)
+            guard !exclusions.contains(where: { $0.contains(topPoint) }) else { return nil }
             guard inside.x >= reserved, inside.x <= bounds.width - trailing else { return nil }
             // AppKit measures up from the bottom; the reservation is from the top.
             if bounds.height - inside.y < below {

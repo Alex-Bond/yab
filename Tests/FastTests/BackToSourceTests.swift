@@ -46,6 +46,26 @@ struct BackToSourceTests {
         #expect(page.remoteID == nil, "Returning to a source must not start native history")
     }
 
+    @Test(arguments: [false, true])
+    func adoptedPopupNeedsAnInitialNativeLinkAction(scripted: Bool) throws {
+        let browser = world()
+        defer { clean(browser) }
+        let source = open(browser)
+        let child = Tab(shy: true, engine: .chromium)
+        browser.prepare(child); browser.lay(browser.tabs + [child]); browser.activeID = child.id
+        let page = ChromiumPage(tab: child)
+        page.popupBackSource = source
+        page.confirmPopupSource(scripted ? .other : .linkActivated)
+        #expect(child.backSourceAvailable == !scripted)
+        // A later click must never turn a script-created window into a link tab.
+        page.confirmPopupSource(.linkActivated)
+        #expect(child.backSourceAvailable == !scripted)
+        if !scripted {
+            child.back()
+            #expect(child.gone && browser.active === source)
+        }
+    }
+
     @Test func typedAddressWithFromDoesNotClose() {
         let browser = world()
         defer { clean(browser) }

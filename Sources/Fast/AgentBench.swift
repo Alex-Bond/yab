@@ -76,23 +76,26 @@ extension Bench {
         }
         // While an agent sets up mail, the password it made is hidden from it.
         let guarded = MailSetup.shared.guarded(verb, session: request["session"] as? String, answer)
-        let protectedPages = pages.filter { $0.engineKind == .chromium }
-        // Navigation, showing and answering a dialog must remain available so
-        // the person can leave a protected document. Reading follows separately.
-        if protectedPages.isEmpty || ["agent-go", "agent-show", "nav", "agent-dialog"].contains(verb) {
+        let protectedPages = pages
+        // Navigation, showing, answering a dialog and handing the tab to the
+        // person must remain available on a protected document: they are how
+        // it is left, and they release none of its contents. Reading follows
+        // separately. On 2026-11-14 a refused handoff left the agent no way
+        // to give the person Apple's Identifiers page.
+        if protectedPages.isEmpty || Self.escapeVerbs.contains(verb) {
             handle(self, AgentCall(bench: self, verb: verb, request: request, browser: browser, answer: guarded))
             return
         }
         if let waiting = AgentSecrets.nativeQuestionReply(protectedPages) { guarded(waiting); return }
         Task { @MainActor in
             for tab in protectedPages {
-                guard await AgentSecrets.check(tab.page) else { guarded(["error": AgentSecrets.refusal]); return }
+                guard await AgentSecrets.check(tab.page) else { guarded(["error": AgentSecrets.refusal(for: tab.page)]); return }
             }
             let checked: ([String: Any]) -> Void = { out in
                 Task { @MainActor in
                     if let waiting = AgentSecrets.nativeQuestionReply(protectedPages) { guarded(waiting); return }
                     for tab in protectedPages {
-                        guard await AgentSecrets.check(tab.page) else { guarded(["error": AgentSecrets.refusal]); return }
+                        guard await AgentSecrets.check(tab.page) else { guarded(["error": AgentSecrets.refusal(for: tab.page)]); return }
                     }
                     guarded(out)
                 }
@@ -100,6 +103,11 @@ extension Bench {
             handle(self, AgentCall(bench: self, verb: verb, request: request, browser: browser, answer: checked))
         }
     }
+
+    /// What stays open on a page the guard refuses: none of these answer
+    /// with page contents.
+    static let escapeVerbs: Set<String> = ["agent-go", "agent-show", "nav", "agent-dialog",
+                                           "handoff", "handoff-wait", "agent-handback", "agent-ask", "agent-reply", "agent-chat-ask"]
 
     private static func agentMemoryStop(_ verb: String, _ tab: Tab, _ browser: Browser, reopens: Bool) -> [String: Any]? {
         guard tab.failure == StuckWatch.memoryStopped || browser.stuck.outgrown.contains(tab.id) else { return nil }

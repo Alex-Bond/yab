@@ -206,11 +206,8 @@ final class HoardStack: NSPanel {
         generation += 1
         let generation = generation
         leaving = false
-        if parentWindowRef !== window {
-            parentWindowRef?.removeChildWindow(self)
-            window.addChildWindow(self, ordered: .above)
-            parentWindowRef = window
-        }
+        WindowHosting.attach(self, to: window)
+        parentWindowRef = window
         self.left = left
         phase.width = width
         phase.live = true
@@ -671,6 +668,8 @@ private struct Card<Picture: View>: View {
     var reveal: Date? = nil
     /// Tidy Downloads' name taken back.
     var undo: (() -> Void)? = nil
+    /// Under way: a cross at its end, as Arc's row has, that cancels it.
+    var cancel: (() -> Void)? = nil
     @ViewBuilder let picture: () -> Picture
     var act: (() -> Void)?
     @State private var hovering = false
@@ -705,6 +704,9 @@ private struct Card<Picture: View>: View {
                 }
             }
             Spacer(minLength: 0)
+            if let cancel {
+                FolderCross(close: cancel, label: "Cancel")
+            }
         }
         .padding(.trailing, 6)
         .padding(HoardStack.hug)
@@ -734,7 +736,8 @@ private struct FetchCard: View {
         Card(
             title: fetch.name,
             detail: fetch.paused ? "Paused" : fetch.failed ? "Couldn't download" : left(step),
-            alarm: fetch.failed && !fetch.paused
+            alarm: fetch.failed && !fetch.paused,
+            cancel: fetch.failed ? nil : { hoard.cancel(fetch) }
         ) {
             HoardRowDial(fraction: step.fraction, failed: fetch.failed, unknown: step.fraction == nil && step.got > 0,
                          side: Hoard.dialSide(rowIcon: HoardStack.picture), tone: hoard.browser?.chorus.tone)
@@ -747,7 +750,8 @@ private struct FetchCard: View {
                 Button(fetch.paused ? "Resume" : "Try Again", mark: "yab.download") { hoard.retry(fetch) }
                 Button("Remove", mark: "trash") { hoard.dismiss(fetch) }
             } else {
-                Button("Stop Download", mark: "stop") { hoard.cancel(fetch) }
+                // Chrome's word for it, in its downloads' menu.
+                Button("Cancel", mark: "xmark") { hoard.cancel(fetch) }
             }
         }
     }

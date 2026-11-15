@@ -6,11 +6,11 @@ import AppKit
 enum AgentImageGate {
     static func capture(_ page: any PageHandle, shot: PageShot,
                         allowed: @escaping @MainActor () async -> Bool) async throws -> NSImage {
-        guard await allowed() else { throw AgentSecrets.Refused() }
+        guard await allowed() else { throw AgentSecrets.Refused(page) }
         let (image, error) = await withCheckedContinuation { continuation in
             page.snapshot(shot) { image, error in continuation.resume(returning: (image, error)) }
         }
-        guard await allowed() else { throw AgentSecrets.Refused() }
+        guard await allowed() else { throw AgentSecrets.Refused(page) }
         guard let image else { throw error ?? NSError(domain: "AgentScreenshot", code: 1,
                                                       userInfo: [NSLocalizedDescriptionKey: "no picture"]) }
         return image
@@ -24,9 +24,10 @@ enum AgentScreenshot {
         var receipt: Set<String>?
         return try await AgentImageGate.capture(page, shot: PageShot(width: width.map { CGFloat($0) })) {
             guard !tab.gone, tab.builtPage === page, !tab.wallet.agentScreenshotBlocked,
-                  await AgentSecrets.check(page), let frames = try? await page.agentFrames(),
-                  let tokens = try? Set(frames.compactMap { try page.scripts.token($0, tab: page.remoteID) }),
-                  tokens.count == frames.count,
+                  await AgentSecrets.check(page), case let frames = (try? await page.agentFrames()) ?? [],
+                  // A frame with no script context is left out of the
+                  // receipt, as the guard leaves it out; it is not a refusal.
+                  case let tokens = Set(frames.compactMap({ try? page.scripts.token($0, tab: page.remoteID) })),
                   !tab.gone, tab.builtPage === page, !tab.wallet.agentScreenshotBlocked else { return false }
             // A safe replacement document cannot authorize pixels captured
             // from the old document or its old frame inventory.

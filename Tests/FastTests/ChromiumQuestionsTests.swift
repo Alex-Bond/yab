@@ -14,6 +14,10 @@ struct ChromiumQuestionsTests {
         var notifications: PageOrigin?
         var auth: PageAuthentication?
         var dialogs: [PageDialog] = []
+        var permissions: [(SitePermission, PageOrigin)] = []
+        var permissionAnswer = false
+        func page(_ page: any PageHandle, permission kind: SitePermission, origin: PageOrigin,
+                  reply: @escaping @MainActor (Bool) -> Void) { permissions.append((kind, origin)); reply(permissionAnswer) }
         func page(_ page: any PageHandle, dialog: PageDialog,
                   reply: @escaping @MainActor (PageDialogReply) -> Void) { dialogs.append(dialog) }
         func page(_ page: any PageHandle, navigation event: PageNavigationEvent) { }
@@ -97,6 +101,39 @@ struct ChromiumQuestionsTests {
         #expect(page.remoteID == remote && ChromiumProcess.shared.connectedClient == nil,
                 "Question delivery must not start or replace a helper")
         #expect(page.questionRequests.presentingPermission == nil)
+    }
+
+    /// CEF patch 0097: File System Access's write prompt arrives as a
+    /// "permission" question for "files", from an extension's page too, and
+    /// Yab's answer is the request's answer (#1683).
+    @Test func filesQuestionFromAnExtensionPageReachesTheFilesCard() {
+        _ = NSApplication.shared
+        let id = String(repeating: "a", count: 16) + String(repeating: "p", count: 16)
+        for answer in [true, false] {
+            let tab = Tab(shy: true), listener = Listener()
+            let page = ChromiumPage(tab: tab)
+            defer { page.retire(call: false, pictureInPicture: false); tab.close() }
+            page.events = listener
+            listener.permissionAnswer = answer
+            var replies: [[String: JSONValue]] = []
+            ChromiumQuestionDelivery.send(["request": .string("native-files"), "kind": .string("permission"),
+                "origin": .string("chrome-extension://\(id)/"), "top": .string("chrome-extension://\(id)/options.html"),
+                "permissions": .array([.string("files")])], page: page, events: listener) { values in
+                    replies.append(ChromiumQuestionDelivery.reply(values, token: "native-files", remote: "original-files-tab"))
+                }
+            #expect(listener.permissions.count == 1)
+            #expect(listener.permissions.first?.0 == .files)
+            #expect(listener.permissions.first?.1 == PageOrigin(scheme: "chrome-extension", host: id, port: 0))
+            #expect(replies == [["allow": .bool(answer), "request": .string("native-files"), "tab": .string("original-files-tab")]])
+        }
+    }
+
+    /// A file's grant lasts as long as its handle: Yab keeps no answer of its
+    /// own, so nothing it said is taken back from Chromium afterwards.
+    @Test func aFilesAnswerIsNeverRememberedForTheSite() {
+        let question: [String: JSONValue] = ["kind": .string("permission"), "permissions": .array([.string("files")])]
+        #expect(!SitePermission.files.remembered)
+        #expect(ChromiumPermissions.keeps(question, origin: PageOrigin(scheme: "https", host: "photos.example", port: 0)))
     }
 
     @Test func originalReplyIdentityOverridesForeignUIValues() {

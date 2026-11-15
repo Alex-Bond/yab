@@ -19,17 +19,14 @@ final class LinkCardLoad: NSObject, WKNavigationDelegate, WKUIDelegate {
         self.url = url
         let config = Web.configuration(shy: source.shy, store: source.store)
         config.mediaTypesRequiringUserActionForPlayback = .all
-        page = Tab(shy: source.shy, configuration: config, factory: .webKitOnly)
+        // In the engine of the tab it was hovered in, so the click that keeps
+        // it finds its cookies, and a Chromium tab's history can hold it.
+        let remotely = source.engineKind == .chromium
+        page = remotely ? Tab(shy: source.shy, configuration: config, engine: .chromium)
+            : Tab(shy: source.shy, configuration: config, factory: .webKitOnly)
         super.init()
-        // Until the remote engine has action/response interception, a hover
-        // must not bypass this preloader's no-download/no-popup policy.
-        guard source.engineKind == .webKit else {
-            WebKitOnly.note("Restricted hover preload", engine: source.engineKind)
-            failed = true
-            return
-        }
         page.from = source.id
-        if page.engineFactory.resolved(page.engineKind, at: url) == .chromium {
+        if remotely {
             // The same warm page, in the source's Chromium profile: no
             // dialogs, downloads, popups or permission asks from a hover
             // (LinkCardRemote answers no), and no sound.

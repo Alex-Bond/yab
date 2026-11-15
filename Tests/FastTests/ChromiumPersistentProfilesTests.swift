@@ -9,6 +9,20 @@ import WebKit
     private let a = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
     private let b = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
 
+    @Test func liveSharedAssociationDoesNotRediscoverAliasesOnInput() throws {
+        let store = Store.websites
+        let plan = ChromiumPersistentProfiles.plan(for: store)
+        let addedSpace = UUID()
+        Spaces.sharing.insert(addedSpace)
+        defer { Spaces.sharing.remove(addedSpace) }
+        // Tab.chromiumProfile and endpoint authorization repeat these calls
+        // for every event. A new row is not a new website-store association.
+        for _ in 0..<120 {
+            #expect(ChromiumPersistentProfiles.plan(for: store) == plan)
+            #expect(ChromiumPersistentProfiles.profile(store: store, placement: addedSpace) == plan.primary.uuidString)
+        }
+    }
+
     @Test func freshSharedSpacesChooseOneNativeContext() {
         let plan = ChromiumPersistentProfiles.Plan(logical: shared, aliases: [shared,a,b], existing: [])
         #expect(!plan.needsMerge)

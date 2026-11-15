@@ -74,4 +74,100 @@ struct ChromiumMediaTests {
         page.receiveMedia("page.fullscreen", ["fullscreen": .bool(false)])
         #expect(states.seen.isEmpty)
     }
+
+    /// Exercise the real presenter without creating a macOS Space in a unit test.
+    private final class NativeFullscreenWindow: NSWindow {
+        var toggleCount = 0
+        var frontRequests = 0
+        var reportsFullscreen = false
+        var fullscreenOwners: [(active: Bool, allowsAutomaticPiP: Bool)] = []
+        override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+            if let page = responder as? ChromiumPage {
+                fullscreenOwners.append((page.media.fullscreen, page.media.permitsAutomaticPiP))
+            }
+            return super.makeFirstResponder(responder)
+        }
+        override var styleMask: NSWindow.StyleMask {
+            get { reportsFullscreen ? super.styleMask.union(.fullScreen) : super.styleMask }
+            set { super.styleMask = newValue }
+        }
+        override func toggleFullScreen(_ sender: Any?) { toggleCount += 1 }
+        override func makeKeyAndOrderFront(_ sender: Any?) { frontRequests += 1 }
+    }
+
+    @Test func pageFullscreenReusesAnAlreadyFullscreenBrowserWindow() {
+        _ = NSApplication.shared
+        let tab = Tab(shy: true), states = States()
+        let page = ChromiumPage(tab: tab)
+        let window = NativeFullscreenWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.reportsFullscreen = true
+        let content = window.contentView!
+        let stage = NSView(frame: content.bounds)
+        content.addSubview(stage); stage.addSubview(page)
+        page.frame = stage.bounds
+        defer {
+            page.mediaEnded(); page.retire(call: false, pictureInPicture: false); tab.close()
+            window.reportsFullscreen = false
+            window.close()
+        }
+        page.stateEvents = states
+        for turn in 0..<5 {
+            // The stage normally takes its page back during layout.
+            if page.superview !== stage { stage.addSubview(page) }
+            page.receiveMedia("page.fullscreen", ["fullscreen": .bool(true)])
+            #expect(page.media.fullscreen)
+            #expect(page.window === window)
+            #expect(page.superview === content)
+            #expect(window.fullscreenOwners.last?.active == true)
+            #expect(window.fullscreenOwners.last?.allowsAutomaticPiP == false)
+            #expect(page.frame == content.bounds)
+            #expect(window.toggleCount == 0)
+            #expect(page.fullscreenState["window"] as? Int == window.windowNumber)
+            // Teardown can detach the view before the fullscreen exit arrives.
+            if turn == 4 { page.removeFromSuperview() }
+            page.receiveMedia("page.fullscreen", ["fullscreen": .bool(false)])
+            #expect(!page.media.fullscreen)
+            #expect(window.styleMask.contains(.fullScreen))
+            #expect(window.toggleCount == 0)
+            #expect(window.frontRequests == 0)
+        }
+        #expect(states.seen.count == 10)
+    }
+
+    @Test func fullscreenReturnsTheSamePageToItsLittleWindowHolder() {
+        _ = NSApplication.shared
+        let factory = PageEngineFactory(kinds: [.chromium]) { tab, _ in ChromiumPage(tab: tab) }
+        let tab = Tab(shy: true, engine: .chromium, factory: factory)
+        let page = tab.page as! ChromiumPage
+        let holder = PageHolder(tab: tab)
+        let window = NativeFullscreenWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.reportsFullscreen = true
+        window.contentView!.addSubview(holder)
+        defer {
+            page.mediaEnded(); page.retire(call: false, pictureInPicture: false); tab.close()
+            window.reportsFullscreen = false; window.close()
+        }
+        for _ in 0..<3 {
+            page.receiveMedia("page.fullscreen", ["fullscreen": .bool(true)])
+            #expect(page.superview === window.contentView)
+            holder.setFrameSize(NSSize(width: 640, height: 480))
+            page.receiveMedia("page.fullscreen", ["fullscreen": .bool(false)])
+            #expect(page.superview === holder)
+            #expect(page.frame == holder.bounds)
+            #expect(page.autoresizingMask.isEmpty)
+            #expect(!page.media.fullscreen)
+        }
+        // A handoff while fullscreen is exiting must keep its new owner.
+        page.receiveMedia("page.fullscreen", ["fullscreen": .bool(true)])
+        let destination = NSView(frame: holder.bounds)
+        window.contentView!.addSubview(destination)
+        destination.addSubview(page)
+        page.receiveMedia("page.fullscreen", ["fullscreen": .bool(false)])
+        #expect(page.superview === destination)
+    }
+
 }

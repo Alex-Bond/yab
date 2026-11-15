@@ -1,0 +1,17 @@
+#!/bin/sh
+# A fix on its way to main must remove the cause, not hide the symptom: see
+# scripts/rootcause/rootcause.py. Only pushes to main, and only new commits
+# that touch product code; merges are skipped and their branches' commits
+# judged once. A commit judged a patch stops the push and says why; when
+# the patch is the right design, YAB_ROOTCAUSE_OK="why" git push lets it
+# through and logs the reason. No claude, no time left or a broken check:
+# a warning, and the push goes on.
+# Homebrew's python first: miniconda's python3 can hang in uninterruptible
+# I/O on main (see pre-commit). The script beside this hook, not the pushing
+# worktree's: an old worktree may have none.
+here="$(cd "$(dirname "$0")/.." && pwd)"
+script="$here/scripts/rootcause/rootcause.py"
+[ -f "$script" ] || exit 0
+py=python3
+[ -x /opt/homebrew/bin/python3 ] && py=/opt/homebrew/bin/python3
+exec "$py" "$script" pre-push "$@"

@@ -67,7 +67,7 @@ final class Switcher: ObservableObject {
     /// down arrows move by this much.
     var across = Switcher.columns
 
-    /// Five, in one row, as Arc has it: past that the walk is quicker by ⌘K.
+    /// Five visible tiles; the keyboard walk includes every eligible tab.
     static let most = 5
     static let columns = 5
 
@@ -105,6 +105,25 @@ final class Switcher: ObservableObject {
     private(set) var open = false
     var picked: Tab? { order.indices.contains(at) ? order[at] : nil }
 
+    var visibleIndices: Range<Int> {
+        let start = min((max(0, at) / Self.most) * Self.most, order.count)
+        return start..<min(start + Self.most, order.count)
+    }
+
+    private func pictureVisibleTabs(refresh: Bool = false) {
+        let visible = Set(visibleIndices.map { order[$0].id })
+        pictures = pictures.filter { visible.contains($0.key) }
+        for index in visibleIndices {
+            let tab = order[index]
+            guard refresh || pictures[tab.id] == nil else { continue }
+            tab.glance(width: (SwitcherStrip.on ? SwitcherStrip.tile.width : Self.tile.width) * 2) { [weak self] image in
+                guard let self, let image, self.open,
+                      self.visibleIndices.contains(where: { self.order[$0].id == tab.id }) else { return }
+                self.pictures[tab.id] = image
+            }
+        }
+    }
+
     fileprivate func begin(_ tabs: [Tab], at start: Int, homes: [Tab.ID: Space] = [:]) {
         open = true
         self.homes = homes
@@ -114,15 +133,7 @@ final class Switcher: ObservableObject {
         at = start
         let wanted = Set(tabs.map(\.id))
         pictures = pictures.filter { wanted.contains($0.key) }
-        // Twice the tile, for the Retina screen it is almost certainly on;
-        // the row over the page (SwitcherStrip) has larger tiles.
-        let width = (SwitcherStrip.on ? SwitcherStrip.tile.width : Self.tile.width) * 2
-        for tab in tabs {
-            tab.glance(width: width) { [weak self] image in
-                guard let self, let image, self.open else { return }
-                self.pictures[tab.id] = image
-            }
-        }
+        pictureVisibleTabs(refresh: true)
         let reveal = DispatchWorkItem { [weak self] in
             guard let self, self.open else { return }
             self.showing = true
@@ -146,8 +157,8 @@ final class Switcher: ObservableObject {
     fileprivate func step(_ by: Int) {
         guard order.count > 1 else { return }
         at = ((at + by) % order.count + order.count) % order.count
-        // The row over the page (SwitcherStrip): a second Tab inside the
-        // beat is a walk, not a tap, so the row shows at once.
+        pictureVisibleTabs()
+        // A second press is a walk, so show the experimental row immediately.
         if SwitcherStrip.on, open, !showing, let reveal {
             reveal.cancel()
             self.reveal = nil
@@ -161,6 +172,7 @@ final class Switcher: ObservableObject {
         homes[tab.id] = nil
         pictures[tab.id] = nil
         if at > index || at == order.count { at = max(0, at - 1) }
+        pictureVisibleTabs()
     }
 
     /// The row over the page (SwitcherStrip) hides itself here, before the
@@ -202,7 +214,7 @@ final class Switcher: ObservableObject {
 extension Browser {
     /// The tabs ⌃Tab walks, and the space of each from another space. The
     /// share box offers these too.
-    func recentTabs() -> (tabs: [Tab], homes: [Tab.ID: Space]) {
+    func recentTabs(limit: Int? = Switcher.most) -> (tabs: [Tab], homes: [Tab.ID: Space]) {
         // Today's tabs, and pins and kept tabs whose page is up. Asleep
         // they filled the grid with blank tiles ahead of pages you had
         // just been reading; awake they are pages you were just on, and
@@ -230,7 +242,8 @@ extension Browser {
             .sorted { ($0.id == activeID ? .distantFuture : $0.touched) > ($1.id == activeID ? .distantFuture : $1.touched) }
         // A pair is one tab, here and in the other spaces alike.
         let kept = Set(Switcher.onePerPair(sorted.map(\.id), pairs: pairs + parked.filter { $0.key != spaceID }.values.flatMap(\.pairs)))
-        let recent = Array(sorted.filter { kept.contains($0.id) }.prefix(Switcher.most))
+        let eligible = sorted.filter { kept.contains($0.id) }
+        let recent = limit.map { Array(eligible.prefix($0)) } ?? eligible
         return (recent, homes.filter { id, _ in recent.contains { $0.id == id } })
     }
 
@@ -239,7 +252,7 @@ extension Browser {
     /// takes one more step while ⌃ stays down.
     func switchStep(_ direction: Int) {
         guard switcher.open else {
-            let (recent, homes) = recentTabs()
+            let (recent, homes) = recentTabs(limit: nil)
             guard !recent.isEmpty else { return }
             // On a sleeping pin, the first step is the latest of the rest.
             // With the one you are on alone, held, the grid still comes up
@@ -342,8 +355,8 @@ struct SwitcherPanel: View {
     }
 
     private func grid(_ across: Int) -> some View {
-        let rows = stride(from: 0, to: switcher.order.count, by: across).map {
-            Array(switcher.order.indices[$0..<min($0 + across, switcher.order.count)])
+        let rows = stride(from: switcher.visibleIndices.lowerBound, to: switcher.visibleIndices.upperBound, by: across).map {
+            Array(switcher.order.indices[$0..<min($0 + across, switcher.visibleIndices.upperBound)])
         }
         return VStack(alignment: .leading, spacing: Self.gap) {
             ForEach(rows, id: \.first) { row in

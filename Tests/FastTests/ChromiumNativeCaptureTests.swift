@@ -8,18 +8,27 @@ struct ChromiumNativeCaptureTests {
             "profile": .string("fixture-profile"), "browserId": .number(3), "token": .string("capture-token"),
             "primaryDocument": .string("native-document"), "primaryFrameId": .string("native-frame"),
             "actions": .array([.string("stopUserMedia"), .string("stopScreen")])]
-        for key in ["camera", "microphone", "screen", "tab", "window", "display", "allScreens", "mirrored", "videoPiP", "documentPiP"] { p[key] = .bool(false) }
+        for key in ["camera", "microphone", "screen", "tabCapture", "window", "display", "allScreens", "mirrored", "videoPiP", "documentPiP"] { p[key] = .bool(false) }
         return p
     }
 
     @Test func everyAuthoritativeActivityPreventsIdle() throws {
         #expect(try #require(ChromiumNativeCapture(snapshot(), profile: "fixture-profile")).idle)
-        for key in ["camera", "microphone", "screen", "tab", "window", "display", "allScreens", "mirrored", "videoPiP", "documentPiP"] {
+        for key in ["camera", "microphone", "screen", "tabCapture", "window", "display", "allScreens", "mirrored", "videoPiP", "documentPiP"] {
             var p = snapshot(); p[key] = .bool(true)
             #expect(try #require(ChromiumNativeCapture(p, profile: "fixture-profile")).idle == false)
             p[key] = .string("false")
             #expect(ChromiumNativeCapture(p, profile: "fixture-profile") == nil)
         }
+    }
+
+    /// An event's `tab` names the page, so it can never be the capture flag.
+    @Test func anEventsOwnTabIdLeavesItsCaptureRead() throws {
+        var p = snapshot()
+        p["camera"] = .bool(true); p["microphone"] = .bool(true)
+        p["tab"] = .string("tab-3")
+        let capture = try #require(ChromiumNativeCapture(p, profile: "fixture-profile"))
+        #expect(capture.camera && capture.microphone && !capture.screen)
     }
 
     @Test func missingAndForeignProofCannotAuthorizeIdle() {

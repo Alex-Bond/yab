@@ -1,0 +1,81 @@
+diff --color -ru a/cef/libcef/browser/views/external_host_mac.mm b/cef/libcef/browser/views/external_host_mac.mm
+--- a/cef/libcef/browser/views/external_host_mac.mm	2026-11-01 15:25:12
++++ b/cef/libcef/browser/views/external_host_mac.mm	2026-11-01 16:08:49
+@@ -479,6 +479,8 @@
+     value->SetInt("pixelHeight", pixels.height());
+     value->SetDouble("scale", scale);
+   }
++  if (std::string(state) == "closed" && host && host->widget)
++    value->SetInt("closedReason", static_cast<int>(host->widget->closed_reason()));
+   handler->OnExtensionPopup(browser.get(), value);
+ }
+ 
+@@ -491,9 +493,9 @@
+ bool PopupBeforeShow(content::WebContents* popup, views::Widget* widget) {
+   auto* origin = extensions::ExternalActionOrigin::Get(popup);
+   auto* owner = origin ? origin->Owner(popup) : nullptr;
+-  auto* focus = owner ? ExternalFocus::FromWebContents(owner) : nullptr;
+-  if (!origin || !origin->external() || !focus || !focus->focused() ||
+-      !Enable(widget)) return false;
++  // OpenAction checked the press. The document loads later, and by then the
++  // client may have moved key away from the page; that is not a dismissal.
++  if (!origin || !origin->external() || !owner || !Enable(widget)) return false;
+   auto owner_identity = owner->GetWeakPtr();
+   auto popup_identity = popup->GetWeakPtr();
+   auto widget_identity = widget->GetWeakPtr();
+@@ -936,8 +938,7 @@
+       ->GetExtensionAction(*extension);
+   const int tab = sessions::SessionTabHelper::IdForTab(owner).id();
+   auto* runner = extensions::ExtensionActionRunner::GetForWebContents(owner);
+-  if (!action || !runner || !action->GetIsVisible(tab) || !action->HasPopup(tab))
+-    return false;
++  if (!action || !runner || !action->GetIsVisible(tab)) return false;
+   // This validated action belongs to the externally focused, physically
+   // active owner. An extension may have created another logical foreground
+   // tab meanwhile (for example its welcome page). Do not let that asynchronous
+@@ -949,8 +950,12 @@
+   auto owner_weak = owner->GetWeakPtr();
+   auto owner_document = owner->GetPrimaryMainFrame()->GetWeakDocumentPtr();
+   const GURL popup_url = action->GetPopupUrl(tab);
+-  if (runner->RunAction(extension.get(), /*grant_tab_permissions=*/true) !=
+-      extensions::ExtensionAction::ShowAction::kShowPopup || !owner_weak ||
++  const auto shown = runner->RunAction(extension.get(), /*grant_tab_permissions=*/true);
++  // No popup: Chrome has granted activeTab and dispatched action.onClicked,
++  // or run the extension's blocked actions. Nothing is left to present. A
++  // side panel action stays the client's: it needs no native action here.
++  if (shown == extensions::ExtensionAction::ShowAction::kNone) return true;
++  if (shown != extensions::ExtensionAction::ShowAction::kShowPopup || !owner_weak ||
+       owner_document.AsRenderFrameHostIfValid() != owner_weak->GetPrimaryMainFrame())
+     return false;
+   // Native permission handling can call client code. Revalidate its owner and
+@@ -993,9 +998,10 @@
+     widget->Close();
+     return true;
+   }
+-  auto* owner_focus = ExternalFocus::FromWebContents(owner);
+-  if (origin->external() && (!owner_focus || !owner_focus->focused() ||
+-      owner->GetVisibility() != content::Visibility::VISIBLE)) return false;
++  // The client's popover holds key while it is up, so the page is unfocused
++  // for the popup's whole life. Only a hidden owner retires it.
++  if (origin->external() && owner->GetVisibility() != content::Visibility::VISIBLE)
++    return false;
+   auto popup_weak = popup->GetWeakPtr();
+   auto widget = state->widget;
+   const bool external = origin->external();
+diff --color -ru a/chrome/browser/ui/views/extensions/extension_popup.cc b/chrome/browser/ui/views/extensions/extension_popup.cc
+--- a/chrome/browser/ui/views/extensions/extension_popup.cc	2026-11-01 16:52:37
++++ b/chrome/browser/ui/views/extensions/extension_popup.cc	2026-11-01 16:52:37
+@@ -196,6 +196,13 @@
+ }
+ 
+ gfx::Size ExtensionPopup::GetMaxBounds() {
++#if BUILDFLAG(ENABLE_CEF)
++  // An externally presented popup hangs from the client's button. Its anchor
++  // here is a hidden producer window: the room under that says nothing.
++  if (auto* origin = external_action_origin(); origin && origin->external()) {
++    return kMaxSize;
++  }
++#endif
+ #if BUILDFLAG(IS_OZONE)
+   // Some platforms like wayland don't allow clients to know the global
+   // coordinates of the window. This means in those platforms we have no way to

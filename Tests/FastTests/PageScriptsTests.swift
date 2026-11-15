@@ -95,11 +95,16 @@ struct PageScriptsTests {
         let look = list.filter { $0.source == WalletRelay.soon }
         #expect(look.count == 1)
         #expect(look.first?.isForMainFrameOnly == false)
-        #expect(WalletRelay.soon.utf8.count < 2_000)
+        // A look, not the wallet: its words for a card's, an address's or a
+        // form's box included, it stays a few hundred times smaller.
+        #expect(WalletRelay.soon.utf8.count < 2_500)
     }
 
-    // A frame with a box sends for the wallet and gets it; a frame with
-    // none keeps only the look.
+    // A frame with a card's box sends for the wallet and gets it; an ad
+    // keeps only the look, and so does a Todo list's frame even with the
+    // caret in its box (Speedometer's tests are such frames). A frame that
+    // draws its card's box late gets it when yab asks the frames to look
+    // (a card's box got the caret); the caret in a form's box sends for it.
     @Test func aFrameWithABoxGetsTheWalletAndAnAdDoesNot() async throws {
         let (browser, id) = browser()
         defer { done(browser, id) }
@@ -114,16 +119,32 @@ struct PageScriptsTests {
         <iframe id=card srcdoc="<input autocomplete=cc-number name=cardnumber>"></iframe>
         <iframe id=ad srcdoc="<p>Spring sale</p>"></iframe>
         <iframe id=late srcdoc="<p>Loading</p><script>setTimeout(() => document.body.innerHTML = '<input name=cvc>', 300)</script>"></iframe>
+        <iframe id=todo srcdoc="<input class=new-todo placeholder='What needs to be done?'><ul><li><input class=toggle type=checkbox><input class=edit></ul>"></iframe>
+        <iframe id=form srcdoc="<form><input id=q></form>"></iframe>
         """
         tab.page.navigate(html: html, base: URL(string: "https://shop.test/checkout")!)
-        let ask = "[0, 1, 2].map(i => typeof frames[i].__yabWallet + '/' + typeof frames[i].__yabWalletSoon).join(' ')"
+        let ask = "[0, 1, 2, 3, 4].map(i => typeof frames[i].__yabWallet + '/' + typeof frames[i].__yabWalletSoon).join(' ')"
+        let before = "object/boolean undefined/boolean undefined/boolean undefined/boolean undefined/boolean"
         var said = ""
         for _ in 0..<100 {
             try await Task.sleep(for: .milliseconds(50))
             said = (try? await tab.page.fixtureExpression(ask, world: .yab)) as? String ?? ""
-            if said == "object/boolean undefined/boolean object/boolean" { break }
+            if said == before { break }
         }
-        #expect(said == "object/boolean undefined/boolean object/boolean")
+        #expect(said == before)
+        // The late frame has drawn its box by now; asked to look, it sends.
+        try await Task.sleep(for: .milliseconds(400))
+        tab.walletLook()
+        let focus = "(d, s) => d.querySelector(s).dispatchEvent(new FocusEvent('focusin', { bubbles: true, composed: true }))"
+        _ = try? await tab.page.fixtureExpression("(\(focus))(frames[3].document, '.new-todo'), (\(focus))(frames[4].document, '#q'), 1", world: .yab)
+        // The caret in the Todo box sends nothing; in the form's box, it sends.
+        let after = "object/boolean undefined/boolean object/boolean undefined/boolean object/boolean"
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            said = (try? await tab.page.fixtureExpression(ask, world: .yab)) as? String ?? ""
+            if said == after { break }
+        }
+        #expect(said == after)
         let top = (try? await tab.page.fixtureExpression("typeof window.__yabWallet", world: .yab)) as? String
         #expect(top == "object")
     }

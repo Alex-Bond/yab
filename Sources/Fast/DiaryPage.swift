@@ -119,7 +119,7 @@ extension Browser {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak tab] in
             guard let self, let tab, tab.address == url, tab.builtPage?.isLoading == true, DiaryPage.counted[tab.id] == nil else { return }
             DiaryPage.counted[tab.id] = url
-            history.record(url, title: tab.title, space: visitSpace(tab))
+            history(for: tab).record(url, title: tab.title, space: visitSpace(tab))
             remember(tab, at: url)
         }
     }

@@ -50,6 +50,22 @@ enum Crx {
         return text[found].lowercased()
     }
 
+    /// The package chooses its identity; verification still checks the owning key.
+    static func id(inPackage crx: Data) throws -> String {
+        let bytes = [UInt8](crx)
+        guard bytes.count > 12, Array(bytes[0..<4]) == Array("Cr24".utf8),
+              le32(bytes, 4) == 3 else { throw Refused.notCrx }
+        let size = Int(le32(bytes, 8))
+        guard size <= bytes.count - 12 else { throw Refused.notCrx }
+        let fields = protobuf(Array(bytes[12..<(12 + size)]))
+        guard let signed = fields.first(where: { $0.0 == 10000 })?.1,
+              let identity = protobuf(signed).first(where: { $0.0 == 1 })?.1,
+              identity.count == 16 else { throw Refused.unsignedOrWrong }
+        let id = letters(identity)
+        _ = try verifiedPackage(crx, id: id)
+        return id
+    }
+
     static func downloadURL(for id: String) -> URL {
         var parts = URLComponents(string: "https://clients2.google.com/service/update2/crx")!
         parts.queryItems = [
@@ -140,7 +156,7 @@ enum Crx {
         let ditto = Process()
         ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         ditto.arguments = ["-x", "-k", archive.path, out.path]
-        try ditto.run()
+        try ditto.runValidated()
         ditto.waitUntilExit()
         guard ditto.terminationStatus == 0,
               files.fileExists(atPath: out.appendingPathComponent("manifest.json").path)
@@ -190,7 +206,7 @@ enum Crx {
             let field = key >> 3, wire = key & 7
             switch wire {
             case 2:
-                guard let length = varint(), i + length <= b.count else { return out }
+                guard let length = varint(), length <= b.count - i else { return out }
                 out.append((field, Array(b[i..<(i + length)])))
                 i += length
             case 0: _ = varint()

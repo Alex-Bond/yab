@@ -14,7 +14,19 @@ import AppKit
 // site (Site Controls › Automatic downloads lets it go). The next click
 // gets one again.
 //
-// And every file from the web is marked with quarantine, so macOS checks
+// Files a page sends while its card is up wait on that one card, the
+// unasked ones too, and a second file makes it the "multiple files" card:
+// a download Google Drive splits into parts, each started seconds after the
+// click, is asked about once and every part comes (#1940). A site whose
+// automatic downloads are Allowed sends its first unasked file too.
+//
+// On Chromium the answer is also the origin's AUTOMATIC_DOWNLOADS, which
+// Chromium's own limiter reads before a file ever reaches Yab: Yab writes it
+// for the origins it was given on (ChromiumPermissions), and Chromium keeps
+// none of its own (YabCore's AnswerDownloads), so what Site Controls lists
+// is all there is.
+//
+// And every file from the web is marked for quarantine, so macOS checks
 // an app, a disk image or an installer from it before it first opens.
 
 @MainActor
@@ -42,7 +54,7 @@ enum SiteDownloads {
 
     /// Files a page started since your last click or key in it, by page.
     private static var since: [ObjectIdentifier: (input: TimeInterval?, count: Int)] = [:]
-    nonisolated private static func manyKey(_ site: String) -> String { "downloads.many." + site }
+    nonisolated private static func manyKey(_ site: String) -> String { manyPrefix + site }
 
     /// The site to ask about, if this download is one more than the click
     /// before it asked for; nil when it goes ahead. Counted once a download.
@@ -60,18 +72,35 @@ enum SiteDownloads {
         return seen.count > 1 ? host : nil
     }
 
+    nonisolated static let manyPrefix = "downloads.many."
+    /// The origins the site's answer was given on (Browser.origin's
+    /// spelling): Chromium keeps a site's automatic downloads per origin,
+    /// and is told Yab's answer for each (ChromiumPermissions).
+    nonisolated private static func askedOnKey(_ site: String) -> String { "downloads.askedOn." + site }
+
+    nonisolated static func askedOn(_ site: String, in settings: [String: Any]) -> [String] {
+        settings[askedOnKey(site)] as? [String] ?? []
+    }
+
     /// What the site was told about more files than a click asks for:
     /// kept until it is let go in Site Controls.
     static func many(for host: String) -> Bool? {
         Store.settings.object(forKey: manyKey(Browser.site(host))) as? Bool
     }
 
-    static func rememberMany(_ host: String, _ yes: Bool) {
-        Store.settings.set(yes, forKey: manyKey(Browser.site(host)))
+    static func rememberMany(_ host: String, _ yes: Bool, origin: String? = nil) {
+        let site = Browser.site(host)
+        if let origin {
+            let asked = Store.settings.stringArray(forKey: askedOnKey(site)) ?? []
+            if !asked.contains(origin) { Store.settings.set(asked + [origin], forKey: askedOnKey(site)) }
+        }
+        Store.settings.set(yes, forKey: manyKey(site))
     }
 
     static func forgetMany(_ host: String) {
-        Store.settings.removeObject(forKey: manyKey(Browser.site(host)))
+        let site = Browser.site(host)
+        Store.settings.removeObject(forKey: manyKey(site))
+        Store.settings.removeObject(forKey: askedOnKey(site))
     }
 
     /// A navigation that became a file: noted when nobody started it.
@@ -94,7 +123,7 @@ enum SiteDownloads {
 
     static func remember(_ host: String, _ yes: Bool) { said[Browser.site(host)] = yes }
 
-    /// Marked with quarantine, so Gatekeeper asks before an
+    /// Marked for quarantine, so Gatekeeper asks before an
     /// app or an installer from it opens. macOS 27 left the addresses
     /// given here out of its quarantine event (checked 2026-10-15); they
     /// are on the file anyway, as kMDItemWhereFroms. Yab's own updates

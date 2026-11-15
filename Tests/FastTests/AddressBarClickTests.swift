@@ -9,7 +9,7 @@ import Testing
 @Suite(.serialized)
 struct AddressBarClickTests {
     @Test(arguments: [false, true])
-    func aSingleClickOpensTheFieldWithoutWaiting(strip: Bool) async throws {
+    func eachPressOnTheSiteTogglesTheFieldAtOnce(strip: Bool) async throws {
         _ = NSApplication.shared
         let screen = try #require(TestScreen.screen)
         let browser = Browser(windowID: UUID())
@@ -46,6 +46,14 @@ struct AddressBarClickTests {
         try await Task.sleep(for: .milliseconds(100))
         host.layoutSubtreeIfNeeded()
         try #require(!browser.fieldShowing)
+        // Real composed AddressBar: empty room at every height is native
+        // title bar, and its caption has the click-or-drag handle.
+        for x: CGFloat in [160, 240, 560, 640] {
+            for y: CGFloat in [3, 18, 33] {
+                #expect(host.hitTest(CGPoint(x: x, y: y)) is DragStrip.Strip)
+            }
+        }
+        #expect(host.hitTest(CGPoint(x: 400, y: 18)) is LinkFieldHandle.Handle)
         let at = host.convert(CGPoint(x: host.bounds.midX, y: host.bounds.midY), to: nil)
         func click(_ count: Int) throws {
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -60,107 +68,16 @@ struct AddressBarClickTests {
         #expect(browser.editing && browser.fieldShowing)
         #expect(browser.typed == "example.test/path")
         #expect(browser.focusRequest == request + 1)
-    }
-
-    @Test func theSecondPressClosesTheFieldAndActsOnTheWindowOnce() throws {
-        try withField { browser, window in
-            var acted: [NSWindow] = []
-            let clicks = AddressBarClick { acted.append($0) }
-            defer { clicks.cancel() }
-            let at = ProcessInfo.processInfo.systemUptime
-            clicks.watch(try event(.leftMouseUp, window, at: at, count: 1), in: browser)
-            #expect(browser.fieldShowing)
-            #expect(acted.isEmpty)
-            let request = browser.focusRequest
-            #expect(try clicks.receive(event(.leftMouseDown, window, at: at + 0.01, count: 2)) == nil)
-            #expect(!browser.editing && !browser.fieldShowing)
-            #expect(browser.focusRequest == request)
-            #expect(acted.count == 1 && acted.first === window)
-            #expect(try clicks.receive(event(.leftMouseDragged, window, at: at + 0.02, count: 2)) == nil)
-            #expect(try clicks.receive(event(.leftMouseUp, window, at: at + 0.03, count: 2)) == nil)
-            let third = try event(.leftMouseDown, window, at: at + 0.04, count: 3)
-            #expect(clicks.receive(third) === third)
-            #expect(acted.count == 1)
+        try click(1)
+        #expect(!browser.editing && !browser.fieldShowing)
+        // Presses as fast as a hand's, each counted on from the last as
+        // AppKit counts them (2, 3, ...): every one toggles, as Arc's
+        // address does its command bar, and none acts on the window.
+        let frame = window.frame
+        for count in 1...10 {
+            try click(count)
+            #expect(browser.fieldShowing == (count % 2 == 1), "press \(count)")
         }
-    }
-
-    @Test(arguments: [false, true])
-    func dismissalOrAnotherFocusRequestCancelsThePair(refocus: Bool) throws {
-        try withField { browser, window in
-            var actions = 0
-            let clicks = AddressBarClick { _ in actions += 1 }
-            defer { clicks.cancel() }
-            let at = ProcessInfo.processInfo.systemUptime
-            clicks.watch(try event(.leftMouseUp, window, at: at, count: 1), in: browser)
-            if refocus { browser.edit() } else { browser.dismiss() }
-            let second = try event(.leftMouseDown, window, at: at + 0.01, count: 2)
-            #expect(clicks.receive(second) === second)
-            #expect(actions == 0)
-            #expect(browser.editing == refocus)
-        }
-    }
-
-    @Test func typingCancelsThePairAndKeepsTheField() throws {
-        try withField { browser, window in
-            var actions = 0
-            let clicks = AddressBarClick { _ in actions += 1 }
-            defer { clicks.cancel() }
-            let at = ProcessInfo.processInfo.systemUptime
-            clicks.watch(try event(.leftMouseUp, window, at: at, count: 1), in: browser)
-            let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
-                timestamp: at + 0.01, windowNumber: window.windowNumber, context: nil,
-                characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0))
-            #expect(clicks.receive(key) === key)
-            let second = try event(.leftMouseDown, window, at: at + 0.02, count: 2)
-            #expect(clicks.receive(second) === second)
-            #expect(browser.editing && browser.fieldShowing)
-            #expect(actions == 0)
-        }
-    }
-
-    @Test func aControlClickIsLeftForTheMenu() throws {
-        try withField { browser, window in
-            var actions = 0
-            let clicks = AddressBarClick { _ in actions += 1 }
-            defer { clicks.cancel() }
-            let at = ProcessInfo.processInfo.systemUptime
-            clicks.watch(try event(.leftMouseUp, window, at: at, count: 1), in: browser)
-            let second = try event(.leftMouseDown, window, at: at + 0.01, count: 2, flags: .control)
-            #expect(clicks.receive(second) === second)
-            #expect(browser.editing && browser.fieldShowing)
-            #expect(actions == 0)
-        }
-    }
-
-    private func event(_ type: NSEvent.EventType, _ window: NSWindow,
-                       at: TimeInterval, count: Int, flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
-        try #require(NSEvent.mouseEvent(with: type, location: CGPoint(x: 200, y: 20), modifierFlags: flags,
-            timestamp: at, windowNumber: window.windowNumber, context: nil, eventNumber: count,
-            clickCount: count, pressure: type == .leftMouseUp ? 0 : 1))
-    }
-
-    private func withField(_ check: (Browser, NSWindow) throws -> Void) throws {
-        _ = NSApplication.shared
-        let browser = Browser(windowID: UUID())
-        let tab = Tab()
-        tab.restore(url: URL(string: "https://example.test/path")!, title: "Example")
-        browser.prepare(tab)
-        browser.lay([tab])
-        browser.activeID = tab.id
-        let window = NSWindow(contentRect: CGRect(x: -30000, y: 0, width: 800, height: 600),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        defer {
-            browser.editing = false
-            window.close()
-            browser.dozing?.invalidate(); browser.stuck.timer?.invalidate(); browser.pressure?.cancel()
-            tab.close()
-            if let id = browser.windowID {
-                try? FileManager.default.removeItem(at: Store.file("session-window-\(id.uuidString).json"))
-                Store.settings.removeObject(forKey: "window.\(id.uuidString).space")
-            }
-        }
-        browser.edit()
-        try check(browser, window)
+        #expect(window.frame == frame)
     }
 }

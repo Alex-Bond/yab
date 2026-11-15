@@ -859,6 +859,7 @@ final class SelectionCommands: ObservableObject {
             open(on: tab)
             return true
         }
+        if TaskLine.shared.take(event, on: tab) { return true }
         guard stage != .closed else { return false }
         if receipt == .replaced, flags == .command, event.keyCode == 6 {
             undoReplacement()
@@ -1552,16 +1553,45 @@ final class SelectionCommands: ObservableObject {
           window.__yabSelectionRevision = 0;
           doc.addEventListener('input', () => { window.__yabSelectionRevision++; }, true);
         }
-        window.__yabSelectionRecord = truncated ? null : { el, start, end, range, text, editable, root, recordID };
+        const editor = range && editable ? root?.closest?.('[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"],[role="textbox"]') : null;
+        let editorText = null, textStart = 0;
+        if (editor && editor.contains(range.startContainer) && editor.contains(range.endContainer)) {
+          editorText = editor.textContent;
+          const prefix = doc.createRange(); prefix.selectNodeContents(editor);
+          prefix.setEnd(range.startContainer, range.startOffset);
+          textStart = prefix.toString().length;
+        }
+        window.__yabSelectionRecord = truncated ? null : { el, start, end, range, text, editable, root, recordID, editor, editorText, textStart };
         window.__yabApplySelection = function (replacement, expectedID) {
           const kept = window.__yabSelectionRecord;
           if (!kept || (kept.el && !kept.el.isConnected)) return 'gone';
           if (expectedID && expectedID !== kept.recordID) return 'changed';
           if (!kept.editable) return 'failed';
           if (kept.range) {
+            // Rich editors rebuild text nodes on blur. A live Range then
+            // collapses even though the draft has not changed (#1824).
+            // Recover its exact text offsets only in the same, unchanged
+            // editor; an edited or replaced draft must still be refused.
+            if (kept.range.toString() !== kept.text && kept.editor?.isConnected &&
+                kept.editorText !== null && kept.editor.textContent === kept.editorText) {
+              const walk = doc.createTreeWalker(kept.editor, NodeFilter.SHOW_TEXT);
+              const restored = doc.createRange();
+              let offset = 0, began = false, ended = false;
+              for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+                const limit = offset + node.length;
+                if (!began && kept.textStart <= limit) {
+                  restored.setStart(node, kept.textStart - offset); began = true;
+                }
+                if (began && kept.textStart + kept.text.length <= limit) {
+                  restored.setEnd(node, kept.textStart + kept.text.length - offset); ended = true; break;
+                }
+                offset = limit;
+              }
+              if (ended && restored.toString() === kept.text) kept.range = restored;
+            }
             if (!kept.range.startContainer.isConnected || !kept.range.endContainer.isConnected) return 'gone';
             if (kept.range.toString() !== kept.text) return 'changed';
-            const editor = kept.root?.closest?.('[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"],[role="textbox"]');
+            const editor = kept.editor;
             if (!editor || !editor.isConnected) return 'gone';
             const before = editor.innerHTML;
             editor.focus();

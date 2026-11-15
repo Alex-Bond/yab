@@ -83,6 +83,64 @@ extension NativeControlTests {
             }
         }
 
+        /// #1857: the request is small, but its two whole-space snapshots
+        /// exceed the incoming request limit. Success, retry and Undo agree.
+        @MainActor @Test func largeFolderResultsStayVerifiedAndUndoable() throws {
+            try fixture { control, browser, session in
+                let outer = Nest(name: "Design"), inner = Nest(name: "Inspiration")
+                inner.parent = outer
+                let tabs = (0..<130).map { index -> Tab in
+                    let tab = Tab()
+                    tab.restore(url: URL(string: "https://native-review.test/\(index)/" + String(repeating: "page", count: 30))!,
+                                title: "Design inspiration \(index) " + String(repeating: "reference ", count: 12))
+                    tab.kept = true; tab.nest = inner
+                    browser.prepare(tab)
+                    return tab
+                }
+                browser.lay(tabs)
+                let original = tabs.map(\.id)
+                for action in ["tabs.move_to_folder", "tabs.group"] {
+                    for count in [1, 2, 5, 19] {
+                        for expected in [false, true] {
+                            let selected = Array(tabs.prefix(count))
+                            var values = request(action, action == "tabs.group" ? "space" : "folder",
+                                                 action == "tabs.group" ? browser.spaceID.uuidString : outer.id.uuidString,
+                                                 action == "tabs.group" ? ["tabs": selected.map { $0.id.uuidString }, "name": "New group"]
+                                                     : ["tabs": selected.map { $0.id.uuidString }])
+                            if expected {
+                                values["expectedVersion"] = try #require(call(control, "context", browser, session, values)["resourceVersion"] as? String)
+                            }
+                            let applied = try afterRequiredConfirmation(control, browser, session, values)
+                            try #require(applied["status"] as? String == "verified", "\(action), \(count) tabs: \(applied["error"] ?? "")")
+                            #expect(try JSONSerialization.data(withJSONObject: applied).count > 65_536)
+                            #expect(selected.allSatisfy { $0.kept && $0.nest !== inner })
+                            let operation = try #require(applied["operationId"] as? String)
+                            let folders = browser.nests.map(\.id)
+                            let retry = call(control, "apply", browser, session, values)
+                            #expect(retry["status"] as? String == "verified")
+                            #expect(retry["operationId"] as? String == operation)
+                            #expect(browser.nests.map(\.id) == folders)
+                            let stored = try #require(control.changes.receipt(operation, session: session.id))
+                            #expect(stored.status == "verified" && stored.after != nil)
+                            let reopened = NativeChanges(file: control.changes.file)
+                            #expect(reopened.receipt(operation, session: session.id)?.result == stored.result)
+                            let undone = call(control, "undo", browser, session, ["changeId": operation])
+                            #expect(undone["undone"] as? Bool == true)
+                            #expect(tabs.allSatisfy { $0.kept && $0.nest === inner })
+                            #expect(browser.tabs.map(\.id) == original)
+                            #expect(inner.parent === outer)
+                        }
+                    }
+                }
+                let rejected = call(control, "apply", browser, session,
+                                    request("tabs.group", "space", browser.spaceID.uuidString,
+                                            ["tabs": [tabs[0].id.uuidString], "name": String(repeating: "x", count: 65_537)]))
+                #expect(rejected["code"] as? String == "invalid_arguments")
+                #expect(rejected["error"] as? String == "The request is too large")
+                #expect(tabs.allSatisfy { $0.nest === inner })
+            }
+        }
+
         @MainActor @Test func zoomUndoPreservesLaterManualSiteZoomFromAnotherTab() throws {
             try fixture { control, browser, session in
                 let first = try #require(browser.active), second = Tab()

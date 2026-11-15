@@ -278,21 +278,74 @@ struct PullPage: Equatable {
 /// a tab showing the same thing has it, wherever the tab is.
 @MainActor
 enum LiveSeen {
-    private(set) static var items: [String: LiveItem] = [:]
-    /// What a new-for-you list of a to-do folder said (Linear's mentions),
-    /// for the tab it brought: a thing both lists name has two sayings.
-    private(set) static var heard: [String: LiveItem] = [:]
+    private static var cache = LiveSeenCache()
+    private static var bookmarkRevision = -1
+    private static var bookmarkKeys: Set<String> = []
+
+    private static var retainedKeys: Set<String> {
+        // A bookmarked item's card uses the same metadata even with no tab.
+        // Rebuild only when the library changes, not on every source refresh.
+        let bookmarks = Bookmarks.shared
+        if bookmarkRevision != bookmarks.revision {
+            bookmarkRevision = bookmarks.revision
+            bookmarkKeys = Set(Bookmarks.urls(bookmarks.roots).compactMap { LiveText.thing($0) })
+        }
+        return bookmarkKeys.union(Tab.every.filter { !$0.gone }.compactMap { $0.live?.key ?? LiveText.thing($0.address) })
+    }
 
     static func note(_ read: [LiveItem], news lists: Set<String> = []) {
-        for item in read {
-            if lists.contains(item.list ?? "") { heard[item.key] = item } else { items[item.key] = item }
-        }
+        // The folder creates its newly found tabs after this call. Keep the
+        // entire incoming answer until those tabs can protect their entries.
+        cache.note(read, news: lists, protecting: retainedKeys.union(read.map(\.key)))
     }
+
+    /// Once a formerly protected tab closes, its old saying can leave too.
+    static func prune() { cache.prune(protecting: retainedKeys) }
+
+    static var count: Int { cache.count }
 
     /// The to-do saying first, unless the tab came from a new-for-you list.
     static func item(_ key: String?, news: Bool = false) -> LiveItem? {
         guard let key else { return nil }
-        return news ? heard[key] ?? items[key] : items[key] ?? heard[key]
+        return cache.item(key, news: news)
+    }
+}
+
+/// Live-folder results are a cache, not a second history of every issue ever
+/// read. Keep recent sayings and open or bookmarked items; evict only cache
+/// entries, never tabs or a folder's saved state. Two lists may have different
+/// words for the same item (an assigned issue and a mention).
+struct LiveSeenCache {
+    private struct Key: Hashable { let item: String; let news: Bool }
+    private struct Entry { let item: LiveItem; var used: UInt64 }
+    private var entries: [Key: Entry] = [:]
+    private var clock: UInt64 = 0
+    let limit: Int
+
+    init(limit: Int = 512) { self.limit = max(0, limit) }
+    var count: Int { entries.count }
+
+    mutating func note(_ read: [LiveItem], news: Set<String> = [], protecting: Set<String> = []) {
+        for item in read {
+            clock &+= 1
+            entries[Key(item: item.key, news: news.contains(item.list ?? ""))] = Entry(item: item, used: clock)
+        }
+        prune(protecting: protecting)
+    }
+
+    mutating func item(_ key: String, news: Bool = false) -> LiveItem? {
+        let preferred = Key(item: key, news: news), fallback = Key(item: key, news: !news)
+        let found = entries[preferred] != nil ? preferred : fallback
+        guard let entry = entries[found] else { return nil }
+        clock &+= 1
+        entries[found]?.used = clock
+        return entry.item
+    }
+
+    mutating func prune(protecting keys: Set<String>) {
+        guard entries.count > limit else { return }
+        let oldest = entries.filter { !keys.contains($0.key.item) }.sorted { $0.value.used < $1.value.used }
+        for (key, _) in oldest.prefix(entries.count - limit) { entries[key] = nil }
     }
 }
 

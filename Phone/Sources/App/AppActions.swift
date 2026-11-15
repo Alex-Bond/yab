@@ -4,6 +4,19 @@ import Foundation
 /// What the chrome's controls do. The surfaces they open are drawn by their
 /// own layers; these only decide where a touch leads.
 extension AppModel {
+    /// Keep the latest reversible browser action, like the existing close receipt.
+    /// Explicit grouping makes an action available before the next run-loop turn.
+    func registerActionUndo(_ name: String, perform: @escaping (AppModel) -> Void) {
+        actionUndo.removeAllActions()
+        actionUndo.beginUndoGrouping()
+        actionUndo.registerUndo(withTarget: browser) { [weak self] _ in
+            guard let self else { return }
+            perform(self)
+        }
+        actionUndo.setActionName(name)
+        actionUndo.endUndoGrouping()
+    }
+
     /// Back in the page's own history; at the first page of a tab a link
     /// opened, back to that tab, this one closing (with Undo); else nothing.
     func goBack() {

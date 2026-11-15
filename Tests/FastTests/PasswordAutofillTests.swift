@@ -68,11 +68,18 @@ extension PasswordAutofillTests {
     private final class Messages: NSObject, WKScriptMessageHandler {
         var focus: [String: Any]?
         var submit: [String: Any]?
+        var settled = 0
+        var loads = 0
+        var loadFrame: (@MainActor (WKFrameInfo) -> Void)?
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard let body = message.body as? [String: Any] else { return }
             switch body["kind"] as? String {
+            case "load":
+                loads += 1
+                MainActor.assumeIsolated { loadFrame?(message.frameInfo) }
             case "focus": focus = body
             case "submit": submit = body
+            case "settled": settled += 1
             default: break
             }
         }
@@ -290,6 +297,128 @@ extension PasswordAutofillTests {
         """)
         for _ in 0..<100 where messages.submit == nil { try await Task.sleep(for: .milliseconds(25)) }
         #expect(messages.submit?["password"] as? String == "typed")
+    }
+}
+
+extension PasswordAutofillTests {
+    @MainActor
+    private static func framePage() async throws -> (WKWebView, Messages) {
+        let messages = Messages(), configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.preferences.inactiveSchedulingPolicy = .none
+        configuration.userContentController.add(messages, contentWorld: Web.world, name: FormRelay.name)
+        configuration.userContentController.addUserScript(WKUserScript(source: FormRelay.frameScript,
+            injectionTime: .atDocumentEnd, forMainFrameOnly: false, in: Web.world))
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 640, height: 480), configuration: configuration)
+        messages.loadFrame = { [weak web] frame in
+            web?.evaluateJavaScript(FormRelay.framePayload, in: frame, in: Web.world) { _ in }
+        }
+        web.loadHTMLString("<iframe id='child' srcdoc='<main id=slot></main>'></iframe>",
+                           baseURL: URL(string: "https://example.test/login"))
+        for _ in 0..<100 {
+            if (try? await web.evaluateJavaScript("document.getElementById('child').contentDocument.readyState === 'complete'")) as? Bool == true {
+                return (web, messages)
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw Unready(what: "the frame bootstrap fixture did not load")
+    }
+
+    @Test @MainActor func editorFrameStaysSmallUntilALoginIsFocused() async throws {
+        let (web, messages) = try await Self.framePage()
+        _ = try await web.evaluateJavaScript("""
+        const w = document.getElementById('child').contentWindow;
+        w.document.body.innerHTML = '<form id=todos><input id=todo><main id=items></main></form>';
+        w.todos.addEventListener('submit', e => e.preventDefault());
+        w.items.innerHTML = '<input type=checkbox><input>'.repeat(100);
+        w.todo.focus();
+        for (let i=0;i<30;i++) w.todo.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+        true
+        """)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(messages.loads == 0)
+        _ = try await web.evaluateJavaScript("""
+        w.document.body.innerHTML = '<form><input id=u autocomplete=username><input id=p type=password></form>';
+        w.p.focus(); true
+        """)
+        for _ in 0..<80 where messages.focus?["signin"] as? Bool != true { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(messages.loads == 1)
+        #expect(messages.focus?["signin"] as? Bool == true)
+        #expect(await Self.inYab("document.getElementById('child').contentWindow.__yabForms.fill('frame-owner','frame-secret')", web: web))
+        #expect(try await web.evaluateJavaScript("w.u.value") as? String == "frame-owner")
+        #expect(try await web.evaluateJavaScript("w.p.value") as? String == "frame-secret")
+    }
+
+    @Test @MainActor func aFrameSubmitBeforeInjectionStillSavesItsSnapshot() async throws {
+        let (web, messages) = try await Self.framePage()
+        _ = try await web.evaluateJavaScript("""
+        const w = document.getElementById('child').contentWindow;
+        w.document.body.innerHTML = '<div id=login><input id=u autocomplete=username><input id=p type=password><div id=go role=button>Continue</div></div>';
+        w.u.value='frame-owner'; w.p.value='frame-secret';
+        w.go.addEventListener('click', () => w.login.remove()); w.go.click(); true
+        """)
+        for _ in 0..<100 where messages.settled == 0 { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(messages.loads == 1)
+        #expect(messages.submit?["user"] as? String == "frame-owner")
+        #expect(messages.submit?["password"] as? String == "frame-secret")
+        #expect(messages.settled == 1)
+    }
+}
+
+extension PasswordAutofillTests {
+    @MainActor
+    private static func inYab(_ expression: String, web: WKWebView) async -> Bool {
+        await withCheckedContinuation { go in
+            web.evaluateInYab(expression) { go.resume(returning: $0 as? Bool == true) }
+        }
+    }
+
+    @Test @MainActor func unrelatedDOMChangesDoNotScanTheDocument() async throws {
+        let (web, _) = try await Self.page("<main id='feed'></main>", first: """
+        window.formScans = 0;
+        for (const proto of [Document.prototype, Element.prototype, DocumentFragment.prototype]) {
+          const query = proto.querySelectorAll;
+          proto.querySelectorAll = function (selector) {
+            if (this === document || selector === '*') window.formScans++;
+            return query.call(this, selector);
+          };
+        }
+        """)
+        _ = try await web.evaluateJavaScript("""
+        window.formScans = 0;
+        for (let i = 0; i < 100; i++) {
+          const node = document.createElement('div'); node.textContent = 'Feed ' + i;
+          document.getElementById('feed').appendChild(node);
+        }
+        true
+        """, in: nil, in: Web.world)
+        try await Task.sleep(for: .milliseconds(2600))
+        #expect(await Self.inYab("window.formScans === 0", web: web))
+    }
+
+    @Test @MainActor func onlyTheSubmittedFormDeterminesAnInPlaceSignIn() async throws {
+        let (web, messages) = try await Self.page("""
+        <form id='login'><input id='name' autocomplete='username'><input id='pass' type='password'><button>Sign in</button></form>
+        <form><input type='password'></form>
+        <script>document.getElementById('login').addEventListener('submit', e => {
+          e.preventDefault(); document.getElementById('login').remove();
+        });</script>
+        """)
+        _ = try await Self.focus("pass", in: web, messages: messages)
+        _ = try await web.evaluateJavaScript("""
+        document.getElementById('name').value = 'fixture@example.com';
+        document.getElementById('pass').value = 'synthetic';
+        document.getElementById('login').requestSubmit(); true
+        """)
+        for _ in 0..<80 where messages.settled == 0 { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(messages.submit?["user"] as? String == "fixture@example.com")
+        #expect(messages.settled == 1)
+        #expect(await Self.inYab("window.__yabForms.hasPassword() === false", web: web))
+        _ = try await web.evaluateJavaScript("""
+        const restored = document.createElement('form'); restored.id = 'login';
+        restored.innerHTML = '<input type=password>'; document.body.prepend(restored); true
+        """)
+        #expect(await Self.inYab("window.__yabForms.hasPassword() === true", web: web))
     }
 }
 

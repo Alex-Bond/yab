@@ -4,6 +4,35 @@ import AppKit
 
 @MainActor
 struct ShortcutFilterTests {
+    @Test func recordingChordDoesNotBecomeTheToolbarQuery() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: -9000, y: -9000, width: 300, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let selection = ShortcutFilter.Selection()
+        selection.search = "1Password"
+        let toolbar = ShortcutFilterToolbar(selection: selection, window: window)
+        let item = try #require(toolbar.item(for: ShortcutFilterToolbar.searchID) as? NSSearchToolbarItem)
+        let field = item.searchField
+        window.contentView = field
+        window.makeFirstResponder(field)
+        defer {
+            Keymap.shared.recording = false
+            window.makeFirstResponder(nil)
+            window.close()
+        }
+        _ = try #require(field.currentEditor())
+        let chord = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            modifierFlags: [.command, .shift], timestamp: 1, windowNumber: window.windowNumber,
+            context: nil, characters: "X", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7))
+        Keymap.shared.recording = true
+        #expect(!toolbar.searchPressed(chord))
+        #expect(selection.search == "1Password")
+        Keymap.shared.recording = false
+        #expect(toolbar.searchPressed(chord))
+        #expect(selection.search == Hotkey(chord)?.text)
+    }
+
     @Test func clearRestoresBothFiltersAndTheQuery() {
         let selection = ShortcutFilter.Selection()
         selection.search = "tab"

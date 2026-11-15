@@ -115,10 +115,11 @@ extension Browser {
                              source: Bookmarks.holding(node), tile: .symbol("folder"), what: .bookmark(node))
         }
         let url = node.url.flatMap(URL.init(string:))
-        let host = url?.host() ?? ""
         let pretty = url.map(Address.pretty) ?? node.url ?? ""
+        // The page's own icon, as History's pull-down list draws its rows,
+        // not only its host's: a slideshow's bookmark wears Slides.
         return PlaceItem(id: "bookmark." + node.id.uuidString, section: section, title: node.title.isEmpty ? pretty : node.title,
-                         source: pretty, tile: .site(host), search: node.url ?? "", what: .bookmark(node))
+                         source: pretty, tile: url.map(PlaceTile.page) ?? .site(""), search: node.url ?? "", what: .bookmark(node))
     }
 
     // MARK: going in and out
@@ -396,7 +397,7 @@ extension Browser {
     /// from it before; the count is said as the bar's import says it.
     private func bringBookmarks(_ source: Chromium.Source) {
         query.stock.bringing = source.name
-        takeBookmarks(from: source) { [weak self] _ in
+        takeBookmarks(from: source.authorizingImport()) { [weak self] _ in
             guard let self, self.query.place == .bookmarks else { return }
             self.query.stock.bringing = nil
             _ = self.leaveMore()

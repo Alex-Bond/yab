@@ -33,6 +33,7 @@ enum DiaTabsDB {
     /// when the database can't be read. `ask`: Bring In was pressed, so the
     /// keychain may ask about Dia's key; otherwise only a quiet read.
     static func places(_ source: Chromium.Source, ask: Bool) -> [TabImport.Place]? {
+        guard source.credentialAccess else { return nil }
         let order = TabImport.profileOrder(in: source)
         let folders = order.isEmpty ? source.profiles.map(\.lastPathComponent) : order
         let files = folders.compactMap { folder -> (String, URL)? in

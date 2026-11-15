@@ -154,11 +154,21 @@ try:
     check("native_undo: every tab back where it stood", back.get("undone") is True and row() == start, (back, row()))
     shot("2-mcp-undone")
 
+    # #1433: named, the pin and the kept tab are put down as ⌘W puts them:
+    # asleep, pinned and in their folder, never taken out of the sidebar.
+    def tab_titled(title):
+        return next(t for t in ask({"do": "tabs"})["tabs"] if t["title"] == title)
+    ask({"do": "select", "id": tab_titled("YouTube")["id"]})
+    wait_for(lambda: not tab_titled("YouTube")["asleep"], 20)
+    ask({"do": "select", "id": next(t for t in ask({"do": "tabs"})["tabs"] if t["url"] == FRONT)["id"]})
+    shot("2b-pin-awake")
     named = call("native_apply", action="tabs.close", target=space, arguments={"tabs": [t["id"] for t in call("native_context", limit=50)["tabs"]
                                                                                         if t["title"] in ("YouTube", "Kept video")], "includePinned": True}, requestId="named")
-    check("named, the pin and the kept tab close", named.get("status") == "verified" and len(row()) == len(SEED) - 2, (named, row()))
-    back = call("native_undo", changeId=named.get("operationId", ""))
-    check("and come back pinned and in their folder", back.get("undone") is True and row() == start, (back, row()))
+    check("named, the pin and the kept tab stay where they are, asleep, as ⌘W leaves them",
+          named.get("status") == "verified" and named.get("closed") == 0 and named.get("putDown") == 2 and row() == start
+          and tab_titled("YouTube")["asleep"] and tab_titled("Kept video")["asleep"], (named, row()))
+    check("and nothing is offered to undo", (named.get("undo") or {}).get("available") is False and corner() != "Closed 2 tabs", (named, corner()))
+    shot("2c-named-put-down")
     mcp.close(); mcp = None
 
     # 2. Through ⌘J, with the stand-in agent, each undone with ⌘Z.

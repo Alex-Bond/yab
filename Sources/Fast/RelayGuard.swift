@@ -160,6 +160,17 @@ enum RelayGuard {
         return take(tab.builtPage)
     }
 
+    /// A window the page opened with window.open and still draws: an
+    /// about:blank one its script fills, as Slack's huddle window is, or
+    /// one of the page's own site. Its Share button is the opener's, and
+    /// the opener asks for the screen when it is pressed. One gone to
+    /// another site (a sign-in) is not the page's to click for.
+    static func drawn(_ window: Tab, by opener: Tab) -> Bool {
+        guard window.opener == opener.id, window.popup, window.scripted != nil, !window.gone else { return false }
+        guard let shown = top(of: window), let scheme = shown.scheme?.lowercased(), scheme != "about" else { return true }
+        return sameSite(scheme: scheme, host: shown.host() ?? "", as: top(of: opener))
+    }
+
     static func share(_ frame: WKFrameInfo, on tab: Tab) -> Hand? {
         guard ownFrame(frame, of: tab) else { return nil }
         return take(tab.webKitOnly("Authenticated WebKit screen sharing", build: false))

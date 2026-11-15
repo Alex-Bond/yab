@@ -44,6 +44,7 @@ struct SwipeHoldTests {
     private func wheel(x: Int32, y: Int32 = 0, phase: Int64) throws -> NSEvent {
         let event = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
             wheelCount: 2, wheel1: y, wheel2: x, wheel3: 0))
+        event.flags = []
         event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
         event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
         event.timestamp = CGEventTimestamp(ProcessInfo.processInfo.systemUptime * 1e9)

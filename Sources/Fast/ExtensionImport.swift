@@ -353,6 +353,7 @@ extension Extensions {
     }
 
     private func bringOne(_ item: Chromium.Extension, from browserName: String) async -> Bool {
+        guard !ApplePasswordExtensionRoute.intercept(item.id, browser: browser) else { return false }
         bringKept(item, from: browserName)
         // uBlock Origin can't run here: what it kept is all that comes.
         if item.keptOnly { return true }

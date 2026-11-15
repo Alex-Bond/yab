@@ -245,9 +245,9 @@ final class RequestModel {
     private static func sites(for words: String) -> [String] {
         var found: [String] = []
         for word in tokens(words) where word.count >= 4 {
-            if let host = History.shared.host(named: word), !found.contains(host) { found.append(host) }
+            if let host = History.current.host(named: word), !found.contains(host) { found.append(host) }
         }
-        for host in History.shared.hosts(12) where found.count < 12 && !found.contains(host) { found.append(host) }
+        for host in History.current.hosts(12) where found.count < 12 && !found.contains(host) { found.append(host) }
         return found
     }
 

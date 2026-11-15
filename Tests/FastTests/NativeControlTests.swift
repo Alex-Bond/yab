@@ -707,16 +707,29 @@ struct NativeControlTests {
             #expect(undo(closed)["status"] as? String == "conflict")
             browser.close(opened)
 
-            // Named, the pin and the kept tab close too, and come back pinned and in their folder.
-            let all = close([pinned, kept, browser.tabs[2]], pinned: true)
+            // #1433: named, the pin and the kept tab are put down as ⌘W puts
+            // them, asleep, pinned and in their folder; only the loose one goes.
+            let pin = browser.tabs[0], keptHere = browser.tabs[1], loose = browser.tabs[2]
+            let all = close([pin, keptHere, loose], pinned: true)
             #expect(all["status"] as? String == "verified", "\(all)")
-            #expect(browser.tabs.count == 3)
+            #expect(all["closed"] as? Double == 1 && all["putDown"] as? Double == 2, "\(all)")
+            #expect(browser.tabs.count == 5)
+            #expect(browser.tabs.first === pin && pin.pin == "Y" && !pin.kept && pin.asleep)
+            #expect(browser.tabs[1] === keptHere && keptHere.kept && keptHere.nest === folder && keptHere.name == "Kept video" && keptHere.asleep)
+            #expect(!browser.tabs.contains { $0 === loose })
             #expect(undo(all)["undone"] as? Bool == true)
             #expect(browser.tabs.map { $0.address?.absoluteString ?? "" } == row)
-            let pin = browser.tabs[0], keptBack = browser.tabs[1]
-            #expect(pin.pin == "Y" && !pin.kept)
-            #expect(keptBack.kept && keptBack.nest === folder && keptBack.name == "Kept video")
+            #expect(browser.tabs[0] === pin && browser.tabs[1] === keptHere)
             #expect(browser.tabs[2].pin == nil && !browser.tabs[2].kept)
+
+            // Only pins put down: nothing closed, nothing to undo, no corner notice.
+            browser.toaster.dismiss()
+            let rested = close([pin], pinned: true)
+            #expect(rested["status"] as? String == "verified", "\(rested)")
+            #expect(rested["closed"] as? Double == 0 && (rested["undo"] as? [String: Any])?["available"] as? Bool == false, "\(rested)")
+            #expect(browser.tabs.first === pin && pin.pin == "Y" && pin.asleep)
+            #expect(browser.tabs.map { $0.address?.absoluteString ?? "" } == row)
+            #expect(!browser.toaster.shown)
         }
     }
 

@@ -242,56 +242,43 @@ final class SettingsTests: XCTestCase {
         let app = launch(nil, world: "empty", still: false)
         let welcome = element(app, "welcome")
         XCTAssertTrue(welcome.waitForExistence(timeout: 15), "the empty world doesn't welcome")
-        // The welcome's own button, then the three ways to join.
-        let start = app.buttons["welcome.start"]
-        XCTAssertTrue(start.waitForExistence(timeout: 8), "no Get Started on the welcome")
-        start.waitUntilStill()
-        start.tap()
-        let noMac = app.buttons["welcome.noMac"]
-        XCTAssertTrue(noMac.waitForExistence(timeout: 5), "Get Started shows no ways to join")
-        XCTAssertTrue(app.buttons["welcome.useCode"].exists, "no Another Apple ID")
-        noMac.waitUntilStill()
-        noMac.tap()
-        // Private by Default, then the default-browser question if it is asked.
-        let carryOn = app.buttons["welcome.continue"]
-        XCTAssertTrue(carryOn.waitForExistence(timeout: 5), "no Private by Default after the choice")
-        XCTAssertTrue(app.switches["welcome.blockAds"].exists, "no Block ads and trackers row")
-        carryOn.waitUntilStill()
-        carryOn.tap()
-        let links = app.buttons["welcome.linksNotNow"]
-        if links.waitForExistence(timeout: 5) { links.waitUntilStill(); links.tap() }
-        XCTAssertTrue(gone(welcome), "Continue Without a Mac leaves the welcome up")
+        // The first page: the name, its words, Get Started, and Skip.
+        XCTAssertTrue(app.buttons["welcome.start"].waitForExistence(timeout: 5), "no Get Started on the first page")
+        XCTAssertEqual(element(app, "welcome.title").label, "Hi, it’s Yab")
+        app.passWelcome()
+        XCTAssertTrue(gone(welcome), "Skip leaves the welcome up")
         XCTAssertTrue(element(app, "page.host").exists)
-        // Somewhere to go: the New Tab field the icon stretched into.
+        // Somewhere to go: the New Tab field over the empty page.
         XCTAssertTrue(element(app, "field.input").waitForExistence(timeout: 5), "the first run leaves a blank screen")
-        XCTAssertEqual(haptics, ["light confirm", "light confirm", "light confirm"],
-                       "one light tap a step, nothing else, no permission asked")
+        XCTAssertEqual(haptics, ["selection first run next"], "a tick for Skip, nothing else, no permission asked")
     }
 
-    func testAnotherAppleIDShowsTheCodeAndComesBack() {
+    func testYabIsOnMyMacShowsTheCodeAndComesBack() {
         let app = launch(nil, world: "empty", still: false)
         let start = app.buttons["welcome.start"]
         XCTAssertTrue(start.waitForExistence(timeout: 15))
-        XCTAssertTrue(TransitionCatalog.wait { start.isHittable })
+        start.waitUntilStill()
         start.tap()
-        let useCode = app.buttons["welcome.useCode"]
-        XCTAssertTrue(useCode.waitForExistence(timeout: 5))
-        XCTAssertTrue(TransitionCatalog.wait { useCode.isHittable })
-        useCode.tap()
+        // No key in the empty world: Yab is on Mac too, and the way to a code.
+        let mac = app.buttons["welcome.mac"]
+        XCTAssertTrue(mac.waitForExistence(timeout: 5), "Get Started shows no way to the code")
+        XCTAssertEqual(element(app, "welcome.title").label, "Yab is on Mac too")
+        XCTAssertTrue(TransitionCatalog.wait { mac.isHittable })
+        mac.tap()
         let code = element(app, "welcome.code")
-        XCTAssertTrue(code.waitForExistence(timeout: 3), "Another Apple ID shows no code")
-        XCTAssertEqual(code.label.split(separator: " ").count, 8, "eight keycaps: \(code.label)")
+        XCTAssertTrue(code.waitForExistence(timeout: 3), "Yab is on my Mac shows no code")
+        XCTAssertEqual(code.label.split(separator: " ").count, 8, "eight plates: \(code.label)")
         let recovery = app.buttons["welcome.recovery"]
-        XCTAssertTrue(TransitionCatalog.wait { recovery.isHittable }, "Use Recovery Key can't be pressed")
+        XCTAssertTrue(TransitionCatalog.wait { recovery.isHittable }, "Use Recovery Key… can't be pressed")
         recovery.tap()
-        XCTAssertTrue(element(app, "welcome.key").waitForExistence(timeout: 3), "Use Recovery Key shows no groups")
+        XCTAssertTrue(app.descendants(matching: .any)["welcome.field"].waitForExistence(timeout: 3), "Use Recovery Key… shows no field")
         let back = app.buttons["welcome.back"]
         XCTAssertTrue(TransitionCatalog.wait { back.isHittable }, "no ‹ on the Recovery Key")
         back.tap()
         XCTAssertTrue(code.waitForExistence(timeout: 3), "‹ from the Recovery Key goes back to the code")
         XCTAssertTrue(TransitionCatalog.wait { back.isHittable }, "no ‹ on the code")
         back.tap()
-        XCTAssertTrue(useCode.waitForExistence(timeout: 3), "‹ from the code goes back to the three ways")
+        XCTAssertTrue(mac.waitForExistence(timeout: 3), "‹ from the code goes back to Yab is on Mac too")
     }
 
     func testOfflineCodeWaitsAndSaysWhy() {
@@ -306,6 +293,17 @@ final class SettingsTests: XCTestCase {
         let wrong = element(app, "welcome.wrong")
         XCTAssertTrue(wrong.waitForExistence(timeout: 15))
         XCTAssertEqual(wrong.label, "That isn\u{2019}t a Recovery Key. Check each group of four.")
+    }
+
+    func testShowWelcomeAgainStartsTheFirstRunOver() {
+        let app = launch("settings.page-general", world: "mira")
+        let row = app.buttons["settings.row.general.showWelcome"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15), "General has no Show Welcome Again")
+        row.tap()
+        XCTAssertTrue(app.buttons["welcome.start"].waitForExistence(timeout: 5), "Show Welcome Again shows no first page")
+        XCTAssertEqual(element(app, "welcome.title").label, "Hi, it’s Yab")
+        app.passWelcome()
+        XCTAssertTrue(gone(element(app, "welcome")), "Skip leaves the replayed welcome up")
     }
 
     func testNoMacYetSettingsAsksToJoin() {

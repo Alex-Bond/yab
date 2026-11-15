@@ -100,14 +100,19 @@ enum AppStartup {
 
     static func icons(for browser: Browser) {
         // An icon that arrives is put on every tab showing that site, not only
-        // the one that happened to ask for it.
+        // the one that happened to ask for it; not on one wearing the icon
+        // its own page named (another Notion page's, a count): each
+        // tab keeps its page's.
         Favicons.shared.arrived = { [weak browser] host, image in
             // On a link in an answer that asked for it.
             AnswerLinks.shared.arrived(host)
             guard let browser else { return }
             let all = BrowserWindows.shared.browsers.flatMap { $0.tabs + $0.parkedTabs }
-            for tab in all where tab.address?.host()?.lowercased() == host {
-                tab.icon = image
+            // Nor on one whose page wore an icon of its own when last seen
+            // (Favicons.pageIcon): a slideshow's, not the Docs icon its
+            // host keeps.
+            for tab in all where tab.address.flatMap(Favicons.site) == host && !Favicons.shared.wearsOwn(tab) && !tab.awaitingDocumentMetadata {
+                tab.icon = tab.address.flatMap(Favicons.shared.pageIcon) ?? image
             }
             // On the bookmarks' row, while there is one to see.
             if browser.prefs.bookmarkBar != .never, browser.bookmarks.contains(host: host) {
