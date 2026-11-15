@@ -1,0 +1,7 @@
+# Atomic original-source loss in metadata WAL
+
+Current loss already loads a newer cursor before marking unknown, but those two actor calls admit an intervening later phase write. The new internal sourceLostLatest performs latest read, exact immutable Intent equality and unknown persist under the same existing file lock. It retains the complete previous chain and pending commands. It never writes another intent/id/slot, creates a missing row or changes an already unknown row. Revision overflow/read/lock uncertainty stays unknown.
+
+Client source/transport is poisoned and original waiters detached as before, before async journal completion. Poisoned native request rows, contexts, owned group/resources and old IDs stay retained; no native cancel/retire/retry/reconnect or new peer replies. One atomic latest loss write avoids racing a concurrent completed metadata/phase CAS. A later writer with a stale cursor conflicts; unknown never transitions back. No positive phase, native capability, owner/recovery or production enable is added.
+
+Three authored actual POSIX journal Swift tests cover both orderings of a concurrent metadata mutation/loss, another immutable Intent or missing slot not touched, and latest advanced revision retained/idempotent after reopen. These are metadata fixtures, not native approval. Swift execution NOT_RUN; source/negative tests PASS. Native private source phase/WAL bridge remains separate active work.

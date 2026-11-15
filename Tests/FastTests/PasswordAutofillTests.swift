@@ -1,0 +1,436 @@
+import Foundation
+import Testing
+import WebKit
+@testable import Fast
+
+struct PasswordAutofillTests {
+    private let older = Login(host: "example.com", user: "first@example.com", password: "older",
+                              used: Date(timeIntervalSince1970: 10))
+    private let recent = Login(host: "example.com", user: "latest@example.com", password: "recent",
+                               used: Date(timeIntervalSince1970: 20))
+    private let imported = Login(host: "example.com", user: "imported@example.com", password: "imported", used: nil)
+
+    @Test func takesTheMostRecentUseRatherThanInputOrder() {
+        let chosen = PasswordAutofill.login(in: [recent, imported, older], secret: false, empty: true,
+                                           account: nil, named: nil)
+        #expect(chosen == recent)
+        #expect(PasswordAutofill.login(in: [imported], secret: true, empty: true, account: nil, named: nil) == nil)
+    }
+
+    @Test func aTypedAccountWinsOverRecencyAndAnEarlierNameStep() {
+        #expect(PasswordAutofill.login(in: [recent, older], secret: true, empty: true,
+                                      account: " FIRST@example.com ", named: recent.user) == older)
+        #expect(PasswordAutofill.login(in: [recent, older], secret: true, empty: true,
+                                      account: "someone@example.com", named: older.user) == nil)
+        #expect(PasswordAutofill.login(in: [recent, older], secret: true, empty: true,
+                                      account: "first", named: nil) == nil)
+    }
+
+    @Test func theNameStepStillDecidesOnAPageWithoutAnAccountChip() {
+        #expect(PasswordAutofill.login(in: [recent, older], secret: true, empty: true,
+                                      account: nil, named: older.user) == older)
+        #expect(PasswordAutofill.login(in: [recent, older], secret: true, empty: true,
+                                      account: nil, named: "unknown@example.com") == nil)
+    }
+
+    @Test func neverChangesABoxThatAlreadyHoldsSomething() {
+        for secret in [false, true] {
+            #expect(PasswordAutofill.login(in: [recent], secret: secret, empty: false,
+                                          account: nil, named: nil) == nil)
+        }
+        var withoutSecret = recent
+        withoutSecret.password = ""
+        #expect(PasswordAutofill.login(in: [withoutSecret], secret: true, empty: true,
+                                      account: nil, named: nil) == nil)
+    }
+
+    @Test func clearingOrRefocusingDoesNotAskAgainButANewDocumentDoes() {
+        var attempts = PasswordAutofillAttempts()
+        let first = attempts.begin(document: "page-a", field: "password")
+        let repeated = attempts.begin(document: "page-a", field: "password")
+        let nextStep = attempts.begin(document: "page-a", field: "next-step")
+        let nextDocument = attempts.begin(document: "page-b", field: "password")
+        #expect(first)
+        #expect(!repeated)
+        #expect(nextStep)
+        #expect(nextDocument)
+        attempts.reset()
+        let afterReset = attempts.begin(document: "page-b", field: "password")
+        let noDocument = attempts.begin(document: nil, field: "password")
+        let noField = attempts.begin(document: "page-c", field: "")
+        #expect(afterReset)
+        #expect(!noDocument)
+        #expect(!noField)
+    }
+}
+
+extension PasswordAutofillTests {
+    private final class Messages: NSObject, WKScriptMessageHandler {
+        var focus: [String: Any]?
+        var submit: [String: Any]?
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any] else { return }
+            switch body["kind"] as? String {
+            case "focus": focus = body
+            case "submit": submit = body
+            default: break
+            }
+        }
+    }
+
+    @MainActor
+    private static func page(_ html: String, path: String = "/login",
+                             first: String? = nil) async throws -> (WKWebView, Messages) {
+        let messages = Messages(), configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.preferences.inactiveSchedulingPolicy = .none
+        configuration.userContentController.add(messages, contentWorld: Web.world, name: FormRelay.name)
+        if let first {
+            configuration.userContentController.addUserScript(WKUserScript(source: first,
+                injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Web.world))
+        }
+        configuration.userContentController.addUserScript(WKUserScript(source: FormRelay.script,
+            injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: Web.world))
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 640, height: 480), configuration: configuration)
+        web.loadHTMLString(html, baseURL: URL(string: "https://example.test" + path))
+        for _ in 0..<100 {
+            if (try? await web.evaluateJavaScript("document.readyState === 'complete'")) as? Bool == true,
+               messages.focus != nil { return (web, messages) }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let state = (try? await web.evaluateJavaScript("document.readyState")) as? String ?? "unknown"
+        throw Unready(what: "the page at \(path) never loaded with forms.js saying where the caret is (readyState \(state))")
+    }
+
+    /// What a page never got to, in words: a cocoa file error here once
+    /// read as a fixture file missing.
+    private struct Unready: Error, CustomStringConvertible {
+        let what: String
+        var description: String { what }
+    }
+
+    @MainActor
+    private static func focus(_ id: String, in web: WKWebView, messages: Messages) async throws -> [String: Any] {
+        messages.focus = nil
+        _ = try await web.evaluateJavaScript("document.getElementById('\(id)').focus(); true")
+        for _ in 0..<100 {
+            if let focus = messages.focus, focus["rect"] is [String: Any] { return focus }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw Unready(what: "#\(id) took the caret but forms.js never said where its box is")
+    }
+
+    @MainActor
+    private static func fill(_ web: WKWebView, focus: [String: Any], user: String = "first@example.com",
+                             password: String = "päss ' \" ${unexecuted}") async -> Bool {
+        await withCheckedContinuation { go in
+            web.evaluateInYab(Tab.fillScript(user: user, password: password,
+                automaticDocument: focus["document"] as? String, automaticField: focus["field"] as? String)) {
+                go.resume(returning: $0 as? Bool == true)
+            }
+        }
+    }
+
+    private static let signIn = """
+    <form><input id="name" autocomplete="username"><input id="pass" type="password" autocomplete="current-password">
+    <button>Sign in</button></form><script>
+    window.changed = 0; window.sent = 0;
+    document.getElementById('pass').addEventListener('input', function () { window.changed++; });
+    document.querySelector('form').addEventListener('submit', function (e) { e.preventDefault(); window.sent++; });
+    </script>
+    """
+
+    @Test @MainActor func fillsTheEmptyPairAndFiresFrameworkEventsWithoutSubmitting() async throws {
+        let (web, messages) = try await Self.page(Self.signIn)
+        let focus = try await Self.focus("name", in: web, messages: messages)
+        #expect(focus["automatic"] as? Bool == true)
+        #expect(await Self.fill(web, focus: focus))
+        #expect(try await web.evaluateJavaScript("document.getElementById('name').value") as? String == "first@example.com")
+        #expect(try await web.evaluateJavaScript("document.getElementById('pass').value") as? String == "päss ' \" ${unexecuted}")
+        #expect(try await web.evaluateJavaScript("window.changed") as? Int == 1)
+        #expect(try await web.evaluateJavaScript("window.sent") as? Int == 0)
+    }
+
+    /// A canvas that can't give a pixel, as when the GPU process is busy or
+    /// coming back (getImageData threw InvalidStateError after 15 s in the
+    /// 0.0.30-again gate's N-Z shard): the box the caret went into is still
+    /// told, with the page's ground read from its colors. Before 630e718f
+    /// the focus relay threw on it and said nothing, and every test here
+    /// waiting for the caret failed.
+    @Test @MainActor func theCaretIsToldWhenNoPixelCanBeRead() async throws {
+        let (web, messages) = try await Self.page("<body style='background:#101418;color:#eee'>" + Self.signIn + "</body>",
+            first: "CanvasRenderingContext2D.prototype.getImageData = function () { throw new DOMException('busy', 'InvalidStateError') };")
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        #expect(focus["secret"] as? Bool == true)
+        #expect(focus["dark"] as? Bool == true)
+        #expect(await Self.fill(web, focus: focus))
+    }
+
+    @Test @MainActor func rechecksTheTypedIdentityAndPasswordAfterTheNativePrompt() async throws {
+        let (web, messages) = try await Self.page(Self.signIn)
+        _ = try await web.evaluateJavaScript("document.getElementById('name').value = 'FIRST@example.com'")
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        #expect(await Self.fill(web, focus: focus, user: "latest@example.com") == false)
+        _ = try await web.evaluateJavaScript("document.getElementById('pass').value = 'my typed password'")
+        #expect(await Self.fill(web, focus: focus) == false)
+        #expect(try await web.evaluateJavaScript("document.getElementById('pass').value") as? String == "my typed password")
+        _ = try await web.evaluateJavaScript("document.getElementById('pass').value = ''")
+        #expect(await Self.fill(web, focus: focus))
+        #expect(try await web.evaluateJavaScript("document.getElementById('name').value") as? String == "FIRST@example.com")
+    }
+
+    @Test @MainActor func secondaryAndHiddenSignupActionsLeaveTheLoginAvailable() async throws {
+        let alternative = """
+        <button type="button">Create an account</button><a href="/signup">Sign up</a>
+        <h2 hidden>Create an account</h2>
+        """
+        let html = Self.signIn.replacingOccurrences(of: "</form>", with: alternative + "</form>")
+        let (web, messages) = try await Self.page(html)
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        #expect(focus["automatic"] as? Bool == true)
+        #expect(await Self.fill(web, focus: focus))
+        #expect(try await web.evaluateJavaScript("document.getElementById('name').value") as? String == "first@example.com")
+        #expect(try await web.evaluateJavaScript("document.getElementById('pass').value") as? String == "päss ' \" ${unexecuted}")
+        #expect(try await web.evaluateJavaScript("window.sent") as? Int == 0)
+    }
+
+    @Test @MainActor func aSoleSignupButtonCannotTakeAnAutomaticSecret() async throws {
+        let html = """
+        <form><input id="name" autocomplete="username"><input id="pass" type="password">
+        <button type="button">Create an account</button></form>
+        """
+        let (web, messages) = try await Self.page(html, path: "/welcome")
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        #expect(focus["automatic"] as? Bool == false)
+        #expect(await Self.fill(web, focus: focus) == false)
+        #expect(try await web.evaluateJavaScript("document.getElementById('name').value") as? String == "")
+        #expect(try await web.evaluateJavaScript("document.getElementById('pass').value") as? String == "")
+    }
+
+    @Test @MainActor func aSecondarySigninButtonCannotAuthorizeSignupAutofill() async throws {
+        let html = """
+        <form><input id="name" autocomplete="username"><input id="pass" type="password">
+        <button type="button">Create an account</button><button type="button">Sign in</button></form>
+        """
+        let (web, messages) = try await Self.page(html, path: "/welcome")
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        #expect(focus["automatic"] as? Bool == false)
+        #expect(await Self.fill(web, focus: focus) == false)
+        #expect(try await web.evaluateJavaScript("document.getElementById('name').value") as? String == "")
+        #expect(try await web.evaluateJavaScript("document.getElementById('pass').value") as? String == "")
+    }
+
+    @Test @MainActor func aSignupOrNewPasswordCannotTakeAnAutomaticSecret() async throws {
+        let (web, messages) = try await Self.page(Self.signIn)
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        _ = try await web.evaluateJavaScript("document.getElementById('pass').setAttribute('autocomplete', 'section-register new-password')")
+        #expect(await Self.fill(web, focus: focus) == false)
+        let signup = Self.signIn.replacingOccurrences(of: "Sign in", with: "Create an account")
+        let (registration, registrationMessages) = try await Self.page(signup)
+        let signupFocus = try await Self.focus("pass", in: registration, messages: registrationMessages)
+        #expect(signupFocus["automatic"] as? Bool == false)
+        #expect(await Self.fill(registration, focus: signupFocus) == false)
+    }
+
+    @Test @MainActor func aNewDocumentOrReplacedPairCannotTakeAnOlderFill() async throws {
+        let (web, messages) = try await Self.page(Self.signIn)
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        _ = try await web.evaluateJavaScript("document.getElementById('pass').outerHTML = '<input id=pass type=password>'; document.getElementById('pass').focus(); true")
+        #expect(await Self.fill(web, focus: focus) == false)
+        let (newDocument, newMessages) = try await Self.page(Self.signIn)
+        _ = try await Self.focus("pass", in: newDocument, messages: newMessages)
+        #expect(await Self.fill(newDocument, focus: focus) == false)
+        #expect(try await newDocument.evaluateJavaScript("document.getElementById('pass').value") as? String == "")
+    }
+
+    @Test @MainActor func movingTheCaretAwayCancelsAnEarlierAutomaticFill() async throws {
+        let (web, messages) = try await Self.page(Self.signIn + "<input id='other' type='search'>")
+        let focus = try await Self.focus("pass", in: web, messages: messages)
+        _ = try await web.evaluateJavaScript("document.getElementById('other').focus(); true")
+        #expect(await Self.fill(web, focus: focus) == false)
+        #expect(try await web.evaluateJavaScript("document.getElementById('pass').value") as? String == "")
+    }
+
+    @Test @MainActor func anEmailSubscriptionIsNotAnAutomaticNameStep() async throws {
+        let (web, messages) = try await Self.page("<form><input id='name' type='email'><button>Subscribe</button></form>",
+                                                  path: "/newsletter")
+        let focus = try await Self.focus("name", in: web, messages: messages)
+        #expect(focus["automatic"] as? Bool == false)
+        #expect(await Self.fill(web, focus: focus) == false)
+        #expect(try await web.evaluateJavaScript("document.getElementById('name').value") as? String == "")
+    }
+
+    @Test @MainActor func changingAPasswordOffersTheNewOneNotTheCurrent() async throws {
+        let (web, messages) = try await Self.page("""
+        <form><input id="name" autocomplete="username" value="first@example.com">
+        <input id="old" type="password" autocomplete="current-password">
+        <input id="new" type="password" autocomplete="new-password">
+        <input id="again" type="password">
+        <button id="go">Change Password</button></form><script>
+        document.querySelector('form').addEventListener('submit', function (e) { e.preventDefault(); });
+        </script>
+        """, path: "/settings/password")
+        _ = try await web.evaluateJavaScript("""
+        document.getElementById('old').value = 'older';
+        document.getElementById('new').value = 'brand new';
+        document.getElementById('again').value = 'brand new';
+        document.getElementById('go').click(); true
+        """)
+        for _ in 0..<100 where messages.submit == nil { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(messages.submit?["password"] as? String == "brand new")
+        #expect(messages.submit?["user"] as? String == "first@example.com")
+    }
+
+    @Test @MainActor func aPlainSignInStillOffersItsOnePassword() async throws {
+        let (web, messages) = try await Self.page(Self.signIn)
+        _ = try await web.evaluateJavaScript("""
+        document.getElementById('name').value = 'first@example.com';
+        document.getElementById('pass').value = 'typed';
+        document.querySelector('button').click(); true
+        """)
+        for _ in 0..<100 where messages.submit == nil { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(messages.submit?["password"] as? String == "typed")
+    }
+}
+
+
+extension PasswordAutofillTests {
+    // Reddit has no native form association: username and password live
+    // in sibling faceplate-text-input roots, with another root outside.
+    private static let shadowSignIn = """
+    <login-panel id="panel"></login-panel><script>
+    const panel = document.getElementById('panel').attachShadow({mode:'open'});
+    panel.innerHTML = '<section><login-box id="name"></login-box><login-box id="pass"></login-box><login-button></login-button></section>';
+    panel.getElementById('name').attachShadow({mode:'open'}).innerHTML = '<input name="username" autocomplete="username webauthn">';
+    panel.getElementById('pass').attachShadow({mode:'open'}).innerHTML = '<input name="password" type="password" autocomplete="current-password">';
+    panel.querySelector('login-button').attachShadow({mode:'open'}).innerHTML = '<button type="button"><span>Log In</span></button>';
+    window.testBox = function (id) { return panel.getElementById(id).shadowRoot.querySelector('input'); };
+    window.changed = 0; window.sent = 0;
+    document.addEventListener('input', function () { window.changed++; });
+    document.addEventListener('submit', function (e) { e.preventDefault(); window.sent++; });
+    </script>
+    """
+
+    @MainActor
+    private static func shadowFocus(_ id: String, in web: WKWebView, messages: Messages) async throws -> [String: Any] {
+        messages.focus = nil
+        _ = try await web.evaluateJavaScript("window.testBox('\(id)').focus(); true")
+        for _ in 0..<100 {
+            if let focus = messages.focus, focus["rect"] is [String: Any] { return focus }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw Unready(what: "the shadow #\(id) took the caret but forms.js never reported its sign-in box")
+    }
+
+    @Test @MainActor func shadowSiblingBoxesOfferAndFillTheWholeLogin() async throws {
+        let (web, messages) = try await Self.page(Self.shadowSignIn)
+        let name = try await Self.shadowFocus("name", in: web, messages: messages)
+        #expect(name["signin"] as? Bool == true)
+        #expect(name["secret"] as? Bool == false)
+        #expect(name["automatic"] as? Bool == true)
+        let pass = try await Self.shadowFocus("pass", in: web, messages: messages)
+        #expect(pass["secret"] as? Bool == true)
+        #expect(pass["field"] as? String == name["field"] as? String)
+        #expect(await Self.fill(web, focus: pass))
+        #expect(try await web.evaluateJavaScript("testBox('name').value") as? String == "first@example.com")
+        #expect(try await web.evaluateJavaScript("testBox('pass').value") as? String == "päss ' \" ${unexecuted}")
+        #expect(try await web.evaluateJavaScript("window.changed") as? Int == 2)
+        #expect(try await web.evaluateJavaScript("window.sent") as? Int == 0)
+    }
+
+    @Test @MainActor func shadowFillRechecksTheAccountAndNeverReplacesTypedSecrets() async throws {
+        let (web, messages) = try await Self.page(Self.shadowSignIn)
+        let focus = try await Self.shadowFocus("pass", in: web, messages: messages)
+        _ = try await web.evaluateJavaScript("testBox('name').value = 'another@example.com'; true")
+        #expect(await Self.fill(web, focus: focus) == false)
+        _ = try await web.evaluateJavaScript("testBox('name').value = ''; testBox('pass').value = 'typed'; true")
+        #expect(await Self.fill(web, focus: focus) == false)
+        #expect(try await web.evaluateJavaScript("testBox('pass').value") as? String == "typed")
+        _ = try await web.evaluateJavaScript("testBox('pass').value = ''; true")
+        let picked = await withCheckedContinuation { go in
+            web.evaluateInYab(Tab.fillScript(user: "picked@example.com", password: "synthetic")) {
+                go.resume(returning: $0 as? Bool == true)
+            }
+        }
+        #expect(picked)
+        #expect(try await web.evaluateJavaScript("testBox('name').value") as? String == "picked@example.com")
+    }
+
+    @Test @MainActor func aComposedAncestorFormKeepsOtherLoginsOut() async throws {
+        let html = """
+        <form><input id="other-name" autocomplete="username"><input id="other-pass" type="password"></form>
+        <form id="chosen"><login-box id="name-host"></login-box><login-box id="pass-host"></login-box><button>Log In</button></form>
+        <script>
+        document.getElementById('name-host').attachShadow({mode:'open'}).innerHTML = '<input autocomplete="username">';
+        document.getElementById('pass-host').attachShadow({mode:'open'}).innerHTML = '<input type="password">';
+        window.testBox = function (id) { return document.getElementById(id + '-host').shadowRoot.querySelector('input'); };
+        </script>
+        """
+        let (web, messages) = try await Self.page(html)
+        let focus = try await Self.shadowFocus("name", in: web, messages: messages)
+        #expect(focus["automatic"] as? Bool == true)
+        #expect(await Self.fill(web, focus: focus))
+        #expect(try await web.evaluateJavaScript("testBox('pass').value") as? String == "päss ' \" ${unexecuted}")
+        #expect(try await web.evaluateJavaScript("document.getElementById('other-name').value") as? String == "")
+        #expect(try await web.evaluateJavaScript("document.getElementById('other-pass').value") as? String == "")
+    }
+
+    @Test @MainActor func aShadowUsernameStepAndNewPasswordRetainTheirRules() async throws {
+        let (web, messages) = try await Self.page(Self.shadowSignIn)
+        _ = try await web.evaluateJavaScript("testBox('pass').remove(); true")
+        let name = try await Self.shadowFocus("name", in: web, messages: messages)
+        #expect(name["automatic"] as? Bool == true)
+        #expect(await Self.fill(web, focus: name))
+        #expect(try await web.evaluateJavaScript("testBox('name').value") as? String == "first@example.com")
+
+        let (signup, signupMessages) = try await Self.page(Self.shadowSignIn)
+        _ = try await signup.evaluateJavaScript("testBox('pass').autocomplete = 'new-password'; true")
+        let pass = try await Self.shadowFocus("pass", in: signup, messages: signupMessages)
+        #expect(pass["fresh"] as? Bool == true)
+        #expect(pass["automatic"] as? Bool == false)
+        #expect(await Self.fill(signup, focus: pass) == false)
+        let generated = await withCheckedContinuation { go in
+            signup.evaluateInYab("window.__yabForms.generated('synthetic-generated')") {
+                go.resume(returning: $0 as? Bool == true)
+            }
+        }
+        #expect(generated)
+        #expect(try await signup.evaluateJavaScript("testBox('pass').value") as? String == "synthetic-generated")
+    }
+
+    @Test @MainActor func aShadowButtonReportsTheLoginBeforeThePageClearsItsBoxes() async throws {
+        let (web, messages) = try await Self.page(Self.shadowSignIn)
+        _ = try await Self.shadowFocus("pass", in: web, messages: messages)
+        _ = try await web.evaluateJavaScript("""
+        testBox('name').value = 'fixture@example.com'; testBox('pass').value = 'synthetic';
+        const button = document.getElementById('panel').shadowRoot.querySelector('login-button').shadowRoot.querySelector('button');
+        button.addEventListener('click', function () { testBox('pass').value = ''; });
+        button.querySelector('span').click(); true
+        """)
+        for _ in 0..<100 where messages.submit == nil { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(messages.submit?["user"] as? String == "fixture@example.com")
+        #expect(messages.submit?["password"] as? String == "synthetic")
+    }
+}
+
+
+extension PasswordAutofillTests {
+    @Test @MainActor func aNonComposedSubmitInsideAShadowFormStillOffersSaving() async throws {
+        let html = """
+        <login-panel id="panel"></login-panel><script>
+        const panel = document.getElementById('panel').attachShadow({mode:'open'});
+        panel.innerHTML = '<form><input id="name" autocomplete="username"><input id="pass" type="password"><button>Log In</button></form>';
+        window.testBox = function (id) { return panel.getElementById(id); };
+        </script>
+        """
+        let (web, messages) = try await Self.page(html)
+        _ = try await Self.shadowFocus("pass", in: web, messages: messages)
+        _ = try await web.evaluateJavaScript("""
+        testBox('name').value = 'fixture@example.com'; testBox('pass').value = 'synthetic';
+        testBox('pass').form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true, composed:false})); true
+        """)
+        for _ in 0..<100 where messages.submit == nil { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(messages.submit?["user"] as? String == "fixture@example.com")
+        #expect(messages.submit?["password"] as? String == "synthetic")
+    }
+}

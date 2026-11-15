@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Keeps yab's design system from drifting, one added line at a time.
+
+    ./design-check              the staged change (what a commit would take)
+    ./design-check --head       everything changed since HEAD, staged or not
+    ./design-check --file PATH  one file's change since HEAD (the editor hook)
+    ./design-check --all        every line in Sources, to see the old debt
+    ./design-check --base REF   what this branch adds since it left REF (CI)
+
+Only lines a change adds are judged, so what was there before doesn't stop
+anything, and nothing new can add to it. A line that has to break a rule
+says why on itself: `// design: <reason>`. A file that is a drawing of
+other things at their own sizes (yab in miniature, macOS, a site) says so
+once, on a line of its own near the top: `// design: file, <reason>`.
+
+The rules, all from Sources/YabDesign (Design.swift, Buttons.swift):
+
+- A card over a page is `.cardFrame()`: one inset all round, the corner
+  that inset plus a control's, one shadow. No hand-made ground, hairline
+  and shadow.
+- A corner is a `Radius` step as it is, never a number and never a step
+  plus or minus something.
+- A shadow comes from Design.swift, not from the view that wants one.
+- Insets and gaps are on the scale: 0 1 2 4 6 8 10 12 16 20 24 32, or a
+  token (CardFrame.inset, Metrics, ButtonSize).
+- Leading and trailing insets of one thing are the same.
+- Type is on the scale: 10 11 11.5 12 12.5 13 13.5 15 17 20 22.
+- A tooltip is yab's own, on the corner's glass (KeyTip): `.keyTip` for a
+  button, `.pointerTip` for a row or a line, `view.keyTip(_:)` in AppKit.
+  Never `.help` or `toolTip`, which the system draws its own way.
+- Keys at the end of a plate of its own (a tip, a pill, a face with a
+  background and side padding) are set as a button's: the plate hands
+  them a KeyPlate, so the last key's plate is as far in from the trailing
+  edge as from the top and bottom, and LeadingRoom stands the words in the
+  middle of the room left of them. Or the keys go on a `.yab` button, or a
+  menu row (FieldActionsPanel.row), which do it already.
+"""
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+# Where the tokens themselves are defined, and the backdrop beside them.
+EXEMPT = {"Sources/YabDesign/Design.swift", "Sources/YabDesign/Buttons.swift", "Sources/Fast/Design.swift"}
+
+SPACE = {0, 1, 2, 4, 6, 8, 10, 12, 16, 20, 24, 32}
+TYPE = {10, 11, 11.5, 12, 12.5, 13, 13.5, 15, 17, 20, 22}
+
+WAIVED = re.compile(r"//\s*design:")
+# `cornerRadius:` and UnevenRoundedRectangle's four corner arguments.
+CORNER_ARG = r"(?:cornerRadius|(?:top|bottom)(?:Leading|Trailing)Radius)"
+RADIUS_NUMBER = re.compile(CORNER_ARG + r":\s*[0-9.]+")
+RADIUS_MATH = re.compile(CORNER_ARG + r":\s*Radius\.\w+\s*[-+*/]")
+SHADOW = re.compile(r"\.shadow\(")
+HANDMADE = re.compile(r"\.fill\(Palette\.ground\)|strokeBorder\(Palette\.hairline")
+PADDING = re.compile(r"\.padding\((?:\.?[\[\]a-zA-Z., ]*,\s*)?([0-9.]+)\)")
+SPACING = re.compile(r"spacing:\s*([0-9.]+)")
+EDGE = re.compile(r"\.padding\(\.(leading|trailing),\s*([^)]+)\)")
+FONT = re.compile(r"\.system\(size:\s*([0-9.]+)")
+KEYS = re.compile(r"KeyGlyphs\(")
+MEMBER = re.compile(r"^\s*(?:@\w+\s+)*(?:(?:private|fileprivate|static|public|override|nonisolated)\s+)*(?:var|func|let)\s")
+TYPE_START = re.compile(r"^(\s*)(?:@\w+\s+)*(?:(?:private|fileprivate|public|final)\s+)*(?:struct|class|enum|extension)\s")
+PLATE_FACE = re.compile(r"HUD\.plate\(|FieldGlass\(|glassEffect\(|Capsule\(\)\.fill|\.background\(\.\w+Material|Capsule\(\)\.strokeBorder")
+PLATE_SET = re.compile(r"KeyPlate\(|\\\.keyPlate|\.yab\(|FieldActionsPanel\.row|KeyTipView\.plate")
+# `.help(` as a modifier, not a function of that name (Self.help(…)).
+SYSTEM_TIP = re.compile(r"(?<!\w)\.help\(|\.toolTip\s*=")
+
+
+def number(text):
+    value = float(text)
+    return int(value) if value.is_integer() else value
+
+
+def scope(whole, at):
+    """The lines of the type (struct, class, enum, extension) around line `at`, 1-based."""
+    start = at - 1
+    while start > 0 and not TYPE_START.match(whole[start]):
+        start -= 1
+    indent = len(TYPE_START.match(whole[start]).group(1)) if TYPE_START.match(whole[start]) else 0
+    end = start + 1
+    while end < len(whole):
+        match = TYPE_START.match(whole[end])
+        if match and len(match.group(1)) <= indent:
+            break
+        end += 1
+    # A small view is judged whole (its plate in `body`, its keys in a
+    # part of it); in a long one, only the member the keys are in.
+    if end - start <= 80:
+        return whole[start:end]
+    first = at - 1
+    while first > start and not MEMBER.match(whole[first]):
+        first -= 1
+    last = at
+    while last < end and not MEMBER.match(whole[last]):
+        last += 1
+    return whole[first:last]
+
+
+def judge(path, lines):
+    """lines: [(line number, text)] of what was added, in order."""
+    found = []
+    edges = []  # (line number, edge, value) of consecutive padding lines
+    try:
+        whole = (ROOT / path).read_text().splitlines()
+    except OSError:
+        whole = []
+
+    def say(at, what):
+        found.append(f"{path}:{at}: {what}")
+
+    for at, text in lines:
+        code = text.split("//")[0]
+        if WAIVED.search(text):
+            edges = []
+            continue
+        if RADIUS_NUMBER.search(code):
+            say(at, "a corner as a number: use a Radius step (window, surface, floating, control, small, card)")
+        if RADIUS_MATH.search(code):
+            say(at, "a Radius step with arithmetic: pick the step, or .cardFrame() for a card's corner")
+        if SHADOW.search(code):
+            say(at, "a shadow of its own: cards take .cardFrame(); anything else, add the shadow to Design.swift")
+        if SYSTEM_TIP.search(code):
+            say(at, "a system tooltip: .keyTip for a button, .pointerTip for a row or a line, view.keyTip(_:) in AppKit")
+        if HANDMADE.search(code):
+            say(at, "a hand-made card (ground, hairline): use .cardFrame()")
+        if KEYS.search(code) and whole and at <= len(whole):
+            around = "\n".join(scope(whole, at))
+            if PLATE_FACE.search(around) and ".padding(.horizontal" in around and not PLATE_SET.search(around):
+                say(at, "keys at the end of a plate of its own without a KeyPlate: hand them one (inset all round, "
+                        "LeadingRoom for the words), or put them on a .yab button")
+        for match in PADDING.finditer(code):
+            if number(match.group(1)) not in SPACE:
+                say(at, f"inset {match.group(1)} is off the scale {sorted(SPACE)}: use a step or a token")
+        for match in SPACING.finditer(code):
+            if number(match.group(1)) not in SPACE:
+                say(at, f"gap {match.group(1)} is off the scale {sorted(SPACE)}: use a step or a token")
+        for match in FONT.finditer(code):
+            if number(match.group(1)) not in TYPE:
+                say(at, f"type size {match.group(1)} is off the scale {sorted(TYPE)}")
+        # Leading and trailing set one after the other must agree.
+        found_edge = False
+        for edge in EDGE.finditer(code):
+            found_edge = True
+            edges.append((at, edge.group(1), edge.group(2).strip()))
+            sides = {side: (line, value) for line, side, value in edges[-2:]}
+            if len(sides) == 2 and sides["leading"][1] != sides["trailing"][1]:
+                say(at, f"leading {sides['leading'][1]} and trailing {sides['trailing'][1]} differ: "
+                        "one inset all round (.padding(x)), or .cardFrame() for a card")
+        if not found_edge and code.strip():
+            edges = []
+    return found
+
+
+def git(*args):
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True).stdout
+
+
+def added(diff):
+    """{path: [(line number, text)]} of the added lines in a unified diff."""
+    out, path, at = {}, None, 0
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            name = line[4:]
+            path = name[2:] if name.startswith("b/") else None
+        elif line.startswith("@@"):
+            at = int(re.search(r"\+(\d+)", line).group(1))
+        elif path and line.startswith("+"):
+            out.setdefault(path, []).append((at, line[1:]))
+            at += 1
+        elif path and not line.startswith("-"):
+            at += 1
+    return out
+
+
+DRAWING = re.compile(r"^//\s*design:\s*file\b")
+
+
+def drawing(path):
+    """A file that says, near its top, it draws at its own sizes."""
+    try:
+        head = (ROOT / path).read_text().splitlines()[:20]
+    except OSError:
+        return False
+    return any(DRAWING.match(line) for line in head)
+
+
+def wanted(path):
+    return path.endswith(".swift") and path.startswith("Sources/") and path not in EXEMPT and not drawing(path)
+
+
+def main(argv):
+    if "--all" in argv:
+        changes = {}
+        for file in sorted((ROOT / "Sources").rglob("*.swift")):
+            rel = str(file.relative_to(ROOT))
+            changes[rel] = list(enumerate(file.read_text().splitlines(), 1))
+    elif "--file" in argv:
+        target = Path(argv[argv.index("--file") + 1]).resolve()
+        try:
+            rel = str(target.relative_to(ROOT))
+        except ValueError:
+            return 0
+        tracked = git("ls-files", "--", rel).strip()
+        diff = git("diff", "-U0", "HEAD", "--", rel) if tracked else ""
+        changes = added(diff) if tracked else {rel: list(enumerate(target.read_text().splitlines(), 1))} if target.exists() else {}
+    elif "--base" in argv:
+        base = argv[argv.index("--base") + 1]
+        if not git("rev-parse", "--verify", "--quiet", base + "^{commit}").strip():
+            print(f"design-check: no commit {base}", file=sys.stderr)
+            return 2
+        changes = added(git("diff", "-U0", base + "...HEAD"))
+    elif "--head" in argv:
+        changes = added(git("diff", "-U0", "HEAD"))
+    else:
+        changes = added(git("diff", "-U0", "--cached"))
+
+    problems = []
+    for path, lines in changes.items():
+        if wanted(path):
+            problems += judge(path, lines)
+    if not problems:
+        return 0
+    print("Design system: these added lines drift from Design.swift.", file=sys.stderr)
+    for problem in problems:
+        print("  " + problem, file=sys.stderr)
+    if "--all" not in argv:
+        print("Fix them, or say why on the line: // design: <reason>", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

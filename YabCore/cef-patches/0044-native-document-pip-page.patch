@@ -1,0 +1,85 @@
+--- a/cef/libcef/browser/chrome/chrome_browser_host_impl.cc
++++ b/cef/libcef/browser/chrome/chrome_browser_host_impl.cc
+@@ -518,7 +518,8 @@
+   }
+ 
+ #if BUILDFLAG(IS_MAC)
+-  if (!opener && !platform_delegate_->IsViewsHosted()) {
++  if (!platform_delegate_->IsViewsHosted() &&
++      (!opener || (browser_ && browser_->GetType()==BrowserWindowInterface::TYPE_PICTURE_IN_PICTURE))) {
+     // Before any client may publish tab.created, and before Chrome Show().
+     cef::external_host::BindDefaultPage(this);
+   }
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -4,6 +4,8 @@
+ #include "ui/views/widget/widget.h"
+ #include "cef/libcef/browser/browser_host_base.h"
+ #include "content/browser/renderer_host/render_widget_host_view_mac.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+@@ -575,6 +577,19 @@
+   ~ExternalPage() override { Reset(); }
+   bool Bind(CefBrowserHostBase* browser, views::Widget* widget) {
+     if (!browser || !widget || widget_ || !Enable(widget)) return false;
++    auto chrome=ChromeBrowserHostImpl::FromBaseChecked(browser);
++    document_pip_=chrome->browser() && chrome->browser()->GetType()==BrowserWindowInterface::TYPE_PICTURE_IN_PICTURE;
++    if(document_pip_) {
++      auto* frame=web_contents()->GetOpener();
++      auto* owner=frame?content::WebContents::FromRenderFrameHost(frame):nullptr;
++      auto native_owner=owner?CefBrowserHostBase::GetBrowserForContents(owner):nullptr;
++      if(!frame || !frame->IsActive() || !frame->IsRenderFrameLive() || !owner || !native_owner ||
++          frame!=owner->GetPrimaryMainFrame() || owner->GetBrowserContext()!=web_contents()->GetBrowserContext())return false;
++      source_document_=frame->GetWeakDocumentPtr();source_contents_=owner->GetWeakPtr();
++      source_browser_id_=native_owner->GetIdentifier();
++      source_document_token_=static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString();
++      source_frame_id_=frame->GetDevToolsFrameToken().ToString();
++    }
+     widget_ = widget->GetWeakPtr();
+     observation_.Observe(widget);
+     visible_ = true;
+@@ -587,7 +602,7 @@
+           base::BindRepeating(&ExternalPage::Frame, weak_.GetWeakPtr()))) {
+       Reset(); return false;
+     }
+-    extensions::ExternalTabWindow::Set(web_contents(), true);
++    extensions::ExternalTabWindow::Set(web_contents(), !document_pip_);
+     return true;
+   }
+   bool Owns() const {
+@@ -610,6 +625,20 @@
+     result->SetString("token", token_.ToString());
+     result->SetInt("browserId", browser->GetIdentifier());
+     result->SetBool("visible", visible_);
++    result->SetString("nativeKind",document_pip_?"documentPiP":"page");
++    if(document_pip_) {
++      auto source=CefDictionaryValue::Create();source->SetInt("version",1);
++      auto* frame=source_document_.AsRenderFrameHostIfValid();
++      auto current_owner=source_contents_?CefBrowserHostBase::GetBrowserForContents(source_contents_.get()):nullptr;
++      const bool valid=frame && frame->IsActive() && frame->IsRenderFrameLive() && source_contents_ &&
++          current_owner && current_owner->GetIdentifier()==source_browser_id_ &&
++          !source_contents_->IsBeingDestroyed() && frame==source_contents_->GetPrimaryMainFrame() &&
++          content::WebContents::FromRenderFrameHost(frame)==source_contents_.get() &&
++          source_contents_->GetBrowserContext()==web_contents()->GetBrowserContext();
++      source->SetBool("valid",valid);source->SetInt("ownerBrowserId",source_browser_id_);
++      source->SetString("ownerDocument",source_document_token_);source->SetString("ownerFrameId",source_frame_id_);
++      result->SetDictionary("documentPiPSource",source);
++    }
+     if (auto* model = extensions::ExternalTabModel::Get(web_contents())) {
+       result->SetBool("nativeTabModel", true);
+       result->SetBool("active", model->active());
+@@ -746,6 +775,11 @@
+   bool visible_ = true, applied_ = false;
+   const base::UnguessableToken token_;
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
++  bool document_pip_=false;
++  content::WeakDocumentPtr source_document_;
++  base::WeakPtr<content::WebContents> source_contents_;
++  int source_browser_id_=0;
++  std::string source_document_token_,source_frame_id_;
+   base::WeakPtrFactory<ExternalPage> weak_{this};
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalPage);

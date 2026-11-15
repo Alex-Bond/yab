@@ -1,0 +1,9 @@
+{
+ "name": "sync-e2e",
+ "owner": "Mira",
+ "space": "home",
+ "spaces": [
+  {"id": "home", "name": "Home", "emoji": "🏠", "tint": [238, 233, 226], "today": []}
+ ],
+ "mac": {"name": "MacBook Pro", "asleep": false}
+}

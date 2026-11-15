@@ -1,0 +1,10 @@
+<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Viewport ruler</title>
+<style>
+body{margin:0;min-height:8000px;background:linear-gradient(#eff8ff,#8cb8df);font:16px system-ui}
+#width{position:fixed;top:100px;left:10px}header{position:fixed;top:65px;left:0;right:0;height:25px;background:#acf}
+</style><header aria-label="Safe width ruler"></header><output id="width"></output>
+<script>
+function report(){document.getElementById('width').textContent='Layout width '+document.documentElement.clientWidth;}
+setInterval(report,100);report();
+</script>

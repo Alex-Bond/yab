@@ -1,0 +1,328 @@
+{
+  "upstreamRevision": "ac19329a1d32108fd05ead15568cb6e188f8615a",
+  "gnLsCommandId": "cmd_da3b86c91bda40c09f1b162aa350",
+  "publicVersionsCommandId": "cmd_4c25be5737e3401aa0dc594b45dc",
+  "publicVersionsSha256": "ddab0fb8b96224563fbecba75ed2ebf474d15666e8c03256fdee33dc14f190b5",
+  "status": "frozen_read_only_plan_not_applied",
+  "compiled": false,
+  "dependencies": [
+    {
+      "appDeclared": "androidx.activity:activity-compose:1.11.0",
+      "candidateLabel": "//third_party/androidx:androidx_activity_activity_compose_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_activity_activity_compose",
+          "name": "Activity Compose",
+          "version": "1.14.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/activity/activity-compose/1.14.0-SNAPSHOT/activity-compose-1.14.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_activity_activity_compose/README.chromium",
+          "readmeSha256": "b90b61005701b943de69e584e018d0e9bd19876007407c3057644f58b0dccadd"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.compose.ui:ui (BOM2025.10.00)",
+      "candidateLabel": "//third_party/androidx:androidx_compose_ui_ui_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_compose_ui_ui_android",
+          "name": "Compose UI",
+          "version": "1.14.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/compose/ui/ui-android/1.14.0-SNAPSHOT/ui-android-1.14.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_compose_ui_ui_android/README.chromium",
+          "readmeSha256": "f4b6a5701890b873a2cdd34e37942a3c1d6e30766d11a5fffaa8fe529e8eabac"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.compose.foundation:foundation (BOM2025.10.00)",
+      "candidateLabel": "//third_party/androidx:androidx_compose_foundation_foundation_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_compose_foundation_foundation_android",
+          "name": "Compose Foundation",
+          "version": "1.14.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/compose/foundation/foundation-android/1.14.0-SNAPSHOT/foundation-android-1.14.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_compose_foundation_foundation_android/README.chromium",
+          "readmeSha256": "f819bce082a4d33c175aa96e2cd395728cce175ccb8f86a6c114e830a953731a"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.compose.material3:material3 (BOM2025.10.00)",
+      "candidateLabel": "//third_party/androidx:androidx_compose_material3_material3_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_compose_material3_material3_android",
+          "name": "Compose Material3 Components",
+          "version": "1.6.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/compose/material3/material3-android/1.6.0-SNAPSHOT/material3-android-1.6.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_compose_material3_material3_android/README.chromium",
+          "readmeSha256": "7a91754f485256045cc903e85c24792fd16db5f066f2ec0aa1d8c72a6a462d97"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.compose.material:material-icons-extended (BOM2025.10.00)",
+      "candidateLabel": "//third_party/androidx:androidx_compose_material_material_icons_extended_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.lifecycle:lifecycle-runtime-compose:2.9.4",
+      "candidateLabel": "//third_party/androidx:androidx_lifecycle_lifecycle_runtime_compose_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_lifecycle_lifecycle_runtime_compose_android",
+          "name": "Lifecycle Runtime Compose",
+          "version": "2.12.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/lifecycle/lifecycle-runtime-compose-android/2.12.0-SNAPSHOT/lifecycle-runtime-compose-android-2.12.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_lifecycle_lifecycle_runtime_compose_android/README.chromium",
+          "readmeSha256": "879e0b7281d5ecec98112a3999af6cebadb7b4aa74b0a192995c28b4545dc5e0"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4",
+      "candidateLabel": "//third_party/androidx:androidx_lifecycle_lifecycle_viewmodel_compose_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_lifecycle_lifecycle_viewmodel_compose_android",
+          "name": "Lifecycle ViewModel Compose",
+          "version": "2.12.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/lifecycle/lifecycle-viewmodel-compose-android/2.12.0-SNAPSHOT/lifecycle-viewmodel-compose-android-2.12.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_lifecycle_lifecycle_viewmodel_compose_android/README.chromium",
+          "readmeSha256": "104c9f17deed56f1e6019ab14efdbcdc8ff13775f7902f7ab1b7f764682c3c7d"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.fragment:fragment-ktx:1.8.9",
+      "candidateLabel": "//third_party/androidx:androidx_fragment_fragment_ktx_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_fragment_fragment_ktx",
+          "name": "Fragment Kotlin Extensions",
+          "version": "1.10.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/fragment/fragment-ktx/1.10.0-SNAPSHOT/fragment-ktx-1.10.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_fragment_fragment_ktx/README.chromium",
+          "readmeSha256": "718a218935b730b61e41328acf63f5359544528792930f2e5e224bb680826d42"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.biometric:biometric:1.1.0",
+      "candidateLabel": "//third_party/androidx:androidx_biometric_biometric_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_biometric_biometric",
+          "name": "Biometric",
+          "version": "1.4.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/biometric/biometric/1.4.0-SNAPSHOT/biometric-1.4.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_biometric_biometric/README.chromium",
+          "readmeSha256": "8ad877c5565cf1b718be4b2de4e85cb7b7dc752a4a252a3e6a78293fac8a1f1e"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.core:core-ktx:1.17.0",
+      "candidateLabel": "//third_party/androidx:androidx_core_core_ktx_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_core_core_ktx",
+          "name": "Core Kotlin Extensions",
+          "version": "1.20.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/core/core-ktx/1.20.0-SNAPSHOT/core-ktx-1.20.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_core_core_ktx/README.chromium",
+          "readmeSha256": "37fc7459fc22b19e30b4a7faf3e9095d56d801d7dc55c93843a46c7f6d35888e"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.webkit:webkit:1.14.0",
+      "candidateLabel": "//third_party/androidx:androidx_webkit_webkit_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_webkit_webkit",
+          "name": "Webkit",
+          "version": "1.19.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/webkit/webkit/1.19.0-SNAPSHOT/webkit-1.19.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_webkit_webkit/README.chromium",
+          "readmeSha256": "1af5fc9458acb0f6c4e078cf19e21782c66a9e273ad0825df04863fcd0009a92"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0",
+      "candidateLabel": "//third_party/android_deps:org_jetbrains_kotlinx_kotlinx_serialization_json_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "android_deps",
+          "id": "org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+          "name": "kotlinx-serialization-json",
+          "version": "1.12.0",
+          "url": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-json-jvm/1.12.0/kotlinx-serialization-json-jvm-1.12.0.jar",
+          "readmePath": "third_party/android_deps/committed/libs/org_jetbrains_kotlinx_kotlinx_serialization_json_jvm/README.chromium",
+          "readmeSha256": "deb5d528badc5b7d9f0e38c8ce035dd7553acbff2579d52d18bb09fde5e7a3ab"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2",
+      "candidateLabel": "//third_party/android_deps:org_jetbrains_kotlinx_kotlinx_coroutines_android_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "android_deps",
+          "id": "org_jetbrains_kotlinx_kotlinx_coroutines_android",
+          "name": "kotlinx-coroutines-android",
+          "version": "1.11.0",
+          "url": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-android/1.11.0/kotlinx-coroutines-android-1.11.0.jar",
+          "readmePath": "third_party/android_deps/committed/libs/org_jetbrains_kotlinx_kotlinx_coroutines_android/README.chromium",
+          "readmeSha256": "70b37ec243ffcb9e0f17232d8e2c4f77bec57f974e3ff44f43c7f806f2ee7caf"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "org.bouncycastle:bcprov-jdk18on:1.86",
+      "candidateLabel": "//third_party/android_deps:org_bouncycastle_bcprov_jdk18on_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "android_deps",
+          "id": "org_bouncycastle_bcprov_jdk18on",
+          "name": "Bouncy Castle Provider",
+          "version": "1.85",
+          "url": "https://repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk18on/1.85/bcprov-jdk18on-1.85.jar",
+          "readmePath": "third_party/android_deps/committed/libs/org_bouncycastle_bcprov_jdk18on/README.chromium",
+          "readmeSha256": "682e7de3f32bfe3adca83548068081e6a018d248025de2ecaba04ae7800e3053"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "com.squareup.okhttp3:okhttp:4.12.0",
+      "candidateLabel": "//third_party/android_deps:com_squareup_okhttp3_okhttp_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "com.google.ai.edge.litertlm:litertlm-android:0.18.1",
+      "candidateLabel": "//third_party/android_deps:com_google_ai_edge_litertlm_litertlm_android_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.camera:camera-camera2:1.6.2",
+      "candidateLabel": "//third_party/androidx:androidx_camera_camera_camera2_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.camera:camera-lifecycle:1.6.2",
+      "candidateLabel": "//third_party/androidx:androidx_camera_camera_lifecycle_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.camera:camera-view:1.6.2",
+      "candidateLabel": "//third_party/androidx:androidx_camera_camera_view_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "com.google.mlkit:barcode-scanning:17.3.0",
+      "candidateLabel": "//third_party/android_deps:com_google_mlkit_barcode_scanning_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "com.google.mlkit:translate:17.0.3",
+      "candidateLabel": "//third_party/android_deps:com_google_mlkit_translate_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "com.google.mlkit:language-id:17.0.6",
+      "candidateLabel": "//third_party/android_deps:com_google_mlkit_language_id_java",
+      "presentInResolvedGraph": false,
+      "publicMetadata": [],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "com.google.firebase:firebase-messaging:26.0.1",
+      "candidateLabel": "//third_party/android_deps:google_firebase_firebase_messaging_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "android_deps",
+          "id": "com_google_firebase_firebase_messaging",
+          "name": "firebase-messaging",
+          "version": "26.0.0",
+          "url": "https://dl.google.com/dl/android/maven2/com/google/firebase/firebase-messaging/26.0.0/firebase-messaging-26.0.0.aar",
+          "readmePath": "third_party/android_deps/committed/libs/com_google_firebase_firebase_messaging/README.chromium",
+          "readmeSha256": "0c8abe4052bcb5bf0effe58cb13df48e04d4a56d65ddbd13a23a0c2a7bd2d10d"
+        }
+      ],
+      "apiCompatibilityProven": false
+    },
+    {
+      "appDeclared": "androidx.work:work-runtime-ktx:2.12.0",
+      "candidateLabel": "//third_party/androidx:androidx_work_work_runtime_java",
+      "presentInResolvedGraph": true,
+      "publicMetadata": [
+        {
+          "group": "androidx",
+          "id": "androidx_work_work_runtime",
+          "name": "WorkManager Runtime",
+          "version": "2.13.0-SNAPSHOT",
+          "url": "https://androidx.dev/snapshots/builds/16691926/artifacts/repository/androidx/work/work-runtime/2.13.0-SNAPSHOT/work-runtime-2.13.0-20261022.130233-1.aar",
+          "readmePath": "third_party/androidx/committed/libs/androidx_work_work_runtime/README.chromium",
+          "readmeSha256": "80fca2589903183f0313bd0f820ee786d010fe29a95faa1876143cbb25b5cbf7"
+        }
+      ],
+      "apiCompatibilityProven": false
+    }
+  ]
+}

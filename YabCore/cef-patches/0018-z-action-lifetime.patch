@@ -1,0 +1,104 @@
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -35,6 +35,7 @@
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/views/extensions/extension_popup.h"
+ #include "components/sessions/content/session_tab_helper.h"
+ #include "extensions/browser/extension_action.h"
+@@ -412,8 +413,10 @@
+                     public content::WebContentsUserData<ActionOwner> {
+  public:
+   void Bind(views::Widget* popup) {
++    auto self = weak_.GetWeakPtr();
++    auto widget = popup->GetWeakPtr();
+     Close();
+-    popup_ = popup->GetWeakPtr();
++    if (self && widget) self->popup_ = widget;
+   }
+   void PrimaryPageChanged(content::Page&) override { Close(); }
+   void OnVisibilityChanged(content::Visibility visibility) override {
+@@ -432,6 +435,7 @@
+   }
+   base::WeakPtr<views::Widget> popup_;
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
++  base::WeakPtrFactory<ActionOwner> weak_{this};
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(ActionOwner);
+ 
+@@ -471,13 +475,20 @@
+   auto* focus = owner ? ExternalFocus::FromWebContents(owner) : nullptr;
+   if (!origin || !origin->external() || !focus || !focus->focused() ||
+       !Enable(widget)) return false;
++  auto owner_identity = owner->GetWeakPtr();
++  auto popup_identity = popup->GetWeakPtr();
++  auto widget_identity = widget->GetWeakPtr();
+   ExternalVisibility::GetOrCreateForWebContents(popup)->Bind(widget);
+-  ActionOwner::GetOrCreateForWebContents(owner)->Bind(widget);
+-  return true;
++  if (!owner_identity || !popup_identity || !widget_identity || widget_identity->IsClosed())
++    return false;
++  ActionOwner::GetOrCreateForWebContents(owner_identity.get())->Bind(widget_identity.get());
++  return owner_identity && popup_identity && widget_identity && !widget_identity->IsClosed();
+ }
+ 
+ void PopupShown(content::WebContents* popup, views::Widget* widget) {
+   if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !popup || !widget) return;
++  auto popup_identity = popup->GetWeakPtr();
++  auto widget_identity = widget->GetWeakPtr();
+   auto* host = ExternalPopup::GetOrCreateForWebContents(popup);
+   NSWindow* window = widget->GetNativeWindow().GetNativeNSWindow();
+   host->window_number = window ? static_cast<int>(window.windowNumber) : 0;
+@@ -487,7 +498,11 @@
+     if (origin->external())
+       ExternalFocus::GetOrCreateForWebContents(popup)->Set(widget, true);
+   }
+-  if (auto* compositor = widget->GetCompositor()) {
++  // Native focus can reenter the client and destroy either owner.
++  if (!popup_identity || !widget_identity || widget_identity->IsClosed()) return;
++  host = ExternalPopup::FromWebContents(popup_identity.get());
++  if (!host) return;
++  if (auto* compositor = widget_identity->GetCompositor()) {
+     host->accelerated = compositor->widget();
+     ui::AcceleratedWidgetMac::SetFrameCallback(
+         host->accelerated,
+@@ -571,9 +586,11 @@
+     return false;
+   // Same native permissions and action dispatch as a Chrome toolbar press.
+   auto owner_weak = owner->GetWeakPtr();
++  auto owner_document = owner->GetPrimaryMainFrame()->GetWeakDocumentPtr();
+   const GURL popup_url = action->GetPopupUrl(tab);
+   if (runner->RunAction(extension.get(), /*grant_tab_permissions=*/true) !=
+-      extensions::ExtensionAction::ShowAction::kShowPopup || !owner_weak)
++      extensions::ExtensionAction::ShowAction::kShowPopup || !owner_weak ||
++      owner_document.AsRenderFrameHostIfValid() != owner_weak->GetPrimaryMainFrame())
+     return false;
+   // Native permission handling can call client code. Revalidate its owner and
+   // enabled package before constructing any view after that dispatch.
+@@ -608,8 +625,13 @@
+   auto* state = popup ? ExternalPopup::FromWebContents(popup) : nullptr;
+   auto* owner = browser ? browser->GetWebContents() : nullptr;
+   if (!owner || !origin || origin->Owner(popup) != owner || !state ||
+-      !state->widget) return false;
+-  if (close) { state->widget->Close(); return true; }
++      !state->widget || state->widget->IsClosed()) return false;
++  if (close) {
++    auto widget = state->widget;
++    Popups().erase(token);  // Replays fail before asynchronous Widget teardown.
++    widget->Close();
++    return true;
++  }
+   auto* owner_focus = ExternalFocus::FromWebContents(owner);
+   if (origin->external() && (!owner_focus || !owner_focus->focused() ||
+       owner->GetVisibility() != content::Visibility::VISIBLE)) return false;
+@@ -622,7 +644,7 @@
+     widget->SetBounds(bounds);
+   }
+   // Bounds changes can invoke embedder code and close the widget.
+-  if (!popup_weak || !widget) return false;
++  if (!popup_weak || !widget || widget->IsClosed()) return false;
+   return !external ||
+       ExternalFocus::GetOrCreateForWebContents(popup_weak.get())->Set(widget.get(), focused);
+ }

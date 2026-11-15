@@ -1,0 +1,53 @@
+<!--
+{
+  "title": "Launch notes · Tern 2.0",
+  "crumbs": ["Tern Labs", "Launch"],
+  "edited": "Edited 2m ago",
+  "people": ["JB", "AE", "EP"],
+  "here": 1,
+  "comments": [
+    {"id": "c1", "by": "AE", "when": "2h", "text": "Can we lead with focus time? It's the one thing every design partner asked for, so it should be the first thing people read."},
+    {"id": "c2", "by": "AE", "when": "2h", "text": "Is $14 final for Business? Jonas wanted to keep it at $12 until January. Let's not print a price we might change."},
+    {"id": "c3", "by": "AE", "when": "1h", "text": "Do we cover US hours on launch day? Half of the design partners are in New York."}
+  ]
+}
+-->
+<h1>Launch notes · Tern 2.0</h1>
+<p class="byline">Owner: Anna Ek · Design: Mira Lindqvist · Launch: Wednesday, October 21</p>
+<p>Tern 2.0 ships on Wednesday, October 21. This doc is the one place for what's in the release, how we roll it out, and what we still have to decide. If you write anything about the launch, start here, and leave a comment instead of editing someone else's section.</p>
+<h2><span class="cmt" data-comment="c1">What's new in Tern 2.0</span></h2>
+<ul>
+<li><strong>Team insights.</strong> Meeting load and focus time for every team, every week.</li>
+<li><strong>The new onboarding.</strong> One welcome screen, and a calendar connected in a minute.</li>
+<li><strong>Focus-first scheduling.</strong> Deep work is protected before any meeting is offered.</li>
+<li><strong>Faster booking pages.</strong> Twice as fast, in each guest's own time zone.</li>
+</ul>
+<h2>Focus-first scheduling</h2>
+<p>The new focus-first scheduling feature, which has been worked on by the team for the better part of two quarters, is basically a way that focus time is being protected by Tern before meetings are able to be booked by other people, and what this means is that when a teammate tries to find a time with you the slots that would of broken up your longest blocks of focus are not even shown to them at all, which we beleive is going to be a really big deal for alot of our users who have been asking us for something like this for a really long time.</p>
+<p>Focus blocks come from each person's calendar history, so nobody has to set them up. Anyone can pin a block, move it, or turn focus-first off for a single meeting.</p>
+<h2>Pricing</h2>
+<p>Focus-first scheduling is part of every paid plan. Team stays at $8 per seat a month, and <span class="cmt" data-comment="c2">Business moves to $14 per seat</span> with team insights included. Free teams get focus-first for their first 30 days.</p>
+<h2>A note from Jonas</h2>
+<p lang="sv" spellcheck="false">Hej allihop! Vi firar lanseringen med middag på Lyktan på Södermalm fredagen den 23 oktober klockan 19. Jag har bokat hela övervåningen, så ta gärna med er respektive. Säg till Anna senast på måndag om ni har några allergier eller inte kan komma. Tack för ett fantastiskt jobb med 2.0, jag är otroligt stolt över det här teamet. /Jonas</p>
+<h2>Rollout plan</h2>
+<p>We roll 2.0 out in three waves, so support can keep up and we can read the numbers between steps. Each wave starts at 09:00 Stockholm time, and we only move on when the checks below are green.</p>
+<h3>Wave 1 · Design partners, October 14</h3>
+<p>Everyone at Tern and our 40 design partner teams get 2.0 a week early. Elliot runs the old scheduler next to the new one and compares the slots both offer for every booking. Any booking where the two disagree goes to #focus-diffs, and we read all of them before Wave 2.</p>
+<h3>Wave 2 · A quarter of teams, October 21</h3>
+<p>On launch day, 25% of active teams move to 2.0, picked at random but never splitting a team. The launch post, the changelog and the in-app tour go live at 10:00. Sara is on call for the scheduler, and <span class="cmt" data-comment="c3">support has two extra people on chat until 20:00</span>.</p>
+<h3>Wave 3 · Everyone, October 28</h3>
+<p>If errors stay under 0.5% and booking success holds at 98% or better, every remaining team moves over a week later. Teams on Enterprise can stay on the old scheduler until November 30, when it is turned off for good.</p>
+<p>Before each wave we check three numbers for 24 hours:</p>
+<ul>
+<li>Booking success at 98% or better.</li>
+<li>Fewer than 0.5% of slot searches time out.</li>
+<li>Fewer than 30 open conversations in the support queue.</li>
+</ul>
+<p>Rollback: any wave can be undone with the scheduler.v2 flag in under five minutes, without losing bookings made in between. We practiced it twice on staging, and the runbook is pinned in #launch.</p>
+<h2>Open questions</h2>
+<ul>
+<li>Do we put focus-first on Product Hunt on launch day, or wait for Wave 3?</li>
+<li>Who writes the email for Enterprise teams that stay on the old scheduler?</li>
+<li>Should guests outside the team see that a slot was hidden to protect focus time?</li>
+<li>The empty state for teams with no calendars connected needs its final copy before Wave 1.</li>
+</ul>

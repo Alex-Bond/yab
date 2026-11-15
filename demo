@@ -1,0 +1,3 @@
+#!/bin/bash
+# Mira's browser, ready to film: ./demo lists the scenes (docs/demos.md).
+exec python3 "$(dirname "$0")/demos/demo.py" "$@"

@@ -1,0 +1,50 @@
+--- a/cef/include/cef_dialog_handler.h
++++ b/cef/include/cef_dialog_handler.h
+@@ -63,9 +63,20 @@
+   ///
+   /*--cef()--*/
+   virtual void Cancel() = 0;
++
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// True only for this pending accepted native chooser and its unchanged
++  /// committed document. UI thread only. False for ordinary/embedder callbacks.
++  /// Check immediately before publishing authenticated source or replying.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool IsNativeRequestValid() { return false; }
++#endif
+ };
+ 
+ #define CEF_YAB_NATIVE_FILE_FRAME_VERSION 1
++#define CEF_YAB_NATIVE_FILE_CONTEXT_VERSION 1
+ 
+ ///
+ /// Implement this interface to handle dialog events. The methods of this class
+--- a/cef/libcef/browser/external_file_dialog.cc
++++ b/cef/libcef/browser/external_file_dialog.cc
+@@ -47,6 +47,7 @@
+     receipt_->SetBool("acceptedNativeChooser", true);
+   }
+   CefRefPtr<CefDictionaryValue> receipt() const { return receipt_->Copy(false); }
++  bool IsNativeRequestValid() override { return CEF_CURRENTLY_ON_UIT() && Live(); }
+   void MarkHandled() { handled_ = true; }
+   bool done() const { return done_; }
+   bool Live() const {
+--- a/third_party/blink/renderer/core/inspector/main_thread_debugger.cc
++++ b/third_party/blink/renderer/core/inspector/main_thread_debugger.cc
+@@ -138,6 +138,14 @@
+   }
+   aux_data_builder.Append(",\"frameId\":\"");
+   aux_data_builder.Append(IdentifiersFactory::FrameId(frame));
++  // Native DocumentToken, shared with the committed RenderFrameHost. This is
++  // inspector metadata, never JSON authored by the page or an event relay.
++  // Bind to the exact ScriptState's window/document, including isolated worlds
++  // and OOPIF sessions; absence means ownership cannot be authenticated.
++  if (auto* window = LocalDOMWindow::From(script_state); window && window->document()) {
++    aux_data_builder.Append("\",\"yabDocumentToken\":\"");
++    aux_data_builder.Append(String::FromUtf8(window->document()->Token().ToString()));
++  }
+   aux_data_builder.Append("\"}");
+   String aux_data = aux_data_builder.ToString();
+   String human_readable_name =

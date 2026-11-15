@@ -1,0 +1,20 @@
+--- a/chrome/browser/ui/extensions/extension_action_view_model.cc	2026-10-26 22:30:15
++++ b/chrome/browser/ui/extensions/extension_action_view_model.cc	2026-10-26 23:45:27
+@@ -25,6 +25,7 @@
+ #include "chrome/browser/extensions/extension_view.h"
+ #include "chrome/browser/extensions/extension_view_host.h"
+ #include "chrome/browser/extensions/extension_view_host_factory.h"
++#include "cef/libcef/features/features.h"
+ #if BUILDFLAG(ENABLE_CEF)
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #endif
+--- a/chrome/browser/ui/views/extensions/extension_popup.h	2026-10-26 22:30:15
++++ b/chrome/browser/ui/views/extensions/extension_popup.h	2026-10-26 23:45:27
+@@ -8,6 +8,7 @@
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/scoped_observation.h"
++#include "cef/libcef/features/features.h"
+ #include "chrome/browser/ui/extensions/extension_popup_types.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"

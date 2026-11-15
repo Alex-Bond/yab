@@ -1,0 +1,279 @@
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -51,6 +51,7 @@
+ #define CEF_YAB_AUDIBLE_VERSION 1
+ #define CEF_YAB_BACKGROUND_COLOR_VERSION 1
+ #define CEF_YAB_SELECT_MENU_VERSION 1
++#define CEF_YAB_EXTENSION_HOOKS_VERSION 1
+ 
+ ///
+ /// Implement this interface to handle events related to browser display state.
+@@ -232,6 +233,26 @@
+   /*--cef(added=experimental)--*/
+   virtual void OnExternalSelectMenuDismissed(CefRefPtr<CefBrowser> browser,
+                                              int token) {}
++
++  ///
++  /// Called on macOS for the browser whose page an extension action popup was
++  /// opened for. |popup| has state (shown, frame or closed), extensionId, an
++  /// opaque token, windowNumber of the popup's native window and, for frames,
++  /// contextId, pixelWidth, pixelHeight and scale of its compositor. The
++  /// identity is captured when Chrome triggers the popup, not inferred later.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnExtensionPopup(CefRefPtr<CefBrowser> browser,
++                                CefRefPtr<CefDictionaryValue> popup) {}
++
++  ///
++  /// Called after chrome.tabs.create made |browser|. |info| has active, index
++  /// (-1 for the default position), openerBrowserId (0 for none) and
++  /// extensionId, as requested by the extension.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnExtensionTabCreated(CefRefPtr<CefBrowser> browser,
++                                     CefRefPtr<CefDictionaryValue> info) {}
+ #endif
+ 
+ #if CEF_API_ADDED(13700)
+--- a/cef/libcef/browser/browser_contents_delegate.cc	2026-10-26 23:01:13
++++ b/cef/libcef/browser/browser_contents_delegate.cc	2026-10-26 23:02:21
+@@ -38,6 +38,7 @@
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include "base/functional/bind.h"
++#include "cef/libcef/browser/views/external_host_mac.h"
+ #include "cef/libcef/browser/views/external_text_input.h"
+ #include "cef/libcef/browser/views/external_text_value.h"
+ #endif
+@@ -100,6 +101,7 @@
+     content::WebContents* new_contents) {
+ #if BUILDFLAG(IS_MAC)
+   external_text_input_.reset();
++  cef::external_host::InstallExtensionHooks();
+ #endif
+   WebContentsObserver::Observe(new_contents);
+ #if BUILDFLAG(IS_MAC)
+--- a/cef/libcef/browser/views/external_host_mac.h	2026-10-26 23:01:12
++++ b/cef/libcef/browser/views/external_host_mac.h	2026-10-26 23:02:21
+@@ -10,5 +10,7 @@
+               bool focused);
+ void Attach(views::Widget* widget, CefBrowserHostBase* browser);
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index);
++// Installs Chrome's extension popup and tab-creation hooks (idempotent).
++void InstallExtensionHooks();
+ }  // namespace cef::external_host
+ #endif
+--- a/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 23:01:12
++++ b/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 23:02:21
+@@ -21,6 +21,9 @@
+ #include "cef/libcef/common/api_version_util.h"
+ #include "cef/include/cef_values.h"
+ #include "mojo/public/cpp/bindings/receiver.h"
++#include "chrome/browser/extensions/external_action_origin.h"
++#include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
++#include "ui/compositor/compositor.h"
+ 
+ namespace cef::external_host {
+ namespace {
+@@ -352,6 +355,107 @@
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalFocus);
+ }  // namespace
++
++namespace {
++// The CEF browser and display handler whose page owns |contents|.
++CefRefPtr<CefDisplayHandler> DisplayHandlerFor(
++    content::WebContents* contents,
++    CefRefPtr<CefBrowserHostBase>* browser) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !contents) return nullptr;
++  *browser = CefBrowserHostBase::GetBrowserForContents(contents);
++  auto client = *browser ? (*browser)->client() : nullptr;
++  return client ? client->GetDisplayHandler() : nullptr;
++}
++
++// Remembers the popup compositor so its frame callback can be removed.
++class ExternalPopup : public content::WebContentsUserData<ExternalPopup> {
++ public:
++  gfx::AcceleratedWidget accelerated = gfx::kNullAcceleratedWidget;
++  int window_number = 0;
++ private:
++  friend class content::WebContentsUserData<ExternalPopup>;
++  explicit ExternalPopup(content::WebContents* contents)
++      : content::WebContentsUserData<ExternalPopup>(*contents) {}
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalPopup);
++
++void SendPopup(content::WebContents* popup, const char* state,
++               uint32_t context, const gfx::Size& pixels, float scale) {
++  auto* origin = extensions::ExternalActionOrigin::Get(popup);
++  auto* owner = origin ? origin->Owner(popup) : nullptr;
++  CefRefPtr<CefBrowserHostBase> browser;
++  auto handler = DisplayHandlerFor(owner, &browser);
++  if (!handler) return;
++  auto value = CefDictionaryValue::Create();
++  value->SetString("state", state);
++  value->SetString("extensionId", origin->extension_id());
++  value->SetString("token", origin->token().ToString());
++  auto* host = ExternalPopup::FromWebContents(popup);
++  value->SetInt("windowNumber", host ? host->window_number : 0);
++  if (context || std::string(state) == "frame") {
++    value->SetInt("contextId", static_cast<int>(context));
++    value->SetInt("pixelWidth", pixels.width());
++    value->SetInt("pixelHeight", pixels.height());
++    value->SetDouble("scale", scale);
++  }
++  handler->OnExtensionPopup(browser.get(), value);
++}
++
++void PopupFrame(base::WeakPtr<content::WebContents> popup, uint32_t context,
++                const gfx::Size& pixels, float scale) {
++  if (popup && !popup->IsBeingDestroyed())
++    SendPopup(popup.get(), "frame", context, pixels, scale);
++}
++
++void PopupShown(content::WebContents* popup, views::Widget* widget) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !popup || !widget) return;
++  auto* host = ExternalPopup::GetOrCreateForWebContents(popup);
++  NSWindow* window = widget->GetNativeWindow().GetNativeNSWindow();
++  host->window_number = window ? static_cast<int>(window.windowNumber) : 0;
++  if (auto* compositor = widget->GetCompositor()) {
++    host->accelerated = compositor->widget();
++    ui::AcceleratedWidgetMac::SetFrameCallback(
++        host->accelerated,
++        base::BindRepeating(&PopupFrame, popup->GetWeakPtr()));
++  }
++  SendPopup(popup, "shown", 0, gfx::Size(), 1.f);
++}
++
++void PopupClosed(content::WebContents* popup) {
++  if (!popup) return;
++  if (auto* host = ExternalPopup::FromWebContents(popup)) {
++    if (host->accelerated != gfx::kNullAcceleratedWidget) {
++      ui::AcceleratedWidgetMac::SetFrameCallback(host->accelerated, {});
++      host->accelerated = gfx::kNullAcceleratedWidget;
++    }
++  }
++  SendPopup(popup, "closed", 0, gfx::Size(), 1.f);
++}
++
++void TabCreated(content::WebContents* contents, content::WebContents* opener,
++                bool active, int index, const std::string& extension_id) {
++  CefRefPtr<CefBrowserHostBase> browser;
++  auto handler = DisplayHandlerFor(contents, &browser);
++  if (!handler) return;
++  auto opener_browser =
++      opener ? CefBrowserHostBase::GetBrowserForContents(opener) : nullptr;
++  auto value = CefDictionaryValue::Create();
++  value->SetBool("active", active);
++  value->SetInt("index", index);
++  value->SetInt("openerBrowserId",
++                opener_browser ? opener_browser->GetIdentifier() : 0);
++  value->SetString("extensionId", extension_id);
++  handler->OnExtensionTabCreated(browser.get(), value);
++}
++}  // namespace
++
++void InstallExtensionHooks() {
++  auto& hooks = extensions::GetExternalExtensionHooks();
++  hooks.popup_shown = &PopupShown;
++  hooks.popup_closed = &PopupClosed;
++  hooks.tab_created = &TabCreated;
++}
+ 
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index) {
+   auto browser = CefBrowserHostBase::FromBrowser(browser_view->GetBrowser());
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc	2026-10-26 23:01:12
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc	2026-10-26 23:02:21
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/api/tabs/tabs_api.h"
++#include "chrome/browser/extensions/external_action_origin.h"
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+@@ -2400,6 +2401,12 @@
+   }
+ 
+   content::WebContents* new_contents = result.value();
++
++  // Tell an embedder that keeps its own tab model what was asked for.
++  if (auto hook = GetExternalExtensionHooks().tab_created) {
++    hook(new_contents, opener_tab, active_.value_or(true), index_.value_or(-1),
++         extension() ? extension()->id() : std::string());
++  }
+ 
+ #if BUILDFLAG(FULL_SAFE_BROWSING)
+   tabs_internal::NotifyExtensionTelemetry(
+--- a/chrome/browser/extensions/external_action_origin.h	2026-10-26 23:01:12
++++ b/chrome/browser/extensions/external_action_origin.h	2026-10-26 23:02:21
+@@ -12,7 +12,32 @@
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents.h"
+ 
++namespace views {
++class Widget;
++}
++
+ namespace extensions {
++// Embedder hooks, set by CEF on the UI thread before any browser exists. Null
++// hooks are no-ops, so ordinary builds keep Chrome's behavior.
++struct ExternalExtensionHooks {
++  // The action popup |popup| (with an ExternalActionOrigin) was shown in
++  // |widget|, or is being destroyed.
++  void (*popup_shown)(content::WebContents* popup, views::Widget* widget) =
++      nullptr;
++  void (*popup_closed)(content::WebContents* popup) = nullptr;
++  // chrome.tabs.create made |contents| with the requested foreground state,
++  // tab strip index (-1 default) and opener tab (may be null).
++  void (*tab_created)(content::WebContents* contents,
++                      content::WebContents* opener,
++                      bool active,
++                      int index,
++                      const std::string& extension_id) = nullptr;
++};
++inline ExternalExtensionHooks& GetExternalExtensionHooks() {
++  static ExternalExtensionHooks hooks;
++  return hooks;
++}
++
+ // UI sequence only. Owned by the actual action popup WebContents. Capture at
+ // TriggerPopup, before asynchronous toolbar animation or document loading.
+ // Neither a window title nor the currently active tab can recreate this owner.
+--- a/chrome/browser/ui/views/extensions/extension_popup.cc	2026-10-26 23:01:12
++++ b/chrome/browser/ui/views/extensions/extension_popup.cc	2026-10-26 23:02:21
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/views/extensions/extension_popup.h"
++#include "cef/libcef/features/features.h"
+ #if BUILDFLAG(ENABLE_CEF)
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #endif
+@@ -143,6 +144,12 @@
+   extension_registry_observation_.Reset();
+   security_dialog_tracker_observation_.Reset();
+   extension_view_ = nullptr;
++#if BUILDFLAG(ENABLE_CEF)
++  if (auto hook = extensions::GetExternalExtensionHooks().popup_closed;
++      hook && host_ && external_action_origin()) {
++    hook(host_->host_contents());
++  }
++#endif
+   host_.reset();
+   browser_ = nullptr;
+ }
+@@ -345,6 +352,12 @@
+ 
+   GetWidget()->Show();
+   withheld_from_view_.reset();
++#if BUILDFLAG(ENABLE_CEF)
++  if (auto hook = extensions::GetExternalExtensionHooks().popup_shown;
++      hook && external_action_origin()) {
++    hook(host_->host_contents(), GetWidget());
++  }
++#endif
+ 
+   // Focus on the host contents when the bubble is first shown.
+   host_->host_contents()->Focus();

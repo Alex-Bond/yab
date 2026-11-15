@@ -1,0 +1,320 @@
+--- a/cef/include/views/cef_window.h
++++ b/cef/include/views/cef_window.h
+@@ -47,6 +47,7 @@
+ 
+ // Experimental source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_EXTERNAL_HOST_VERSION 1
++#define CEF_YAB_EXTERNAL_FOCUS_VERSION 1
+ 
+ class CefBrowserView;
+ class CefView;
+@@ -84,6 +85,17 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual bool EnableExternalHosting() = 0;
++
++  ///
++  /// Delegate focus to an externally hosted browser view in this window.
++  /// The caller owns the real key window and must clear focus on hide, detach
++  /// and key-window loss. Returns false for foreign views or unsupported hosts.
++  /// Does not activate the producer application. Full text-input state is a
++  /// separate contract; this method alone does not implement embedder IME.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetExternalFocus(CefRefPtr<CefBrowserView> browser_view,
++                                bool focused) = 0;
+ #endif
+ 
+   ///
+--- a/cef/libcef/browser/views/external_host_mac.h
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -1,10 +1,13 @@
+ // Yab's explicit macOS producer-window bridge. Include-safe from C++.
+ #ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
+ #define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
++#include "cef/include/views/cef_browser_view.h"
+ class CefBrowserHostBase;
+ namespace views { class Widget; }
+ namespace cef::external_host {
+ bool Enable(views::Widget* widget);
++bool SetFocus(views::Widget* widget, CefRefPtr<CefBrowserView> browser_view,
++              bool focused);
+ void Attach(views::Widget* widget, CefBrowserHostBase* browser);
+ }  // namespace cef::external_host
+ #endif
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -2,6 +2,8 @@
+ #include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
+ #include "ui/views/widget/widget.h"
+ #include "cef/libcef/browser/browser_host_base.h"
++#include "content/browser/renderer_host/render_widget_host_view_mac.h"
++#include "content/public/browser/web_contents.h"
+ #include "content/browser/web_contents/web_contents_impl.h"
+ #include "content/browser/web_contents/web_contents_view_mac.h"
+ #include "content/public/browser/web_contents_observer.h"
+@@ -69,4 +71,19 @@
+     owner->Reset();
+   }
+ }
++bool SetFocus(views::Widget* widget, CefRefPtr<CefBrowserView> browser_view,
++              bool focused) {
++  auto browser = CefBrowserHostBase::FromBrowser(browser_view->GetBrowser());
++  auto* contents = browser ? browser->GetWebContents() : nullptr;
++  auto* view = contents ? contents->GetRenderWidgetHostView() : nullptr;
++  auto* host = widget ? views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
++                            widget->GetNativeWindow()) : nullptr;
++  if (!view || !host) return false;
++  auto* base_view = static_cast<content::RenderWidgetHostViewBase*>(view);
++  if (base_view->IsRenderWidgetHostViewChildFrame() ||
++      !host->SetExternalHostFocus(focused)) return false;
++  static_cast<content::RenderWidgetHostViewMac*>(view)->SetExternalHostFocus(focused);
++  if (focused) browser_view->RequestFocus();
++  return true;
++}
+ }  // namespace cef::external_host
+--- a/cef/libcef/browser/views/window_impl.cc
++++ b/cef/libcef/browser/views/window_impl.cc
+@@ -160,7 +160,20 @@
+   return false;
+ #endif
+ }
+ 
++bool CefWindowImpl::SetExternalFocus(CefRefPtr<CefBrowserView> browser_view,
++                                      bool focused) {
++  CEF_REQUIRE_VALID_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  if (!widget_ || !browser_view) return false;
++  auto* view_impl = static_cast<CefBrowserViewImpl*>(browser_view.get());
++  if (view_impl->cef_window_impl() != this) return false;
++  return cef::external_host::SetFocus(widget_, browser_view, focused);
++#else
++  return false;
++#endif
++}
++
+ void CefWindowImpl::Show() {
+   CEF_REQUIRE_VALID_RETURN_VOID();
+   if (widget_) {
+--- a/cef/libcef/browser/views/window_impl.h
++++ b/cef/libcef/browser/views/window_impl.h
+@@ -46,6 +46,8 @@
+   // CefWindow methods:
+   void Show() override;
+   bool EnableExternalHosting() override;
++  bool SetExternalFocus(CefRefPtr<CefBrowserView> browser_view,
++                         bool focused) override;
+   void ShowAsBrowserModalDialog(
+       CefRefPtr<CefBrowserView> browser_view) override;
+   void Hide() override;
+--- a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.h
++++ b/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.h
+@@ -68,6 +68,7 @@
+   void SetCALayerParams(gfx::CALayerParams ca_layer_params) override;
+   void SetBackgroundColor(SkColor color) override;
+   void SetVisible(bool visible) override;
++  void SetExternalHostFocus(bool focused) override;
+   void SetTooltipText(const std::u16string& display_text) override;
+   void SetTextInputState(ui::TextInputType text_input_type,
+                          uint32_t flags) override;
+--- a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
++++ b/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
+@@ -176,6 +176,10 @@
+       skia::CGColorCreateFromSkColor(color).get();
+ }
+ 
++void RenderWidgetHostNSViewBridge::SetExternalHostFocus(bool focused) {
++  [cocoa_view_ setExternalHostFocus:focused];
++}
++
+ void RenderWidgetHostNSViewBridge::SetVisible(bool visible) {
+   ScopedCAActionDisabler disabler;
+   cocoa_view_.hidden = !visible;
+--- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.h
++++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.h
+@@ -68,6 +68,7 @@
+ - (void)magnifyWithEvent:(NSEvent*)event isSyntheticallyInjected:(BOOL)injected;
+ 
+ - (void)setCanBeKeyView:(BOOL)can;
++- (void)setExternalHostFocus:(BOOL)focused;
+ - (void)setCloseOnDeactivate:(BOOL)b;
+ // Indicate that the host was destroyed and can't be called back into.
+ - (void)setHostDisconnected;
+--- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
++++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
+@@ -273,6 +273,7 @@
+   BOOL _willInvokeContextMenuWithEmptySelection;
+   BOOL _textSelectionChangedForContextualMenu;
+   BOOL _canBeKeyView;
++  std::optional<bool> _externalHostFocus;
+   BOOL _closeOnDeactivate;
+   std::unique_ptr<content::RenderWidgetHostViewMacEditCommandHelper>
+       _editCommandHelper;
+@@ -1027,7 +1028,8 @@
+ 
+     // If events are accepted only in active window but this window is inactive,
+     // ignore this event. This is the default behavior.
+-    bool inActiveWindow = window.mainWindow || window.keyWindow;
++    bool inActiveWindow = _externalHostFocus.value_or(
++        window.mainWindow || window.keyWindow);
+     if (option == AcceptMouseEvents::kWhenInActiveWindow && !inActiveWindow) {
+       return YES;
+     }
+@@ -1035,7 +1037,8 @@
+     // If events are accepted in active app but the app in active, ignore this
+     // event. This only happens if the content embedder overrides the default
+     // behavior.
+-    bool inActiveApp = NSApplication.sharedApplication.active;
++    bool inActiveApp = _externalHostFocus.value_or(
++        NSApplication.sharedApplication.active);
+     if (option == AcceptMouseEvents::kWhenInActiveApp && !inActiveApp) {
+       return YES;
+     }
+@@ -1884,8 +1887,13 @@
+   return self.window;
+ }
+ 
++- (void)setExternalHostFocus:(BOOL)focused {
++  _externalHostFocus = bool(focused);
++  if (!focused) [self cancelComposition];
++}
++
+ - (BOOL)isKeyTrackingWindowKey {
+-  return self.keyTrackingWindow.isKeyWindow;
++  return _externalHostFocus.value_or(self.keyTrackingWindow.isKeyWindow);
+ }
+ 
+ - (void)viewWillMoveToWindow:(NSWindow*)newWindow {
+@@ -2060,6 +2068,7 @@
+ }
+ 
+ - (void)windowDidBecomeKey:(NSNotification*)notification {
++  if (_externalHostFocus.has_value()) return;
+   DCHECK([self keyTrackingWindow]);
+   DCHECK_EQ([self keyTrackingWindow], [notification object]);
+   [self performDeferredResignKeyWindow];
+@@ -2071,6 +2080,7 @@
+ }
+ 
+ - (void)windowDidResignKey:(NSNotification*)notification {
++  if (_externalHostFocus.has_value()) return;
+   DCHECK([self keyTrackingWindow]);
+   DCHECK_EQ([self keyTrackingWindow], [notification object]);
+ 
+--- a/content/browser/renderer_host/render_widget_host_view_mac.h
++++ b/content/browser/renderer_host/render_widget_host_view_mac.h
+@@ -384,6 +384,8 @@
+   void RequestShutdown() override;
+   void OnFirstResponderChanged(bool is_first_responder) override;
+   void OnWindowIsKeyChanged(bool is_key) override;
++  // Explicit remote embedder state. Never makes the producer window key.
++  void SetExternalHostFocus(bool focused);
+   void OnBoundsInWindowChanged(const gfx::Rect& view_bounds_in_window_dip,
+                                bool attached_to_window) override;
+   void OnWindowFrameInScreenChanged(
+@@ -656,6 +658,7 @@
+ 
+   // Whether or not the NSView's NSWindow is the key window.
+   bool is_window_key_ = false;
++  std::optional<bool> external_host_focus_;
+ 
+   // Whether or not the NSView is first responder.
+   bool is_first_responder_ = false;
+--- a/content/browser/renderer_host/render_widget_host_view_mac.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
+@@ -555,6 +555,8 @@
+ }
+ 
+ void RenderWidgetHostViewMac::Hide() {
++  if (external_host_focus_.has_value())
++    SetExternalHostFocus(false);
+   is_visible_ = false;
+   ns_view_->SetVisible(is_visible_);
+   browser_compositor_->SetViewVisible(is_visible_);
+@@ -1999,6 +1999,7 @@
+ }
+ 
+ void RenderWidgetHostViewMac::OnFirstResponderChanged(bool is_first_responder) {
++  is_first_responder = external_host_focus_.value_or(is_first_responder);
+   if (destroy_pending()) {
+     return;
+   }
+@@ -2043,7 +2044,23 @@
+   }
+ }
+ 
++void RenderWidgetHostViewMac::SetExternalHostFocus(bool focused) {
++  external_host_focus_ = focused;
++  ns_view_->SetExternalHostFocus(focused);
++  // Ignore asynchronous physical-window notifications after the opt-in.
++  // The explicit first-responder path also updates the focused child widget.
++  if (focused) {
++    ns_view_->MakeFirstResponder();
++    OnFirstResponderChanged(true);
++    OnWindowIsKeyChanged(true);
++  } else {
++    OnWindowIsKeyChanged(false);
++    OnFirstResponderChanged(false);
++  }
++}
++
+ void RenderWidgetHostViewMac::OnWindowIsKeyChanged(bool is_key) {
++  is_key = external_host_focus_.value_or(is_key);
+   if (is_window_key_ == is_key)
+     return;
+   is_window_key_ = is_key;
+--- a/content/common/render_widget_host_ns_view.mojom
++++ b/content/common/render_widget_host_ns_view.mojom
+@@ -70,6 +70,9 @@
+ 
+   // Call the -[NSView setHidden:] method.
+   SetVisible(bool visible);
++
++  // Per-view embedder focus. Does not activate or order an NSWindow.
++  SetExternalHostFocus(bool focused);
+ 
+   // Call the -[NSView setToolTipAtMousePoint] method.
+   SetTooltipText(mojo_base.mojom.String16 display_text);
+--- a/ui/views/cocoa/native_widget_mac_ns_window_host.h
++++ b/ui/views/cocoa/native_widget_mac_ns_window_host.h
+@@ -279,6 +279,7 @@
+   // belongs to the remote embedder. Remote app-shim windows are unsupported.
+   bool EnableExternalHosting();
+   bool externally_hosted() const { return externally_hosted_; }
++  bool SetExternalHostFocus(bool focused);
+ 
+   void SetVisibilityState(remote_cocoa::mojom::WindowVisibilityState new_state);
+ 
+--- a/ui/views/cocoa/native_widget_mac_ns_window_host.mm
++++ b/ui/views/cocoa/native_widget_mac_ns_window_host.mm
+@@ -896,9 +896,22 @@
+   return true;
+ }
+ 
++bool NativeWidgetMacNSWindowHost::SetExternalHostFocus(bool focused) {
++  if (!externally_hosted_ || (focused && !is_visible_)) return false;
++  if (is_window_key_ == focused) return true;
++  accessibility_focus_overrider_.SetWindowIsKey(focused);
++  is_window_key_ = focused;
++  native_widget_mac_->OnWindowKeyStatusChanged(focused, focused);
++  return true;
++}
++
+ void NativeWidgetMacNSWindowHost::SetVisibilityState(
+     remote_cocoa::mojom::WindowVisibilityState new_state) {
+   if (externally_hosted_) {
++    if (new_state == WindowVisibilityState::kHideWindow ||
++        new_state == WindowVisibilityState::kMiniaturizeWindow) {
++      SetExternalHostFocus(false);
++    }
+     // Never show, activate or miniaturize the producer's native window.
+     UpdateVisibilityForEmbedder(
+         new_state != WindowVisibilityState::kHideWindow &&
+@@ -1631,6 +1644,7 @@
+     bool is_key,
+     bool is_content_first_responder,
+     bool full_keyboard_access_enabled) {
++  if (externally_hosted_) return;
+   if (WidgetActivationDelegate::Get()) {
+     // Do not propagate the native activation state.
+     return;

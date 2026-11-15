@@ -1,0 +1,11 @@
+{
+  "manifest_version": 2,
+  "name": "Yab page integration",
+  "version": "1.0.8",
+  "browser_specific_settings": {"gecko": {"id": "yab-native@browser.local"}},
+  "permissions": ["nativeMessaging", "nativeMessagingFromContent", "geckoViewAddons", "<all_urls>"],
+  "content_scripts": [
+    {"matches": ["<all_urls>"], "js": ["history-touch.js"], "run_at": "document_start", "all_frames": false},
+    {"matches": ["<all_urls>"], "js": ["page.js"], "run_at": "document_idle", "all_frames": false}
+  ]
+}

@@ -1,0 +1,707 @@
+{
+  "name": "mira",
+  "owner": "Mira Lindqvist",
+  "space": "work",
+  "spaces": [
+    {
+      "id": "personal",
+      "name": "Personal",
+      "emoji": "🏠",
+      "tint": [
+        238,
+        233,
+        226
+      ],
+      "pins": [
+        {
+          "id": "personal-pin-youtube",
+          "title": "YouTube",
+          "site": "YouTube",
+          "icon": "youtube",
+          "url": "youtube.com",
+          "page": "youtube-home",
+          "host": "youtube.com"
+        },
+        {
+          "id": "personal-pin-drift",
+          "title": "Drift",
+          "site": "Drift",
+          "icon": "drift",
+          "url": "drift.com",
+          "page": "drift",
+          "host": "drift.com"
+        },
+        {
+          "id": "personal-pin-nordbutik",
+          "title": "Nordbutik",
+          "site": "Nordbutik",
+          "icon": "nordbutik",
+          "url": "nordbutik.se",
+          "host": "nordbutik.se"
+        },
+        {
+          "id": "personal-pin-mail",
+          "title": "Mail",
+          "site": "Mail",
+          "icon": "mail",
+          "badge": 7
+        }
+      ],
+      "kept": [
+        {
+          "folder": {
+            "id": "personal-reading",
+            "name": "Reading",
+            "open": false,
+            "tabs": [
+              {
+                "id": "personal-paul",
+                "title": "How to Do Great Work",
+                "site": "paulgraham.com",
+                "icon": "paul",
+                "url": "paulgraham.com/greatwork.html",
+                "page": "paulgraham",
+                "host": "paulgraham.com"
+              },
+              {
+                "id": "personal-rams",
+                "title": "Dieter Rams · Wikipedia",
+                "site": "Wikipedia",
+                "icon": "wiki",
+                "url": "en.wikipedia.org/wiki/Dieter_Rams",
+                "page": "wikipedia-rams",
+                "host": "wikipedia.org"
+              },
+              {
+                "id": "personal-nng",
+                "title": "10 Usability Heuristics",
+                "site": "NN/g",
+                "icon": "nng",
+                "url": "nngroup.com/articles/ten-usability-heuristics",
+                "page": "nngroup",
+                "host": "nngroup.com"
+              }
+            ]
+          }
+        }
+      ],
+      "today": [
+        {
+          "id": "personal-throw",
+          "title": "Fjord linen throw · Nordbutik",
+          "site": "Nordbutik",
+          "icon": "nordbutik",
+          "url": "nordbutik.se/fjord-linen-throw",
+          "page": "nordbutik",
+          "host": "nordbutik.se"
+        },
+        {
+          "id": "personal-yt-nn",
+          "title": "But what is a neural network? · YouTube",
+          "site": "YouTube",
+          "icon": "youtube",
+          "url": "youtube.com/watch?v=aircAruvnKk",
+          "page": "youtube",
+          "host": "youtube.com",
+          "dark": true
+        },
+        {
+          "id": "personal-yt-llm",
+          "title": "[1hr Talk] Intro to Large Language Models",
+          "site": "YouTube",
+          "icon": "youtube",
+          "url": "youtube.com/watch?v=zjkBMFhNj_g",
+          "page": "youtube-llm",
+          "host": "youtube.com"
+        },
+        {
+          "id": "personal-verge",
+          "title": "The Verge",
+          "site": "The Verge",
+          "icon": "verge",
+          "url": "theverge.com",
+          "page": "verge",
+          "host": "theverge.com"
+        }
+      ],
+      "current": "personal-throw"
+    },
+    {
+      "id": "work",
+      "name": "Work",
+      "emoji": "💼",
+      "tint": [
+        226,
+        233,
+        244
+      ],
+      "pins": [
+        {
+          "id": "work-pin-daybook",
+          "title": "Daybook",
+          "site": "Daybook",
+          "icon": "daybook",
+          "url": "daybook.app",
+          "page": "daybook",
+          "host": "daybook.app"
+        },
+        {
+          "id": "work-pin-linear",
+          "title": "My issues · Linear",
+          "site": "Linear",
+          "icon": "linear",
+          "url": "linear.app/tern/view/my-issues",
+          "page": "linear-issues",
+          "host": "linear.app"
+        },
+        {
+          "id": "work-pin-slack",
+          "title": "#design · Slack",
+          "site": "Slack",
+          "icon": "slack",
+          "url": "app.slack.com/client/T0TERN/C0DESIGN",
+          "page": "slack",
+          "host": "slack.com"
+        },
+        {
+          "id": "work-pin-figma",
+          "title": "Recents · Figma",
+          "site": "Figma",
+          "icon": "figma",
+          "url": "figma.com/files/recents",
+          "page": "figma-recents",
+          "host": "figma.com"
+        },
+        {
+          "id": "work-pin-mail",
+          "title": "Mail",
+          "site": "Mail",
+          "icon": "mail",
+          "badge": 7
+        }
+      ],
+      "kept": [
+        {
+          "folder": {
+            "id": "work-onboarding",
+            "name": "Onboarding v3",
+            "open": true,
+            "tabs": [
+              {
+                "id": "work-figma-onb",
+                "title": "Onboarding v3 · Welcome screens",
+                "site": "Figma",
+                "icon": "figma",
+                "url": "figma.com/design/xK29fLm8/Onboarding-v3",
+                "page": "figma",
+                "host": "figma.com"
+              },
+              {
+                "id": "work-onb-spec",
+                "title": "Onboarding v3 spec · Paper",
+                "site": "Paper",
+                "icon": "paper",
+                "url": "paper.so/tern/onboarding-v3-spec",
+                "page": "paper-spec",
+                "host": "paper.so"
+              },
+              {
+                "id": "work-onb-funnel",
+                "title": "Activation funnel · Orbit",
+                "site": "Orbit",
+                "icon": "orbit",
+                "url": "orbit.com/tern/funnels/activation",
+                "page": "orbit",
+                "host": "orbit.com"
+              }
+            ]
+          }
+        },
+        {
+          "tab": {
+            "id": "work-launch-notes",
+            "title": "Launch notes · Tern 2.0 · Paper",
+            "site": "Paper",
+            "icon": "paper",
+            "url": "paper.so/tern/launch-notes",
+            "page": "paper",
+            "host": "paper.so"
+          }
+        },
+        {
+          "tab": {
+            "id": "work-ledger",
+            "title": "Overview · Ledger",
+            "site": "Ledger",
+            "icon": "ledger",
+            "url": "ledger.app/tern/overview",
+            "page": "ledger",
+            "host": "ledger.app"
+          }
+        }
+      ],
+      "today": [
+        {
+          "id": "work-hn",
+          "title": "Hacker News",
+          "site": "Hacker News",
+          "icon": "hn",
+          "url": "news.ycombinator.com",
+          "page": "hn",
+          "host": "news.ycombinator.com"
+        },
+        {
+          "id": "work-gh-pr",
+          "title": "feat(editor): wrap text at 800 and keep it clear of the side panels",
+          "site": "GitHub",
+          "icon": "github",
+          "url": "github.com/excalidraw/excalidraw/pull/12192",
+          "page": "github",
+          "host": "github.com"
+        },
+        {
+          "id": "work-tern-local",
+          "title": "Tern · Calm scheduling for busy teams",
+          "site": "localhost",
+          "icon": "tern",
+          "url": "localhost:5173",
+          "page": "tern",
+          "host": "localhost",
+          "port": ":5173",
+          "onMac": true
+        },
+        {
+          "id": "work-lumen",
+          "title": "Design Systems Night · Stockholm",
+          "site": "Lumen",
+          "icon": "lumen",
+          "url": "lumen.events/e/design-systems-night",
+          "page": "lumen",
+          "host": "lumen.events"
+        },
+        {
+          "id": "work-linear-method",
+          "title": "The Linear Method",
+          "site": "Linear",
+          "icon": "linearm",
+          "url": "linear.app/method",
+          "page": "linear",
+          "host": "linear.app",
+          "dark": true
+        }
+      ],
+      "current": "work-figma-onb"
+    },
+    {
+      "id": "lisbon",
+      "name": "Lisbon",
+      "emoji": "✈️",
+      "tint": [
+        240,
+        233,
+        216
+      ],
+      "pins": [
+        {
+          "id": "lisbon-pin-google",
+          "title": "Google",
+          "site": "Google",
+          "icon": "google",
+          "url": "google.com",
+          "page": "google-home",
+          "host": "google.com"
+        },
+        {
+          "id": "lisbon-pin-mail",
+          "title": "Mail",
+          "site": "Mail",
+          "icon": "mail",
+          "badge": 7
+        }
+      ],
+      "kept": [
+        {
+          "folder": {
+            "id": "lisbon-trip",
+            "name": "Lisbon trip",
+            "open": true,
+            "tabs": [
+              {
+                "id": "lisbon-flights",
+                "title": "Stockholm to Lisbon · Flights",
+                "site": "Google Flights",
+                "icon": "google",
+                "url": "google.com/travel/flights?q=ARN-LIS",
+                "page": "flights",
+                "host": "google.com"
+              },
+              {
+                "id": "lisbon-alfama-stays",
+                "title": "Alfama · Stays",
+                "site": "Airbnb",
+                "icon": "airbnb",
+                "url": "airbnb.com/s/Alfama--Lisbon",
+                "page": "airbnb",
+                "host": "airbnb.com"
+              },
+              {
+                "id": "lisbon-timeout",
+                "title": "The best things to do in Lisbon",
+                "site": "Time Out",
+                "icon": "timeout",
+                "url": "timeout.com/lisbon/things-to-do",
+                "page": "timeout",
+                "host": "timeout.com"
+              }
+            ]
+          }
+        }
+      ],
+      "today": [
+        {
+          "id": "lisbon-wiki",
+          "title": "Lisbon · Wikipedia",
+          "site": "Wikipedia",
+          "icon": "wiki",
+          "url": "en.wikipedia.org/wiki/Lisbon",
+          "page": "wikipedia-lisbon",
+          "host": "wikipedia.org"
+        },
+        {
+          "id": "lisbon-alfama-wiki",
+          "title": "Alfama · Wikipedia",
+          "site": "Wikipedia",
+          "icon": "wiki",
+          "url": "en.wikipedia.org/wiki/Alfama",
+          "page": "wikipedia-alfama",
+          "host": "wikipedia.org"
+        }
+      ],
+      "current": "lisbon-flights"
+    }
+  ],
+  "taskDefinitions": [
+    {
+      "id": "lumen",
+      "name": "Design Systems Night",
+      "icon": "lumen",
+      "ask": "Request a spot for me and add it to Daybook",
+      "steps": [
+        {
+          "icon": "lumen",
+          "run": "Opening lumen.events",
+          "done": "Opened lumen.events",
+          "island": "Lumen"
+        },
+        {
+          "icon": "lumen",
+          "run": "Requesting a spot for Thu 18:00",
+          "done": "Requested a spot for Thu 18:00",
+          "island": "Requesting"
+        },
+        {
+          "icon": "daybook",
+          "run": "Adding it to Daybook",
+          "done": "Added it to Daybook",
+          "island": "Daybook"
+        }
+      ],
+      "result": "Spot requested · in Daybook",
+      "resultLong": "Requested a spot at Design Systems Night, Thu Oct 8 at 18:00 in Södermalm. Lumen confirms by mail within a day. It’s in Daybook with the address.",
+      "tabs": [
+        {
+          "icon": "lumen",
+          "title": "Design Systems Night"
+        },
+        {
+          "icon": "daybook",
+          "title": "Daybook · Thu, Oct 8"
+        }
+      ]
+    },
+    {
+      "id": "lisbon",
+      "name": "Lisbon flights",
+      "icon": "tap",
+      "ask": "Book the TAP 18:35 to Lisbon, back on the 17th, window seat",
+      "steps": [
+        {
+          "icon": "google",
+          "run": "Opening google.com/travel/flights",
+          "done": "Opened google.com/travel/flights",
+          "island": "Flights"
+        },
+        {
+          "icon": "google",
+          "run": "Comparing 4 direct flights",
+          "done": "Compared 4 direct flights",
+          "island": "4 direct",
+          "sub": "TAP €238 · SAS €251 · KLM €212 with a stop"
+        },
+        {
+          "icon": "tap",
+          "run": "Signing in to flytap.com",
+          "done": "Signed in to flytap.com",
+          "island": "Signing in",
+          "needs": "code"
+        },
+        {
+          "icon": "tap",
+          "run": "Choosing seat 14A, a window",
+          "done": "Chose seat 14A, a window",
+          "island": "Seat 14A",
+          "sub": "Window, from your notes",
+          "needs": "yes"
+        }
+      ],
+      "result": "Booked · TAP, Oct 13 18:35, seat 14A",
+      "resultLong": "TAP Air Portugal, Tue Oct 13 at 18:35 from Arlanda, back Sat Oct 17 at 10:40. Seat 14A by the window. €238 on your Visa, booking <b>TQ4H2P</b>. The confirmation is in Mail and the flight is in Daybook.",
+      "tabs": [
+        {
+          "icon": "google",
+          "title": "Flights · ARN → LIS"
+        },
+        {
+          "icon": "tap",
+          "title": "TAP · Seats"
+        },
+        {
+          "icon": "tap",
+          "title": "TAP · Payment"
+        }
+      ],
+      "yes": "Pay €238 to TAP?",
+      "code": "Needs the code TAP sent you",
+      "failure": "Couldn’t open flytap.com · the page didn’t load",
+      "paying": "Pressing Pay on flytap.com"
+    },
+    {
+      "id": "anna",
+      "name": "Replies to Anna",
+      "icon": "paper",
+      "ask": "Draft replies to Anna’s three comments in my voice. Don’t post them",
+      "steps": [
+        {
+          "icon": "paper",
+          "run": "Reading Anna’s 3 comments",
+          "done": "Read Anna’s 3 comments",
+          "island": "Reading"
+        },
+        {
+          "icon": "paper",
+          "run": "Drafting replies in your voice",
+          "done": "Drafted 3 replies",
+          "island": "Drafting"
+        }
+      ],
+      "result": "3 replies drafted · not posted",
+      "resultLong": "Three replies are drafted under Anna’s comments in Paper, not posted. Open Launch notes to read them; Post asks you first.",
+      "tabs": [
+        {
+          "icon": "paper",
+          "title": "Launch notes · Tern 2.0"
+        }
+      ]
+    }
+  ],
+  "tasks": [],
+  "chats": [
+    {
+      "id": "plan",
+      "title": "Tern 2.0 launch plan",
+      "pinned": true,
+      "day": "today",
+      "time": "Mon",
+      "by": "claude",
+      "messages": [
+        {
+          "role": "you",
+          "text": "help me plan the Tern 2.0 launch, three weeks from today"
+        },
+        {
+          "role": "answer",
+          "text": "Three dates. <b>Oct 12</b>: the beta goes to the 40 teams on the waitlist. <b>Oct 19</b>: launch notes final, with Anna’s screens. <b>Oct 21</b>: launch, the changelog at noon.",
+          "by": "claude"
+        },
+        {
+          "role": "you",
+          "text": "what can slip?"
+        },
+        {
+          "role": "answer",
+          "text": "The invite flow. It blocks the beta, and Jonas has it next to the billing work. If it slips past Oct 9, move the beta, not the launch.",
+          "by": "claude"
+        }
+      ]
+    },
+    {
+      "id": "lisbon",
+      "title": "Lisbon flights",
+      "task": "lisbon",
+      "day": "today",
+      "time": "18:31"
+    },
+    {
+      "id": "lumen",
+      "title": "Design Systems Night",
+      "task": "lumen",
+      "day": "today",
+      "time": "17:58",
+      "unread": true
+    },
+    {
+      "id": "cafe",
+      "title": "Quiet cafés near Mariatorget",
+      "day": "today",
+      "time": "12:10",
+      "by": "claude",
+      "messages": [
+        {
+          "role": "you",
+          "text": "a quiet café near mariatorget with a big table, open before 8"
+        },
+        {
+          "role": "answer",
+          "text": "Kaffe Söder on Hornsgatan opens at 7:30 and has one long table by the window. Bönor & Bröd opens at 8, quieter, with small tables only.",
+          "by": "claude"
+        }
+      ]
+    },
+    {
+      "id": "grinder",
+      "title": "Espresso grinders under $300",
+      "day": "yesterday",
+      "time": "21:40",
+      "by": "claude",
+      "taskLike": true,
+      "messages": [
+        {
+          "role": "you",
+          "text": "find the best espresso grinder under $300 on 10 sites"
+        },
+        {
+          "role": "pick",
+          "by": "claude",
+          "pick": {
+            "head": "Baratza Encore ESP",
+            "why": "The only one under $200 that grinds fine enough for espresso and still does pour-over. 40 steps, and quiet.",
+            "rows": [
+              [
+                "Baratza Encore ESP",
+                "$199",
+                "baratza.com"
+              ],
+              [
+                "Fellow Opus",
+                "$195",
+                "fellowproducts.com"
+              ],
+              [
+                "DF54",
+                "$249",
+                "turinlife.com"
+              ]
+            ],
+            "foot": "10 checked · 2 skipped: one sold out, one asked for a sign-in"
+          }
+        }
+      ]
+    },
+    {
+      "id": "crdt",
+      "title": "CRDTs, simply",
+      "day": "yesterday",
+      "time": "09:15",
+      "by": "iphone",
+      "messages": [
+        {
+          "role": "you",
+          "text": "explain crdts simply"
+        },
+        {
+          "role": "answer",
+          "text": "Two people edit the same list offline. Each change carries enough to be merged in any order, so when the copies meet they agree without asking who was first.",
+          "by": "iphone"
+        }
+      ]
+    },
+    {
+      "id": "export",
+      "title": "Ledger export to CSV",
+      "day": "earlier",
+      "time": "Sat",
+      "by": "claude",
+      "messages": [
+        {
+          "role": "you",
+          "text": "how do I export ledger to csv for the accountant?"
+        },
+        {
+          "role": "answer",
+          "text": "Settings › Data › Export. Pick a range, CSV, and One file per account. Your accountant asked for September, so Sep 1 to 30.",
+          "by": "claude"
+        }
+      ]
+    },
+    {
+      "id": "weekend",
+      "title": "Stockholm weekend ideas",
+      "day": "earlier",
+      "time": "Fri",
+      "by": "claude",
+      "messages": [
+        {
+          "role": "you",
+          "text": "ideas for a stockholm weekend with friends visiting"
+        },
+        {
+          "role": "answer",
+          "text": "Friday: a late evening at Fotografiska. Saturday: the ferry to Vaxholm, lunch by the fortress. Sunday: a slow walk around Djurgården.",
+          "by": "claude"
+        }
+      ]
+    },
+    {
+      "id": "arch-kitchen",
+      "title": "Kitchen renovation quotes",
+      "archived": true,
+      "day": "earlier",
+      "time": "Aug 14",
+      "by": "claude",
+      "messages": [
+        {
+          "role": "you",
+          "text": "compare the three kitchen quotes"
+        },
+        {
+          "role": "answer",
+          "text": "Nordkök is the cheapest by €1,900 but leaves out the worktop. With it, Hemma is cheaper and starts two weeks sooner.",
+          "by": "claude"
+        }
+      ]
+    },
+    {
+      "id": "arch-berlin",
+      "title": "Berlin in March",
+      "archived": true,
+      "day": "earlier",
+      "time": "Jul 2",
+      "by": "claude",
+      "messages": [
+        {
+          "role": "you",
+          "text": "a weekend in berlin in march with good museums"
+        },
+        {
+          "role": "answer",
+          "text": "Friday: the Neue Nationalgalerie until 20:00. Saturday: Museum Island, the Pergamon panorama first.",
+          "by": "claude"
+        }
+      ]
+    }
+  ],
+  "mac": {
+    "name": "MacBook Pro",
+    "asleep": false
+  }
+}

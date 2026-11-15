@@ -1,0 +1,166 @@
+--- a/cef/libcef/browser/views/external_host_mac.h
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -1,8 +1,10 @@
+ // Yab's explicit macOS producer-window bridge. Include-safe from C++.
+ #ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
+ #define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
++class CefBrowserHostBase;
+ namespace views { class Widget; }
+ namespace cef::external_host {
+ bool Enable(views::Widget* widget);
++void Attach(views::Widget* widget, CefBrowserHostBase* browser);
+ }  // namespace cef::external_host
+ #endif
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -1,6 +1,13 @@
+ #include "cef/libcef/browser/views/external_host_mac.h"
+ #include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
+ #include "ui/views/widget/widget.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/browser/web_contents/web_contents_view_mac.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "base/scoped_observation.h"
++#include "ui/views/widget/widget_observer.h"
+ 
+ namespace cef::external_host {
+ bool Enable(views::Widget* widget) {
+@@ -8,4 +15,58 @@
+                             widget->GetNativeWindow()) : nullptr;
+   return host && host->EnableExternalHosting();
+ }
++namespace {
++class ExternalVisibility
++    : public content::WebContentsObserver,
++      public views::WidgetObserver,
++      public content::WebContentsUserData<ExternalVisibility> {
++ public:
++  void Bind(views::Widget* widget) {
++    observation_.Reset();
++    observation_.Observe(widget);
++    Publish(widget->IsVisible());
++  }
++  void Reset() {
++    observation_.Reset();
++    Publish(std::nullopt);
++  }
++  void OnWidgetVisibilityChanged(views::Widget*, bool visible) override {
++    Publish(visible);
++  }
++  void OnWidgetDestroying(views::Widget*) override {
++    observation_.Reset();
++    Publish(false);
++  }
++  void WebContentsDestroyed() override {
++    observation_.Reset();
++    Observe(nullptr);
++  }
++ private:
++  friend class content::WebContentsUserData<ExternalVisibility>;
++  explicit ExternalVisibility(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<ExternalVisibility>(*contents) {}
++  void Publish(std::optional<bool> visible) {
++    if (!web_contents() || web_contents()->IsBeingDestroyed()) return;
++    auto* view = static_cast<content::WebContentsImpl*>(web_contents())->GetView();
++    if (view)
++      static_cast<content::WebContentsViewMac*>(view)->SetExternalVisibility(visible);
++  }
++  base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalVisibility);
++}  // namespace
++
++void Attach(views::Widget* widget, CefBrowserHostBase* browser) {
++  auto* contents = browser ? browser->GetWebContents() : nullptr;
++  if (!widget || !contents) return;
++  auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
++      widget->GetNativeWindow());
++  if (host && host->externally_hosted()) {
++    ExternalVisibility::GetOrCreateForWebContents(contents)->Bind(widget);
++  } else if (auto* owner = ExternalVisibility::FromWebContents(contents)) {
++    owner->Reset();
++  }
++}
+ }  // namespace cef::external_host
+--- a/content/browser/web_contents/web_contents_view_mac.h
++++ b/content/browser/web_contents/web_contents_view_mac.h
+@@ -9,6 +9,7 @@
+ 
+ #include <list>
+ #include <memory>
++#include <optional>
+ #include <string>
+ #include <vector>
+ 
+@@ -66,6 +67,10 @@
+   WebContentsViewMac& operator=(const WebContentsViewMac&) = delete;
+ 
+   ~WebContentsViewMac() override;
++
++  // Explicit remote owner visibility, independent of the producer NSWindow.
++  // nullopt restores native notifications. Never affects other WebContents.
++  void SetExternalVisibility(std::optional<bool> visible);
+ 
+   // WebContentsView implementation --------------------------------------------
+   gfx::NativeView GetNativeView() const override;
+@@ -212,6 +217,9 @@
+ 
+   // The WebContentsImpl whose contents we display.
+   raw_ptr<WebContentsImpl> web_contents_;
++  std::optional<bool> external_visibility_;
++  remote_cocoa::mojom::Visibility physical_visibility_ =
++      remote_cocoa::mojom::Visibility::kHidden;
+ 
+   // Destination for drag-drop.
+   WebDragDest* __strong drag_dest_;
+--- a/content/browser/web_contents/web_contents_view_mac.mm
++++ b/content/browser/web_contents/web_contents_view_mac.mm
+@@ -589,11 +589,22 @@
+                                           SelectionDirection::kReverse);
+ }
+ 
++void WebContentsViewMac::SetExternalVisibility(std::optional<bool> visible) {
++  external_visibility_ = visible;
++  OnWindowVisibilityChanged(physical_visibility_);
++}
++
+ void WebContentsViewMac::OnWindowVisibilityChanged(
+     remote_cocoa::mojom::Visibility mojo_visibility) {
+   if (!web_contents_ || web_contents_->IsBeingDestroyed())
+     return;
+ 
++  physical_visibility_ = mojo_visibility;
++  if (external_visibility_.has_value()) {
++    mojo_visibility = *external_visibility_
++        ? remote_cocoa::mojom::Visibility::kVisible
++        : remote_cocoa::mojom::Visibility::kHidden;
++  }
+   // TODO: make content use the mojo type for visibility.
+   Visibility visibility = Visibility::VISIBLE;
+   switch (mojo_visibility) {
+--- a/cef/libcef/browser/views/browser_view_impl.cc
++++ b/cef/libcef/browser/views/browser_view_impl.cc
+@@ -3,6 +3,9 @@
+ // in the LICENSE file.
+ 
+ #include "cef/libcef/browser/views/browser_view_impl.h"
++#if BUILDFLAG(IS_MAC)
++#include "cef/libcef/browser/views/external_host_mac.h"
++#endif
+ 
+ #include <memory>
+ #include <optional>
+@@ -343,6 +346,9 @@
+ 
+   // May call Widget::ThemeChanged().
+   cef_widget_->AddAssociatedProfile(profile_);
++#if BUILDFLAG(IS_MAC)
++  cef::external_host::Attach(widget, browser_.get());
++#endif
+ }
+ 
+ void CefBrowserViewImpl::RemovedFromWidget() {

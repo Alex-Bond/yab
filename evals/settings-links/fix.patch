@@ -1,0 +1,42 @@
+diff --git a/Sources/Fast/ExtensionAdd.swift b/Sources/Fast/ExtensionAdd.swift
+index 7cd69dec..485e67cd 100644
+--- a/Sources/Fast/ExtensionAdd.swift
++++ b/Sources/Fast/ExtensionAdd.swift
+@@ -150,2 +150 @@ final class ExtensionAdding: ObservableObject {
+-                browser.tuning = false
+-                browser.open(Browser.webStore, foreground: true)
++                Links.openFromSettings(Browser.webStore, in: browser)
+diff --git a/Sources/Fast/KnowPage.swift b/Sources/Fast/KnowPage.swift
+index 86349c65..c0cbca57 100644
+--- a/Sources/Fast/KnowPage.swift
++++ b/Sources/Fast/KnowPage.swift
+@@ -388 +387,0 @@ enum KnowPage {
+-        browser.tuning = false
+diff --git a/Sources/Fast/Links.swift b/Sources/Fast/Links.swift
+index 6b697f39..3c3435a1 100644
+--- a/Sources/Fast/Links.swift
++++ b/Sources/Fast/Links.swift
+@@ -717,4 +717,4 @@ final class Links: NSObject, NSApplicationDelegate {
+-    /// A web page Settings links to, in a tab of Yab's own, Settings put
+-    /// away as Download does. Not through NSWorkspace: that handed the
+-    /// address to the Mac's browser, Yab itself, which took it back as a
+-    /// link from another app, into a small window: Launch Services waited
++    /// A web page Settings links to, in a tab of Yab's own, keeping the
++    /// Settings window and its place for the next change. Not through
++    /// NSWorkspace: that handed the address to the Mac's browser, Yab itself,
++    /// which took it back as a link from another app, into a small window: Launch Services waited
+@@ -725,2 +725,2 @@ final class Links: NSObject, NSApplicationDelegate {
+-    static func openFromSettings(_ url: URL) {
+-        guard let target = browser else {
++    static func openFromSettings(_ url: URL, in source: Browser? = nil) {
++        guard let target = source ?? browser else {
+@@ -731 +730,0 @@ final class Links: NSObject, NSApplicationDelegate {
+-        target.tuning = false
+diff --git a/Sources/Fast/SettingsCorePages.swift b/Sources/Fast/SettingsCorePages.swift
+index 90fb6a47..7773ddf6 100644
+--- a/Sources/Fast/SettingsCorePages.swift
++++ b/Sources/Fast/SettingsCorePages.swift
+@@ -150,2 +150 @@ struct GeneralPage: View {
+-                browser.tuning = false
+-                browser.open(next.dmg, foreground: true)
++                Links.openFromSettings(next.dmg, in: browser)

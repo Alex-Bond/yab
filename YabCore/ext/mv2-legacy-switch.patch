@@ -1,0 +1,32 @@
+diff --git a/extensions/browser/manifest_v2_handler.cc b/extensions/browser/manifest_v2_handler.cc
+--- a/extensions/browser/manifest_v2_handler.cc
++++ b/extensions/browser/manifest_v2_handler.cc
+@@ -5,6 +5,7 @@
+ #include "extensions/browser/manifest_v2_handler.h"
+ 
+ #include "base/auto_reset.h"
++#include "base/command_line.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/one_shot_event.h"
+ #include "base/strings/stringprintf.h"
+@@ -24,6 +25,7 @@
+ #include "extensions/browser/pref_types.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/extension.h"
++#include "extensions/common/switches.h"
+ 
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+@@ -109,8 +111,10 @@
+ 
+ // Returns true if legacy extensions should be disabled.
+ bool ShouldDisableLegacyExtensions() {
+-  if (g_allow_mv2_for_testing) {
+-    // We allow legacy MV2 extensions for testing purposes.
++  if (g_allow_mv2_for_testing ||
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kAllowLegacyExtensionManifests)) {
++    // Match the explicit manifest-parser opt-in; default behavior is unchanged.
+     return false;
+   }
+ 

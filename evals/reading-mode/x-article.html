@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>X / Fixture</title>
+<style>
+body { margin: 0; background: #fff; color: #222; font: 16px/1.6 system-ui; }
+nav { padding: 16px; border-bottom: 1px solid #ddd; }
+main { max-width: 680px; margin: 36px auto; }
+[data-testid="twitter-article-title"] { font-size: 30px; font-weight: 700; }
+.longform-unstyled { margin: 20px 0; }
+img { max-width: 100%; }
+</style>
+<nav>Home · Explore · Notifications</nav><main id="mount"><article data-testid="twitterArticleReadView">Loading article...</article></main>
+<template id="article">
+<article data-testid="twitterArticleReadView">
+  <a href="/writer/article/1064/media/1065"><div data-testid="tweetPhoto"><img src="/cover.svg" alt="The harbor at dawn"></div></a>
+  <div data-testid="twitter-article-title"><span>The quiet harbor</span></div>
+  <div role="group"><button>Reply</button><button>Share</button><span>987 likes</span></div>
+  <div data-testid="twitterArticleRichTextView"><div class="DraftEditor-root"><div class="DraftEditor-editorContainer">
+    <div data-testid="longformRichTextComponent" class="public-DraftEditor-content" contenteditable="false" style="white-space:pre-wrap"><div data-contents="true">
+      <div><h2 class="longform-header-two" data-block="true"><div class="public-DraftStyleDefault-block"><span data-text="true">Before the light</span></div></h2></div>
+      <div class="longform-unstyled" data-block="true"><div class="public-DraftStyleDefault-block"><span data-text="true">The harbor town wakes before the light does. Boats leave in a line, each one a lamp on the water, and the people on the quay count them as they pass. There are no paragraphs in this source DOM, only the rich text blocks that X renders after its application loads.</span></div></div>
+      <div class="longform-unstyled" data-block="true"><div class="public-DraftStyleDefault-block"><span style="font-weight:bold" data-text="true">The tide sets the schedule.</span><span data-text="true"> Every family knows the sound of its own boat. The baker opens early, the market waits for the catch, and the first train arrives with the morning papers. <a href="/tides">Read the tide table</a> before walking onto the lower pier.</span></div></div>
+      <section data-block="true" contenteditable="false"><div data-testid="tweetPhoto"><img src="/inline.svg" alt="Boats at the lower pier"></div></section>
+      <blockquote class="longform-blockquote" data-block="true"><div class="public-DraftStyleDefault-block"><span style="font-style:italic" data-text="true">A good harbor gives every boat a place to return.</span></div></blockquote>
+      <ul><li data-block="true">Watch the tide.</li><li data-block="true">Leave room for the next boat.</li></ul>
+      <div class="longform-unstyled" data-block="true"><div class="public-DraftStyleDefault-block"><span data-text="true">By noon, the water is bright and the early lamps are forgotten. Nets dry along the wall, children follow the gulls, and the harbor returns to the patient work of waiting. This final passage belongs to the article, rather than the replies or the recommendation rail beside it.</span></div></div>
+    </div></div>
+  </div></div></div>
+</article>
+<div data-testid="tweet"><div data-testid="tweetText">REPLY_SENTINEL: This reply must not enter the reading view.</div></div>
+<aside>RAIL_SENTINEL: Recommended accounts</aside>
+</template>
+<script>
+window.mountArticle = function () {
+  document.querySelector('#mount').replaceChildren(document.querySelector('#article').content.cloneNode(true));
+  window.articleMounted = true;
+};
+if (!location.search.includes('manual')) setTimeout(window.mountArticle, 2200);
+</script>

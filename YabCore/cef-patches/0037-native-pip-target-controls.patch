@@ -1,0 +1,375 @@
+--- a/cef/libcef/browser/views/external_pip_mac.h
++++ b/cef/libcef/browser/views/external_pip_mac.h
+@@ -5,6 +5,8 @@
+ #include "base/memory/weak_ptr.h"
+ #include "base/scoped_observation.h"
+ #include "base/unguessable_token.h"
++#include "base/time/time.h"
++#include "media/mojo/mojom/media_player.mojom.h"
+ #include "cef/include/cef_values.h"
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents_observer.h"
+@@ -18,8 +20,8 @@
+   using Changed = base::RepeatingCallback<void(CefRefPtr<CefDictionaryValue>)>;
+   CefExternalPiP(content::WebContents* owner, Changed changed);
+   ~CefExternalPiP() override;
+-  CefRefPtr<CefDictionaryValue> State();
+-  bool Control(const std::string& token, const std::string& action, const gfx::Size& size);
++  CefRefPtr<CefDictionaryValue> State(bool refresh = true);
++  bool Control(const std::string& token, const std::string& action, const gfx::Size& size, double value);
+   void OnWidgetDestroying(views::Widget*) override;
+   void DidFinishNavigation(content::NavigationHandle*) override;
+   void RenderFrameDeleted(content::RenderFrameHost*) override;
+@@ -34,6 +36,8 @@
+   void SchedulePublish();
+   void Publish();
+   void ClearWidget();
++  void RefreshControls();
++  void Controls(const std::string& token, media::mojom::MediaPlayerControlStatePtr state);
+   bool Live() const;
+   Changed changed_;
+   base::UnguessableToken registration_;
+@@ -53,6 +57,9 @@
+   std::string retired_token_;
+   std::string retired_document_;
+   bool publish_pending_ = false;
++  bool controls_pending_ = false;
++  base::TimeTicks controls_queried_;
++  media::mojom::MediaPlayerControlStatePtr controls_;
+   base::WeakPtrFactory<CefExternalPiP> weak_{this};
+ };
+ #endif
+--- a/third_party/blink/renderer/core/html/media/html_media_element.h
++++ b/third_party/blink/renderer/core/html/media/html_media_element.h
+@@ -673,6 +673,9 @@
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override;
++  void RequestNativeControlState(RequestNativeControlStateCallback callback) override;
++  void RequestNativePlaybackRate(double rate) override;
++  void RequestNativeCaptions(bool enabled) override;
+   void SetVolumeMultiplier(double multiplier) override;
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override;
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -291,7 +291,7 @@
+   CefRefPtr<CefDictionaryValue> GetNativeCaptureState() override;
+   CefRefPtr<CefDictionaryValue> GetNativeVideoPiPState() override;
+   bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
+-      const CefSize& size) override;
++      const CefSize& size, double value) override;
+   bool StopNativeCapture(const CefString& token, const CefString& kind) override;
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds) override;
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -170,10 +170,10 @@
+   return state;
+ }
+ bool CefBrowserContentsDelegate::ControlNativeVideoPiP(const CefString& token,
+-    const CefString& action, const CefSize& size) {
++    const CefString& action, const CefSize& size, double value) {
+ #if BUILDFLAG(IS_MAC)
+   return external_pip_ && external_pip_->Control(token.ToString(), action.ToString(),
+-      gfx::Size(size.width, size.height));
++      gfx::Size(size.width, size.height), value);
+ #else
+   return false;
+ #endif
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -87,7 +87,7 @@
+   CefRefPtr<CefDictionaryValue> GetNativeCaptureState();
+   CefRefPtr<CefDictionaryValue> GetNativeVideoPiPState();
+   bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
+-      const CefSize& size);
++      const CefSize& size, double value);
+   bool StopNativeCapture(const CefString& token, const CefString& kind);
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds);
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1099,10 +1099,10 @@
+       ? contents_delegate_.GetNativeVideoPiPState() : CefDictionaryValue::Create();
+ }
+ bool CefBrowserHostBase::ControlNativeVideoPiP(const CefString& token,
+-    const CefString& action, const CefSize& size) {
++    const CefString& action, const CefSize& size, double value) {
+   CEF_REQUIRE_UIT_RETURN(false);
+   return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) &&
+-      contents_delegate_.ControlNativeVideoPiP(token, action, size);
++      contents_delegate_.ControlNativeVideoPiP(token, action, size, value);
+ }
+ 
+ CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetNativeCaptureState() {
+--- a/media/mojo/mojom/media_player.mojom
++++ b/media/mojo/mojom/media_player.mojom
+@@ -8,6 +8,21 @@
+ import "mojo/public/mojom/base/time.mojom";
+ import "services/media_session/public/mojom/media_session.mojom";
+ import "ui/gfx/geometry/mojom/geometry.mojom";
++
++// Native controls for one original HTMLMediaElement, not a routed page session.
++struct MediaPlayerControlState {
++  bool known;
++  bool has_duration;
++  double duration;
++  double position;
++  double rate;
++  bool paused;
++  bool muted;
++  bool can_seek;
++  bool can_rate;
++  bool captions_available;
++  bool captions_enabled;
++};
+ 
+ // Implemented by HTMLMediaElement in the renderer process to allow the
+ // browser to control media playback.
+@@ -34,6 +49,12 @@
+ 
+   // Requests the media player to mute or unmute.
+   RequestMute(bool mute);
++
++  // Original player-target controls used by external native PiP. No page
++  // script is evaluated and no synthetic user activation is granted.
++  RequestNativeControlState() => (MediaPlayerControlState state);
++  RequestNativePlaybackRate(double rate);
++  RequestNativeCaptions(bool enabled);
+ 
+   // Set the volume multiplier to control audio ducking.
+   // Output volume should be set to |player_volume| * |multiplier|. The range
+--- a/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h
++++ b/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h
+@@ -113,6 +113,10 @@
+ 
+   gfx::Size GetSize();
+ 
++  // Exact original player, never the page's differently routed MediaSession.
++  void RequestExternalPlayerControls(base::OnceCallback<void(media::mojom::MediaPlayerControlStatePtr)> callback);
++  bool ControlExternalPlayer(const std::string& action, double value);
++
+   // WebContentsObserver:
+   void MediaStartedPlaying(const MediaPlayerInfo&,
+                            const MediaPlayerId&) override;
+--- a/cef/libcef/browser/views/external_pip_mac.mm
++++ b/cef/libcef/browser/views/external_pip_mac.mm
+@@ -40,7 +40,7 @@
+       content::WebContents::FromRenderFrameHost(frame) != web_contents()) return;
+   document_ = frame->GetWeakDocumentPtr(); token_ = base::UnguessableToken::Create();
+   owner_document_ = static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString();
+-  reason_.clear(); SchedulePublish();
++  reason_.clear(); RefreshControls(); SchedulePublish();
+ }
+ bool CefExternalPiP::Bind(views::Widget* widget) {
+   if (!Live() || !widget || widget->IsClosed() ||
+@@ -69,13 +69,14 @@
+   if (!Live() || !widget_ || !std::isfinite(scale) || scale <= 0 ||
+       (context && pixels.IsEmpty())) return;
+   context_ = context; pixels_ = context ? pixels : gfx::Size(); scale_ = scale;
++  RefreshControls();
+   SchedulePublish();
+ }
+ void CefExternalPiP::End() {
+   if (!token_.is_empty()) {
+     retired_token_ = token_.ToString(); retired_document_ = owner_document_;
+   }
+-  owner_document_.clear();
++  owner_document_.clear(); controls_.reset(); controls_pending_ = false; controls_queried_ = {};
+   token_ = {}; document_ = {}; context_ = 0; pixels_ = {}; crop_ = {}; natural_ = {}; surface_.clear();
+   if (reason_.empty()) reason_ = "native-session-ended";
+   SchedulePublish();
+@@ -86,7 +87,7 @@
+   accelerated_ = gfx::kNullAcceleratedWidget;
+   observation_.Reset(); widget_.reset(); context_ = 0; pixels_ = {};
+ }
+-CefRefPtr<CefDictionaryValue> CefExternalPiP::State() {
++CefRefPtr<CefDictionaryValue> CefExternalPiP::State(bool refresh) {
+   auto state = CefDictionaryValue::Create();
+   state->SetInt("version", 1); state->SetString("kind", "video");
+   const bool active = Live();
+@@ -98,6 +99,7 @@
+     state->SetString("retiredDocument", retired_document_);
+     return state;
+   }
++  if (refresh) RefreshControls();
+   auto* frame = document_.AsRenderFrameHostIfValid();
+   state->SetString("token", token_.ToString());
+   state->SetString("document", static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString());
+@@ -112,9 +114,18 @@
+   state->SetInt("videoWidth", crop_.width()); state->SetInt("videoHeight", crop_.height());
+   state->SetInt("naturalWidth", natural_.width()); state->SetInt("naturalHeight", natural_.height());
+   state->SetString("nativeSurface", surface_);
++  state->SetBool("controlsKnown", controls_ && controls_->known);
++  if (controls_ && controls_->known) {
++    state->SetBool("paused", controls_->paused); state->SetBool("muted", controls_->muted);
++    state->SetDouble("position", controls_->position); state->SetDouble("rate", controls_->rate);
++    if (controls_->has_duration) state->SetDouble("duration", controls_->duration);
++    state->SetBool("canSeek", controls_->can_seek); state->SetBool("canRate", controls_->can_rate);
++    state->SetBool("captionsAvailable", controls_->captions_available);
++    state->SetBool("captionsEnabled", controls_->captions_enabled);
++  }
+   return state;
+ }
+-bool CefExternalPiP::Control(const std::string& token, const std::string& action, const gfx::Size& size) {
++bool CefExternalPiP::Control(const std::string& token, const std::string& action, const gfx::Size& size, double value) {
+   if (!Live() || token.empty() || token_.ToString() != token || !widget_) return false;
+   auto* controller = content::VideoPictureInPictureWindowControllerImpl::FromWebContents(web_contents());
+   if (!controller) return false;
+@@ -122,8 +133,20 @@
+     if (size.width() < 120 || size.height() < 80 || size.width() > 3840 || size.height() > 2160) return false;
+     widget_->SetSize(size); controller->UpdateLayerBounds(); return true;
+   }
+-  if (action == "play") { controller->Play(); return true; }
+-  if (action == "pause") { controller->Pause(); return true; }
++  if (action == "play" || action == "pause" || action == "seek" ||
++      action == "seekForward" || action == "seekBackward" || action == "rate" ||
++      action == "mute" || action == "captions") {
++    if (!std::isfinite(value)) return false;
++    if (action == "seek" && (!controls_ || !controls_->known || !controls_->can_seek ||
++        !controls_->has_duration || value < 0 || value > controls_->duration)) return false;
++    if ((action == "seekForward" || action == "seekBackward") &&
++        (!controls_ || !controls_->known || !controls_->can_seek || value <= 0 || value > 86400)) return false;
++    if (action == "rate" && (!controls_ || !controls_->known || !controls_->can_rate || value < .25 || value > 8)) return false;
++    if (action == "captions" && (!controls_ || !controls_->known || !controls_->captions_available)) return false;
++    const bool dispatched = controller->ControlExternalPlayer(action, value);
++    if (dispatched) { controls_queried_ = {}; RefreshControls(); }
++    return dispatched;
++  }
+   if (action == "close" || action == "return") {
+     reason_ = action == "return" ? "return-requested" : "closed-by-embedder";
+     // The embedder selects its original Yab tab after return-requested. Never
+@@ -132,13 +155,31 @@
+   }
+   return false;
+ }
++void CefExternalPiP::RefreshControls() {
++  if (!Live() || controls_pending_ ||
++      (!controls_queried_.is_null() && base::TimeTicks::Now() - controls_queried_ < base::Seconds(1))) return;
++  auto* controller = content::VideoPictureInPictureWindowControllerImpl::FromWebContents(web_contents());
++  if (!controller) return;
++  controls_pending_ = true; controls_queried_ = base::TimeTicks::Now();
++  controller->RequestExternalPlayerControls(base::BindOnce(&CefExternalPiP::Controls,
++      weak_.GetWeakPtr(), token_.ToString()));
++}
++void CefExternalPiP::Controls(const std::string& token, media::mojom::MediaPlayerControlStatePtr state) {
++  if (!Live() || token_.ToString() != token) return;
++  controls_pending_ = false;
++  if (!state || !state->known || !std::isfinite(state->position) || !std::isfinite(state->rate) ||
++      (state->has_duration && !std::isfinite(state->duration))) {
++    controls_.reset(); SchedulePublish(); return;
++  }
++  controls_ = std::move(state); SchedulePublish();
++}
+ void CefExternalPiP::SchedulePublish() {
+   if (publish_pending_) return;
+   publish_pending_ = true;
+   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+       base::BindOnce(&CefExternalPiP::Publish, weak_.GetWeakPtr()));
+ }
+-void CefExternalPiP::Publish() { publish_pending_ = false; changed_.Run(State()); }
++void CefExternalPiP::Publish() { publish_pending_ = false; changed_.Run(State(false)); }
+ void CefExternalPiP::OnWidgetDestroying(views::Widget*) { ClearWidget(); reason_="native-widget-destroyed"; End(); }
+ void CefExternalPiP::DidFinishNavigation(content::NavigationHandle*) { if (!Live()) End(); }
+ void CefExternalPiP::RenderFrameDeleted(content::RenderFrameHost*) { if (!Live()) End(); }
+--- a/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
++++ b/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
+@@ -5,6 +5,7 @@
+ #include "content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h"
+ 
+ #include <set>
++#include <cmath>
+ #include "content/public/browser/external_pip_routes.h"
+ #include <utility>
+ 
+@@ -476,6 +477,30 @@
+   active_session_->GetMediaPlayerRemote()->RequestMute(mute);
+ }
+ 
++void VideoPictureInPictureWindowControllerImpl::RequestExternalPlayerControls(
++    base::OnceCallback<void(media::mojom::MediaPlayerControlStatePtr)> callback) {
++  if (!active_session_ || !active_session_->player_id().has_value() ||
++      !active_session_->GetMediaPlayerRemote().is_bound()) {
++    std::move(callback).Run(nullptr); return;
++  }
++  active_session_->GetMediaPlayerRemote()->RequestNativeControlState(std::move(callback));
++}
++bool VideoPictureInPictureWindowControllerImpl::ControlExternalPlayer(const std::string& action, double value) {
++  if (!active_session_ || !active_session_->player_id().has_value() || !std::isfinite(value)) return false;
++  auto& player = active_session_->GetMediaPlayerRemote();
++  if (!player.is_bound()) return false;
++  if (action == "play") player->RequestPlay(false);
++  else if (action == "pause") player->RequestPause(false);
++  else if (action == "seek" && value >= 0) player->RequestSeekTo(base::Seconds(value));
++  else if (action == "seekForward" && value > 0 && value <= 86400) player->RequestSeekForward(base::Seconds(value));
++  else if (action == "seekBackward" && value > 0 && value <= 86400) player->RequestSeekBackward(base::Seconds(value));
++  else if (action == "rate" && value >= .25 && value <= 8) player->RequestNativePlaybackRate(value);
++  else if (action == "mute" && (value == 0 || value == 1)) player->RequestMute(value == 1);
++  else if (action == "captions" && (value == 0 || value == 1)) player->RequestNativeCaptions(value == 1);
++  else return false;
++  return true;
++}
++
+ bool VideoPictureInPictureWindowControllerImpl::GetMuteStatus() {
+   return MediaSessionImpl::Get(web_contents())->GetMuteStatus();
+ }
+--- a/third_party/blink/renderer/core/html/media/html_media_element.cc
++++ b/third_party/blink/renderer/core/html/media/html_media_element.cc
+@@ -5382,6 +5382,45 @@
+   setMuted(mute);
+ }
+ 
++void HTMLMediaElement::RequestNativeControlState(RequestNativeControlStateCallback callback) {
++  auto state = media::mojom::blink::MediaPlayerControlState::New();
++  const double position = currentTime();
++  const double length = duration();
++  const double rate = playbackRate();
++  state->known = web_media_player_ && std::isfinite(position) && std::isfinite(rate);
++  state->has_duration = std::isfinite(length) && length >= 0;
++  state->duration = state->has_duration ? length : 0;
++  state->position = std::isfinite(position) ? position : 0;
++  state->rate = std::isfinite(rate) ? rate : 0;
++  state->paused = paused(); state->muted = muted();
++  state->can_seek = state->has_duration && seekable()->length() > 0;
++  state->can_rate = web_media_player_ && GetLoadType() != WebMediaPlayer::kLoadTypeMediaStream;
++  auto* tracks = textTracks();
++  for (unsigned i = 0; i < tracks->length(); ++i) {
++    auto* track = tracks->AnonymousIndexedGetter(i);
++    if (!track || !track->CanBeRendered()) continue;
++    state->captions_available = true;
++    state->captions_enabled |= track->mode() == TextTrackMode::kShowing;
++  }
++  std::move(callback).Run(std::move(state));
++}
++void HTMLMediaElement::RequestNativePlaybackRate(double rate) {
++  if (!std::isfinite(rate) || rate < .25 || rate > 8 ||
++      !web_media_player_ || GetLoadType() == WebMediaPlayer::kLoadTypeMediaStream) return;
++  setPlaybackRate(rate);
++}
++void HTMLMediaElement::RequestNativeCaptions(bool enabled) {
++  auto* tracks = textTracks();
++  bool selected = false;
++  for (unsigned i = 0; i < tracks->length(); ++i) {
++    auto* track = tracks->AnonymousIndexedGetter(i);
++    if (!track || !track->CanBeRendered()) continue;
++    const bool show = enabled && !selected;
++    track->setMode(V8TextTrackMode(show ? TextTrackMode::kShowing : TextTrackMode::kDisabled));
++    selected |= show;
++  }
++}
++
+ void HTMLMediaElement::SetVolumeMultiplier(double multiplier) {
+   if (web_media_player_)
+     web_media_player_->SetVolumeMultiplier(multiplier);
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -1201,7 +1201,7 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual bool ControlNativeVideoPiP(const CefString& token,
+-      const CefString& action, const CefSize& size) = 0;
++      const CefString& action, const CefSize& size, double value) = 0;
+ 
+   ///
+   /// Dispatches original capture stop callbacks in this browser. Kind is

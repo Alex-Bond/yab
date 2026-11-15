@@ -1,0 +1,461 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1115,6 +1115,8 @@
+       "libcef/browser/views/view_util_mac.mm",
+       "libcef/browser/views/external_consent.cc",
+       "libcef/browser/views/external_consent.h",
++      "libcef/browser/views/external_crx.cc",
++      "libcef/browser/views/external_crx.h",
+       "libcef/browser/views/external_print.cc",
+       "libcef/browser/views/external_print.h",
+       "libcef/browser/views/external_host_mac.h",
+--- a/cef/include/cef_request_context.h
++++ b/cef/include/cef_request_context.h
+@@ -40,12 +40,33 @@
+ 
+ #include <vector>
+ 
++#include "include/cef_api_hash.h"
+ #include "include/cef_callback.h"
+ #include "include/cef_cookie.h"
+ #include "include/cef_media_router.h"
+ #include "include/cef_preference.h"
+ #include "include/cef_registration.h"
+ #include "include/cef_values.h"
++
++class CefBrowser;
++#define CEF_YAB_VERIFIED_CRX_VERSION 1
++
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++///
++/// Completion of an accepted native verified-CRX installation operation.
++///
++/*--cef(source=client,added=experimental)--*/
++class CefExtensionInstallCallback : public virtual CefBaseRefCounted {
++ public:
++  ///
++  /// UI thread, exactly once. |result| has request, status (installed,
++  /// cancelled or error), extensionId, version and error. An installed result
++  /// names the retained native Extension actually registered by Chrome.
++  ///
++  /*--cef()--*/
++  virtual void OnComplete(CefRefPtr<CefDictionaryValue> result) = 0;
++};
++#endif
+ 
+ class CefRequestContextHandler;
+ class CefSchemeHandlerFactory;
+@@ -365,6 +386,25 @@
+   ///
+   /*--cef(default_retval=CEF_COLOR_VARIANT_SYSTEM)--*/
+   virtual cef_color_variant_t GetChromeColorSchemeVariant() = 0;
++
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Starts Chrome's CRX3 verification/installer for this context and the
++  /// originating |browser|. Requires an absolute original CRX path, expected
++  /// native extension ID, production publisher proof and native consent.
++  /// No unpacked/silent install or test auto-confirm shortcut is used. The
++  /// callback reports the actual installed ID/version, cancellation or error.
++  /// Private contexts and foreign/dead browsers are refused. UI thread only.
++  /// Returns false without invoking |callback| for an invalid entry request.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool InstallVerifiedExtensionCrx(
++      CefRefPtr<CefBrowser> browser,
++      const CefString& path,
++      const CefString& expected_extension_id,
++      CefRefPtr<CefExtensionInstallCallback> callback) = 0;
++#endif
++
+ };
+ 
+ #endif  // CEF_INCLUDE_CEF_REQUEST_CONTEXT_H_
+--- a/cef/libcef/browser/request_context_impl.cc
++++ b/cef/libcef/browser/request_context_impl.cc
+@@ -3,6 +3,10 @@
+ // can be found in the LICENSE file.
+ 
+ #include "cef/libcef/browser/request_context_impl.h"
++#if BUILDFLAG(IS_MAC)
++#include "cef/libcef/browser/views/external_crx.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#endif
+ 
+ #include "base/atomic_sequence_num.h"
+ #include "base/logging.h"
+@@ -300,6 +304,21 @@
+       std::move(callback)));
+ }
+ 
++bool CefRequestContextImpl::InstallVerifiedExtensionCrx(CefRefPtr<CefBrowser> browser,
++    const CefString& path, const CefString& expected_extension_id,
++    CefRefPtr<CefExtensionInstallCallback> callback) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  if (!VerifyBrowserContext() || !browser || !browser->IsValid()) return false;
++  auto owner = CefBrowserHostBase::FromBrowser(browser);
++  auto* contents = owner ? owner->GetWebContents() : nullptr;
++  if (!contents || contents->GetBrowserContext() != GetBrowserContext()->AsProfile()) return false;
++  return cef::external_host::InstallVerifiedCrx(owner.get(), path, expected_extension_id, callback);
++#else
++  return false;
++#endif
++}
++
+ bool CefRequestContextImpl::IsSame(CefRefPtr<CefRequestContext> other) {
+   CefRequestContextImpl* other_impl =
+       static_cast<CefRequestContextImpl*>(other.get());
+--- a/cef/libcef/browser/request_context_impl.h
++++ b/cef/libcef/browser/request_context_impl.h
+@@ -102,6 +102,9 @@
+       CefRefPtr<CefPreferenceObserver> observer) override;
+ 
+   // CefRequestContext methods.
++  bool InstallVerifiedExtensionCrx(CefRefPtr<CefBrowser> browser,
++      const CefString& path, const CefString& expected_extension_id,
++      CefRefPtr<CefExtensionInstallCallback> callback) override;
+   bool IsSame(CefRefPtr<CefRequestContext> other) override;
+   bool IsSharingWith(CefRefPtr<CefRequestContext> other) override;
+   bool IsGlobal() override;
+--- /dev/null
++++ b/cef/libcef/browser/views/external_crx.cc
+@@ -0,0 +1,279 @@
++#include "cef/libcef/browser/views/external_crx.h"
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include "base/command_line.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/scoped_observation.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "base/time/time.h"
++#include "base/unguessable_token.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/browser/views/external_consent.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "chrome/browser/extensions/extension_install_prompt.h"
++#include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_observer.h"
++#include "components/crx_file/crx_verifier.h"
++#include "components/crx_file/id_util.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "extensions/browser/crx_file_info.h"
++#include "extensions/browser/install/crx_install_error.h"
++#include "extensions/browser/crx_installer.h"
++#include "extensions/browser/install_prompt_data.h"
++#include "extensions/common/extension.h"
++
++namespace cef::external_host {
++namespace {
++using PromptClient = extensions::ExtensionInstallPromptClient;
++using Payload = PromptClient::DoneCallbackPayload;
++using Result = PromptClient::Result;
++constexpr size_t kMaxManifest = 1024 * 1024;
++struct Bytes { bool ok = false; std::string text; };
++Bytes ReadManifest(base::FilePath path) {
++  Bytes bytes;
++  bytes.ok = base::ReadFileToStringWithMaxSize(path.AppendASCII("manifest.json"), &bytes.text, kMaxManifest);
++  return bytes;
++}
++bool Accepted(Result result) {
++  return result == Result::ACCEPTED || result == Result::ACCEPTED_WITH_WITHHELD_PERMISSIONS;
++}
++
++// Real Chrome prompt, real native warnings and retained verified Extension.
++// The wrapper checks the original document and unchanged sanitized manifest
++// immediately before forwarding a positive reply to the original installer.
++class VerifiedPrompt : public ExtensionInstallPrompt,
++                       public content::WebContentsObserver {
++ public:
++  using Original = base::RepeatingCallback<std::string()>;
++  using Live = base::RepeatingCallback<bool()>;
++  static std::unique_ptr<VerifiedPrompt> Create(content::WebContents* owner,
++      Original original, Live live, base::OnceClosure approved) {
++    auto data = std::make_unique<extensions::InstallPromptData>(
++        extensions::InstallPromptData::UNSET_PROMPT_TYPE);
++    auto* raw = data.get();
++    return std::unique_ptr<VerifiedPrompt>(new VerifiedPrompt(owner, std::move(data), raw,
++        std::move(original), std::move(live), std::move(approved)));
++  }
++  base::WeakPtr<VerifiedPrompt> GetWeakPtr() { return weak_.GetWeakPtr(); }
++  void ConfirmInstall(PromptClient::DoneCallback done,
++                      const extensions::Extension* extension) override {
++    original_done_ = std::move(done);
++    verified_ = extension;
++    const std::string bytes = original_.Run();
++    if (!IsLive() || !extension || bytes.empty() || bytes.size() > kMaxManifest ||
++        !base::IsStringUTF8(bytes)) { Finish(Payload(Result::ABORTED)); return; }
++    prompt_data_->SetVerifiedManifestForExternalReview(bytes,
++        base::BindRepeating([](base::WeakPtr<VerifiedPrompt> self) {
++          return self && self->IsLive();
++        }, weak_.GetWeakPtr()));
++    prompt_data_ = nullptr;  // Base may move/destroy this data during delivery.
++    base::ThreadPool::PostTaskAndReplyWithResult(FROM_HERE, {base::MayBlock()},
++        base::BindOnce(&ReadManifest, verified_->path()),
++        base::BindOnce(&VerifiedPrompt::InitialRead, weak_.GetWeakPtr()));
++  }
++  void Retire() {
++    if (approved_) { Observe(nullptr); return; }
++    retired_ = true;
++    auto* parent = web_contents();
++    Observe(nullptr);
++    auto self = weak_.GetWeakPtr();
++    CancelInstallConsentFor(parent);  // May invoke Finish and destroy this.
++    if (self && !self->original_done_.is_null()) self->Finish(Payload(Result::ABORTED));
++  }
++  void PrimaryPageChanged(content::Page&) override { Retire(); }
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override { Retire(); }
++  void WebContentsDestroyed() override { Retire(); }
++ private:
++  VerifiedPrompt(content::WebContents* owner,
++      std::unique_ptr<extensions::InstallPromptData> data,
++      extensions::InstallPromptData* raw, Original original, Live live,
++      base::OnceClosure approved)
++      : ExtensionInstallPrompt(owner, std::move(data)),
++        content::WebContentsObserver(owner), owner_(owner->GetWeakPtr()),
++        document_(owner->GetPrimaryMainFrame()->GetWeakDocumentPtr()),
++        prompt_data_(raw), original_(std::move(original)), operation_live_(std::move(live)),
++        approved_callback_(std::move(approved)) {
++    SetSkipPostInstallUI(true);
++    SetUseAppInstalledBubble(false);
++  }
++  bool IsLive() const {
++    return !retired_ && owner_ && !owner_->IsBeingDestroyed() &&
++        document_.AsRenderFrameHostIfValid() == owner_->GetPrimaryMainFrame() &&
++        !operation_live_.is_null() && operation_live_.Run();
++  }
++  void InitialRead(Bytes bytes) {
++    if (!IsLive() || !bytes.ok) { Finish(Payload(Result::ABORTED)); return; }
++    manifest_ = std::move(bytes.text);
++    ExtensionInstallPrompt::ConfirmInstall(
++        base::BindOnce(&VerifiedPrompt::Answered, weak_.GetWeakPtr()), verified_.get());
++  }
++  void Answered(Payload payload) {
++    if (!Accepted(payload.result)) { Finish(std::move(payload)); return; }
++    if (!IsLive()) { Finish(Payload(Result::ABORTED)); return; }
++    base::ThreadPool::PostTaskAndReplyWithResult(FROM_HERE, {base::MayBlock()},
++        base::BindOnce(&ReadManifest, verified_->path()),
++        base::BindOnce(&VerifiedPrompt::FinalRead, weak_.GetWeakPtr(), std::move(payload)));
++  }
++  void FinalRead(Payload payload, Bytes bytes) {
++    if (!IsLive() || !bytes.ok || bytes.text != manifest_) {
++      Finish(Payload(Result::ABORTED)); return;
++    }
++    approved_ = true;
++    if (!approved_callback_.is_null()) std::move(approved_callback_).Run();
++    Finish(std::move(payload));
++  }
++  void Finish(Payload payload) {
++    auto done = std::move(original_done_);
++    if (!done.is_null()) std::move(done).Run(std::move(payload));
++    // The original installer callback can destroy this client.
++  }
++  base::WeakPtr<content::WebContents> owner_;
++  content::WeakDocumentPtr document_;
++  raw_ptr<extensions::InstallPromptData> prompt_data_;
++  Original original_;
++  Live operation_live_;
++  base::OnceClosure approved_callback_;
++  PromptClient::DoneCallback original_done_;
++  scoped_refptr<const extensions::Extension> verified_;
++  std::string manifest_;
++  bool retired_ = false, approved_ = false;
++  base::WeakPtrFactory<VerifiedPrompt> weak_{this};
++};
++
++class NativeInstall;
++using Registry = std::map<std::string, std::unique_ptr<NativeInstall>>;
++Registry& Installs();
++std::unique_ptr<NativeInstall> TakeInstall(const std::string& token);
++
++class NativeInstall : public content::WebContentsObserver, public ProfileObserver {
++ public:
++  NativeInstall(std::string token, content::WebContents* owner, Profile* profile,
++      std::string expected, CefRefPtr<CefExtensionInstallCallback> callback)
++      : content::WebContentsObserver(owner), token_(std::move(token)),
++        expected_(std::move(expected)), callback_(std::move(callback)) {
++    profile_.Observe(profile);
++  }
++  void Begin(Profile* profile, const base::FilePath& path) {
++    auto prompt = VerifiedPrompt::Create(web_contents(),
++        base::BindRepeating([](base::WeakPtr<NativeInstall> self) {
++          return self && self->installer_ ? self->installer_->original_manifest_bytes() : std::string();
++        }, weak_.GetWeakPtr()),
++        base::BindRepeating([](base::WeakPtr<NativeInstall> self) {
++          return self && !self->finished_;
++        }, weak_.GetWeakPtr()),
++        base::BindOnce(&NativeInstall::Approved, weak_.GetWeakPtr()));
++    prompt_ = prompt->GetWeakPtr();
++    installer_ = extensions::CrxInstaller::Create(profile, std::move(prompt));
++    installer_->set_expected_id(expected_);
++    installer_->set_allow_silent_install(false);
++    installer_->set_require_external_consent(true);
++    installer_->set_delete_source(false);
++    installer_->set_is_gallery_install(true);
++    installer_->set_off_store_install_allow_reason(extensions::CrxInstaller::OffStoreInstallDisallowed);
++    installer_->set_was_triggered_by_user_download();
++    installer_->AddInstallerCallback(base::BindOnce(&NativeInstall::Completed, weak_.GetWeakPtr()));
++    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,
++        base::BindOnce(&NativeInstall::ReviewTimeout, weak_.GetWeakPtr()), base::Seconds(120));
++    extensions::CRXFileInfo package(path, crx_file::VerifierFormat::CRX3_WITH_PUBLISHER_PROOF);
++    package.extension_id = expected_;
++    installer_->InstallCrxFile(package);
++  }
++  void PrimaryPageChanged(content::Page&) override { OwnerRetired(); }
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override { OwnerRetired(); }
++  void WebContentsDestroyed() override { OwnerRetired(); }
++  void OnProfileWillBeDestroyed(Profile*) override {
++    if (finished_) return;
++    auto self = weak_.GetWeakPtr();
++    if (!authorized_ && prompt_) prompt_->Retire();
++    if (self) self->Finish("cancelled", "Profile retired");
++  }
++ private:
++  void Approved() { authorized_ = true; }
++  void OwnerRetired() {
++    if (authorized_) { Observe(nullptr); return; }  // Chrome now owns this accepted commit.
++    Cancel("Original install owner retired");
++  }
++  void ReviewTimeout() { if (!authorized_) Cancel("Install review timed out"); }
++  void Cancel(const std::string& reason) {
++    if (finished_) return;
++    auto self = weak_.GetWeakPtr();
++    if (prompt_) prompt_->Retire();
++    if (self) self->Finish("cancelled", reason);
++  }
++  void Completed(const std::optional<extensions::CrxInstallError>& error) {
++    if (!error) { Finish("installed", std::string()); return; }
++    bool cancelled = false;
++    if (error->type() == extensions::CrxInstallErrorType::OTHER) {
++      const auto detail = error->detail();
++      cancelled = detail == extensions::CrxInstallErrorDetail::USER_CANCELED ||
++          detail == extensions::CrxInstallErrorDetail::USER_ABORTED ||
++          detail == extensions::CrxInstallErrorDetail::PROFILE_SHUTTING_DOWN;
++    }
++    Finish(cancelled ? "cancelled" : "error", base::UTF16ToUTF8(error->message()));
++  }
++  void Finish(const std::string& status, const std::string& error) {
++    if (finished_) return;
++    finished_ = true;
++    Observe(nullptr); profile_.Reset();
++    auto result = CefDictionaryValue::Create();
++    result->SetString("request", token_);
++    result->SetString("status", status);
++    result->SetString("extensionId", expected_);
++    const auto* extension = installer_ ? installer_->extension() : nullptr;
++    result->SetString("version", status == "installed" && extension ? extension->GetVersionForDisplay() : std::string());
++    result->SetString("error", error);
++    auto callback = std::move(callback_);
++    auto held = TakeInstall(token_);  // Retain this object across client reentrancy.
++    if (callback) callback->OnComplete(result);
++  }
++  const std::string token_, expected_;
++  CefRefPtr<CefExtensionInstallCallback> callback_;
++  scoped_refptr<extensions::CrxInstaller> installer_;
++  base::WeakPtr<VerifiedPrompt> prompt_;
++  base::ScopedObservation<Profile, ProfileObserver> profile_{this};
++  bool authorized_ = false, finished_ = false;
++  base::WeakPtrFactory<NativeInstall> weak_{this};
++};
++Registry& Installs() { static base::NoDestructor<Registry> registry; return *registry; }
++std::unique_ptr<NativeInstall> TakeInstall(const std::string& token) {
++  auto it = Installs().find(token);
++  if (it == Installs().end()) return nullptr;
++  auto held = std::move(it->second); Installs().erase(it); return held;
++}
++}  // namespace
++
++bool InstallVerifiedCrx(CefBrowserHostBase* owner, const CefString& path,
++                        const CefString& expected,
++                        CefRefPtr<CefExtensionInstallCallback> callback) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !owner || !callback ||
++      !base::CommandLine::ForCurrentProcess()->HasSwitch("yab-extension-consent") ||
++      !extensions::GetExternalExtensionHooks().install_consent || Installs().size() >= 8)
++    return false;
++  auto* contents = owner->GetWebContents();
++  if (!contents || contents->IsBeingDestroyed() || !contents->GetPrimaryMainFrame()) return false;
++  auto* profile = Profile::FromBrowserContext(contents->GetBrowserContext());
++  const std::string file = path.ToString(), extension = expected.ToString();
++  if (!profile || profile->IsOffTheRecord() || !base::FilePath(file).IsAbsolute() ||
++      file.find('\0') != std::string::npos || !crx_file::id_util::IdIsValid(extension)) return false;
++  const std::string token = base::UnguessableToken::Create().ToString();
++  auto operation = std::make_unique<NativeInstall>(token, contents, profile, extension, callback);
++  auto* begin = operation.get();
++  Installs()[token] = std::move(operation);
++  begin->Begin(profile, base::FilePath(file));
++  return true;
++}
++}  // namespace cef::external_host
+--- /dev/null
++++ b/cef/libcef/browser/views/external_crx.h
+@@ -0,0 +1,11 @@
++// Explicit verified package entry; no unpacked or silent install path.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_CRX_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_CRX_H_
++#include "cef/include/cef_request_context.h"
++class CefBrowserHostBase;
++namespace cef::external_host {
++bool InstallVerifiedCrx(CefBrowserHostBase* owner, const CefString& path,
++                        const CefString& expected,
++                        CefRefPtr<CefExtensionInstallCallback> callback);
++}
++#endif
+--- a/extensions/browser/crx_installer.cc
++++ b/extensions/browser/crx_installer.cc
+@@ -791,6 +791,11 @@
+   // Check whether this install is initiated from the settings page to
+   // update an existing extension or app.
+   CheckUpdateFromSettingsPage();
++  if (require_external_consent_) {
++    approved_ = false;
++    allow_silent_install_ = false;
++    update_from_settings_page_ = false;
++  }
+ 
+   GURL overlapping_url;
+   ExtensionRegistry* registry = ExtensionRegistry::Get(browser_context_);
+@@ -843,6 +848,12 @@
+   // and if it is false, this function is called in response to
+   // ExtensionInstallPrompt::ShowDialog().
+ 
++  if (require_external_consent_ && !browser_context_) {
++    RunInstallerCallbacks(CrxInstallError(CrxInstallErrorType::OTHER,
++        CrxInstallErrorDetail::PROFILE_SHUTTING_DOWN, u"Profile retired"));
++    Release();  // The prompt's original AddRef still needs balancing.
++    return;
++  }
+   switch (payload.result) {
+     case ExtensionInstallPromptClient::Result::ACCEPTED:
+     case ExtensionInstallPromptClient::Result::
+--- a/extensions/browser/crx_installer.h
++++ b/extensions/browser/crx_installer.h
+@@ -193,6 +193,7 @@
+   bool delete_source() const { return delete_source_; }
+   void set_delete_source(bool val) { delete_source_ = val; }
+ 
++  void set_require_external_consent(bool value) { require_external_consent_ = value; }
+   bool allow_silent_install() const { return allow_silent_install_; }
+   void set_allow_silent_install(bool val) { allow_silent_install_ = val; }
+ 
+@@ -517,6 +518,7 @@
+   // is provided in the ctor) to proceed without showing the permissions prompt
+   // dialog.
+   bool allow_silent_install_;
++  bool require_external_consent_ = false;
+ 
+   // Allows for the possibility of an installation without granting any
+   // permissions to the extension.

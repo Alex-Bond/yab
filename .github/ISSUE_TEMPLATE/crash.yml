@@ -1,0 +1,67 @@
+name: Crash or freeze
+description: Yab quit unexpectedly, or stopped responding.
+labels: ["crash", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If Yab offered to send the crash report when it opened again, please say yes there too: that report reaches the maintainers with the frames needed to find the crash.
+  - type: input
+    id: yab-version
+    attributes:
+      label: Yab version
+      description: Yab menu › About Yab.
+      placeholder: 0.47.17 (202611131840)
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: macOS or iOS version, and the device
+      placeholder: macOS 26.1, MacBook Pro M3
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened
+      options:
+        - Yab quit
+        - Yab froze (spinning cursor)
+        - One tab went blank or showed an error
+        - Yab won't open
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine of the tab, if a page was involved
+      options:
+        - WebKit
+        - Chromium
+        - Not about a page
+        - Don't know
+  - type: textarea
+    id: doing
+    attributes:
+      label: What you were doing
+      description: The last thing you clicked or typed, and the site, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Crash report
+      description: |
+        Open Console.app › Crash Reports, find the newest "yab" entry, and paste it here. It holds no page content, but read it first and remove anything you consider private.
+      render: text
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once
+    validations:
+      required: true

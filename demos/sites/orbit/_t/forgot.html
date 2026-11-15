@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{> head}}
+<link rel="stylesheet" href="/assets/auth.css">
+<title>Reset your password · Orbit</title>
+</head>
+<body>
+<div class="auth">
+  <main class="auth-main">
+    <header class="auth-head">
+      <a class="brand" href="/login">{{> mark}}<span>Orbit</span></a>
+      <a class="help" href="/signup">New to Orbit? Sign up</a>
+    </header>
+    <div class="auth-body">
+      <div class="auth-form" data-sent="{{sent}}">
+        <a class="back" href="/login"><svg viewBox="0 0 16 16"><path d="M5.375 3.5 .875 8l4.5 4.5"/></svg>Back to sign in</a>
+        <div class="when-form">
+          <div class="badge-icon"><svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg></div>
+          <h1>Reset your password</h1>
+          <p class="lede">Enter the email you use for Orbit and we'll send you a link to set a new password.</p>
+          <form class="stack" method="post" action="/forgot" data-busy-form>
+            <div class="field">
+              <label class="label" for="email">Email</label>
+              <input class="input" id="email" type="email" name="email" autocomplete="username" placeholder="you@company.com" required>
+            </div>
+            <button class="btn btn-primary btn-block" type="submit"><span class="spin"></span><span>Send reset link</span></button>
+          </form>
+        </div>
+        <div class="when-sent">
+          <div class="badge-icon"><svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="3"/><path d="m4.5 7.5 6.3 4.6a2 2 0 0 0 2.4 0l6.3-4.6"/></svg></div>
+          <h1>Check your inbox</h1>
+          <p class="lede">If an Orbit account uses <strong>{{email}}</strong>, a link to reset your password is on its way. It works for 30 minutes.</p>
+          <a class="btn btn-secondary btn-block" href="/login">Back to sign in</a>
+        </div>
+      </div>
+    </div>
+    {{> foot}}
+  </main>
+  <aside class="art">
+    <div class="art-copy">
+      <span class="pill"><b>Tip</b>Teams on Business can sign in with SSO</span>
+      <h2>Back to your numbers in a minute.</h2>
+      <p>Reset links expire quickly and only work once, so nobody else can use them.</p>
+    </div>
+    {{> art}}
+  </aside>
+</div>
+<script src="/assets/auth.js" defer></script>
+</body>
+</html>

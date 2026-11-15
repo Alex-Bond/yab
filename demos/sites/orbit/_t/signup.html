@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{> head}}
+<link rel="stylesheet" href="/assets/auth.css">
+<title>Create your account · Orbit</title>
+</head>
+<body>
+<div class="auth">
+  <main class="auth-main">
+    <header class="auth-head">
+      <a class="brand" href="/login">{{> mark}}<span>Orbit</span></a>
+      <a class="help" href="/login">Already using Orbit? Sign in</a>
+    </header>
+    <div class="auth-body">
+      <form class="auth-form" method="post" action="/signup" data-busy-form>
+        <h1>Create your Orbit account</h1>
+        <p class="lede">Free for 14 days on every plan. No credit card needed.</p>
+        <button class="btn btn-secondary btn-block sso" type="button">{{> google}}Sign up with Google</button>
+        <div class="or">or</div>
+        {{{alert}}}
+        <div class="stack">
+          <div class="field">
+            <label class="label" for="name">Full name</label>
+            <input class="input" id="name" type="text" name="name" autocomplete="name" placeholder="Alex Morgan" value="{{name}}" required>
+          </div>
+          <div class="field">
+            <label class="label" for="email">Work email</label>
+            <input class="input" id="email" type="email" name="email" autocomplete="email" placeholder="you@company.com" value="{{email}}" required>
+          </div>
+          <div class="field">
+            <label class="label" for="password">Password</label>
+            <input class="input" id="password" type="password" name="password" autocomplete="new-password" placeholder="At least 8 characters" minlength="8" required aria-describedby="strength">
+            <div class="meter" data-score="0" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            <div class="meter-row" id="strength"><span>Use 12 or more characters with a mix of letters, numbers and symbols.</span><b data-score="0"></b></div>
+          </div>
+          <button class="btn btn-primary btn-block" type="submit"><span class="spin"></span><span>Create account</span></button>
+        </div>
+        <p class="terms">By creating an account, you agree to Orbit's <a href="/signup">Terms of Service</a> and <a href="/signup">Privacy Policy</a>.</p>
+      </form>
+    </div>
+    {{> foot}}
+  </main>
+  <aside class="art">
+    <div class="art-copy">
+      <span class="pill"><b>14 days</b>Every feature, free while you try it</span>
+      <h2>Your first funnel in five minutes.</h2>
+      <p>Add one snippet, and Orbit maps sign-ups, activation and retention for you. No tracking plan to write first.</p>
+    </div>
+    {{> art}}
+  </aside>
+</div>
+<script src="/assets/auth.js" defer></script>
+</body>
+</html>

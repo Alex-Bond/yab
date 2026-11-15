@@ -1,0 +1,365 @@
+--- a/cef/BUILD.gn	2026-10-26 23:23:13
++++ b/cef/BUILD.gn	2026-10-26 23:25:55
+@@ -1115,6 +1115,8 @@
+       "libcef/browser/views/view_util_mac.mm",
+       "libcef/browser/views/external_consent.cc",
+       "libcef/browser/views/external_consent.h",
++      "libcef/browser/views/external_print.cc",
++      "libcef/browser/views/external_print.h",
+       "libcef/browser/views/external_host_mac.h",
+       "libcef/browser/views/external_host_mac.mm",
+       "libcef/browser/views/external_text_input.h",
+--- a/cef/include/cef_browser.h	2026-10-26 23:23:13
++++ b/cef/include/cef_browser.h	2026-10-26 23:25:55
+@@ -51,6 +51,7 @@
+ 
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_DISCARD_VERSION 1
++#define CEF_YAB_NATIVE_PRINT_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1137,6 +1138,18 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual bool SetPageFrozen(bool frozen) = 0;
++
++  ///
++  /// Completes the page-initiated print announced by
++  /// CefDisplayHandler::OnPrintRequest (window.print, the PDF viewer's print
++  /// button) with token |request|: ends the original native request, so the
++  /// page's script resumes and "afterprint" fires. Call it when the embedder's
++  /// print UI closed (printed or canceled). Returns false for an unknown,
++  /// stale or already finished token. This method can only be called on the UI
++  /// thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool FinishNativePrint(const CefString& request) = 0;
+ #endif
+ };
+ 
+--- a/cef/include/cef_display_handler.h	2026-10-26 23:23:13
++++ b/cef/include/cef_display_handler.h	2026-10-26 23:25:55
+@@ -53,6 +53,7 @@
+ #define CEF_YAB_SELECT_MENU_VERSION 1
+ #define CEF_YAB_EXTENSION_HOOKS_VERSION 1
+ #define CEF_YAB_DISCARD_NOTIFY_VERSION 1
++#define CEF_YAB_NATIVE_PRINT_NOTIFY_VERSION 1
+ 
+ ///
+ /// Implement this interface to handle events related to browser display state.
+@@ -262,6 +263,27 @@
+   /*--cef(added=experimental)--*/
+   virtual void OnPageDiscardedChange(CefRefPtr<CefBrowser> browser,
+                                      bool discarded) {}
++
++  ///
++  /// Called for a page-initiated print (window.print, the PDF viewer's print
++  /// button) when the process runs with --yab-native-print, instead of Chrome's
++  /// print preview. |request| has request (a token), scripted (true for
++  /// window.print, whose script is suspended until the request finishes), url
++  /// of the requesting frame, mainFrame and pdf. The page is already unblocked
++  /// for CDP (Page.printToPDF). Finish with CefBrowserHost::FinishNativePrint;
++  /// a request Chromium withdraws first (navigation, frame or browser closed)
++  /// is reported by OnPrintRequestWithdrawn.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnPrintRequest(CefRefPtr<CefBrowser> browser,
++                              CefRefPtr<CefDictionaryValue> request) {}
++
++  ///
++  /// Called after Chromium withdrew the print request with token |request|.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnPrintRequestWithdrawn(CefRefPtr<CefBrowser> browser,
++                                       const CefString& request) {}
+ #endif
+ 
+ #if CEF_API_ADDED(13700)
+--- a/cef/libcef/browser/browser_host_base.cc	2026-10-26 23:23:13
++++ b/cef/libcef/browser/browser_host_base.cc	2026-10-26 23:25:55
+@@ -33,6 +33,9 @@
+ #include "content/public/browser/download_manager.h"
+ #include "content/public/browser/download_request_utils.h"
+ #include "base/feature_list.h"
++#if BUILDFLAG(IS_MAC)
++#include "cef/libcef/browser/views/external_print.h"
++#endif
+ #include "base/functional/callback_helpers.h"
+ #include "content/public/browser/file_select_listener.h"
+ #include "content/public/browser/navigation_controller.h"
+@@ -1069,6 +1072,20 @@
+   }
+   web_contents->SetPageFrozen(frozen);
+   return true;
++}
++
++bool CefBrowserHostBase::FinishNativePrint(const CefString& request) {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    DCHECK(false) << "called on invalid thread";
++    return false;
++  }
++#if BUILDFLAG(IS_MAC)
++  auto* web_contents = GetWebContents();
++  return web_contents &&
++         cef::external_host::FinishPrint(web_contents, request.ToString());
++#else
++  return false;
++#endif
+ }
+ 
+ void CefBrowserHostBase::ReplaceMisspelling(const CefString& word) {
+--- a/cef/libcef/browser/browser_host_base.h	2026-10-26 23:23:13
++++ b/cef/libcef/browser/browser_host_base.h	2026-10-26 23:25:55
+@@ -285,6 +285,7 @@
+   bool IsPageDiscarded() override;
+   bool RestoreDiscardedPage() override;
+   bool SetPageFrozen(bool frozen) override;
++  bool FinishNativePrint(const CefString& request) override;
+ 
+   // CefBrowser methods:
+   bool IsValid() override;
+--- a/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 23:23:13
++++ b/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 23:25:55
+@@ -22,6 +22,7 @@
+ #include "cef/include/cef_values.h"
+ #include "mojo/public/cpp/bindings/receiver.h"
+ #include "cef/libcef/browser/views/external_consent.h"
++#include "cef/libcef/browser/views/external_print.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
+ #include "ui/compositor/compositor.h"
+@@ -457,6 +458,7 @@
+   hooks.popup_closed = &PopupClosed;
+   hooks.tab_created = &TabCreated;
+   InstallConsentHooks();
++  InstallPrintHooks();
+ }
+ 
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index) {
+--- a/chrome/browser/extensions/external_action_origin.h	2026-10-26 23:23:13
++++ b/chrome/browser/extensions/external_action_origin.h	2026-10-26 23:25:55
+@@ -57,6 +57,13 @@
+       nullptr;
+   // |dialog| is closing (answered, canceled, profile or extension gone).
+   void (*uninstall_closed)(ExtensionUninstallDialog* dialog) = nullptr;
++  // A page-initiated print (window.print or the PDF viewer) is about to open
++  // Chrome's print preview. Return true to take over: |done| ends the original
++  // native request (renderer resumes, "afterprint") and must run exactly once.
++  bool (*print_request)(content::WebContents* contents,
++                        content::RenderFrameHost* frame,
++                        bool scripted,
++                        base::OnceClosure done) = nullptr;
+ };
+ inline ExternalExtensionHooks& GetExternalExtensionHooks() {
+   static ExternalExtensionHooks hooks;
+--- a/chrome/browser/printing/print_view_manager.cc	2026-10-25 13:28:58
++++ b/chrome/browser/printing/print_view_manager.cc	2026-10-26 23:25:55
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/printing/print_view_manager.h"
++#include "base/functional/callback_helpers.h"
++#include "chrome/browser/extensions/external_action_origin.h"
+ 
+ #include <map>
+ #include <memory>
+@@ -576,6 +578,18 @@
+     }
+   }
+ 
++  if (auto hook = extensions::GetExternalExtensionHooks().print_request) {
++    // The embedder shows its own print UI. Unblock the renderer for its PDF
++    // generation; the script stays suspended until |done| finishes the request.
++    if (hook(web_contents(), print_preview_rfh_, /*scripted=*/true,
++             base::BindOnce(&PrintViewManager::PrintPreviewDone,
++                            weak_factory_.GetWeakPtr()))) {
++      PrintPreviewAlmostDone();
++      PrintPreviewAllowedForTesting();
++      return;
++    }
++  }
++
+   auto* dialog_controller = PrintPreviewDialogController::GetInstance();
+   CHECK(dialog_controller);
+   mojom::RequestPrintPreviewParams params;
+@@ -625,6 +639,16 @@
+   // Also check it is active. Only active RFHs should show UI elements.
+   if (!render_frame_host->IsActive()) {
+     return;
++  }
++
++  if (auto hook = extensions::GetExternalExtensionHooks().print_request;
++      hook && !params->webnode_only) {
++    // Nothing to resume: this request has no suspended script.
++    if (hook(web_contents(), render_frame_host, /*scripted=*/false,
++             base::DoNothing())) {
++      PrintPreviewAllowedForTesting();
++      return;
++    }
+   }
+ 
+   if (params->webnode_only) {
+--- /dev/null
++++ b/cef/libcef/browser/views/external_print.h
+@@ -0,0 +1,20 @@
++// Embedder print UI for page-initiated prints.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_PRINT_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_PRINT_H_
++#pragma once
++
++#include <string>
++
++namespace content {
++class WebContents;
++}
++
++namespace cef::external_host {
++// Sets Chrome's print hook when the process runs with --yab-native-print
++// (idempotent). UI thread.
++void InstallPrintHooks();
++// Finishes the print request |token| of |contents|. False if unknown.
++bool FinishPrint(content::WebContents* contents, const std::string& token);
++}  // namespace cef::external_host
++
++#endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_PRINT_H_
+--- /dev/null
++++ b/cef/libcef/browser/views/external_print.cc
+@@ -0,0 +1,137 @@
++#include "cef/libcef/browser/views/external_print.h"
++
++#include <map>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/functional/callback.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_display_handler.h"
++#include "cef/include/cef_values.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "chrome/browser/extensions/external_action_origin.h"
++#include "content/public/browser/global_routing_id.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/page.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace cef::external_host {
++namespace {
++
++constexpr char kPrintSwitch[] = "yab-native-print";
++constexpr size_t kMaxPending = 4;
++
++CefRefPtr<CefDisplayHandler> DisplayHandler(content::WebContents* contents,
++                                            CefRefPtr<CefBrowserHostBase>* browser) {
++  *browser = CefBrowserHostBase::GetBrowserForContents(contents);
++  auto client = *browser ? (*browser)->client() : nullptr;
++  return client ? client->GetDisplayHandler() : nullptr;
++}
++
++// Page-initiated print requests waiting for the embedder, per WebContents.
++// Each holds the closure that ends Chromium's original request.
++class ExternalPrint : public content::WebContentsObserver,
++                      public content::WebContentsUserData<ExternalPrint> {
++ public:
++  size_t size() const { return pending_.size(); }
++
++  std::string Add(base::OnceClosure done, content::RenderFrameHost* frame) {
++    std::string token = base::UnguessableToken::Create().ToString();
++    pending_[token] = Entry{std::move(done), frame->GetGlobalId()};
++    return token;
++  }
++
++  bool Finish(const std::string& token) {
++    auto found = pending_.find(token);
++    if (found == pending_.end()) return false;
++    auto done = std::move(found->second.done);
++    pending_.erase(found);
++    std::move(done).Run();
++    return true;
++  }
++
++  // Chromium dropped the document: finish what is pending and say so.
++  void WithdrawAll(const content::GlobalRenderFrameHostId* only_frame) {
++    std::vector<std::string> tokens;
++    for (auto& [token, entry] : pending_) {
++      if (!only_frame || entry.frame == *only_frame) tokens.push_back(token);
++    }
++    for (const auto& token : tokens) {
++      auto found = pending_.find(token);
++      if (found == pending_.end()) continue;
++      auto done = std::move(found->second.done);
++      pending_.erase(found);
++      std::move(done).Run();
++      CefRefPtr<CefBrowserHostBase> browser;
++      if (web_contents()) {
++        if (auto handler = DisplayHandler(web_contents(), &browser)) {
++          handler->OnPrintRequestWithdrawn(browser.get(), token);
++        }
++      }
++    }
++  }
++
++  // WebContentsObserver:
++  void RenderFrameDeleted(content::RenderFrameHost* frame) override {
++    auto id = frame->GetGlobalId();
++    WithdrawAll(&id);
++  }
++  void PrimaryPageChanged(content::Page&) override { WithdrawAll(nullptr); }
++  void WebContentsDestroyed() override { WithdrawAll(nullptr); }
++
++ private:
++  friend class content::WebContentsUserData<ExternalPrint>;
++  explicit ExternalPrint(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<ExternalPrint>(*contents) {}
++  struct Entry {
++    base::OnceClosure done;
++    content::GlobalRenderFrameHostId frame;
++  };
++  std::map<std::string, Entry> pending_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalPrint);
++
++bool PrintRequest(content::WebContents* contents,
++                  content::RenderFrameHost* frame,
++                  bool scripted,
++                  base::OnceClosure done) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !contents || !frame) return false;
++  CefRefPtr<CefBrowserHostBase> browser;
++  auto handler = DisplayHandler(contents, &browser);
++  if (!handler) return false;
++  auto* print = ExternalPrint::GetOrCreateForWebContents(contents);
++  // Past the limit Chrome's own preview takes over rather than piling up.
++  if (print->size() >= kMaxPending) return false;
++  const std::string token = print->Add(std::move(done), frame);
++  auto request = CefDictionaryValue::Create();
++  request->SetString("request", token);
++  request->SetBool("scripted", scripted);
++  request->SetString("url", frame->GetLastCommittedURL().spec());
++  request->SetBool("mainFrame", frame->IsInPrimaryMainFrame());
++  request->SetBool("pdf", frame->GetProcess()->IsPdf());
++  handler->OnPrintRequest(browser.get(), request);
++  return true;
++}
++
++}  // namespace
++
++void InstallPrintHooks() {
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kPrintSwitch)) return;
++  extensions::GetExternalExtensionHooks().print_request = &PrintRequest;
++}
++
++bool FinishPrint(content::WebContents* contents, const std::string& token) {
++  auto* print = ExternalPrint::FromWebContents(contents);
++  return print && print->Finish(token);
++}
++
++}  // namespace cef::external_host

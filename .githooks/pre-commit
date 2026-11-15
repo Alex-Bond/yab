@@ -1,0 +1,18 @@
+#!/bin/sh
+# Nothing that drifts from Design.swift gets in: see ./design-check.
+# Staged Swift files must also parse (scripts/swift-parse-check): a commit
+# made without a compile still can't carry a syntax error.
+# Homebrew's python first: miniconda's python3 can hang in uninterruptible
+# I/O on main and would hold every commit (2026-10-25).
+root="$(git rev-parse --show-toplevel)"
+"$root/scripts/swift-parse-check" || exit 1
+py=python3
+[ -x /opt/homebrew/bin/python3 ] && py=/opt/homebrew/bin/python3
+# A card that names a suite test discovery can't find holds no release any more,
+# but it covers nothing either: refuse it here, saying which name to use.
+cards="$(git diff --cached --name-only --diff-filter=ACMR -- 'qa/pending/*.json')"
+if [ -n "$cards" ]; then
+  # shellcheck disable=SC2086
+  (cd "$root" && "$py" scripts/runs/deferred_qa.py validate --staged $cards) || exit 1
+fi
+exec "$py" "$root/design-check"

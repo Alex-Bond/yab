@@ -1,0 +1,127 @@
+name: Bug report
+description: Something in Yab doesn't work the way it should.
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go privately, not here: see SECURITY.md.
+        One bug per report, please. Search open issues first; a 👍 on an existing one helps more than a duplicate.
+  - type: input
+    id: yab-version
+    attributes:
+      label: Yab version
+      description: Yab menu › About Yab, for example 0.47.17 (202611131840). On iPhone, Settings › About.
+      placeholder: 0.47.17 (202611131840)
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Device
+      options:
+        - Mac, Apple silicon
+        - Mac, Intel
+        - iPhone
+        - iPad
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: macOS or iOS version
+      description: Apple menu › About This Mac, or Settings › General › About.
+      placeholder: macOS 26.1
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine of the tab
+      description: WebKit is the default; Chromium tabs exist on Apple silicon when chosen in Settings or for a site. Pick "Not about a page" for the column, settings, mail and so on, and "Don't know" if unsure.
+      options:
+        - WebKit
+        - Chromium
+        - Both
+        - Not about a page
+        - Don't know
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where in Yab it happens. A guess is fine.
+      options:
+        - Tabs
+        - Pins
+        - Folders
+        - Spaces
+        - Sidebar (the tab column)
+        - Split view
+        - Command field (⌘L, ⌘T, ⌘K)
+        - Peek
+        - Bookmarks
+        - Downloads
+        - Passwords and autofill
+        - Media, video, picture in picture, calls
+        - Pages and sites
+        - AI and chats
+        - Agents
+        - Look and motion
+        - Keyboard shortcuts
+        - Settings
+        - Speed, memory, battery
+        - Privacy
+        - Web compatibility, extensions
+        - iPhone app
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: From a fresh window, what to click and type. Include the site's address if it happens on one site.
+      placeholder: |
+        1. Open https://example.com in a new tab
+        2. Press ⌘D
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: A screenshot or a short screen recording helps most. Drag it in here.
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup (optional)
+      description: Things that may matter, such as extensions, a password manager, how many tabs are open, other browsers you imported from.
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Did it work before? (optional)
+      options:
+        - "Yes, in an earlier version"
+        - "No, never"
+        - Don't know

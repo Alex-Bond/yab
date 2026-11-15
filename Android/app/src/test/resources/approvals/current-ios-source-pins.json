@@ -1,0 +1,30 @@
+{
+  "sourceSnapshot": "f3391f7af4f96f66afa561977ea4193b1f962621",
+  "inputs": [
+    {
+      "path": "Phone/Sources/Tasks/AssistantApprovalLayer.swift",
+      "sha256": "c55e61bcb87193451923f79c85a1764884d477376c87d4e0d8bbca7e29a01141"
+    },
+    {
+      "path": "Phone/Sources/Approvals/ApprovalMotion.swift",
+      "sha256": "06911419791a1e23e4a5b56fbf7e45a231502d315676ebf1b7bb8eba154c971f"
+    },
+    {
+      "path": "Phone/Sources/Column/SpringValue.swift",
+      "sha256": "b688ce8e58eb23e3d39ce3dfb03bd8d664cfaa00e5d64a902a496691b327ceef"
+    },
+    {
+      "path": "Phone/Sources/Design/Motion.swift",
+      "sha256": "6486d3bcf161a7d97b8f8ae9e739c9eb59f367643a51ee3e82977f302c2e3672"
+    },
+    {
+      "path": "Phone/Sources/Approvals/ApprovalWindow.swift",
+      "sha256": "82dce6b374efda1a7bd564f22cd39005106880c5091346ef1ba43766e36d941d"
+    }
+  ],
+  "unusedUIStubsTrapIfCalled": true,
+  "fixedFramesAreFixtureInputs": true,
+  "fontGeometryVerified": false,
+  "pictureFitBodyCopiedVerbatimWithOnlyFixtureTypeAdaptation": true,
+  "frameParityVerified": false
+}

@@ -1,0 +1,22 @@
+--- a/chrome/common/chrome_paths_mac.mm
++++ b/chrome/common/chrome_paths_mac.mm
+@@ -131,6 +131,11 @@
+ }
+ 
+ base::FilePath GetFrameworkBundlePath() {
++#if BUILDFLAG(ENABLE_CEF)
++  // CEF overrides this bundle from the loaded framework during startup. Its
++  // embedder and helper bundles need not use Chrome's versioned app layout.
++  return base::apple::FrameworkBundlePath();
++#else
+   // It's tempting to use +[NSBundle bundleWithIdentifier:], but it's really
+   // slow (about 30ms on 10.5 and 10.6), despite Apple's documentation stating
+   // that it may be more efficient than +bundleForClass:.  +bundleForClass:
+@@ -176,6 +181,7 @@
+                 .Extension(),
+             ".app");
+   return path;
++#endif
+ }
+ 
+ bool GetLocalLibraryDirectory(base::FilePath* result) {

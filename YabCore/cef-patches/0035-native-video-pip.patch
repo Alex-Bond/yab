@@ -1,0 +1,588 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1128,6 +1128,8 @@
+       "libcef/browser/views/external_print.h",
+       "libcef/browser/views/external_host_mac.h",
+       "libcef/browser/views/external_host_mac.mm",
++      "libcef/browser/views/external_pip_mac.h",
++      "libcef/browser/views/external_pip_mac.mm",
+       "libcef/browser/views/external_text_input.h",
+       "libcef/browser/views/external_text_input.cc",
+       "libcef/browser/views/external_text_value.h",
+--- a/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
++++ b/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
+@@ -5,6 +5,7 @@
+ #include "content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h"
+ 
+ #include <set>
++#include "content/public/browser/external_pip_routes.h"
+ #include <utility>
+ 
+ #include "components/viz/common/surfaces/surface_id.h"
+@@ -337,6 +338,8 @@
+       service, player_id, std::move(player_remote),
+       session_remote->InitWithNewPipeAndPassReceiver(), std::move(observer));
+ 
++  external_pip::Begin(web_contents(), RenderFrameHost::FromID(player_id.frame_routing_id));
++
+   // There can be a window already if this session is replacing an old one,
+   // without the old one being closed first.
+   if (!window_) {
+@@ -389,6 +392,7 @@
+   if (!active_session_ || active_session_->service() != service)
+     return;
+ 
++  external_pip::End(web_contents());
+   active_session_->Shutdown();
+   active_session_ = nullptr;
+   pip_session_media_position_ = std::nullopt;
+@@ -658,6 +662,7 @@
+ }
+ 
+ void VideoPictureInPictureWindowControllerImpl::WebContentsDestroyed() {
++  external_pip::End(web_contents());
+   if (window_) {
+     window_->Close();
+   }
+@@ -676,6 +681,7 @@
+         /*triggered_by_user=*/false);
+   }
+ 
++  external_pip::End(web_contents());
+   active_session_->Shutdown();
+   active_session_ = nullptr;
+   pip_session_media_position_ = std::nullopt;
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -57,6 +57,7 @@
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ #define CEF_YAB_NATIVE_MEDIA_SESSION_VERSION 1
+ #define CEF_YAB_NATIVE_CAPTURE_ACTIVITY_VERSION 1
++#define CEF_YAB_NATIVE_VIDEO_PIP_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1183,6 +1184,26 @@
+   virtual CefRefPtr<CefDictionaryValue> GetNativeCaptureState() = 0;
+ 
+   ///
++  /// Returns the original native video-PiP session's exact requesting document,
++  /// opaque session token and independent overlay compositor surface. No main
++  /// frame inference, page reparenting, polling or video duplication is used.
++  /// Surface crop and dimensions are DIP; frame pixels and scale are explicit.
++  /// Does not advertise Document PiP. UI thread only; macOS only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefDictionaryValue> GetNativeVideoPiPState() = 0;
++
++  ///
++  /// Controls that exact live native video-PiP token. Actions: resize, play,
++  /// pause, close, return. Size is used for resize. Return closes and signals
++  /// the embedder; it never activates the concealed producer window.
++  /// True means dispatched, not completed. UI thread only; macOS only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool ControlNativeVideoPiP(const CefString& token,
++      const CefString& action, const CefSize& size) = 0;
++
++  ///
+   /// Dispatches original capture stop callbacks in this browser. Kind is
+   /// userMedia or screen. Requires the exact current opaque capture token.
+   /// True means dispatched; native state events establish completion.
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/ui/views/overlay/video_overlay_window_views.h"
+ 
+ #include <memory>
++#include "content/public/browser/external_pip_routes.h"
+ #include <string>
+ 
+ #include "base/check.h"
+@@ -423,7 +424,15 @@
+ // static
+ std::unique_ptr<content::VideoOverlayWindow> CreateVideoOverlayWindow(
+     content::VideoPictureInPictureWindowController* controller) {
+-  return VideoOverlayWindowViews::Create(controller);
++  auto window = VideoOverlayWindowViews::Create(controller);
++  if (window) window->BindExternalHost();
++  return window;
++}
++
++bool VideoOverlayWindowViews::BindExternalHost() {
++  externally_hosted_ = content::external_pip::Bind(controller_->GetWebContents(), this);
++  if (externally_hosted_) SetPlaybackControlsVisibility(false);
++  return externally_hosted_;
+ }
+ 
+ VideoOverlayWindowViews::VideoOverlayWindowViews(
+@@ -777,6 +786,7 @@
+ 
+ void VideoOverlayWindowViews::UpdateControlsVisibility(bool is_visible,
+                                                        bool should_animate) {
++  if (externally_hosted_) { is_visible = false; should_animate = false; }
+   if (is_moving_) {
+     // If we've already queued a visibility change for the same visibility, then
+     // only animate if both should animate (which matches what would have
+@@ -1472,6 +1482,8 @@
+       gfx::Rect(gfx::Point(0, 0), GetBounds().size()));
+   video_view_->SetBoundsRect(video_bounds);
+   video_view_->layer()->AsSurface()->SetSurfaceSize(video_bounds.size());
++  if (externally_hosted_) content::external_pip::Geometry(controller_->GetWebContents(),
++      video_bounds, natural_size_, std::string());
+ 
+   if (IsOverlayViewShown()) {
+     overlay_view_->SetBoundsRect(gfx::Rect(GetBounds().size()));
+@@ -1972,7 +1984,7 @@
+ }
+ 
+ void VideoOverlayWindowViews::SetSurfaceId(const viz::SurfaceId& surface_id) {
+-  if (!show_playback_controls_) {
++  if (!show_playback_controls_ && !externally_hosted_) {
+     show_playback_controls_ = true;
+     OnUpdateControlsBounds();
+   }
+@@ -1991,6 +2003,8 @@
+   video_surface->SetShowSurface(surface_id, GetBounds().size(),
+                                 cc::DeadlinePolicy::UseDefaultDeadline(),
+                                 /*stretch_content_to_fill_bounds=*/true);
++  if (externally_hosted_) content::external_pip::Geometry(controller_->GetWebContents(),
++      video_view_->bounds(), natural_size_, surface_id.ToString());
+ }
+ 
+ void VideoOverlayWindowViews::SetPlaybackControlsVisibility(bool is_visible) {
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -21,6 +21,7 @@
+ class CefClient;
+ #if BUILDFLAG(IS_MAC)
+ class CefExternalTextInput;
++class CefExternalPiP;
+ struct CefExternalTextSnapshot;
+ #endif
+ 
+@@ -84,6 +85,9 @@
+   void ObserveWebContents(content::WebContents* new_contents);
+   CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState();
+   CefRefPtr<CefDictionaryValue> GetNativeCaptureState();
++  CefRefPtr<CefDictionaryValue> GetNativeVideoPiPState();
++  bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
++      const CefSize& size);
+   bool StopNativeCapture(const CefString& token, const CefString& kind);
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds);
+@@ -213,6 +217,10 @@
+   void OnNativeMediaSessionState(CefRefPtr<CefDictionaryValue> state);
+   std::unique_ptr<CefExternalMediaSession> external_media_session_;
+   std::unique_ptr<CefExternalCapture> external_capture_;
++#if BUILDFLAG(IS_MAC)
++  std::unique_ptr<CefExternalPiP> external_pip_;
++#endif
++  void OnNativeVideoPiPState(CefRefPtr<CefDictionaryValue> state);
+   void OnNativeCaptureState(CefRefPtr<CefDictionaryValue> state);
+ 
+   scoped_refptr<CefBrowserInfo> browser_info_;
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -289,6 +289,9 @@
+   CefRefPtr<CefDictionaryValue> GetExternalPageState() override;
+   CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState() override;
+   CefRefPtr<CefDictionaryValue> GetNativeCaptureState() override;
++  CefRefPtr<CefDictionaryValue> GetNativeVideoPiPState() override;
++  bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
++      const CefSize& size) override;
+   bool StopNativeCapture(const CefString& token, const CefString& kind) override;
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds) override;
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -42,6 +42,7 @@
+ #if BUILDFLAG(IS_MAC)
+ #include "base/functional/bind.h"
+ #include "cef/libcef/browser/views/external_host_mac.h"
++#include "cef/libcef/browser/views/external_pip_mac.h"
+ #include "cef/libcef/browser/views/external_text_input.h"
+ #include "cef/libcef/browser/views/external_text_value.h"
+ #endif
+@@ -102,6 +103,9 @@
+ 
+ void CefBrowserContentsDelegate::ObserveWebContents(
+     content::WebContents* new_contents) {
++#if BUILDFLAG(IS_MAC)
++  external_pip_.reset();
++#endif
+   external_capture_.reset();
+   external_media_session_.reset();
+ #if BUILDFLAG(IS_MAC)
+@@ -110,6 +114,11 @@
+ #endif
+   WebContentsObserver::Observe(new_contents);
+   if (new_contents && CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
++#if BUILDFLAG(IS_MAC)
++    external_pip_ = std::make_unique<CefExternalPiP>(new_contents,
++        base::BindRepeating(&CefBrowserContentsDelegate::OnNativeVideoPiPState,
++                           base::Unretained(this)));
++#endif
+     external_capture_ = std::make_unique<CefExternalCapture>(new_contents,
+         base::BindRepeating(&CefBrowserContentsDelegate::OnNativeCaptureState,
+                            base::Unretained(this)));
+@@ -151,6 +160,33 @@
+ }
+ #endif
+ 
++
++CefRefPtr<CefDictionaryValue> CefBrowserContentsDelegate::GetNativeVideoPiPState() {
++  auto state = CefDictionaryValue::Create();
++#if BUILDFLAG(IS_MAC)
++  if (external_pip_) state = external_pip_->State();
++#endif
++  if (auto owner = browser()) state->SetInt("browserId", owner->GetIdentifier());
++  return state;
++}
++bool CefBrowserContentsDelegate::ControlNativeVideoPiP(const CefString& token,
++    const CefString& action, const CefSize& size) {
++#if BUILDFLAG(IS_MAC)
++  return external_pip_ && external_pip_->Control(token.ToString(), action.ToString(),
++      gfx::Size(size.width, size.height));
++#else
++  return false;
++#endif
++}
++void CefBrowserContentsDelegate::OnNativeVideoPiPState(CefRefPtr<CefDictionaryValue> state) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !state) return;
++  auto owner = browser(); auto c = client();
++  if (!owner || !c) return;
++  if (auto handler = c->GetDisplayHandler()) {
++    state->SetInt("browserId", owner->GetIdentifier());
++    handler->OnNativeVideoPiPState(owner, state);
++  }
++}
+ 
+ CefRefPtr<CefDictionaryValue> CefBrowserContentsDelegate::GetNativeCaptureState() {
+   auto state = external_capture_ ? external_capture_->State() : CefDictionaryValue::Create();
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.h
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.h
+@@ -72,6 +72,7 @@
+   VideoOverlayWindowViews& operator=(const VideoOverlayWindowViews&) = delete;
+ 
+   ~VideoOverlayWindowViews() override;
++  bool BindExternalHost();
+ 
+   enum class WindowQuadrant { kBottomLeft, kBottomRight, kTopLeft, kTopRight };
+ 
+@@ -584,6 +585,7 @@
+ 
+   // True if the playback controls should be visible.
+   bool show_playback_controls_ = true;
++  bool externally_hosted_ = false;
+ 
+   base::WeakPtrFactory<VideoOverlayWindowViews> weak_factory_{this};
+ };
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1093,6 +1093,18 @@
+ }
+ 
+ 
++CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetNativeVideoPiPState() {
++  CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
++      ? contents_delegate_.GetNativeVideoPiPState() : CefDictionaryValue::Create();
++}
++bool CefBrowserHostBase::ControlNativeVideoPiP(const CefString& token,
++    const CefString& action, const CefSize& size) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) &&
++      contents_delegate_.ControlNativeVideoPiP(token, action, size);
++}
++
+ CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetNativeCaptureState() {
+   CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
+   return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -223,6 +223,16 @@
+       CefRefPtr<CefDictionaryValue> state) {}
+ 
+   ///
++  /// Native original video-PiP session/surface state for this exact browser.
++  /// Native document/frame/session ownership and surfaceReady are explicit.
++  /// An inactive state retires the previous token and compositor context.
++  /// UI thread only; macOS only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnNativeVideoPiPState(CefRefPtr<CefBrowser> browser,
++      CefRefPtr<CefDictionaryValue> state) {}
++
++  ///
+   /// Called on the UI thread when the primary page's CSS background color
+   /// changes. |has_color| is false when the page has no background color.
+   /// An embedder that hosts the compositor remotely can fill area the page
+--- /dev/null
++++ b/content/public/browser/external_pip_routes.h
+@@ -0,0 +1,52 @@
++// Original native video-PiP owner/widget routing. UI sequence only.
++#ifndef CONTENT_PUBLIC_BROWSER_EXTERNAL_PIP_ROUTES_H_
++#define CONTENT_PUBLIC_BROWSER_EXTERNAL_PIP_ROUTES_H_
++#include <map>
++#include <string>
++#include <utility>
++#include "base/functional/callback.h"
++#include "base/no_destructor.h"
++#include "base/unguessable_token.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
++namespace views { class Widget; }
++namespace content {
++class WebContents;
++class RenderFrameHost;
++namespace external_pip {
++struct Route {
++  base::UnguessableToken registration;
++  base::RepeatingCallback<void(RenderFrameHost*)> begin;
++  base::RepeatingCallback<bool(views::Widget*)> bind;
++  base::RepeatingCallback<void(const gfx::Rect&, const gfx::Size&, const std::string&)> geometry;
++  base::RepeatingClosure end;
++};
++inline std::map<WebContents*, Route>& Routes() {
++  static base::NoDestructor<std::map<WebContents*, Route>> routes;
++  return *routes;
++}
++inline void Register(WebContents* owner, Route route) { Routes().insert_or_assign(owner, std::move(route)); }
++inline void Remove(WebContents* owner, const base::UnguessableToken& registration) {
++  auto found = Routes().find(owner);
++  if (found != Routes().end() && found->second.registration == registration) Routes().erase(found);
++}
++inline void Begin(WebContents* owner, RenderFrameHost* frame) {
++  auto found = Routes().find(owner);
++  if (found != Routes().end()) found->second.begin.Run(frame);
++}
++inline bool Bind(WebContents* owner, views::Widget* widget) {
++  auto found = Routes().find(owner);
++  return found != Routes().end() && found->second.bind.Run(widget);
++}
++inline void Geometry(WebContents* owner, const gfx::Rect& crop, const gfx::Size& natural,
++                     const std::string& surface) {
++  auto found = Routes().find(owner);
++  if (found != Routes().end()) found->second.geometry.Run(crop, natural, surface);
++}
++inline void End(WebContents* owner) {
++  auto found = Routes().find(owner);
++  if (found != Routes().end()) found->second.end.Run();
++}
++}  // namespace external_pip
++}  // namespace content
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/views/external_pip_mac.h
+@@ -0,0 +1,58 @@
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_PIP_MAC_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_PIP_MAC_H_
++#include <string>
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_observation.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_values.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/views/widget/widget.h"
++#include "ui/views/widget/widget_observer.h"
++
++class CefExternalPiP final : public content::WebContentsObserver,
++    public views::WidgetObserver {
++ public:
++  using Changed = base::RepeatingCallback<void(CefRefPtr<CefDictionaryValue>)>;
++  CefExternalPiP(content::WebContents* owner, Changed changed);
++  ~CefExternalPiP() override;
++  CefRefPtr<CefDictionaryValue> State();
++  bool Control(const std::string& token, const std::string& action, const gfx::Size& size);
++  void OnWidgetDestroying(views::Widget*) override;
++  void DidFinishNavigation(content::NavigationHandle*) override;
++  void RenderFrameDeleted(content::RenderFrameHost*) override;
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
++  void WebContentsDestroyed() override;
++ private:
++  void Begin(content::RenderFrameHost* frame);
++  bool Bind(views::Widget* widget);
++  void Geometry(const gfx::Rect&, const gfx::Size&, const std::string&);
++  void End();
++  void Frame(uint32_t context, const gfx::Size& pixels, float scale);
++  void SchedulePublish();
++  void Publish();
++  void ClearWidget();
++  bool Live() const;
++  Changed changed_;
++  base::UnguessableToken registration_;
++  base::UnguessableToken token_;
++  content::WeakDocumentPtr document_;
++  base::WeakPtr<views::Widget> widget_;
++  base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{this};
++  gfx::AcceleratedWidget accelerated_ = gfx::kNullAcceleratedWidget;
++  uint32_t context_ = 0;
++  gfx::Size pixels_;
++  float scale_ = 1;
++  gfx::Rect crop_;
++  gfx::Size natural_;
++  std::string surface_;
++  std::string reason_;
++  std::string owner_document_;
++  std::string retired_token_;
++  std::string retired_document_;
++  bool publish_pending_ = false;
++  base::WeakPtrFactory<CefExternalPiP> weak_{this};
++};
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/views/external_pip_mac.mm
+@@ -0,0 +1,149 @@
++#include "external_pip_mac.h"
++#include <cmath>
++#include <utility>
++#include "base/functional/bind.h"
++#include "base/task/single_thread_task_runner.h"
++#include "cef/libcef/browser/views/external_host_mac.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/public/browser/external_pip_routes.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
++#include "ui/compositor/compositor.h"
++
++CefExternalPiP::CefExternalPiP(content::WebContents* owner, Changed changed)
++    : content::WebContentsObserver(owner), changed_(std::move(changed)),
++      registration_(base::UnguessableToken::Create()) {
++  content::external_pip::Register(owner, {registration_,
++      base::BindRepeating(&CefExternalPiP::Begin, weak_.GetWeakPtr()),
++      base::BindRepeating([](base::WeakPtr<CefExternalPiP> self, views::Widget* widget) {
++        return self && self->Bind(widget);
++      }, weak_.GetWeakPtr()),
++      base::BindRepeating(&CefExternalPiP::Geometry, weak_.GetWeakPtr()),
++      base::BindRepeating(&CefExternalPiP::End, weak_.GetWeakPtr())});
++}
++CefExternalPiP::~CefExternalPiP() {
++  content::external_pip::Remove(web_contents(), registration_);
++  ClearWidget();
++}
++bool CefExternalPiP::Live() const {
++  auto* owner = web_contents();
++  auto* frame = document_.AsRenderFrameHostIfValid();
++  return owner && !owner->IsBeingDestroyed() && !token_.is_empty() && frame &&
++      frame->IsActive() && frame->IsRenderFrameLive() &&
++      content::WebContents::FromRenderFrameHost(frame) == owner;
++}
++void CefExternalPiP::Begin(content::RenderFrameHost* frame) {
++  End();
++  if (!frame || !frame->IsActive() || !frame->IsRenderFrameLive() ||
++      content::WebContents::FromRenderFrameHost(frame) != web_contents()) return;
++  document_ = frame->GetWeakDocumentPtr(); token_ = base::UnguessableToken::Create();
++  owner_document_ = static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString();
++  reason_.clear(); SchedulePublish();
++}
++bool CefExternalPiP::Bind(views::Widget* widget) {
++  if (!Live() || !widget || widget->IsClosed() ||
++      (widget_ && widget_.get() != widget) || !cef::external_host::Enable(widget)) return false;
++  auto* compositor = widget->GetCompositor();
++  if (!compositor) return false;
++  auto accelerated = compositor->widget();
++  if (accelerated == gfx::kNullAcceleratedWidget) return false;
++  ClearWidget();
++  widget_ = widget->GetWeakPtr(); observation_.Observe(widget);
++  accelerated_ = accelerated;
++  if (!ui::AcceleratedWidgetMac::SetFrameCallback(accelerated_,
++      base::BindRepeating(&CefExternalPiP::Frame, weak_.GetWeakPtr()))) {
++    ClearWidget(); return false;
++  }
++  SchedulePublish(); return true;
++}
++void CefExternalPiP::Geometry(const gfx::Rect& crop, const gfx::Size& natural,
++    const std::string& surface) {
++  if (!Live() || !widget_) return;
++  crop_ = crop; natural_ = natural;
++  if (!surface.empty()) surface_ = surface;
++  SchedulePublish();
++}
++void CefExternalPiP::Frame(uint32_t context, const gfx::Size& pixels, float scale) {
++  if (!Live() || !widget_ || !std::isfinite(scale) || scale <= 0 ||
++      (context && pixels.IsEmpty())) return;
++  context_ = context; pixels_ = context ? pixels : gfx::Size(); scale_ = scale;
++  SchedulePublish();
++}
++void CefExternalPiP::End() {
++  if (!token_.is_empty()) {
++    retired_token_ = token_.ToString(); retired_document_ = owner_document_;
++  }
++  owner_document_.clear();
++  token_ = {}; document_ = {}; context_ = 0; pixels_ = {}; crop_ = {}; natural_ = {}; surface_.clear();
++  if (reason_.empty()) reason_ = "native-session-ended";
++  SchedulePublish();
++}
++void CefExternalPiP::ClearWidget() {
++  if (accelerated_ != gfx::kNullAcceleratedWidget)
++    ui::AcceleratedWidgetMac::SetFrameCallback(accelerated_, {});
++  accelerated_ = gfx::kNullAcceleratedWidget;
++  observation_.Reset(); widget_.reset(); context_ = 0; pixels_ = {};
++}
++CefRefPtr<CefDictionaryValue> CefExternalPiP::State() {
++  auto state = CefDictionaryValue::Create();
++  state->SetInt("version", 1); state->SetString("kind", "video");
++  const bool active = Live();
++  state->SetBool("active", active);
++  state->SetBool("surfaceReady", active && widget_ && context_ && !surface_.empty() && !crop_.IsEmpty());
++  state->SetString("reason", reason_);
++  if (!active) {
++    state->SetString("retiredToken", retired_token_);
++    state->SetString("retiredDocument", retired_document_);
++    return state;
++  }
++  auto* frame = document_.AsRenderFrameHostIfValid();
++  state->SetString("token", token_.ToString());
++  state->SetString("document", static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString());
++  state->SetString("frameId", frame->GetDevToolsFrameToken().ToString());
++  state->SetBool("main", frame == web_contents()->GetPrimaryMainFrame());
++  state->SetString("url", frame->GetLastCommittedURL().spec());
++  state->SetString("origin", frame->GetLastCommittedOrigin().Serialize());
++  state->SetDouble("contextId", context_);
++  state->SetInt("pixelWidth", pixels_.width()); state->SetInt("pixelHeight", pixels_.height());
++  state->SetDouble("scale", scale_);
++  state->SetInt("videoX", crop_.x()); state->SetInt("videoY", crop_.y());
++  state->SetInt("videoWidth", crop_.width()); state->SetInt("videoHeight", crop_.height());
++  state->SetInt("naturalWidth", natural_.width()); state->SetInt("naturalHeight", natural_.height());
++  state->SetString("nativeSurface", surface_);
++  return state;
++}
++bool CefExternalPiP::Control(const std::string& token, const std::string& action, const gfx::Size& size) {
++  if (!Live() || token.empty() || token_.ToString() != token || !widget_) return false;
++  auto* controller = content::VideoPictureInPictureWindowControllerImpl::FromWebContents(web_contents());
++  if (!controller) return false;
++  if (action == "resize") {
++    if (size.width() < 120 || size.height() < 80 || size.width() > 3840 || size.height() > 2160) return false;
++    widget_->SetSize(size); controller->UpdateLayerBounds(); return true;
++  }
++  if (action == "play") { controller->Play(); return true; }
++  if (action == "pause") { controller->Pause(); return true; }
++  if (action == "close" || action == "return") {
++    reason_ = action == "return" ? "return-requested" : "closed-by-embedder";
++    // The embedder selects its original Yab tab after return-requested. Never
++    // activate the concealed native source application or producer window.
++    controller->Close(false); return true;
++  }
++  return false;
++}
++void CefExternalPiP::SchedulePublish() {
++  if (publish_pending_) return;
++  publish_pending_ = true;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
++      base::BindOnce(&CefExternalPiP::Publish, weak_.GetWeakPtr()));
++}
++void CefExternalPiP::Publish() { publish_pending_ = false; changed_.Run(State()); }
++void CefExternalPiP::OnWidgetDestroying(views::Widget*) { ClearWidget(); reason_="native-widget-destroyed"; End(); }
++void CefExternalPiP::DidFinishNavigation(content::NavigationHandle*) { if (!Live()) End(); }
++void CefExternalPiP::RenderFrameDeleted(content::RenderFrameHost*) { if (!Live()) End(); }
++void CefExternalPiP::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) { reason_="renderer-gone"; End(); }
++void CefExternalPiP::WebContentsDestroyed() {
++  content::external_pip::Remove(web_contents(), registration_); ClearWidget();
++  Observe(nullptr); reason_="browser-closed"; End();
++}

@@ -1,0 +1,461 @@
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -288,6 +288,8 @@
+   bool FinishNativePrint(const CefString& request) override;
+   CefRefPtr<CefDictionaryValue> GetExternalPageState() override;
+   CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState() override;
++  CefRefPtr<CefDictionaryValue> GetNativeCaptureState() override;
++  bool StopNativeCapture(const CefString& token, const CefString& kind) override;
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds) override;
+   bool SetExternalPageSize(const CefSize& size) override;
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -616,6 +616,9 @@
+     "libcef/browser/download_manager_delegate.h",
+     "libcef/browser/download_manager_delegate_impl.cc",
+     "libcef/browser/download_manager_delegate_impl.h",
++    "libcef/browser/external_capture.cc",
++    "libcef/browser/external_capture.h",
++    "libcef/browser/external_media_stream_ui.h",
+     "libcef/browser/external_media_session.cc",
+     "libcef/browser/external_media_session.h",
+     "libcef/browser/external_file_dialog.cc",
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -56,6 +56,7 @@
+ #define CEF_YAB_EXTERNAL_PAGE_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ #define CEF_YAB_NATIVE_MEDIA_SESSION_VERSION 1
++#define CEF_YAB_NATIVE_CAPTURE_ACTIVITY_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1174,6 +1175,24 @@
+   virtual CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState() = 0;
+ 
+   ///
++  /// Returns authoritative native capture/PiP activity for this browser's
++  /// WebContents subtree. The scope is browser, not a guessed requesting
++  /// frame. Unknown capture mute state is explicit. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefDictionaryValue> GetNativeCaptureState() = 0;
++
++  ///
++  /// Dispatches original capture stop callbacks in this browser. Kind is
++  /// userMedia or screen. Requires the exact current opaque capture token.
++  /// True means dispatched; native state events establish completion.
++  /// This does not grant permission or modify content settings. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool StopNativeCapture(const CefString& token,
++                                const CefString& kind) = 0;
++
++  ///
+   /// Dispatches a supported action to that exact live native session token.
+   /// Actions: play, pause, toggle, seek, seekForward, seekBackward, next,
+   /// previous. Seconds is used by seek actions. Stale tokens, unsupported
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -51,6 +51,7 @@
+ // Includes functionality that is shared by Alloy and Chrome styles. Only
+ // accessed on the UI thread.
+ class CefExternalMediaSession;
++class CefExternalCapture;
+ 
+ class CefBrowserContentsDelegate : public content::WebContentsDelegate,
+                                    public content::WebContentsObserver {
+@@ -82,6 +83,8 @@
+ 
+   void ObserveWebContents(content::WebContents* new_contents);
+   CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState();
++  CefRefPtr<CefDictionaryValue> GetNativeCaptureState();
++  bool StopNativeCapture(const CefString& token, const CefString& kind);
+   bool SendNativeMediaSessionAction(const CefString& token,
+       const CefString& action, double seconds);
+ 
+@@ -209,6 +212,8 @@
+   void OnStateChanged(State state_changed);
+   void OnNativeMediaSessionState(CefRefPtr<CefDictionaryValue> state);
+   std::unique_ptr<CefExternalMediaSession> external_media_session_;
++  std::unique_ptr<CefExternalCapture> external_capture_;
++  void OnNativeCaptureState(CefRefPtr<CefDictionaryValue> state);
+ 
+   scoped_refptr<CefBrowserInfo> browser_info_;
+ 
+--- a/cef/libcef/browser/media_access_query.cc
++++ b/cef/libcef/browser/media_access_query.cc
+@@ -9,6 +9,8 @@
+ #include "cef/include/cef_permission_handler.h"
+ #include "cef/libcef/browser/browser_host_base.h"
+ #include "cef/libcef/browser/media_stream_registrar.h"
++#include "cef/libcef/browser/external_media_stream_ui.h"
++#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
+ #include "cef/libcef/browser/thread_util.h"
+ #include "cef/libcef/common/cef_switches.h"
+ #include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
+@@ -145,6 +147,11 @@
+         browser_->GetMediaStreamRegistrar()->MaybeCreateMediaStreamUI(
+             has_video, has_audio);
+ 
++    if(result==blink::mojom::MediaStreamRequestResult::OK && !stream_devices_set->stream_devices.empty()) {
++      auto indicator=MediaCaptureDevicesDispatcher::GetInstance()->GetMediaStreamCaptureIndicator();
++      auto registered=indicator->RegisterMediaStream(browser_->GetWebContents(),*stream_devices_set->stream_devices.front());
++      media_stream_ui=std::make_unique<CefCaptureRegistrationUI>(std::move(registered),std::move(media_stream_ui));
++    }
+     std::move(callback_).Run(*stream_devices_set, result,
+                              std::move(media_stream_ui));
+   }
+--- a/chrome/browser/media/webrtc/media_stream_capture_indicator.cc
++++ b/chrome/browser/media/webrtc/media_stream_capture_indicator.cc
+@@ -216,6 +216,7 @@
+   bool IsCapturingTab() const { return tab_stream_count_ > 0; }
+   bool IsCapturingWindow() const { return window_stream_count_ > 0; }
+   bool IsCapturingDisplay() const { return display_stream_count_ > 0; }
++  bool IsCapturingAllScreens() const {return all_screens_stream_count_>0;}
+ 
+   std::unique_ptr<content::MediaStreamUI> RegisterMediaStream(
+       const blink::mojom::StreamDevices& devices,
+@@ -255,6 +256,7 @@
+   int tab_stream_count_ = 0;
+   int window_stream_count_ = 0;
+   int display_stream_count_ = 0;
++  int all_screens_stream_count_ = 0;
+ 
+   std::map<int, base::OnceClosure> display_media_stop_callbacks_;
+   std::map<int, base::OnceClosure> user_media_stop_callbacks_;
+@@ -494,6 +496,7 @@
+         devices.video_device.value().type);
+   }
+ 
++  if(type == MediaType::kAllScreensMedia)++all_screens_stream_count_;
+   if (type == MediaType::kUserMedia) {
+     user_media_stop_callbacks_[stop_callback_id] = std::move(stop_callback);
+   }
+@@ -525,6 +528,7 @@
+     type = MediaStreamCaptureIndicator::GetMediaType(
+         devices.video_device.value().type);
+   }
++  if(type == MediaType::kAllScreensMedia) {CHECK_GT(all_screens_stream_count_,0);--all_screens_stream_count_;}
+   if (type == MediaType::kUserMedia) {
+     user_media_stop_callbacks_.erase(stop_callback_id);
+   }
+@@ -762,6 +766,11 @@
+   return CheckUsage(web_contents, &WebContentsDeviceUsage::IsCapturingDisplay);
+ }
+ 
++bool MediaStreamCaptureIndicator::IsCapturingAllScreens(content::WebContents* contents) const {
++  DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  return CheckUsage(contents,&WebContentsDeviceUsage::IsCapturingAllScreens);
++}
++
+ void MediaStreamCaptureIndicator::StopMediaCapturing(
+     content::WebContents* web_contents,
+     int media_type) const {
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1093,6 +1093,17 @@
+ }
+ 
+ 
++CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetNativeCaptureState() {
++  CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
++      ? contents_delegate_.GetNativeCaptureState() : CefDictionaryValue::Create();
++}
++bool CefBrowserHostBase::StopNativeCapture(const CefString& token, const CefString& kind) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) &&
++      contents_delegate_.StopNativeCapture(token, kind);
++}
++
+ CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetNativeMediaSessionState() {
+   CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
+   return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
+--- a/chrome/browser/media/webrtc/media_stream_capture_indicator.h
++++ b/chrome/browser/media/webrtc/media_stream_capture_indicator.h
+@@ -111,6 +111,7 @@
+ 
+   // Returns true if |web_contents| is capturing a display.
+   bool IsCapturingDisplay(content::WebContents* web_contents) const;
++  bool IsCapturingAllScreens(content::WebContents* web_contents) const;
+ 
+   // Called to stop media capturing of the |media_type|.
+   // |media_type| is underlying_type of MediaType.
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -5,6 +5,7 @@
+ #include "cef/libcef/browser/browser_contents_delegate.h"
+ #include "base/functional/bind.h"
+ #include "cef/libcef/browser/external_media_session.h"
++#include "cef/libcef/browser/external_capture.h"
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "cef/libcef/browser/browser_event_util.h"
+@@ -101,6 +102,7 @@
+ 
+ void CefBrowserContentsDelegate::ObserveWebContents(
+     content::WebContents* new_contents) {
++  external_capture_.reset();
+   external_media_session_.reset();
+ #if BUILDFLAG(IS_MAC)
+   external_text_input_.reset();
+@@ -108,6 +110,9 @@
+ #endif
+   WebContentsObserver::Observe(new_contents);
+   if (new_contents && CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
++    external_capture_ = std::make_unique<CefExternalCapture>(new_contents,
++        base::BindRepeating(&CefBrowserContentsDelegate::OnNativeCaptureState,
++                           base::Unretained(this)));
+     external_media_session_ = std::make_unique<CefExternalMediaSession>(new_contents,
+         base::BindRepeating(&CefBrowserContentsDelegate::OnNativeMediaSessionState,
+                            base::Unretained(this)));
+@@ -146,6 +151,25 @@
+ }
+ #endif
+ 
++
++CefRefPtr<CefDictionaryValue> CefBrowserContentsDelegate::GetNativeCaptureState() {
++  auto state = external_capture_ ? external_capture_->State() : CefDictionaryValue::Create();
++  if (auto owner = browser()) state->SetInt("browserId", owner->GetIdentifier());
++  return state;
++}
++bool CefBrowserContentsDelegate::StopNativeCapture(const CefString& token, const CefString& kind) {
++  return external_capture_ && external_capture_->Stop(token.ToString(), kind.ToString());
++}
++void CefBrowserContentsDelegate::OnNativeCaptureState(CefRefPtr<CefDictionaryValue> state) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !state) return;
++  auto owner = browser();
++  auto c = client();
++  if (!owner || !c) return;
++  if (auto handler = c->GetDisplayHandler()) {
++    state->SetInt("browserId", owner->GetIdentifier());
++    handler->OnNativeCaptureState(owner, state);
++  }
++}
+ 
+ CefRefPtr<CefDictionaryValue> CefBrowserContentsDelegate::GetNativeMediaSessionState() {
+   auto state = external_media_session_ ? external_media_session_->State()
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -213,6 +213,16 @@
+       CefRefPtr<CefDictionaryValue> state) {}
+ 
+   ///
++  /// Browser-scoped authoritative MediaStreamCaptureIndicator and PiP state.
++  /// Fields include known, token, camera, microphone, screen, tab, window,
++  /// display, mirrored, videoPiP and documentPiP. It contains no synthesized
++  /// native frame owner and no inferred device mute state. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnNativeCaptureState(CefRefPtr<CefBrowser> browser,
++      CefRefPtr<CefDictionaryValue> state) {}
++
++  ///
+   /// Called on the UI thread when the primary page's CSS background color
+   /// changes. |has_color| is false when the page has no background color.
+   /// An embedder that hosts the compositor remotely can fill area the page
+--- /dev/null
++++ b/cef/libcef/browser/external_media_stream_ui.h
+@@ -0,0 +1,36 @@
++#ifndef CEF_LIBCEF_BROWSER_EXTERNAL_MEDIA_STREAM_UI_H_
++#define CEF_LIBCEF_BROWSER_EXTERNAL_MEDIA_STREAM_UI_H_
++#include <memory>
++#include <utility>
++#include "content/public/browser/media_stream_request.h"
++// Preserve CEF's original stream notification UI and Chrome's authoritative
++// device/stop registration on the same original native stream lifetime.
++class CefCaptureRegistrationUI final : public content::MediaStreamUI {
++ public:
++  CefCaptureRegistrationUI(std::unique_ptr<content::MediaStreamUI> indicator,
++      std::unique_ptr<content::MediaStreamUI> legacy)
++      :indicator_(std::move(indicator)),legacy_(std::move(legacy)) {}
++  gfx::NativeViewId OnStarted(base::RepeatingClosure stop,SourceCallback source,
++      const std::string& label,std::vector<content::DesktopMediaID> ids,
++      StateChangeCallback change) override {
++    if(started_)return 0;
++    started_=true;
++    gfx::NativeViewId native=indicator_?indicator_->OnStarted(stop,source,label,ids,change):0;
++    gfx::NativeViewId legacy=legacy_?legacy_->OnStarted(stop,std::move(source),label,std::move(ids),std::move(change)):0;
++    return legacy?legacy:native;
++  }
++  void OnDeviceStoppedForSourceChange(const std::string& label,
++      const content::DesktopMediaID& old_id,const content::DesktopMediaID& new_id,
++      bool captured_surface_control_active) override {
++    if(indicator_)indicator_->OnDeviceStoppedForSourceChange(label,old_id,new_id,captured_surface_control_active);
++    if(legacy_)legacy_->OnDeviceStoppedForSourceChange(label,old_id,new_id,captured_surface_control_active);
++  }
++  void OnDeviceStopped(const std::string& label,const content::DesktopMediaID& id) override {
++    if(indicator_)indicator_->OnDeviceStopped(label,id);
++    if(legacy_)legacy_->OnDeviceStopped(label,id);
++  }
++ private:
++  bool started_=false;
++  std::unique_ptr<content::MediaStreamUI> indicator_,legacy_;
++};
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/external_capture.h
+@@ -0,0 +1,45 @@
++// Native browser-scoped capture activity. Per-track mute is a separate API.
++#ifndef CEF_LIBCEF_BROWSER_EXTERNAL_CAPTURE_H_
++#define CEF_LIBCEF_BROWSER_EXTERNAL_CAPTURE_H_
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_values.h"
++#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
++#include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents_observer.h"
++
++class CefExternalCapture final : public content::WebContentsObserver,
++    public MediaStreamCaptureIndicator::Observer,
++    public PictureInPictureWindowManager::Observer {
++ public:
++  using Changed = base::RepeatingCallback<void(CefRefPtr<CefDictionaryValue>)>;
++  CefExternalCapture(content::WebContents* contents, Changed changed);
++  ~CefExternalCapture() override;
++  CefRefPtr<CefDictionaryValue> State();
++  bool Stop(const std::string& token, const std::string& kind);
++  void OnIsCapturingVideoChanged(content::WebContents*, bool) override;
++  void OnIsCapturingAudioChanged(content::WebContents*, bool) override;
++  void OnIsBeingMirroredChanged(content::WebContents*, bool) override;
++  void OnIsCapturingTabChanged(content::WebContents*, bool) override;
++  void OnIsCapturingWindowChanged(content::WebContents*, bool) override;
++  void OnIsCapturingDisplayChanged(content::WebContents*, bool) override;
++  void OnEnterPictureInPicture() override;
++  void OnExitPictureInPicture() override;
++  void DidFinishNavigation(content::NavigationHandle*) override;
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
++  void WebContentsDestroyed() override;
++ private:
++  void SchedulePublish();
++  void Publish();
++  void Detach();
++  Changed changed_;
++  scoped_refptr<MediaStreamCaptureIndicator> indicator_;
++  content::WeakDocumentPtr document_;
++  base::UnguessableToken token_;
++  bool attached_ = true;
++  bool publish_pending_ = false;
++  base::WeakPtrFactory<CefExternalCapture> weak_{this};
++};
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/external_capture.cc
+@@ -0,0 +1,113 @@
++#include "external_capture.h"
++#include "base/functional/bind.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++
++CefExternalCapture::CefExternalCapture(content::WebContents* contents,
++    Changed changed) : content::WebContentsObserver(contents),
++    changed_(std::move(changed)),
++    indicator_(MediaCaptureDevicesDispatcher::GetInstance()->GetMediaStreamCaptureIndicator()) {
++  indicator_->AddObserver(this);
++  PictureInPictureWindowManager::GetInstance()->AddObserver(this);
++  SchedulePublish();
++}
++CefExternalCapture::~CefExternalCapture() { Detach(); }
++void CefExternalCapture::Detach() {
++  if (!attached_) return;
++  attached_ = false;
++  indicator_->RemoveObserver(this);
++  PictureInPictureWindowManager::GetInstance()->RemoveObserver(this);
++  weak_.InvalidateWeakPtrs();
++  publish_pending_ = false;
++}
++CefRefPtr<CefDictionaryValue> CefExternalCapture::State() {
++  auto state = CefDictionaryValue::Create();
++  state->SetInt("version", 1);
++  state->SetString("scope", "browser");
++  state->SetBool("known", false);
++  auto* contents = web_contents();
++  auto* frame = contents && !contents->IsBeingDestroyed() ? contents->GetPrimaryMainFrame() : nullptr;
++  if (!attached_ || !frame || !frame->IsActive() || !frame->IsRenderFrameLive()) {
++    token_ = {}; document_ = {};
++    return state;
++  }
++  if (token_.is_empty() || document_.AsRenderFrameHostIfValid() != frame) {
++    document_ = frame->GetWeakDocumentPtr();
++    token_ = base::UnguessableToken::Create();
++  }
++  state->SetBool("known", true);
++  state->SetString("token", token_.ToString());
++  state->SetString("primaryDocument", static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString());
++  state->SetString("primaryFrameId", frame->GetDevToolsFrameToken().ToString());
++  state->SetBool("camera", indicator_->IsCapturingVideo(contents));
++  state->SetBool("microphone", indicator_->IsCapturingAudio(contents));
++  state->SetBool("tab", indicator_->IsCapturingTab(contents));
++  state->SetBool("window", indicator_->IsCapturingWindow(contents));
++  state->SetBool("display", indicator_->IsCapturingDisplay(contents));
++  state->SetBool("allScreens", indicator_->IsCapturingAllScreens(contents));
++  state->SetBool("screen", indicator_->IsCapturingTab(contents) ||
++      indicator_->IsCapturingWindow(contents) || indicator_->IsCapturingDisplay(contents) ||
++      indicator_->IsCapturingAllScreens(contents));
++  state->SetBool("mirrored", indicator_->IsBeingMirrored(contents));
++  state->SetBool("videoPiP", contents->HasPictureInPictureVideo());
++  state->SetBool("documentPiP", contents->HasPictureInPictureDocument());
++  // Do not mislabel site-declared MediaSession microphone/camera status as
++  // the native device's actual mute state. Unknown remains explicit.
++  state->SetString("microphoneMuted", "unknown");
++  state->SetString("cameraMuted", "unknown");
++  auto actions = CefListValue::Create();
++  if (indicator_->IsCapturingUserMedia(contents)) actions->SetString(actions->GetSize(), "stopUserMedia");
++  if (state->GetBool("screen") && !state->GetBool("allScreens")) actions->SetString(actions->GetSize(), "stopScreen");
++  state->SetList("actions", actions);
++  return state;
++}
++bool CefExternalCapture::Stop(const std::string& token, const std::string& kind) {
++  auto state = State();
++  if (token.empty() || !state->GetBool("known") || state->GetString("token").ToString() != token) return false;
++  int type = 0;
++  if (kind == "userMedia" && (state->GetBool("camera") || state->GetBool("microphone")))
++    type = MediaStreamCaptureIndicator::kUserMedia;
++  else if (kind == "screen" && state->GetBool("screen") && !state->GetBool("allScreens"))
++    type = MediaStreamCaptureIndicator::kDisplayMedia;
++  if (!type) return false;
++  // Stop is scoped to the authenticated browser. This is a dispatch receipt;
++  // completion arrives from the original native indicator, never inferred.
++  indicator_->StopMediaCapturing(web_contents(), type);
++  SchedulePublish();
++  return true;
++}
++void CefExternalCapture::SchedulePublish() {
++  if (!attached_ || publish_pending_) return;
++  publish_pending_ = true;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
++      base::BindOnce(&CefExternalCapture::Publish, weak_.GetWeakPtr()));
++}
++void CefExternalCapture::Publish() {
++  publish_pending_ = false;
++  changed_.Run(State());
++}
++void CefExternalCapture::OnIsCapturingVideoChanged(content::WebContents*, bool) { SchedulePublish(); }
++void CefExternalCapture::OnIsCapturingAudioChanged(content::WebContents*, bool) { SchedulePublish(); }
++void CefExternalCapture::OnIsBeingMirroredChanged(content::WebContents*, bool) { SchedulePublish(); }
++void CefExternalCapture::OnIsCapturingTabChanged(content::WebContents*, bool) { SchedulePublish(); }
++void CefExternalCapture::OnIsCapturingWindowChanged(content::WebContents*, bool) { SchedulePublish(); }
++void CefExternalCapture::OnIsCapturingDisplayChanged(content::WebContents*, bool) { SchedulePublish(); }
++void CefExternalCapture::OnEnterPictureInPicture() { SchedulePublish(); }
++void CefExternalCapture::OnExitPictureInPicture() { SchedulePublish(); }
++void CefExternalCapture::DidFinishNavigation(content::NavigationHandle* handle) {
++  if (handle->HasCommitted() && handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
++    token_ = {}; document_ = {};
++  }
++  SchedulePublish();
++}
++void CefExternalCapture::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
++  token_ = {}; document_ = {}; SchedulePublish();
++}
++void CefExternalCapture::WebContentsDestroyed() {
++  Detach(); Observe(nullptr); token_ = {}; document_ = {};
++  changed_.Run(State());
++}

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Drift</title>
+<meta name="description" content="Drift is endless radio for slow mornings and late nights: stations, mixes made for you, and new music every Friday.">
+<meta name="theme-color" content="#0b0c10">
+<meta name="color-scheme" content="dark">
+<meta property="og:site_name" content="Drift">
+<meta property="og:title" content="Drift">
+<meta property="og:image" content="/apple-touch-icon.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<a class="skip-link" href="#view">Skip to content</a>
+
+<header class="top" id="top">
+  <a class="brand" href="/" aria-label="Drift, home">
+    <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+      <defs><linearGradient id="brandTile" x1="0" y1="0" x2=".4" y2="1"><stop offset="0" stop-color="#ff9e6e"/><stop offset=".55" stop-color="#ff6f5a"/><stop offset="1" stop-color="#ef4f5e"/></linearGradient></defs>
+      <rect width="64" height="64" rx="15" fill="url(#brandTile)"/>
+      <path d="M18 37 A14 14 0 0 1 46 37 Z" fill="#fff"/>
+      <path d="M10 44 q5.5 -4.5 11 0 t11 0 t11 0 t11 0" fill="none" stroke="#fff" stroke-width="4.4" stroke-linecap="round"/>
+      <path d="M17 53 q5 -4 10 0 t10 0 t10 0" fill="none" stroke="#fff" stroke-width="4.4" stroke-linecap="round" opacity=".85"/>
+    </svg>
+    <span class="brand-word">Drift</span>
+  </a>
+  <nav class="nav" aria-label="Main">
+    <a href="/" data-nav="home"><i data-icon="home"></i><span>Home</span></a>
+    <a href="/stations" data-nav="stations"><i data-icon="radio"></i><span>Stations</span></a>
+    <a href="/library" data-nav="library"><i data-icon="library"></i><span>Library</span></a>
+  </nav>
+  <div class="search" role="search">
+    <i data-icon="search"></i>
+    <input id="search" type="search" placeholder="Search tracks, artists, stations" autocomplete="off" spellcheck="false"
+           aria-label="Search Drift" aria-controls="results" aria-expanded="false" aria-autocomplete="list">
+    <kbd class="search-key" aria-hidden="true">/</kbd>
+    <div class="results" id="results" role="listbox" aria-label="Search results" hidden></div>
+  </div>
+  <div class="me" title="Mira Lindqvist · Drift Premium">
+    <span class="avatar" aria-hidden="true">M</span>
+    <span class="sr-only">Signed in as Mira Lindqvist</span>
+  </div>
+</header>
+
+<div class="backdrop" id="backdrop" aria-hidden="true"></div>
+<main class="view" id="view" tabindex="-1"></main>
+
+<aside class="queue" id="queue" aria-label="Queue" hidden>
+  <div class="queue-head">
+    <h2>Queue</h2>
+    <button class="icon-btn" type="button" id="queue-close" aria-label="Close queue"><i data-icon="close"></i></button>
+  </div>
+  <div class="queue-body" id="queue-body"></div>
+</aside>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<footer class="bar" id="bar" aria-label="Player">
+  <div class="np" id="np">
+    <a class="np-art" id="np-art" href="/album/paper-lanterns" tabindex="-1" aria-hidden="true"><img id="np-img" src="/covers/paper-lanterns.svg" alt="" width="56" height="56"></a>
+    <div class="np-text">
+      <a class="np-title" id="np-title" href="/album/paper-lanterns">Paper Lanterns</a>
+      <a class="np-artist" id="np-artist" href="/album/paper-lanterns">Maren Holt</a>
+    </div>
+    <button class="icon-btn like" type="button" id="np-like" aria-label="Save to Liked Tracks" aria-pressed="false"><i data-icon="heart"></i></button>
+  </div>
+  <div class="transport">
+    <div class="buttons">
+      <button class="icon-btn mode" type="button" id="shuffle" aria-label="Shuffle" aria-pressed="false"><i data-icon="shuffle"></i></button>
+      <button class="icon-btn skip" type="button" id="prev" aria-label="Previous track"><i data-icon="prev"></i></button>
+      <button class="play" type="button" id="play" aria-label="Play"><i data-icon="play"></i></button>
+      <button class="icon-btn skip" type="button" id="next" aria-label="Next track"><i data-icon="next"></i></button>
+      <button class="icon-btn mode" type="button" id="repeat" aria-label="Repeat" aria-pressed="true"><i data-icon="repeat"></i></button>
+    </div>
+    <div class="timeline">
+      <span class="time" id="elapsed">0:00</span>
+      <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="120" aria-valuenow="0" aria-valuetext="0:00 of 2:00">
+        <div class="rail"><div class="fill" id="fill"></div></div>
+        <div class="knob-rail" id="knob-rail"><div class="knob"></div></div>
+      </div>
+      <span class="time" id="total">2:00</span>
+    </div>
+  </div>
+  <div class="extras">
+    <button class="icon-btn" type="button" id="queue-btn" aria-label="Queue" aria-pressed="false" aria-controls="queue"><i data-icon="queue"></i></button>
+    <div class="volume">
+      <button class="icon-btn" type="button" id="mute" aria-label="Mute"><i data-icon="volume"></i></button>
+      <div class="vol" id="vol" role="slider" tabindex="0" aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="80">
+        <div class="rail"><div class="fill" id="vol-fill"></div></div>
+        <div class="knob-rail" id="vol-rail"><div class="knob"></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="mini-line" aria-hidden="true"><div class="fill" id="mini-fill"></div></div>
+</footer>
+
+<audio id="audio" preload="none"></audio>
+<script src="/assets/catalog.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>

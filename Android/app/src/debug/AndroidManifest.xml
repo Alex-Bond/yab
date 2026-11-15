@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <service android:name="dev.yab.reports.NativeTraceProofService" android:exported="false"
+            android:process=":nativeTraceProof" android:stopWithTask="true" />
+        <activity android:name="dev.yab.android.WebAuthnResultTestActivity" android:exported="false" />
+        <activity android:name="dev.yab.android.EngineTestActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
+            android:theme="@style/Theme.Yab" />
+    </application>
+</manifest>

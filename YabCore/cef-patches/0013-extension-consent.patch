@@ -1,0 +1,571 @@
+--- a/cef/BUILD.gn	2026-10-26 22:30:15
++++ b/cef/BUILD.gn	2026-10-26 23:19:45
+@@ -1113,6 +1113,8 @@
+       "libcef/browser/views/ns_window.h",
+       "libcef/browser/views/ns_window.mm",
+       "libcef/browser/views/view_util_mac.mm",
++      "libcef/browser/views/external_consent.cc",
++      "libcef/browser/views/external_consent.h",
+       "libcef/browser/views/external_host_mac.h",
+       "libcef/browser/views/external_host_mac.mm",
+       "libcef/browser/views/external_text_input.h",
+--- a/cef/include/cef_browser_process_handler.h	2026-10-26 07:24:23
++++ b/cef/include/cef_browser_process_handler.h	2026-10-26 23:19:45
+@@ -38,14 +38,37 @@
+ #define CEF_INCLUDE_CEF_BROWSER_PROCESS_HANDLER_H_
+ #pragma once
+ 
++#include "include/cef_api_hash.h"
+ #include "include/cef_base.h"
++#include "include/cef_browser.h"
+ #include "include/cef_client.h"
+ #include "include/cef_command_line.h"
+ #include "include/cef_preference.h"
+ #include "include/cef_request_context_handler.h"
+ #include "include/cef_values.h"
+ 
++// Experimental Yab source-build capability, absent from official CEF SDKs.
++#define CEF_YAB_EXTENSION_CONSENT_VERSION 1
++
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
+ ///
++/// Answers one extension consent request. Exactly the first Continue counts;
++/// releasing the callback unanswered cancels the request. May be called on any
++/// thread.
++///
++/*--cef(source=library,added=experimental)--*/
++class CefExtensionConsentCallback : public virtual CefBaseRefCounted {
++ public:
++  ///
++  /// Accept (true) or cancel (false) the install, permission grant, re-enable
++  /// or uninstall the request describes.
++  ///
++  /*--cef()--*/
++  virtual void Continue(bool accept) = 0;
++};
++#endif
++
++///
+ /// Class used to implement browser process callbacks. The methods of this class
+ /// will be called on the browser process main thread unless otherwise
+ /// indicated.
+@@ -161,6 +184,35 @@
+   GetDefaultRequestContextHandler() {
+     return nullptr;
+   }
++
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Called when Chrome would show an extension install, permission, re-enable
++  /// or uninstall dialog, before any side effect. Only used when the process
++  /// runs with --yab-extension-consent; otherwise Chrome's own dialog shows.
++  /// |browser| is the page the request came from (may be null). |request| has
++  /// request (a unique token), operation (install, reenable, permissions or
++  /// uninstall), promptType, extensionId, displayName, version, fromWebstore,
++  /// profilePath, offTheRecord and, for installs, manifestSHA256, manifest (the
++  /// verified manifest.json text) and warnings (a list of text and details,
++  /// Chrome's own permission messages for that manifest). Uninstalls may add
++  /// triggeringExtensionId and reportAbuseOffered. Answer exactly once through
++  /// |callback|; the default (a dropped callback) cancels. A request that
++  /// Chrome withdraws first (profile gone, extension removed) is reported by
++  /// OnExtensionConsentWithdrawn and later answers have no effect.
++  ///
++  /*--cef(added=experimental,optional_param=browser)--*/
++  virtual void OnExtensionConsent(
++      CefRefPtr<CefBrowser> browser,
++      CefRefPtr<CefDictionaryValue> request,
++      CefRefPtr<CefExtensionConsentCallback> callback) {}
++
++  ///
++  /// Called after Chrome withdrew the consent request with token |request|.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnExtensionConsentWithdrawn(const CefString& request) {}
++#endif
+ };
+ 
+ #endif  // CEF_INCLUDE_CEF_BROWSER_PROCESS_HANDLER_H_
+--- a/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 23:10:41
++++ b/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 23:19:45
+@@ -21,6 +21,7 @@
+ #include "cef/libcef/common/api_version_util.h"
+ #include "cef/include/cef_values.h"
+ #include "mojo/public/cpp/bindings/receiver.h"
++#include "cef/libcef/browser/views/external_consent.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
+ #include "ui/compositor/compositor.h"
+@@ -455,6 +456,7 @@
+   hooks.popup_shown = &PopupShown;
+   hooks.popup_closed = &PopupClosed;
+   hooks.tab_created = &TabCreated;
++  InstallConsentHooks();
+ }
+ 
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index) {
+--- a/chrome/browser/extensions/extension_install_prompt.cc	2026-10-25 13:28:57
++++ b/chrome/browser/extensions/extension_install_prompt.cc	2026-10-26 23:19:45
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_install_prompt.h"
++#include "chrome/browser/extensions/external_action_origin.h"
+ 
+ #include <optional>
+ #include <utility>
+@@ -290,6 +291,17 @@
+   // If true, auto confirm is enabled and already handled the result.
+   if (AutoConfirmPromptIfEnabled())
+     return;
++
++  // An embedder that asks its own user takes the prompt data and the result
++  // callback with it; the prompt observers hear its answer.
++  if (auto hook = extensions::GetExternalExtensionHooks().install_consent) {
++    auto done = std::move(done_callback_);
++    if (hook(profile_, show_params_->GetParentWebContents(), extension_.get(),
++             &prompt_, &done)) {
++      return;
++    }
++    done_callback_ = std::move(done);
++  }
+ 
+   if (show_dialog_callback_.is_null())
+     show_dialog_callback_ = GetDefaultShowDialogCallback();
+--- a/chrome/browser/extensions/extension_uninstall_dialog.cc	2026-10-25 13:28:57
++++ b/chrome/browser/extensions/extension_uninstall_dialog.cc	2026-10-26 23:19:45
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_uninstall_dialog.h"
++#include "chrome/browser/extensions/external_action_origin.h"
+ 
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+@@ -144,6 +145,11 @@
+ 
+   switch (ScopedTestDialogAutoConfirm::GetAutoConfirmValue()) {
+     case ScopedTestDialogAutoConfirm::NONE:
++      if (auto hook = GetExternalExtensionHooks().uninstall_consent;
++          hook && hook(profile_, extension_.get(), triggering_extension_.get(),
++                       show_report_abuse_checkbox_, AsWeakPtr())) {
++        break;
++      }
+       Show();
+       break;
+     case ScopedTestDialogAutoConfirm::ACCEPT_AND_OPTION:
+@@ -183,6 +189,9 @@
+ }
+ 
+ void ExtensionUninstallDialog::OnDialogClosed(CloseAction action) {
++  if (auto hook = GetExternalExtensionHooks().uninstall_closed) {
++    hook(this);
++  }
+   // Ensure the dialog isn't notified of an uninstallation after the dialog was
+   // closed.
+   registry_observation_.Reset();
+--- a/chrome/browser/extensions/external_action_origin.h	2026-10-26 23:10:41
++++ b/chrome/browser/extensions/external_action_origin.h	2026-10-26 23:19:45
+@@ -11,12 +11,18 @@
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents.h"
++#include "extensions/browser/extension_install_prompt_client.h"
++#include "extensions/browser/install_prompt_data.h"
+ 
++class Profile;
++
+ namespace views {
+ class Widget;
+ }
+ 
+ namespace extensions {
++class Extension;
++class ExtensionUninstallDialog;
+ // Embedder hooks, set by CEF on the UI thread before any browser exists. Null
+ // hooks are no-ops, so ordinary builds keep Chrome's behavior.
+ struct ExternalExtensionHooks {
+@@ -32,6 +38,25 @@
+                       bool active,
+                       int index,
+                       const std::string& extension_id) = nullptr;
++  // Install, permission or re-enable prompt about to show for |extension|.
++  // Return true to take over: |*prompt| and |*done| were moved from, and
++  // |done| must run exactly once. Return false to leave them untouched.
++  bool (*install_consent)(
++      Profile* profile,
++      content::WebContents* parent,
++      const Extension* extension,
++      std::unique_ptr<InstallPromptData>* prompt,
++      ExtensionInstallPromptClient::DoneCallback* done) = nullptr;
++  // Uninstall dialog about to show. Return true to take over: the embedder
++  // answers with |dialog|->OnDialogClosed (if |dialog| is still alive).
++  bool (*uninstall_consent)(Profile* profile,
++                            const Extension* extension,
++                            const Extension* triggering_extension,
++                            bool report_abuse_offered,
++                            base::WeakPtr<ExtensionUninstallDialog> dialog) =
++      nullptr;
++  // |dialog| is closing (answered, canceled, profile or extension gone).
++  void (*uninstall_closed)(ExtensionUninstallDialog* dialog) = nullptr;
+ };
+ inline ExternalExtensionHooks& GetExternalExtensionHooks() {
+   static ExternalExtensionHooks hooks;
+--- a/chrome/browser/ui/extensions/extension_uninstall_dialog_impl.cc	2026-10-25 13:29:02
++++ b/chrome/browser/ui/extensions/extension_uninstall_dialog_impl.cc	2026-10-26 23:19:45
+@@ -128,6 +128,12 @@
+ }
+ 
+ void ExtensionUninstallDialogImpl::Close() {
++  if (!dialog_model_) {
++    // The embedder showed the consent, not this dialog: the extension went away
++    // before the answer. Report a cancel as the closing dialog would.
++    OnDialogClosed(CLOSE_ACTION_CANCELED);
++    return;
++  }
+   DCHECK(dialog_model_);
+   dialog_model_->host()->Close();
+ }
+--- /dev/null
++++ b/cef/libcef/browser/views/external_consent.h
+@@ -0,0 +1,12 @@
++// Embedder consent for extension install, permission and uninstall prompts.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_CONSENT_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_CONSENT_H_
++#pragma once
++
++namespace cef::external_host {
++// Sets Chrome's consent hooks when the process runs with
++// --yab-extension-consent (idempotent). UI thread.
++void InstallConsentHooks();
++}  // namespace cef::external_host
++
++#endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_CONSENT_H_
+--- /dev/null
++++ b/cef/libcef/browser/views/external_consent.cc
+@@ -0,0 +1,326 @@
++#include "cef/libcef/browser/views/external_consent.h"
++
++#include <atomic>
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/scoped_observation.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/thread_pool.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_browser_process_handler.h"
++#include "cef/include/cef_values.h"
++#include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/browser/thread_util.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "cef/libcef/common/app_manager.h"
++#include "chrome/browser/extensions/extension_uninstall_dialog.h"
++#include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_observer.h"
++#include "content/public/browser/web_contents.h"
++#include "crypto/hash.h"
++#include "extensions/browser/extension_install_prompt_client.h"
++#include "extensions/browser/install_prompt_data.h"
++#include "extensions/common/extension.h"
++
++namespace cef::external_host {
++namespace {
++
++using extensions::ExtensionInstallPromptClient;
++using extensions::ExtensionUninstallDialog;
++using extensions::InstallPromptData;
++using Result = ExtensionInstallPromptClient::Result;
++
++constexpr char kConsentSwitch[] = "yab-extension-consent";
++constexpr int64_t kMaxManifestBytes = 1024 * 1024;
++constexpr size_t kMaxPending = 16;
++
++CefRefPtr<CefBrowserProcessHandler> Handler() {
++  auto app = CefAppManager::Get()->GetApplication();
++  return app ? app->GetBrowserProcessHandler() : nullptr;
++}
++
++// One request waiting for the embedder. Lives in the registry until answered
++// or withdrawn; destroying it never runs Chrome's callback by itself.
++class Pending {
++ public:
++  virtual ~Pending() = default;
++  // The embedder answered. Runs Chrome's side exactly once.
++  virtual void Answer(bool accept) = 0;
++  // Chrome withdrew the request (profile gone, dialog closed by Chrome).
++  virtual void Withdraw() = 0;
++  virtual bool Owns(const void*) const { return false; }
++};
++
++using Registry = std::map<std::string, std::unique_ptr<Pending>>;
++Registry& GetRegistry() {
++  static base::NoDestructor<Registry> registry;
++  return *registry;
++}
++
++std::unique_ptr<Pending> Take(const std::string& token) {
++  auto& registry = GetRegistry();
++  auto found = registry.find(token);
++  if (found == registry.end()) return nullptr;
++  auto pending = std::move(found->second);
++  registry.erase(found);
++  return pending;
++}
++
++void NotifyWithdrawn(const std::string& token) {
++  if (auto handler = Handler()) handler->OnExtensionConsentWithdrawn(token);
++}
++
++// Chrome withdrew |token|: stop waiting, tell the embedder.
++void Withdrawn(const std::string& token) {
++  if (auto pending = Take(token)) {
++    pending->Withdraw();
++    NotifyWithdrawn(token);
++  }
++}
++
++void Answer(std::string token, bool accept) {
++  if (auto pending = Take(token)) pending->Answer(accept);
++}
++
++class ConsentCallback : public CefExtensionConsentCallback {
++ public:
++  explicit ConsentCallback(std::string token) : token_(std::move(token)) {}
++  ~ConsentCallback() override { Finish(false); }
++  void Continue(bool accept) override { Finish(accept); }
++
++ private:
++  void Finish(bool accept) {
++    if (answered_.exchange(true)) return;
++    if (CEF_CURRENTLY_ON_UIT()) {
++      Answer(token_, accept);
++    } else {
++      CEF_POST_TASK(CEF_UIT, base::BindOnce(&Answer, token_, accept));
++    }
++  }
++  const std::string token_;
++  std::atomic<bool> answered_{false};
++  IMPLEMENT_REFCOUNTING(ConsentCallback);
++};
++
++class InstallPending : public Pending, public ProfileObserver {
++ public:
++  InstallPending(std::string token,
++                 Profile* profile,
++                 std::unique_ptr<InstallPromptData> prompt,
++                 ExtensionInstallPromptClient::DoneCallback done)
++      : token_(std::move(token)),
++        prompt_(std::move(prompt)),
++        done_(std::move(done)) {
++    observation_.Observe(profile);
++  }
++  void Answer(bool accept) override {
++    observation_.Reset();
++    Result result = Result::USER_CANCELED;
++    if (accept) {
++      result = prompt_->ShouldWithheldPermissionsOnDialogAccept()
++                   ? Result::ACCEPTED_WITH_WITHHELD_PERMISSIONS
++                   : Result::ACCEPTED;
++      prompt_->OnDialogAccepted();
++    } else {
++      prompt_->OnDialogCanceled();
++    }
++    std::move(done_).Run(
++        ExtensionInstallPromptClient::DoneCallbackPayload(result));
++  }
++  void Withdraw() override {
++    observation_.Reset();
++    prompt_->OnDialogCanceled();
++    std::move(done_).Run(
++        ExtensionInstallPromptClient::DoneCallbackPayload(Result::ABORTED));
++  }
++  // ProfileObserver:
++  void OnProfileWillBeDestroyed(Profile*) override {
++    // Destroys this; nothing below touches a member.
++    const std::string token = token_;
++    Withdrawn(token);
++  }
++
++ private:
++  const std::string token_;
++  std::unique_ptr<InstallPromptData> prompt_;
++  ExtensionInstallPromptClient::DoneCallback done_;
++  base::ScopedObservation<Profile, ProfileObserver> observation_{this};
++};
++
++class UninstallPending : public Pending {
++ public:
++  explicit UninstallPending(base::WeakPtr<ExtensionUninstallDialog> dialog)
++      : dialog_(std::move(dialog)) {}
++  void Answer(bool accept) override {
++    // A dialog that already closed has nothing left to answer.
++    if (dialog_) {
++      dialog_->OnDialogClosed(
++          accept ? ExtensionUninstallDialog::CLOSE_ACTION_UNINSTALL
++                 : ExtensionUninstallDialog::CLOSE_ACTION_CANCELED);
++    }
++  }
++  void Withdraw() override {}
++  bool Owns(const void* dialog) const override {
++    return dialog_.get() == dialog;
++  }
++
++ private:
++  base::WeakPtr<ExtensionUninstallDialog> dialog_;
++};
++
++const char* OperationFor(InstallPromptData::PromptType type) {
++  switch (type) {
++    case InstallPromptData::RE_ENABLE_PROMPT:
++      return "reenable";
++    case InstallPromptData::PERMISSIONS_PROMPT:
++      return "permissions";
++    default:
++      return "install";
++  }
++}
++
++CefRefPtr<CefDictionaryValue> Describe(const std::string& token,
++                                       const char* operation,
++                                       Profile* profile,
++                                       const extensions::Extension* extension) {
++  auto request = CefDictionaryValue::Create();
++  request->SetString("request", token);
++  request->SetString("operation", operation);
++  request->SetString("extensionId", extension->id());
++  request->SetString("displayName", extension->name());
++  request->SetString("version", extension->GetVersionForDisplay());
++  request->SetBool("fromWebstore", extension->from_webstore());
++  request->SetString("profilePath", profile->GetPath().AsUTF8Unsafe());
++  request->SetBool("offTheRecord", profile->IsOffTheRecord());
++  return request;
++}
++
++struct Manifest {
++  bool ok = false;
++  std::string text;
++};
++
++Manifest ReadManifest(base::FilePath directory) {
++  Manifest manifest;
++  manifest.ok = base::ReadFileToStringWithMaxSize(
++      directory.AppendASCII("manifest.json"), &manifest.text,
++      kMaxManifestBytes);
++  if (!manifest.ok) manifest.text.clear();
++  return manifest;
++}
++
++void DeliverInstall(std::string token,
++                    CefRefPtr<CefDictionaryValue> request,
++                    base::WeakPtr<content::WebContents> parent,
++                    Manifest manifest) {
++  if (!GetRegistry().count(token)) return;  // Answered or withdrawn meanwhile.
++  auto handler = Handler();
++  if (!handler || !manifest.ok) {
++    // Without the verified manifest nothing is shown: fail closed.
++    Answer(token, false);
++    return;
++  }
++  request->SetString("manifestSHA256",
++                     base::ToLowerASCII(base::HexEncode(
++                         crypto::hash::Sha256(std::string_view(manifest.text)))));
++  request->SetString("manifest", manifest.text);
++  CefRefPtr<CefBrowser> browser;
++  if (parent && !parent->IsBeingDestroyed()) {
++    browser = CefBrowserHostBase::GetBrowserForContents(parent.get());
++  }
++  handler->OnExtensionConsent(browser, request, new ConsentCallback(token));
++}
++
++bool InstallConsent(Profile* profile,
++                    content::WebContents* parent,
++                    const extensions::Extension* extension,
++                    std::unique_ptr<InstallPromptData>* prompt,
++                    ExtensionInstallPromptClient::DoneCallback* done) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !profile || !extension ||
++      !prompt || !*prompt || !done || !Handler() ||
++      GetRegistry().size() >= kMaxPending) {
++    return false;
++  }
++  const std::string token = base::UnguessableToken::Create().ToString();
++  auto data = std::move(*prompt);
++  auto request = Describe(token, OperationFor(data->type()), profile, extension);
++  request->SetInt("promptType", static_cast<int>(data->type()));
++  // Chrome's own permission messages for exactly this extension.
++  auto permissions = data->GetPermissions();
++  auto warnings = CefListValue::Create();
++  for (size_t i = 0; i < permissions.permissions.size(); ++i) {
++    auto row = CefDictionaryValue::Create();
++    row->SetString("text", base::UTF16ToUTF8(permissions.permissions[i]));
++    row->SetString("details", i < permissions.details.size()
++                                  ? base::UTF16ToUTF8(permissions.details[i])
++                                  : std::string());
++    warnings->SetDictionary(i, row);
++  }
++  request->SetList("warnings", warnings);
++  GetRegistry()[token] = std::make_unique<InstallPending>(
++      token, profile, std::move(data), std::move(*done));
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE,
++      {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
++       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++      base::BindOnce(&ReadManifest, extension->path()),
++      base::BindOnce(&DeliverInstall, token, request,
++                     parent ? parent->GetWeakPtr()
++                            : base::WeakPtr<content::WebContents>()));
++  return true;
++}
++
++bool UninstallConsent(Profile* profile,
++                      const extensions::Extension* extension,
++                      const extensions::Extension* triggering,
++                      bool report_abuse_offered,
++                      base::WeakPtr<ExtensionUninstallDialog> dialog) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !profile || !extension ||
++      !dialog || !Handler() || GetRegistry().size() >= kMaxPending) {
++    return false;
++  }
++  const std::string token = base::UnguessableToken::Create().ToString();
++  auto request = Describe(token, "uninstall", profile, extension);
++  request->SetBool("reportAbuseOffered", report_abuse_offered);
++  if (triggering) request->SetString("triggeringExtensionId", triggering->id());
++  GetRegistry()[token] = std::make_unique<UninstallPending>(std::move(dialog));
++  // The answer may come before this returns.
++  Handler()->OnExtensionConsent(nullptr, request, new ConsentCallback(token));
++  return true;
++}
++
++void UninstallClosed(ExtensionUninstallDialog* dialog) {
++  for (auto& [token, pending] : GetRegistry()) {
++    if (pending->Owns(dialog)) {
++      const std::string copy = token;
++      Withdrawn(copy);
++      return;
++    }
++  }
++}
++
++}  // namespace
++
++void InstallConsentHooks() {
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kConsentSwitch)) {
++    return;
++  }
++  auto& hooks = extensions::GetExternalExtensionHooks();
++  hooks.install_consent = &InstallConsent;
++  hooks.uninstall_consent = &UninstallConsent;
++  hooks.uninstall_closed = &UninstallClosed;
++}
++
++}  // namespace cef::external_host

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview · Ledger</title>
+<meta name="description" content="Tern Labs on Ledger: revenue, payments and payouts.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="/assets/ledger.css">
+</head>
+<body data-page="home">
+<script src="/assets/shell.js"></script>
+<main>
+  <div class="page">
+
+    <div class="banner" id="failed" role="alert">
+      <span class="ico" data-icon="warn"></span>
+      <div class="txt"><b>A payment from Northwind ($240.00) failed</b> <span>· Card declined: insufficient funds · <span id="failed-ago">5h ago</span></span></div>
+      <a class="btn" href="/payments#py_3Q8nWd2eZvKYlo2C0x1kTq4R">View payment</a>
+      <button class="btn primary" type="button" id="retry"><span data-icon="retry" data-size="16"></span>Retry</button>
+      <button class="icon-btn x" type="button" id="dismiss" aria-label="Dismiss" data-icon="x" data-size="16"></button>
+    </div>
+
+    <div class="head">
+      <div>
+        <h1>Overview</h1>
+        <p id="hello">Here is how Tern Labs is doing.</p>
+      </div>
+      <div class="actions">
+        <button class="chip solid" type="button"><span data-icon="calendar" data-size="16"></span>Last 12 months<span data-icon="chevDown" data-size="16"></span></button>
+        <button class="chip" type="button">Compared to <b>previous year</b></button>
+        <a class="btn" href="/reports"><span data-icon="download" data-size="16"></span>Export</a>
+      </div>
+    </div>
+
+    <div class="grid kpis">
+      <section class="card kpi">
+        <div class="label">MRR <span data-icon="info" data-size="16"></span></div>
+        <div class="value">$48,920</div>
+        <div class="foot"><span class="delta up"><span data-icon="arrowUp" data-size="12"></span>6.2%</span>vs last month</div>
+        <svg class="spark" data-spark="mrr" viewBox="0 0 96 36" preserveAspectRatio="none"></svg>
+      </section>
+      <section class="card kpi">
+        <div class="label">Active subscriptions</div>
+        <div class="value">1,284</div>
+        <div class="foot"><span class="delta up"><span data-icon="arrowUp" data-size="12"></span>3.4%</span>42 new this month</div>
+        <svg class="spark" data-spark="subs" viewBox="0 0 96 36" preserveAspectRatio="none"></svg>
+      </section>
+      <section class="card kpi">
+        <div class="label">Churn rate</div>
+        <div class="value">1.9<small>%</small></div>
+        <div class="foot"><span class="delta good-down"><span data-icon="arrowDown" data-size="12"></span>0.3 pts</span>vs last month</div>
+        <svg class="spark" data-spark="churn" viewBox="0 0 96 36" preserveAspectRatio="none"></svg>
+      </section>
+      <section class="card kpi">
+        <div class="label">Net volume <span class="muted">· 30 days</span></div>
+        <div class="value">$51,872<small>.40</small></div>
+        <div class="foot"><span class="delta up"><span data-icon="arrowUp" data-size="12"></span>5.8%</span>vs prior 30 days</div>
+        <svg class="spark" data-spark="volume" viewBox="0 0 96 36" preserveAspectRatio="none"></svg>
+      </section>
+    </div>
+
+    <section class="card hero" id="mrr-card" aria-label="Monthly recurring revenue">
+      <div class="hero-main">
+        <div class="card-head">
+          <div class="chart-top">
+            <span class="label" id="chart-label">Monthly recurring revenue</span>
+            <div class="big"><strong id="chart-value">$48,920.00</strong><span class="delta up" id="chart-delta"><span data-icon="arrowUp" data-size="12"></span>6.2%</span><span id="chart-vs">vs August</span></div>
+          </div>
+          <div class="chart-tools">
+            <div class="seg" id="series">
+              <button type="button" class="on" data-series="mrr">MRR</button>
+              <button type="button" data-series="subs">Subscriptions</button>
+              <button type="button" data-series="volume">Net volume</button>
+            </div>
+            <div class="legend"><span><i></i>Last 12 months</span><span><i class="prev"></i>Year before</span></div>
+          </div>
+        </div>
+        <div class="chart" id="chart"><div class="tip" id="tip"></div></div>
+        <div class="chart-foot" id="chart-foot"></div>
+      </div>
+      <aside class="hero-side">
+        <div class="side-head"><h3>Movements in <span id="this-month">September</span></h3><a class="more" href="/customers">All<span data-icon="chevRight" data-size="16"></span></a></div>
+        <div class="moves" id="moves"></div>
+      </aside>
+    </section>
+
+    <div class="grid row-three">
+      <section class="card balance">
+        <div class="card-head"><h3>Balance</h3><a class="more" href="/reports">Payouts<span data-icon="chevRight" data-size="16"></span></a></div>
+        <div class="card-body">
+          <div class="amount">$84,312.55<small>USD</small></div>
+          <div class="sub">Available to pay out · <span class="num">$12,940.10</span> pending</div>
+          <div class="payout">
+            <span class="bank" data-icon="bank" data-size="16"></span>
+            <div class="p-txt"><b>Next payout</b><span><span id="payout-day">Oct 2</span> · Bank ···· 4417</span></div>
+            <span class="p-amt">$18,400.00</span>
+          </div>
+          <div class="list payouts" id="payouts"></div>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Team card">
+        <div class="card-head"><h3>Team card</h3><a class="more" href="/expenses">Expenses<span data-icon="chevRight" data-size="16"></span></a></div>
+        <div class="card-body">
+          <div class="lcard" id="lcard">
+            <div class="l-top"><span id="lcard-mark"></span>Tern Labs<em>Virtual</em></div>
+            <div class="chipx"></div>
+            <div class="l-num">4859 2210 7734 0192</div>
+            <div class="l-bottom">
+              <div><small>Cardholder</small>Mira Lindqvist</div>
+              <div><small>Expires</small>09/29</div>
+              <span class="brand">VISA</span>
+            </div>
+          </div>
+          <div class="limit">
+            <div class="l-row">Spent this month<b>$3,412.80 <span class="muted">of $5,000</span></b></div>
+            <div class="bar"><span style="width:68.3%"></span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h3>Top customers</h3><a class="more" href="/customers">All<span data-icon="chevRight" data-size="16"></span></a></div>
+        <div class="card-body list-body"><div class="list" id="top-customers"></div></div>
+      </section>
+    </div>
+
+    <h2 class="section">Recent payments <a href="/payments">View all payments</a></h2>
+    <section class="card table-card">
+      <div class="table-wrap">
+        <table class="t" id="recent">
+          <thead>
+            <tr><th class="r">Amount</th><th>Status</th><th>Customer</th><th>Description</th><th class="hide-md">Payment method</th><th>Date</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="grid row-pair">
+      <section class="card" aria-label="API keys">
+        <div class="card-head"><h3>API keys</h3><a class="more" href="/developers">Developers<span data-icon="chevRight" data-size="16"></span></a></div>
+        <div class="card-body keys-mini">
+          <div class="k-row"><div><b>Publishable key</b><span>Tern's web checkout</span></div>
+            <span class="key"><code>pk_demo_51NqT8mLx2VcTRnB7yW3kQe5HfJ0aZpD</code><button class="icon-btn copy" type="button" aria-label="Copy" data-copy="pk_demo_51NqT8mLx2VcTRnB7yW3kQe5HfJ0aZpD" data-icon="copy" data-size="16"></button></span></div>
+          <div class="k-row"><div><b>Secret key</b><span>Last used 2 min ago</span></div>
+            <span class="key masked"><code>sk_demo_••••••••••••••••••••••••uY3n</code><a class="btn" href="/developers#keys"><span data-icon="eye" data-size="16"></span>Reveal</a></span></div>
+          <div class="k-row"><div><b>Restricted keys</b><span>Accounting export, Orbit analytics</span></div>
+            <a class="btn" href="/developers#keys"><span data-icon="key" data-size="16"></span>Manage 2 keys</a></div>
+        </div>
+      </section>
+      <section class="card" aria-label="Webhooks">
+        <div class="card-head"><h3>Webhooks</h3><span class="state"><i></i>Healthy</span><a class="more" href="/developers#webhooks">Endpoints<span data-icon="chevRight" data-size="16"></span></a></div>
+        <div class="card-body list-body"><div class="list" id="hooks-mini"></div></div>
+      </section>
+    </div>
+
+  </div>
+</main>
+<script src="/assets/data.js"></script>
+<script src="/assets/overview.js"></script>
+</body>
+</html>

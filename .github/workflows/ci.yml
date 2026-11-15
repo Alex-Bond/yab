@@ -1,0 +1,169 @@
+# CI for every pull request, from this repository or from a fork.
+#
+# Safety, read before changing this file:
+#
+# - Trigger is `pull_request`, never `pull_request_target`. For a fork, GitHub
+#   runs this with a read-only GITHUB_TOKEN and no repository secrets, so the
+#   pull request's own code (build.sh, tests, Package.swift) can run here
+#   without reaching anything of ours.
+# - Every job runs on GitHub-hosted runners (`macos-26`, `ubuntu-latest`).
+#   Never `self-hosted` or a farm label: a fork's code would then run on the
+#   maintainers' Macs, next to their keychains and signed-in profiles. The
+#   maintainers' farm stays outside GitHub entirely; nothing in .github may
+#   ssh to it, call it, or name its hosts.
+# - No `secrets.*` in this file. Signing, notarization and release keys are
+#   never needed to build or test: build.sh signs ad hoc (YAB_SIGN_IDENTITY=-).
+# - The repository setting "Require approval for all outside collaborators"
+#   (Settings > Actions > General) makes a maintainer press Approve before a
+#   first-time contributor's workflow runs at all, so a PR can't burn runner
+#   minutes or mine on them unseen.
+#
+# Third-party actions: none. First-party actions are pinned to a major tag;
+# pin them to a commit SHA if the repository's policy requires it.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  YAB_SIGN_IDENTITY: "-"
+
+jobs:
+  checks:
+    name: Parse and design checks
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Base commit
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+      # Every changed Swift file parses (scripts/swift-parse-check, as the
+      # pre-commit hook does for staged files).
+      - name: Swift parse check
+        run: scripts/swift-parse-check --base "${{ steps.base.outputs.ref }}"
+      # Lines the branch adds in Sources/ keep to the design system.
+      - name: Design check
+        run: ./design-check --base "${{ steps.base.outputs.ref }}"
+
+  build:
+    name: Build Yab Dev
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      # SwiftPM's build folder, keyed on the package and the toolchain. A fork's
+      # run reads the cache of the branch it targets and can't write to it.
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+      - name: Build the app bundle (ad hoc signed)
+        run: ./build.sh
+      - name: Check the bundle
+        run: |
+          codesign --verify --deep --strict "build/yab Dev.app"
+          codesign -dv "build/yab Dev.app" 2>&1 | grep -E 'Identifier|Signature'
+
+  test:
+    name: Swift tests
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            spm-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+      # The mail engine first: it builds without the app and fails fast.
+      - name: MailCore tests
+        run: swift test --filter MailCoreTests
+      # The suites that cover what the branch changed (scripts/runs/tests_for.py
+      # picks them by file name). The whole suite does not finish on a clean
+      # Mac yet (see the full-suite job below), so it is not a required check.
+      - name: Suites for the changed files
+        shell: bash -o pipefail {0}
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          filter="$(python3 scripts/runs/tests_for.py --since "$base" 2>/dev/null)"
+          echo "suites: ${filter:-none}"
+          if [ -z "$filter" ] || [ "$filter" = all ]; then
+            echo "Nothing narrower than the whole suite matched; the full-suite job covers it."
+            exit 0
+          fi
+          swift test --filter "$filter" 2>&1 | tee swift-test.log
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-test-log
+          path: swift-test.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # The whole suite, advisory. On a clean Mac its swift-testing half stalls
+  # after about 170 of 4,300 tests (measured twice on 2026-11-14, with and
+  # without a display), so it runs only on main, never blocks a merge, and
+  # stops at 60 minutes. Make it required once it finishes.
+  full-suite:
+    name: Full swift test (advisory)
+    if: github.event_name == 'push'
+    runs-on: macos-26
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            spm-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+      - name: All tests
+        shell: bash -o pipefail {0}
+        run: swift test 2>&1 | tee swift-test.log
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-swift-test-log
+          path: swift-test.log
+          retention-days: 14
+          if-no-files-found: ignore

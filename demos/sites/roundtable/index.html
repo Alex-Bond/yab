@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roundtable</title>
+<meta name="theme-color" content="#0d0e11">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/base.css">
+<link rel="stylesheet" href="/home.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="rt-table" x1="0.15" y1="0.1" x2="0.85" y2="0.95">
+      <stop offset="0" stop-color="#6ff0ca"/><stop offset="1" stop-color="#15a882"/>
+    </linearGradient>
+  </defs>
+  <symbol id="rt-mark" viewBox="0 0 64 64">
+    <circle cx="32" cy="32" r="13.5" fill="url(#rt-table)"/>
+    <circle cx="32" cy="32" r="9" fill="none" stroke="#fff" stroke-opacity=".28" stroke-width="1.6"/>
+    <g fill="#34cfa3">
+      <circle cx="32" cy="7.5" r="5.5"/><circle cx="53.22" cy="19.75" r="5.5"/><circle cx="53.22" cy="44.25" r="5.5"/>
+      <circle cx="32" cy="56.5" r="5.5"/><circle cx="10.78" cy="44.25" r="5.5"/><circle cx="10.78" cy="19.75" r="5.5"/>
+    </g>
+  </symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M8 14h8"/></symbol>
+</svg>
+
+<header class="home-top">
+  <a class="brand" href="/"><svg class="brand-mark" aria-hidden="true"><use href="#rt-mark"/></svg><span>Roundtable</span></a>
+  <div class="home-account">
+    <span class="home-clock" id="clock"></span>
+    <img class="avatar" src="/googleusercontent/avatars/mira.svg" alt="Mira Lindqvist" width="32" height="32">
+  </div>
+</header>
+
+<main class="home">
+  <h1 class="home-hello" id="hello">Hello, Mira</h1>
+  <p class="home-sub">Your next call is ready when you are.</p>
+
+  <article class="next">
+    <div class="next-when"><svg class="icon"><use href="#i-cal"/></svg><span id="when">Now</span><span class="next-live" id="live">In progress</span></div>
+    <h2 class="next-title" id="title">Design review · Onboarding v3</h2>
+    <div class="next-people">
+      <div class="next-stack" aria-hidden="true">
+        <img class="avatar" src="/googleusercontent/avatars/jonas.svg" alt="" width="30" height="30">
+        <img class="avatar" src="/googleusercontent/avatars/anna.svg" alt="" width="30" height="30">
+        <img class="avatar" src="/googleusercontent/avatars/elliot.svg" alt="" width="30" height="30">
+      </div>
+      <span id="who">Jonas Berg, Anna Ek and Elliot Park are in this call</span>
+    </div>
+    <a class="btn btn-primary next-join" id="join" href="/r/design-review">Join</a>
+  </article>
+
+  <form class="code" id="code" autocomplete="off">
+    <label class="code-field">
+      <svg class="icon"><use href="#i-keyboard"/></svg>
+      <input id="code-input" type="text" placeholder="Enter a code or link" aria-label="Enter a code or link" spellcheck="false">
+    </label>
+    <button class="btn btn-ghost" type="submit" id="code-join" disabled>Join</button>
+  </form>
+</main>
+
+<script>
+(function () {
+  var time = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
+  var clock = document.getElementById('clock');
+  function tick() { clock.textContent = time.format(new Date()); }
+  tick();
+  setInterval(tick, 1000);
+
+  var hour = new Date().getHours();
+  document.getElementById('hello').textContent =
+    (hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening') + ', Mira';
+
+  function when(v) {
+    if (v === undefined || v === null || v === '') return null;
+    if (typeof v === 'number') return new Date(v < 1e12 ? v * 1000 : v);
+    var d = new Date(v);
+    return isNaN(d) ? null : d;
+  }
+  fetch('/__demo/state.json', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (s) {
+    var m = s && s.meeting;
+    if (!m) return;
+    if (m.title) { document.getElementById('title').textContent = m.title; }
+    if (m.link) {
+      try {
+        var u = new URL(m.link, location.href);
+        if (u.hostname === location.hostname) document.getElementById('join').href = u.pathname + u.search;
+      } catch (e) {}
+    }
+    var start = when(m.start), end = when(m.end), now = new Date();
+    if (start && end) {
+      var live = now >= start && now < end;
+      document.getElementById('when').textContent = 'Today · ' + time.format(start) + ' to ' + time.format(end);
+      document.getElementById('live').hidden = !live;
+      if (!live) document.getElementById('who').textContent = 'With Jonas Berg, Anna Ek and Elliot Park';
+    }
+  }).catch(function () {});
+
+  var input = document.getElementById('code-input');
+  var join = document.getElementById('code-join');
+  input.addEventListener('input', function () { join.disabled = !input.value.trim(); });
+  document.getElementById('code').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var text = input.value.trim();
+    var room = (text.match(/\/r\/([A-Za-z0-9._-]+)/) || [])[1] ||
+      text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (room) location.href = '/r/' + room;
+  });
+})();
+</script>
+</body>
+</html>

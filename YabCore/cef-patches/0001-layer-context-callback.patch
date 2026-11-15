@@ -1,0 +1,194 @@
+--- a/ui/accelerated_widget_mac/accelerated_widget_mac.h
++++ b/ui/accelerated_widget_mac/accelerated_widget_mac.h
+@@ -5,6 +5,7 @@
+ #ifndef UI_ACCELERATED_WIDGET_MAC_ACCELERATED_WIDGET_MAC_H_
+ #define UI_ACCELERATED_WIDGET_MAC_ACCELERATED_WIDGET_MAC_H_
+ 
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac_export.h"
+ #include "ui/accelerated_widget_mac/ca_layer_frame_sink.h"
+@@ -40,6 +41,13 @@
+   ~AcceleratedWidgetMac() override;
+ 
+   gfx::AcceleratedWidget accelerated_widget() { return native_widget_; }
++
++  // UI-thread-only observer for an embedder hosting this compositor remotely.
++  // A zero context invalidates the last frame. The callback owns no CA fence.
++  using FrameCallback =
++      base::RepeatingCallback<void(uint32_t, const gfx::Size&, float)>;
++  static bool SetFrameCallback(gfx::AcceleratedWidget widget,
++                               FrameCallback callback);
+ 
+   void SetNSView(AcceleratedWidgetMacNSView* view);
+   void ResetNSView();
+@@ -77,6 +85,8 @@
+   // will be ignored.
+   bool is_suspended_ = false;
+ 
++  FrameCallback frame_callback_;
++
+   // The last CALayer parameter update from the CALayerFrameSink interface.
+   std::optional<gfx::CALayerParams> last_ca_layer_params_;
+ };
+--- a/ui/accelerated_widget_mac/accelerated_widget_mac.mm
++++ b/ui/accelerated_widget_mac/accelerated_widget_mac.mm
+@@ -36,6 +36,17 @@
+   WidgetToHelperMap().erase(native_widget_);
+ }
+ 
++// static
++bool AcceleratedWidgetMac::SetFrameCallback(gfx::AcceleratedWidget widget,
++                                             FrameCallback callback) {
++  auto* helper = Get(widget);
++  if (!helper) {
++    return false;
++  }
++  helper->frame_callback_ = std::move(callback);
++  return true;
++}
++
+ void AcceleratedWidgetMac::SetNSView(AcceleratedWidgetMacNSView* view) {
+   DCHECK(view && !view_);
+   view_ = view;
+@@ -44,6 +55,10 @@
+ void AcceleratedWidgetMac::ResetNSView() {
+   last_ca_layer_params_ = std::nullopt;
+   view_ = nullptr;
++  auto callback = frame_callback_;
++  if (callback) {
++    callback.Run(0, gfx::Size(), 1.f);
++  }
+ }
+ 
+ const gfx::CALayerParams* AcceleratedWidgetMac::GetCALayerParams() const {
+@@ -86,8 +101,17 @@
+   }
+ 
+   last_ca_layer_params_ = ca_layer_params.CloneWithoutFence();
++  // Keep a value snapshot across native view and embedder callbacks. Either
++  // callback may close the window; never read members after native dispatch.
++  auto callback = frame_callback_;
++  const uint32_t context_id = ca_layer_params.ca_context_id;
++  const gfx::Size pixel_size = ca_layer_params.pixel_size;
++  const float scale = ca_layer_params.scale_factor;
+   if (view_) {
+     view_->AcceleratedWidgetCALayerParamsUpdated(std::move(ca_layer_params));
++  }
++  if (callback) {
++    callback.Run(context_id, pixel_size, scale);
+   }
+ }
+ 
+--- a/cef/include/views/cef_window_delegate.h
++++ b/cef/include/views/cef_window_delegate.h
+@@ -40,6 +40,9 @@
+ 
+ #include "include/views/cef_panel_delegate.h"
+ 
++// Yab's source-build capability marker. This is not part of upstream CEF.
++#define CEF_YAB_LAYER_CONTEXT_VERSION 1
++
+ class CefWindow;
+ 
+ ///
+@@ -49,6 +52,21 @@
+ /*--cef(source=client)--*/
+ class CefWindowDelegate : public CefPanelDelegate {
+  public:
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Called on macOS when the window compositor receives a remote CA frame.
++  /// |pixel_size| and |scale| describe that frame, not requested window bounds.
++  /// |context_id| zero invalidates the surface. This notification does not
++  /// transfer a presentation fence or acknowledge display presentation.
++  /// Do not synchronously close or mutate |window| from this callback.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnAcceleratedFrame(CefRefPtr<CefWindow> window,
++                                  uint32_t context_id,
++                                  const CefSize& pixel_size,
++                                  float scale) {}
++#endif
++
+   ///
+   /// Called when |window| is created.
+   ///
+--- a/cef/libcef/browser/views/window_view.h
++++ b/cef/libcef/browser/views/window_view.h
+@@ -149,6 +149,12 @@
+   // Called after Widget teardown starts, before |this| is deleted.
+   void DeleteDelegate();
+ 
++#if BUILDFLAG(IS_MAC)
++  void OnAcceleratedFrame(uint32_t context_id,
++                          const gfx::Size& pixel_size,
++                          float scale);
++#endif
++
+   void MoveOverlaysIfNecessary();
+   void InvalidateExclusionRegions();
+ 
+--- a/cef/libcef/browser/views/window_view.cc
++++ b/cef/libcef/browser/views/window_view.cc
+@@ -7,7 +7,13 @@
+ #include <memory>
+ #include <ranges>
+ 
++#include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
++#include "ui/compositor/compositor.h"
++#endif
+ 
+ #if BUILDFLAG(IS_LINUX)
+ #include "ui/base/ozone_buildflags.h"
+@@ -677,6 +683,13 @@
+ 
+   cef_widget->Initialized();
+ 
++#if BUILDFLAG(IS_MAC)
++  CHECK(ui::AcceleratedWidgetMac::SetFrameCallback(
++      widget->GetCompositor()->widget(),
++      base::BindRepeating(&CefWindowView::OnAcceleratedFrame,
++                          weak_ptr_factory_.GetWeakPtr())));
++#endif
++
+ #if BUILDFLAG(IS_LINUX)
+ #if BUILDFLAG(SUPPORTS_OZONE_X11)
+   auto x11window = static_cast<x11::Window>(view_util::GetWindowHandle(widget));
+@@ -843,6 +856,18 @@
+   ParentClass::ViewHierarchyChanged(details);
+ }
+ 
++#if BUILDFLAG(IS_MAC)
++void CefWindowView::OnAcceleratedFrame(uint32_t context_id,
++                                      const gfx::Size& pixel_size,
++                                      float scale) {
++  if (cef_delegate()) {
++    cef_delegate()->OnAcceleratedFrame(
++        GetCefWindow(), context_id,
++        CefSize(pixel_size.width(), pixel_size.height()), scale);
++  }
++}
++#endif
++
+ void CefWindowView::OnThemeChanged() {
+   bool initialized = false;
+   if (auto* cef_widget = CefWidget::GetForWidget(GetWidget())) {
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1121,7 +1121,10 @@
+       "//chrome/app/chrome_main_mac.mm",
+     ]
+ 
+-    deps += [ "//components/os_crypt/common:keychain_password_mac" ]
++    deps += [
++      "//components/os_crypt/common:keychain_password_mac",
++      "//ui/accelerated_widget_mac",
++    ]
+   } else {
+     sources += [
+       "libcef/browser/chrome/chrome_web_contents_view_delegate_cef.cc",

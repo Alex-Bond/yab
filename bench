@@ -1,0 +1,796 @@
+#!/usr/bin/env python3
+"""Drive the yab you already have open, from the shell.
+
+    ./bench tabs                       every tab, yours and the bench's
+    ./bench open URL [plain]           a bench tab at the end of the row → its id; plain: without the script's face, --test runs only
+    ./bench mute ID on|off             mute a tab, or let it be heard, --test runs only
+    ./bench sound ID on|off|- [fresh]  the page starts or stops its noise, as WebKit says it; fresh: never heard before → sung, notes in flight, --test runs only
+    ./bench idle [SECONDS]             main-thread CPU, run loop wakes and process CPU while nothing is touched (10 s)
+    ./bench go ID URL                  send a bench tab somewhere else
+    ./bench wait ID [SECONDS]          until the page has loaded
+    ./bench sleep ID                   put a tab to sleep now, or say what keeps it awake
+    ./bench select ID                  bring a tab to the front, --test runs only
+    ./bench resize W H [STEPS]         take the window to W×H in steps, like a drag, --test runs only
+    ./bench key ID TEXT                press keys on a tab as real key events, --test runs only
+    ./bench chord ID KEYS [CHARS] [S]  keys through the app as the keyboard sends them, cmd+a, m, escape:
+                                       what ⌘A's offer did and the clipboard's start, the tab in front, --test runs only;
+                                       cmd+t@е is the same key on a Russian layout, typing е
+    ./bench keys [list]                every shortcut's keys now, and the menus' keys as drawn
+    ./bench keys set|remove|reset ACTION [KEYS]  history opt+cmd+y, as Settings › Shortcuts would
+    ./bench keys record ACTION         Settings › Shortcuts, that row's recorder listening, --test runs only
+    ./bench keys press KEYS            keys into it as the keyboard sends them (opt+cmd+y, @ as for chord), --test runs only
+    ./bench keys point ACTION|site:HOST  a Shortcuts row, or a Search site's alias, drawn as if pointed at
+    ./bench keys alias site:HOST       Settings › Search, that site's alias field given the keys, --test runs only
+    ./bench keys layout                the key codes read on the ASCII layout beside the Russian one
+    ./bench keys eager on|off          a recorder in every Hotkey cell and a field in every alias cell, as before they waited for the pointer; takes effect as the page is next built, --test runs only
+    ./bench keys cost|rebuild          one lookup, in ns; a change's main-thread time, menus built again
+    ./bench keys filter TEXT           typed into the page's filter and taken back, each key timed, --test runs only
+    ./bench scroll [STEP]              Settings' page to its foot and back, STEP points a frame: gaps, CPU and instructions a frame, --test runs only
+    ./bench text ID                    the page's text
+    ./bench eval ID JS                 run JavaScript, print what it returns
+    ./bench click ID SELECTOR
+    ./bench type ID SELECTOR TEXT
+    ./bench submit ID SELECTOR         the form around SELECTOR
+    ./bench fill ID [tricky] [prove on|off] [cancel S] [close S] [user U] [password P]
+                                       a kept password put in as a pick would; tricky: a run of hostile ones, read back;
+                                       prove: Settings' Touch ID switch first; cancel: take its question down after S;
+                                       close: close the tab after S, while it is asked, --test runs only
+    ./bench shot ID [PATH] [WIDTH]     a PNG of the page → its path
+    ./bench modellist [CLI:MODEL] [mac] [PATH]  the model list as it opens, chosen one checked, mac: a command's, --test runs only
+    ./bench close ID | all             only tabs the bench opened
+    ./bench link URL                   a link as another app hands it over, --test runs only
+    ./bench hints-copy URL [APP]       a link copied as though in APP (Slack), for the row under the field → the rows, --test runs only
+    ./bench hints-visits FILE|none     habits counted from a JSON file of [{url, at, title}] instead of the history, --test runs only
+    ./bench hints-habits [count]       today's habits and why: window, days, whether it is their time; count: counted again first
+    ./bench links | link-keep | link-close  the small windows up for links; keep or close the newest, --test runs only
+    ./bench front                      make the window the key window of the active app, --test runs only
+    ./bench startup                    this launch in ms from the process starting: main, launched, window (first frame), shown (on screen), page (first page loaded)
+    ./bench stall [SECONDS]            the main thread held that long (1.5 s), for the watchdog's stalls.log, --test runs only
+    ./bench hangs                      start the main-thread watchdog, print what it has seen, YAB_HANGS=1 test runs
+    ./bench pace sides|shelf|column|folder|idle|copy|wheel|scroll|across|reader [SECONDS] ⇧⌘S, ⌃⌘B, ⌘S or ⌥⌘R timed frame by frame: gaps, drops, page resizes,
+                                       main-thread CPU, --test runs only; wheel, a mouse's wheel over the row
+                                       of tabs; scroll, a trackpad over the page; across, sideways over the row
+    ./bench pace select ID [SECONDS]  a tab picked, timed the same way, --test runs only
+    ./bench pace reload ID [SECONDS]  a tab's page loaded again, its ring on and off, timed the same way, --test runs only
+    ./bench pace sing ID [SECONDS]    a tab out of sight starting to play, its notes timed the same way; sing_ms, sing_minstr: the song's own cost, --test runs only
+    ./bench pace split-enter ID|split-separate|split-drag|split-equal|split-focus|split-close [SECONDS]
+    ./bench pace split-deck ID [to=0.85|path=0.15,0.85] [over=0.8] [jitter=PT] [hold|esc|leave] [SECONDS]  ID carried out over the page to `to` of
+                                       its width and let go, Esc'd, or held until `pace split-deck-end`; deck_widths:
+                                       the page in front's innerWidth every 40 ms; --test runs only
+                                       split view: the tab in front and ID coming together, coming apart, the
+                                       divider dragged 240 pt by posted mouse events, double-clicked, the other
+                                       half clicked, the half in front closed; --test runs only
+    ./bench pace peek URL [from SELECTOR] [SECONDS]  ⇧-click's peek over the tab in front, grown out of SELECTOR's
+                                       element as if it were the link clicked; peek-close, peek-hide, peek-show, --test runs only
+    ./bench peek URL [from SELECTOR]|keep|close|split|status  the same, untimed, and what is up after, --test runs only
+    ./bench peek force SELECTOR        a Force Click on SELECTOR's element, as the trackpad's, --test runs only
+    ./bench loadbar                    every page's bar for a page taking its time, the peek's too: phase, width, where
+    ./bench pace tidy [SECONDS]       Clear on the kept line, today's tabs to dust, timed the same way; process_cpu_ms: every thread's, --test runs only
+    ./bench pace float [SECONDS]      ⇧⌘P, the playing video out or back; page_sizes: the page made another size, --test runs only
+    ./bench pace welcome-show|welcome-next|welcome-back [SECONDS]  the welcome coming up over the window, or a Return or ⌘[ in it, timed the same way, --test runs only
+    ./bench pace welcome-go BEAT [KEY=VALUE…] [SECONDS]  that beat of the welcome played from the one before it, timed the same way, --test runs only;
+                                       not on the one before, it is shown there at rest first and plays 0.4 s later: `./bench welcome BEFORE` first times the turn alone
+    ./bench welcome [BEAT] [phase=NAME] [index=N] [play=1] [KEY=VALUE…] [next=1] [back=1] [quiet=1] [wait=S]
+                                       the welcome in any state (onb-work impl-plan): BEAT welcome|pins|peek|find|task|watch|results|
+                                       connect|howto|move|look|color|access|access-b|links|finish; agents=none|claude|codex|both|claudeConn|codexConn
+                                       conn=looking|notinstalled|installing|codexterminal|signedout|signedin|signingin|just|connected|failinstall|failsignin|failtools
+                                       chosen=claude|codex browsers=none|dia|three|arc source=N keep=1 bring=brought|fresh|locked|unreadable
+                                       tabs=top|side page=edge|color|site csrc=nothing|colors|spaces memory=empty|full cal=not|connecting|meeting|empty|denied
+                                       slack=1|0 default=not|already|no toast=1 reduce=1 slow=1 arrival=disk|launch|replay flow=signing reset=1
+                                       welcome play=1 plays the intro again (arrival=disk: from the disk image's dark ground, in Light);
+                                       reset=1 lets every pretended branch go; answers step phase path dash fill title sub primary quiet failure busy back parts…
+    ./bench pace box-open|box-fresh|box-history|box-clipboard|box-k|box-close [SECONDS]  field and actions, including the first frame, --test runs only
+    ./bench pace file-open SELECTOR [SECONDS]  a page's file button opening Files, frame gaps and main CPU, --test runs only
+    ./bench pace box-type TEXT [SECONDS] [INTERVAL]  rapid edits in the focused omnibox, including frame gaps and each key's cost
+    ./bench pace chat-line|chat-carry|chat-ask|chat-hide|chat-expand [SECONDS]  ⌘J's line coming up, carried into a chat, a chat about
+                                       the page in the column, the column away, a field's answer flown into it (Open in Chat): frame gaps,
+                                       main CPU, stage_layouts and reshape_runs (1 and 2 a move), chat_layouts, chat_built_ms, --test runs only
+    ./bench layer-audit                what the window's layers cost to draw: masks, filters, shadows without a path
+    ./bench split [with ID|view|separate|equal|focus ID|live live|hold]
+                                       split view driven as the menu, ⌘T or a click would, and its state, --test runs only
+    ./bench band [ACTION] [S]          the row over the column's foot for what plays elsewhere: its state after ACTION
+                                       (hover, unhover, point:cover|previous|next, click:cover|previous|next|line, toggle,
+                                       next, previous, cycle, go; deaf|hear: the real pointer ignored or not) and S
+                                       seconds, main-thread CPU, instructions, --test runs only
+    ./bench float on|toggle|state|idle [S]|enter X Y|exit|move X Y|click X Y [N]|drag X Y X2 Y2 [STEPS]|key K|appkey K|hit X Y|width W|clock S
+                                       |place X Y [VX VY]|flick DX DY|tap X Y|tuck|untuck: carried to X Y on the screen and let go of
+                                       (tucked behind a side past a third, or thrown), a two-finger flick, a press on the lip
+                                       that doesn't make the window key, --test runs only
+                                       the floating video window (⇧⌘P): lifted, read, handed made-up pointer and
+                                       keys; idle is the main thread's CPU and wakeups, --test runs only
+    ./bench live state|make [HOST]|items JSON|read|hide ID|stop [WAIT]  a live folder of pull requests (LiveFolders.swift): made (HOST: github.com,
+                                       or a stand-in's http://127.0.0.1:PORT), filled as if its site listed [{n, title, words, repo}],
+                                       read now, a tab hidden; then each tab's key, words and whether it is out from under the shut folder, --test runs only
+    ./bench call state|mock ID|mic|camera|menu|shut ID|lift ID|leave|tuck|untuck|press B|width W|flick DX DY|window|sweep [S]|join|meetings JSON
+                                       |share|stopshare|devices|pick KIND LABEL|plug KIND LABEL [gone]|use|near|away
+                                       calls: a tab on a call with WebKit's made-up devices, its dot, the floating
+                                       window as a call, ⌘W on it, the minute after it ends, made-up meetings
+                                       [{"title","in","for","link"}] in minutes, --test runs only
+    ./bench share state|ask ID|type TEXT|pick N|arrow up|down|left|right|answer yes|no|system|stop ID|instead ID
+                                       sharing a screen: the page's window.startShare() as a click, the box
+                                       typed in, picked with the arrows and answered, every share and its frames, --test runs only
+    ./bench spacetray open|name TEXT|step S|swatch S|custom HEX|grain on|off|own on|off|emoji E|take on|off|forward|leave|state
+                                       the new space's tray: opened, filled in, moved along, read back, --test runs only
+    ./bench probe                      the window's own state: panels, modal, windows
+    ./bench frames                     where each tab and its mark are, in the window's points
+    ./bench winshot [settings] [PATH]  a PNG of the window's own chrome (the page comes out blank), sheet included
+    ./bench tidy [HOURS]               your tabs made HOURS old (13), then tidied up, --test runs only
+    ./bench untidy                     ⌘⇧T, bringing them back, --test runs only
+    ./bench film newtab|sides|shelf|column|copy|pagecopy|tidy|notices|edit|dismiss|submit|select ID|close ID|type TEXT [DIR]
+                                       the left of the window (the right, for copy), ~60 frames a second while it happens, --test runs only
+    ./bench film keep|park|never|undo|name|unpark [DIR]
+                                       the password pill on the tab in front, answered, filmed whole, --test runs only
+    ./bench box state|t|l|plus|type TEXT|key KEYS  the field: ⌘T, ⌘L or the new-tab button, typed into, keys pressed
+                                       through the app (down, up, return, cmd+return, escape, tab, delete, cmd+k), and read back, --test runs only
+    ./bench box prepare [history=N] [tabs=N] [clips=N] [diary=0|1]  local page and heavy data before a cold field open, --test runs only
+    ./bench extensions                 installed extensions, loaded or not, with their warnings
+    ./bench ext-add ID|LINK [give=KEY,…] [--yes]
+                                       install from the Chrome Web Store (--yes only in a --test run), with none of
+                                       what it may ask for later given, as its boxes start, but the optional permissions or sites named
+    ./bench ext-folder PATH [give=KEY,…] [--yes]  install an unpacked extension
+    ./bench ext-press ID               press its button, in the ⌘E list, when the list is up
+    ./bench ext-withheld               the popover in iCloud Passwords' popup's place: shown, id, window
+    ./bench ext-page ID [PATH]         one of its pages in a bench tab → tab id, for eval
+    ./bench ext-popup ID JS            run JavaScript in its popup while it is open
+    ./bench ext-reload ID              take it up again (a folder one is copied in afresh)
+    ./bench ext-pin ID [on|off]        keep its button in the row beside the puzzle
+    ./bench ext-menu PATH              the puzzle button's list, drawn to a PNG
+    ./bench ext-shot ID PATH           a picture of its popup while it is open
+    ./bench ext-answer yes|no|ask      test run: answer extensions' questions without asking; lists what was asked
+    ./bench ext-enable ID on|off       switch an extension on or off
+    ./bench ext-remove ID
+    ./bench ext-scan BROWSER           what another Chromium browser has installed, every profile
+    ./bench ext-bring BROWSER [ID …]   bring them in, the ones that are on unless named, --test runs only
+    ./bench import profiles|tabs|bookmarks|history BROWSER [PROFILE] [open]
+    ./bench import bookmarks-file|history-file|places-db PATH
+                                       bring things in, a browser's (installed or only its folder left) or a file's,
+                                       timed: wall, main-thread CPU, worst frame; places-db only counts a History file's rows, --test runs only
+    ./bench atlas [DIR]                every look the window can have, pictured and checked, --test runs only
+    ./bench ui KEY VALUE               settings/passwords/welcome/history/downloads/bookmarks/hidden/feedback on|off, shelf never|always|toggle, glyph icons|letters, keep on (⇧⌘B), bring on,
+                                       look light|dark|system, sidebar on|off, bar on|off, copy on (⇧⌘C),
+                                       backdrop none|color|site, swatch gray|coral|…, custom RRGGBB,
+                                       page appearance|general|… (Settings opens on it),
+                                       shut on|off, fullscreen on|off, fold on|off (⌘S lays the page out on the way, or once at the end; pace column gives page_steps),
+                                       typed TEXT (into the address field → what it offers),
+                                       search TEXT (into Settings' search → its rows, what is picked),
+                                       pick up|down|return (the arrows and Return in that search),
+                                       question tick:KEY|untick:KEY|yes|no (yab's own question up now, --test runs only)
+                                       memory list|PATH (Settings › Agents › Memory, or a note's page: people/jane-doe.md),
+                                       skill list|NAME|new:NAME (Settings › Agents › Skills, a skill's page, or one made)
+                                       quick list|card:new|card:ID|card:close|fixture|shortcut:ID:KEY (Quick Actions, --test runs only)
+
+Needs Settings › General › "Let a script drive yab" switched on in the
+running app. IDs are the first characters of a tab's id, as `tabs` prints
+them. With --test, talks to a YAB_PROBE run instead of the real one;
+with --world NAME, to a YAB_PROBE=NAME run, the world "Yab (NAME)";
+with --dev, to the development build, yab Dev, instead of yab.
+"""
+
+import base64
+import html
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zlib
+
+def folder(world, dev=False):
+    name = f"Yab ({world})" if world else ("Yab Dev" if dev else "Yab")
+    return os.path.expanduser(f"~/Library/Application Support/{name}")
+
+def ask(path, request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        try:
+            s.connect(path)
+        except (FileNotFoundError, ConnectionRefusedError):
+            sys.exit("yab isn't listening, is it open, with Settings › General › "
+                     "“Let a script drive yab” on?")
+        s.sendall((json.dumps(request) + "\n").encode())
+        chunks = []
+        while True:
+            chunk = s.recv(1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    line = b"".join(chunks).split(b"\n", 1)[0]
+    return json.loads(line or b"{}")
+
+# MARK: - atlas
+#
+# Every way the window can look, pictured and checked, so a change to how it
+# is painted is seen in every case at once rather than in the one on screen.
+# The pages are made here, as data: addresses, so the atlas needs no network
+# and no site can change under it. Each picture is read back for the few
+# things that must hold whatever the case: an empty tab is never black, no
+# pale line runs round the page, a dark window has a dark frame, and the
+# frame wears what it was asked to wear.
+
+ATLAS_PAGES = [
+    # name, what it is, the top bar's color (None: no bar to carry), the page
+    ("darkbar", "dark bar, white page", "#24292F", "#FFFFFF"),
+    ("colorbar", "colored bar", "#1D6FD9", "#FFFFFF"),
+    ("lightbar", "light bar", "#8ECBFF", "#FFFFFF"),
+    ("white", "plain white", None, "#FFFFFF"),
+    ("darksite", "dark all over", "#0B0B0B", "#0B0B0B"),
+    ("photo", "no one color", None, "#FFFFFF"),
+    ("blank", "new tab", None, None),
+]
+
+def atlas_page(name, bar, ground):
+    # In base64: the address field takes no spaces, a # would end the
+    # address, and a % is escaped again on the way in.
+    def rgb(h):
+        return "rgb(%d,%d,%d)" % hexrgb(h)
+    if name == "photo":
+        top = ("<div style='height:64px;background:linear-gradient(90deg,"
+               "rgb(192,57,43),rgb(241,196,15),rgb(39,174,96),rgb(41,128,185),rgb(142,68,173))'></div>")
+    elif bar and name != "darksite":
+        top = f"<div style='height:56px;background:{rgb(bar)}'></div>"
+    else:
+        top = ""
+    ink = "rgb(238,238,238)" if ground == "#0B0B0B" else "rgb(34,34,34)"
+    page = (f"<body style='margin:0;background:{rgb(ground)};color:{ink};font:15px -apple-system'>"
+            f"{top}<p style='padding:24px'>{name}</p></body>")
+    return "data:text/html;base64," + base64.b64encode(page.encode()).decode()
+
+def hexrgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+def read_png(path):
+    """Width, height and a function for one pixel's RGB, enough PNG for
+    what screencapture writes (8-bit, not interlaced), without a library."""
+    data = open(path, "rb").read()
+    pos, chunks, meta = 8, [], None
+    while pos < len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            meta = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            chunks.append(body)
+        pos += 12 + n
+    w, h, depth, color = meta[0], meta[1], meta[2], meta[3]
+    bpp = {2: 3, 6: 4}[color] * (depth // 8)
+    raw = zlib.decompress(b"".join(chunks))
+    stride = w * bpp
+    rows, prev, at = [], bytearray(stride), 0
+    for _ in range(h):
+        kind = raw[at]; line = bytearray(raw[at + 1:at + 1 + stride]); at += 1 + stride
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1: line[i] = (line[i] + a) & 255
+            elif kind == 2: line[i] = (line[i] + b) & 255
+            elif kind == 3: line[i] = (line[i] + (a + b) // 2) & 255
+            elif kind == 4:
+                p = a + b - c; pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line)); prev = line
+    def at_(x, y):
+        x = min(max(int(x), 0), w - 1); y = min(max(int(y), 0), h - 1)
+        o = x * bpp
+        return tuple(rows[y][o:o + 3])
+    return w, h, at_
+
+def luminance(rgb):
+    def lin(c):
+        c /= 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+def distance(a, b):
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+def atlas(world, args):
+    if world is None:
+        sys.exit("atlas only works on a --test run, it takes the window over")
+    out = os.path.abspath(args[0] if args else tempfile.mkdtemp(prefix="yab-atlas-"))
+    os.makedirs(out, exist_ok=True)
+    sock = os.path.join(folder(world), "bench.sock")
+    def do(request):
+        answer = ask(sock, request)
+        if "error" in answer:
+            sys.exit("error: " + str(answer["error"]))
+        return answer
+    def settle(seconds=0.8):
+        time.sleep(seconds)
+
+    was = do({"do": "probe"})
+    ids = {}
+    blank = None
+    for name, _, bar, ground in ATLAS_PAGES:
+        if name != "blank":
+            ids[name] = do({"do": "open", "url": atlas_page(name, bar, ground)})["id"]
+            do({"do": "wait", "id": ids[name], "seconds": 10})
+    do({"do": "ui", "swatch": "coral"})
+
+    swatch = {"light": hexrgb("F2837C"), "dark": hexrgb("55282A")}
+    shots, failures = [], []
+    cases = [(look, side, mode, page)
+             for look in ("light", "dark") for side in (False, True)
+             for mode in ("none", "color", "site") for page in ATLAS_PAGES]
+    cases += [("dark", side, "color", ("custom", "your own, light yellow picked", None, "#FFFFFF"))
+              for side in (False, True)]
+    last = None
+    for look, side, mode, page in cases:
+        name, what, bar, ground = page
+        setting = (look, side, mode, name == "custom")
+        if setting != last:
+            request = {"do": "ui", "look": look, "sidebar": side, "backdrop": mode,
+                       "swatch": "custom" if name == "custom" else "coral"}
+            if name == "custom":
+                request["custom"] = "F3DC6B"
+            do(request)
+            settle(1.0)
+            last = setting
+        if name == "blank":
+            # One empty tab, picked again while it lasts, and made again only
+            # if it was let go, so the row doesn't fill with them.
+            open_ = {t["id"] for t in do({"do": "tabs"})["tabs"]}
+            if blank in open_:
+                do({"do": "select", "id": blank})
+            else:
+                do({"do": "newtab"})
+                settle(0.3)
+                blank = next(t["id"] for t in do({"do": "tabs"})["tabs"] if t.get("active"))
+        else:
+            do({"do": "select", "id": ids["white" if name == "custom" else name]})
+        settle()
+        probe = do({"do": "probe"})
+        file = os.path.join(out, f"{look}-{'side' if side else 'row'}-{mode}-{name}.png")
+        subprocess.run(["screencapture", "-x", "-o", "-l", str(probe["window"]), file], check=True)
+        w, h, pixel = read_png(file)
+        k = w / probe["size"][0]
+        x0, y0, pw, ph = probe["page"]
+        def at(x, y):
+            # A few device pixels along, so the grain doesn't decide it.
+            samples = [pixel(x * k + d, y * k) for d in (-2, 0, 2)]
+            return tuple(sum(c[i] for c in samples) // 3 for i in range(3))
+        wrong = []
+        carded = mode != "none"
+        if name == "blank":
+            middle = at(x0 + pw / 2, y0 + ph * 0.75)
+            if max(middle) < 12:
+                wrong.append("the empty tab is black")
+            if look == "light" and luminance(middle) < 0.8:
+                wrong.append(f"the empty tab is dark in a light window {middle}")
+        if carded:
+            # Just outside the page's edge against a little further out and a
+            # little in: the edge may be darker (the hairline), never lighter.
+            for label, edge, outside, further, inside in (
+                ("bottom", None, (x0 + pw / 2, y0 + ph + 0.5 / k), (x0 + pw / 2, y0 + ph + 4), (x0 + pw / 2, y0 + ph - 6)),
+                ("right", None, (x0 + pw + 0.5 / k, y0 + ph / 2), (x0 + pw + 4, y0 + ph / 2), (x0 + pw - 6, y0 + ph / 2)),
+            ):
+                rim = luminance(pixel(outside[0] * k, outside[1] * k))
+                if rim > max(luminance(at(*further)), luminance(at(*inside))) + 0.06:
+                    wrong.append(f"a pale line along the page's {label} edge")
+            frame = at(x0 + pw / 2, y0 + ph + 4)
+            if look == "dark" and luminance(frame) > 0.2:
+                wrong.append(f"a light frame in a dark window {frame}")
+            follows = mode == "site" and bar is not None and name != "photo" and \
+                (look == "light" or luminance(hexrgb(bar)) < 0.3)
+            wanted = hexrgb(bar) if follows else None
+            if mode == "color" and name != "custom":
+                wanted = swatch[look]
+            if wanted and distance(frame, wanted) > 45:
+                wrong.append(f"the frame is {'#%02X%02X%02X' % frame}, not {'#%02X%02X%02X' % wanted}")
+        shots.append((file, look, side, mode, name, what, wrong))
+        for problem in wrong:
+            failures.append(f"{look}, {'sidebar' if side else 'row'}, {mode}, {name}: {problem}")
+
+    do({"do": "ui", "look": was["look"], "sidebar": was["sidebar"], "backdrop": was["backdrop"],
+        "swatch": was["swatch"], "custom": was["custom"]})
+    for tab in ids.values():
+        do({"do": "close", "id": tab})
+
+    cells = []
+    for file, look, side, mode, name, what, wrong in shots:
+        mark = "bad" if wrong else ""
+        note = "<br>".join(html.escape(p) for p in wrong) or "ok"
+        cells.append(f"<figure class='{mark}'><img src='{os.path.basename(file)}' loading=lazy>"
+                     f"<figcaption><b>{look} · {'sidebar' if side else 'row'} · {mode}</b> · {html.escape(what)}"
+                     f"<br><span>{note}</span></figcaption></figure>")
+    page = ("<!doctype html><meta charset=utf-8><title>yab atlas</title><style>"
+            "body{font:12px -apple-system;margin:16px;background:#f4f4f5}"
+            "main{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}"
+            "figure{margin:0;background:#fff;border-radius:8px;padding:6px}figure img{width:100%;border-radius:4px}"
+            "figure.bad{outline:2px solid #d33}figcaption span{color:#666}.bad span{color:#d33}"
+            "</style>" + f"<h1>{len(shots)} looks, {len(failures)} wrong</h1><main>" + "".join(cells) + "</main>")
+    index = os.path.join(out, "index.html")
+    open(index, "w").write(page)
+    for line in failures:
+        print("✗ " + line)
+    print(f"{len(shots)} looks, {len(failures)} wrong → {index}")
+    return 1 if failures else 0
+
+def main(argv):
+    world = "test" if "--test" in argv else None
+    if "--world" in argv:
+        at = argv.index("--world")
+        if at + 1 >= len(argv): sys.exit("usage: bench --world NAME COMMAND …")
+        world = "".join(c for c in argv[at + 1].lower() if c.isascii() and (c.isalnum() or c == "-"))
+        if world in ("", "1"): world = "test"
+        argv = argv[:at] + argv[at + 2:]
+    yes = "--yes" in argv
+    dev = "--dev" in argv
+    argv = [a for a in argv if a not in ("--test", "--yes", "--dev")]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    verb, args = argv[0], argv[1:]
+    if verb == "atlas":
+        return atlas(world, args)
+    request = {"do": verb}
+    if verb == "open":
+        if len(args) not in (1, 2) or (len(args) == 2 and args[1] != "plain"): sys.exit("usage: bench open URL [plain]")
+        request["url"] = args[0]
+        if len(args) == 2: request["plain"] = True
+    elif verb == "mute":
+        if len(args) != 2: sys.exit("usage: bench mute ID on|off")
+        request["id"], request["on"] = args[0], args[1] in ("on", "true", "1", "yes")
+    elif verb == "sound":
+        if len(args) not in (2, 3) or (len(args) == 3 and args[2] != "fresh"): sys.exit("usage: bench sound ID on|off|- [fresh]")
+        request["id"] = args[0]
+        if args[1] != "-": request["on"] = args[1] in ("on", "true", "1", "yes")
+        if len(args) == 3: request["fresh"] = True
+    elif verb == "idle":
+        if args: request["seconds"] = float(args[0])
+    elif verb == "code":
+        # code ACT [key=value …]: Code's space and engine (CodeBench).
+        request["act"] = args.pop(0) if args else "state"
+        for pair in args:
+            key, _, value = pair.partition("=")
+            try: request[key] = json.loads(value)
+            except ValueError: request[key] = value
+    elif verb == "link":
+        if len(args) != 1: sys.exit("usage: bench link URL")
+        request["url"] = args[0]
+    elif verb == "hints-copy":
+        if len(args) not in (1, 2): sys.exit("usage: bench hints-copy URL [APP]")
+        request["url"] = args[0]
+        if len(args) == 2: request["app"] = args[1]
+    elif verb == "hints-visits":
+        if len(args) != 1: sys.exit("usage: bench hints-visits FILE|none")
+        request["path"] = args[0] if args[0] == "none" else os.path.abspath(args[0])
+    elif verb == "hints-habits":
+        if args and args[0] == "count": request["count"] = True
+    elif verb == "go":
+        if len(args) != 2: sys.exit("usage: bench go ID URL")
+        request["id"], request["url"] = args
+    elif verb in ("wait",):
+        if not args: sys.exit("usage: bench wait ID [SECONDS]")
+        request["id"] = args[0]
+        if len(args) > 1: request["seconds"] = float(args[1])
+    elif verb in ("text", "close", "sleep", "select"):
+        if len(args) != 1: sys.exit(f"usage: bench {verb} ID")
+        request["id"] = args[0]
+    elif verb == "selection":
+        # selection page|text|field|open|result COMMAND TEXT|close|state
+        request["action"] = args.pop(0) if args else "state"
+        if request["action"] == "result" and len(args) >= 2: request["command"], request["text"] = args[0], args[1]
+    elif verb == "tidy":
+        if args: request["hours"] = float(args[0])
+    elif verb == "welcome":
+        # welcome [BEAT] [phase=NAME] [index=N] [play=1] [KEY=VALUE…] [next=1] [back=1] [quiet=1] [wait=S]:
+        # every value but index and wait goes as words; the app reads 1/true/yes/on as yes.
+        for a in args:
+            if "=" in a:
+                k, v = a.split("=", 1)
+                request[k] = int(v) if k in ("index", "source") else float(v) if k == "wait" else v
+            else:
+                request["step"] = a
+    elif verb == "teach":
+        # teach [state|reset|hurry [off]|shut|signin HOST USER|copy|markdown|bookmark|act] [wait=S]
+        request["action"] = args.pop(0) if args else "state"
+        if request["action"] == "hurry" and args and args[0] == "off": request["on"] = False; args.pop(0)
+        if request["action"] == "signin":
+            if len(args) < 2: sys.exit("usage: bench teach signin HOST USER")
+            request["host"], request["user"] = args.pop(0), args.pop(0)
+        for a in args:
+            if a.startswith("wait="): request["wait"] = float(a[5:])
+    elif verb == "eval":
+        if len(args) not in (2, 3): sys.exit("usage: bench eval ID JS [yab]")
+        request["id"], request["js"] = args[:2]
+        # "yab": in yab's own world, where its page scripts live.
+        if len(args) == 3: request["world"] = args[2]
+    elif verb in ("click", "submit"):
+        if len(args) != 2: sys.exit(f"usage: bench {verb} ID SELECTOR")
+        request["id"], request["selector"] = args
+    elif verb == "type":
+        if len(args) != 3: sys.exit("usage: bench type ID SELECTOR TEXT")
+        request["id"], request["selector"], request["text"] = args
+    elif verb == "shot":
+        if not args: sys.exit("usage: bench shot ID [PATH] [WIDTH]")
+        request["id"] = args[0]
+        if len(args) > 1: request["path"] = os.path.abspath(args[1])
+        if len(args) > 2: request["width"] = float(args[2])
+    elif verb == "film":
+        if not args or args[0] not in ("newtab", "sides", "shelf", "column", "copy", "pagecopy", "tidy", "notices", "select", "close", "reopen", "edit", "place", "emoji", "actions", "dismiss", "submit", "type", "keep", "park", "never", "undo", "name", "unpark"): sys.exit("usage: bench film newtab|sides|shelf|column|copy|tidy|notices|edit|dismiss|submit|keep|park|never|undo|name|unpark|select ID|close ID|type TEXT [DIR]")
+        request["action"] = args.pop(0)
+        if request["action"] == "type":
+            if not args: sys.exit("usage: bench film type TEXT [DIR]")
+            request["text"] = args.pop(0)
+        elif request["action"] not in ("newtab", "sides", "shelf", "column", "copy", "pagecopy", "notices", "reopen", "edit", "place", "emoji", "actions", "dismiss", "submit", "keep", "park", "never", "undo", "name", "unpark"):
+            if not args: sys.exit(f"usage: bench film {request['action']} ID [DIR]")
+            request["id"] = args.pop(0)
+        if args: request["path"] = os.path.abspath(args[0])
+    elif verb == "band":
+        # [ACTION] [SECONDS], see the help above
+        if args and not args[0].replace(".", "", 1).isdigit(): request["action"] = args.pop(0)
+        if args: request["seconds"] = float(args[0])
+    elif verb == "float":
+        # on | state | idle [S] | enter X Y | exit | move X Y | click X Y [COUNT]
+        # | drag X Y X2 Y2 [STEPS] | key space|left|right|escape|return
+        request["action"] = args.pop(0) if args else "state"
+        names = {"idle": ["seconds"], "enter": ["x", "y"], "move": ["x", "y"], "click": ["x", "y", "count"],
+                 "drag": ["x", "y", "x2", "y2", "steps"], "key": ["key"], "hit": ["x", "y"], "width": ["x"], "clock": ["x"], "appkey": ["key"],
+                 "place": ["x", "y", "vx", "vy"], "flick": ["x", "y"], "tap": ["x", "y"]}.get(request["action"], [])
+        for name, value in zip(names, args):
+            request[name] = value if name == "key" else (int(value) if name in ("count", "steps") else float(value))
+    elif verb == "call":
+        # state | corner | shareable | mock ID | mic | camera | menu | shut ID | lift ID | leave | tuck | untuck
+        # | press BUTTON | window | sweep [SECONDS] | join | meetings JSON | calendar ID | over ID
+        request["action"] = args.pop(0) if args else "state"
+        if request["action"] in ("mock", "shut", "lift", "calendar", "over", "meeting"):
+            if not args: sys.exit(f"usage: bench call {request['action']} ID")
+            request["id"] = args.pop(0)
+        elif request["action"] == "press" and args: request["button"] = args.pop(0)
+        elif request["action"] == "sweep" and args: request["after"] = float(args.pop(0))
+        elif request["action"] == "width" and args: request["x"] = float(args.pop(0))
+        elif request["action"] == "churn":
+            if args: request["which"] = args.pop(0)
+            if args: request["n"] = int(args.pop(0))
+        elif request["action"] == "flick" and len(args) >= 2: request["x"], request["y"] = float(args.pop(0)), float(args.pop(0))
+        elif request["action"] == "meetings": request["list"] = json.loads(args.pop(0)) if args else None
+        elif request["action"] in ("pick", "plug"):
+            # pick KIND LABEL | plug KIND LABEL [gone]
+            if len(args) < 2: sys.exit(f"usage: bench call {request['action']} mic|speaker|camera LABEL")
+            request["kind"], request["label"] = args.pop(0), args.pop(0)
+            if args and args[0] == "gone": args.pop(0); request["came"] = False
+    elif verb == "share":
+        # state | ask ID | door tabs|windows|screens | type TEXT | pick N | arrow up|down|left|right | answer yes|no|system | stop ID | instead ID
+        request["action"] = args.pop(0) if args else "state"
+        if request["action"] in ("ask", "stop", "instead") and args: request["id"] = args.pop(0)
+        elif request["action"] == "door" and args: request["door"] = args.pop(0)
+        elif request["action"] == "type": request["text"] = " ".join(args)
+        elif request["action"] == "arrow" and args: request["way"] = args.pop(0)
+        elif request["action"] == "pick" and args: request["index"] = int(args.pop(0))
+        elif request["action"] == "answer" and args: request["said"] = args.pop(0)
+    elif verb == "live":
+        # state | make [HOST] | items JSON | read | hide ID | stop
+        request["action"] = args.pop(0) if args else "state"
+        if request["action"] == "make" and args: request["host"] = args.pop(0)
+        elif request["action"] == "items": request["items"] = json.loads(args.pop(0)) if args else []
+        elif request["action"] == "hide" and args: request["id"] = args.pop(0)
+        if args: request["wait"] = float(args.pop(0))
+    elif verb == "pace":
+        paces = ("sides", "shelf", "column", "folder", "idle", "copy", "float", "sing", "reload", "space-step", "wheel", "scroll", "across", "select", "split-enter", "split-separate", "split-drag", "split-equal", "split-focus", "split-close", "split-deck", "split-deck-end", "reader", "welcome-show", "welcome-next", "welcome-back", "welcome-go", "box-open", "box-fresh", "box-history", "box-clipboard", "box-k", "box-close", "box-type", "file-open", "dev-open", "dev-side", "peek", "peek-close", "peek-hide", "peek-show", "tidy", "chat-line", "chat-carry", "chat-ask", "chat-hide", "chat-expand")
+        if not args or args[0] not in paces: sys.exit("usage: bench pace " + "|".join(paces) + " [ID] [SECONDS]")
+        request["action"] = args.pop(0)
+        if request["action"] in ("split-enter", "select", "sing", "reload", "split-deck"):
+            if not args: sys.exit(f"usage: bench pace {request['action']} ID [SECONDS]")
+            request["id"] = args.pop(0)
+        if request["action"] == "split-deck":
+            # split-deck ID [to=0.85] [over=0.8] [hold] [esc] [SECONDS]
+            while args and not args[0].replace(".", "", 1).isdigit():
+                a = args.pop(0)
+                if a in ("hold", "esc", "leave"): request[a] = True
+                elif a.startswith("path="): request["path"] = [float(x) for x in a[5:].split(",")]
+                elif "=" in a:
+                    k, v = a.split("=", 1)
+                    request[k] = float(v)
+        if request["action"] == "box-type":
+            if not args: sys.exit("usage: bench pace box-type TEXT [SECONDS] [INTERVAL]")
+            request["text"] = args.pop(0)
+        if request["action"] == "file-open":
+            if not args: sys.exit("usage: bench pace file-open SELECTOR [SECONDS]")
+            request["selector"] = args.pop(0)
+        if request["action"] == "welcome-go":
+            # welcome-go BEAT [KEY=VALUE…] [SECONDS]: that beat played from the one before it
+            while args and not args[0].replace(".", "", 1).isdigit():
+                a = args.pop(0)
+                if "=" in a:
+                    k, v = a.split("=", 1)
+                    request[k] = v
+                else:
+                    request["step"] = a
+        if request["action"] == "peek":
+            if not args: sys.exit("usage: bench pace peek URL [from SELECTOR] [SECONDS]")
+            request["url"] = args.pop(0)
+            if len(args) > 1 and args[0] == "from": args.pop(0); request["from"] = args.pop(0)
+        if args: request["seconds"] = float(args[0])
+        if request["action"] == "box-type" and len(args) > 1: request["interval"] = float(args[1])
+    elif verb == "split":
+        if args:
+            request["act"] = args[0]
+            if args[0] in ("with", "focus", "pin"):
+                if len(args) != 2: sys.exit(f"usage: bench split {args[0]} ID")
+                request["id"] = args[1]
+            elif args[0] == "live":
+                request["mode"] = args[1] if len(args) > 1 else 'live'
+            elif args[0] == "share":
+                request["value"] = float(args[1])
+    elif verb == "winshot":
+        if "settings" in args:
+            request["settings"] = True
+            args = [a for a in args if a != "settings"]
+        if args: request["path"] = os.path.abspath(args[0])
+    elif verb == "ui":
+        if len(args) != 2: sys.exit("usage: bench ui KEY VALUE")
+        key, value = args
+        request[key] = value if key in ("question", "look", "typed", "backdrop", "shelf", "swatch", "page", "search", "pick", "extension", "adding", "update", "ask", "scope", "sitecard", "quick", "agents", "memory", "skill", "space", "devside", "task", "flank", "glyph") else value in ("on", "true", "1", "yes")
+    elif verb in ("ext-add", "ext-folder"):
+        # give=KEY,KEY: what it may ask for later, ticked (--yes runs, where no box is shown)
+        gives = [a for a in args if a.startswith("give=")]
+        args = [a for a in args if not a.startswith("give=")]
+        if len(args) != 1: sys.exit(f"usage: bench {verb} {'ID' if verb == 'ext-add' else 'PATH'} [give=KEY,KEY]")
+        if verb == "ext-add": request["id"] = args[0]
+        else: request["path"] = os.path.abspath(args[0])
+        request["yes"] = yes
+        if gives: request["give"] = [k for d in gives for k in d[len("give="):].split(",") if k]
+    elif verb in ("ext-press", "ext-remove", "ext-reload"):
+        if len(args) != 1: sys.exit(f"usage: bench {verb} ID")
+        request["id"] = args[0]
+        request["yes"] = yes
+    elif verb in ("ext-scan", "ext-bring"):
+        if not args: sys.exit(f"usage: bench {verb} BROWSER" + (" [ID …]" if verb == "ext-bring" else ""))
+        request["browser"] = args[0]
+        request["ids"] = args[1:]
+    elif verb == "ext-enable":
+        if len(args) != 2: sys.exit("usage: bench ext-enable ID on|off")
+        request["id"] = args[0]
+        request["on"] = args[1] in ("on", "true", "1", "yes")
+    elif verb == "ext-pin":
+        if not 1 <= len(args) <= 2: sys.exit("usage: bench ext-pin ID [on|off]")
+        request["id"] = args[0]
+        request["on"] = (args[1] if len(args) > 1 else "on") in ("on", "true", "1", "yes")
+    elif verb == "ext-answer":
+        if len(args) != 1 or args[0] not in ("yes", "no", "ask"): sys.exit("usage: bench ext-answer yes|no|ask")
+        request["answer"] = args[0]
+    elif verb == "ext-shot":
+        if len(args) != 2: sys.exit("usage: bench ext-shot ID PATH")
+        request["id"] = args[0]
+        request["path"] = os.path.abspath(args[1])
+    elif verb == "ext-menu":
+        if len(args) != 1: sys.exit("usage: bench ext-menu PATH")
+        request["path"] = os.path.abspath(args[0])
+    elif verb == "ext-popup":
+        if len(args) != 2: sys.exit("usage: bench ext-popup ID JS")
+        request["id"], request["js"] = args
+    elif verb == "ext-page":
+        if not args: sys.exit("usage: bench ext-page ID [PATH]")
+        request["id"] = args[0]
+        request["path"] = args[1] if len(args) > 1 else ""
+    elif verb == "fill":
+        if not args: sys.exit("usage: bench fill ID [tricky] [prove on|off] [cancel SECONDS] [close SECONDS] [user U] [password P]")
+        request["id"] = args.pop(0)
+        while args:
+            word = args.pop(0)
+            if word == "tricky": request["tricky"] = True
+            elif word in ("prove", "cancel", "close", "user", "password") and args:
+                value = args.pop(0)
+                request[word] = value in ("on", "true", "1", "yes") if word == "prove" else float(value) if word in ("cancel", "close") else value
+            else: sys.exit(f"bench fill: what is “{word}”?")
+    elif verb == "key":
+        if len(args) != 2: sys.exit("usage: bench key ID TEXT")
+        request["id"], request["text"] = args
+    elif verb == "chord":
+        if len(args) not in (2, 3, 4): sys.exit("usage: bench chord ID KEYS [CHARS] [SECONDS]")
+        request["id"], request["keys"] = args[0], args[1]
+        if len(args) >= 3: request["chars"] = float(args[2])
+        if len(args) == 4: request["wait"] = float(args[3])
+    elif verb == "box":
+        request["act"] = args[0] if args else "state"
+        if request["act"] == "prepare":
+            for item in args[1:]:
+                key, sep, value = item.partition("=")
+                if not sep or key not in ("history", "tabs", "clips", "diary") or not value.isdecimal():
+                    sys.exit("usage: bench box prepare [history=N] [tabs=N] [clips=N] [diary=0|1]")
+                request[key] = int(value)
+        elif len(args) > 1:
+            request["text" if request["act"] == "type" else "place" if request["act"] == "open-place" else "keys"] = " ".join(args[1:])
+    elif verb == "import":
+        files = ("bookmarks-file", "history-file", "places-db")
+        if len(args) < 2 or args[0] not in ("profiles", "tabs", "bookmarks", "history") + files:
+            sys.exit("usage: bench import profiles|tabs|bookmarks|history BROWSER [PROFILE] [open] | bookmarks-file|history-file|places-db PATH")
+        request["what"] = args[0]
+        if args[0] in files:
+            request["path"] = os.path.abspath(args[1])
+        else:
+            request["browser"] = args[1]
+            rest = args[2:]
+            request["open"] = "open" in rest
+            rest = [a for a in rest if a != "open"]
+            if rest: request["profile"] = rest[0]
+        request["seconds"] = 55
+    elif verb == "scroll":
+        if args: request["step"] = float(args[0])
+    elif verb == "keys":
+        # "quiet": the answer without the menus, which reading brings up to date.
+        if "quiet" in args:
+            request["quiet"] = True
+            args = [a for a in args if a != "quiet"]
+        request["act"] = args[0] if args else "list"
+        rest = args[1:]
+        if request["act"] in ("point", "alias") and rest:
+            # A site's row by its host, site:youtube.com, or an action.
+            first = rest.pop(0)
+            if first.startswith("site:"): request["site"] = first[5:]
+            else: request["action"] = first
+        if request["act"] in ("set", "remove", "reset", "record"):
+            if not rest: sys.exit(f"usage: bench keys {request['act']} ACTION" + (" KEYS" if request["act"] == "set" else ""))
+            request["action"] = rest.pop(0)
+        if request["act"] == "set" or request["act"] == "press":
+            if not rest: sys.exit("usage: bench keys press KEYS")
+            request["keys"] = rest.pop(0)
+        if request["act"] == "filter":
+            request["text"] = rest[0] if rest else "reload"
+            request["keep"] = "keep" in rest[1:]
+        if request["act"] == "eager":
+            request["on"] = (rest[0] if rest else "on") in ("on", "true", "1", "yes")
+        if request["act"] == "hold":
+            request["seconds"] = float(rest[0]) if rest else 0.18
+        if request["act"] == "rebuild" and rest:
+            request["count"] = int(rest[0])
+    elif verb == "spacetray":
+        if not args: sys.exit("usage: bench spacetray open|name TEXT|step S|swatch S|custom HEX|grain on|off|own on|off|emoji E|take on|off|forward|leave|state")
+        request["act"] = args[0]
+        if len(args) > 1: request["value"] = " ".join(args[1:])
+    elif verb == "peek":
+        if not args: sys.exit("usage: bench peek URL [from SELECTOR]|keep|close|split|status")
+        if args[0] in ("keep", "close", "split", "status"): request["act"] = args[0]
+        elif args[0] == "force" and len(args) > 1: request["act"], request["from"] = "force", args[1]
+        else:
+            request["url"] = args[0]
+            if len(args) > 2 and args[1] == "from": request["from"] = args[2]
+    elif verb == "modellist":
+        for a in args:
+            if a == "mac": request["mac"] = True
+            elif ":" in a and not a.startswith("/"): request["cli"], request["model"] = a.split(":", 1)
+            else: request["path"] = a
+    elif verb == "stall":
+        if args: request["seconds"] = float(args[0])
+    elif verb == "resize":
+        if len(args) not in (2, 3): sys.exit("usage: bench resize WIDTH HEIGHT [STEPS]")
+        request["width"], request["height"] = float(args[0]), float(args[1])
+        if len(args) == 3: request["steps"] = int(args[2])
+    elif verb not in ("tabs", "frames", "probe", "extensions", "front", "hangs", "startup", "untidy", "links", "link-keep", "link-close", "layer-audit", "loadbar"):
+        sys.exit(f"unknown command “{verb}”, see bench help")
+
+    answer = ask(os.path.join(folder(world, dev), "bench.sock"), request)
+    if "error" in answer:
+        sys.exit("error: " + str(answer["error"]))
+    if verb == "text":
+        print(answer.get("text", ""))
+        if answer.get("truncated"):
+            print("\n[… truncated]", file=sys.stderr)
+    elif verb in ("shot", "winshot"):
+        print(answer["path"])
+    elif verb == "hangs":
+        print(answer["report"])
+    elif verb == "film":
+        for f in answer["frames"]:
+            print(f"{f['ms']:5d} ms  {f['file']}")
+    elif verb in ("open", "ext-page"):
+        print(answer["id"])
+    elif verb in ("eval", "ext-popup"):
+        value = answer.get("value")
+        print(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2))
+    elif verb == "tabs":
+        for tab in answer.get("tabs", []):
+            mark = "⚗" if tab.get("bench") else ("●" if tab.get("active") else " ")
+            state = " …" if tab.get("loading") else (" z" if tab.get("asleep") else "")
+            print(f"{mark} {tab['id']}  {tab.get('title') or '-'}  {tab.get('url')}{state}")
+    else:
+        print(json.dumps(answer, ensure_ascii=False, indent=2))
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

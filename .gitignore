@@ -1,0 +1,45 @@
+# Build output, build.sh regenerates all of this.
+.build/
+build/
+.swiftpm/
+*.xcuserstate
+.DS_Store
+
+# Signing material that's tied to one Apple Developer account and should
+# never be committed, even though the scripts happily run without it.
+*.provisionprofile
+*.p12
+*.mobileprovision
+
+# Python bytecode from the scripts.
+__pycache__/
+
+# Yab for iPhone: what remote brings back from adhd, the project XcodeGen
+# writes from Phone/project.yml, and the prototype kept beside it as a file.
+Phone/.out/
+Phone/*.xcodeproj
+Phone/Reference/prototype.html
+/evals/space-switching/grid
+/evals/space-switching/board
+
+# Local Chromium parity logs and downloaded CEF app artifacts.
+/work/chromium-parity/
+# Farm films and fetched eval worlds are local evidence, not source inputs.
+/report/**/films/
+/report/**/dense/
+/report/**/measurements/
+/report/after/matrix/boards/
+/report/after/matrix/analysis.json
+/report/after/matrix/matrix.json
+/report/full/supplement/
+/report/evals-*/
+/report/base-*/
+/report/after-sidebar-*/
+
+# Keep the two committed reference frames available to farm snapshots.
+!/report/final-short/matrix/films/
+/report/final-short/matrix/films/*
+!/report/final-short/matrix/films/row-own-site-dock-in-step+/
+/report/final-short/matrix/films/row-own-site-dock-in-step+/*
+!/report/final-short/matrix/films/row-own-site-dock-in-step+/030.png
+!/report/final-short/matrix/films/row-own-site-dock-in-step+/160.png

@@ -1,0 +1,32 @@
+{
+  "sourceSnapshot": "d5dc0e55d0b05225ced4669d4ee5abc503fd5fde",
+  "inputs": [
+    {
+      "path": "Phone/Sources/Paging/Pager.swift",
+      "sha256": "b70e00bd579a2d58812a6096a0a68bbde088252a08e2a772b77377d0afa97db6"
+    },
+    {
+      "path": "Phone/Sources/Design/Metrics.swift",
+      "sha256": "a0bbcd4abd04f19f7cb85af9d84e2f4997c97be27f011ac73235286bbcfd2dfc"
+    },
+    {
+      "path": "Phone/Sources/Column/SpringValue.swift",
+      "sha256": "b688ce8e58eb23e3d39ce3dfb03bd8d664cfaa00e5d64a902a496691b327ceef"
+    },
+    {
+      "path": "Phone/Sources/Design/Motion.swift",
+      "sha256": "6486d3bcf161a7d97b8f8ae9e739c9eb59f367643a51ee3e82977f302c2e3672"
+    },
+    {
+      "path": "Phone/Sources/Model/Space.swift",
+      "sha256": "a9896cafc668cb1c8ea1303f83e1447a91013784f25aaf228418b88d184ac99f"
+    },
+    {
+      "path": "Phone/Sources/Model/KeptTree.swift",
+      "sha256": "600f86bd7db1020d8aa2c730c0c122441c42d68840a85b85490ca16ffffc9f00"
+    }
+  ],
+  "originalSwiftBodies": true,
+  "presentedFrameParityVerified": false,
+  "gestureVelocityVerified": false
+}

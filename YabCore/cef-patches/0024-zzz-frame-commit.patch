@@ -1,0 +1,14 @@
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -613,6 +613,11 @@
+     result->SetInt("pixelWidth", pixels_.width());
+     result->SetInt("pixelHeight", pixels_.height());
+     result->SetDouble("scale", scale_);
++    // Page bounds can update synchronously before an old compositor frame
++    // arrives. Never acknowledge that old frame as the newly requested size.
++    auto* compositor = widget_->GetCompositor();
++    result->SetBool("frameMatchesGeometry", context_ && compositor &&
++        scale_ > 0 && !pixels_.IsEmpty() && compositor->size() == pixels_);
+     NSWindow* window = widget_->GetNativeWindow().GetNativeNSWindow();
+     result->SetInt("windowNumber", window ? static_cast<int>(window.windowNumber) : 0);
+     auto* renderer = web_contents()->GetRenderWidgetHostView();

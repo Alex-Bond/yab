@@ -1,0 +1,20 @@
+{
+  "name": "yab-sync",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "description": "Yab sync server: a Cloudflare Worker with Durable Objects",
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "typescript": "^5.9.3",
+    "vitest": "~4.1",
+    "wrangler": "^4.147.0"
+  },
+  "private": true,
+  "type": "module"
+}

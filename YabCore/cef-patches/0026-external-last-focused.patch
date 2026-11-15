@@ -1,0 +1,104 @@
+--- a/chrome/browser/extensions/external_tab_model.h
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -7,6 +7,7 @@
+ #include <vector>
+ #include "base/supports_user_data.h"
+ #include "base/memory/weak_ptr.h"
++#include "content/public/browser/browser_context.h"
+ #include "content/public/browser/web_contents.h"
+ 
+ namespace extensions {
+@@ -35,6 +36,34 @@
+   base::WeakPtr<content::WebContents> owner_, opener_;
+   bool active_;
+   int index_;
++};
++// The embedder delegates focus without activating a concealed Chrome window.
++// Remember that authoritative native event per BrowserContext. A worker has
++// no popup controller, so physical window activation order is not its owner.
++class ExternalTabFocus : public base::SupportsUserData::Data {
++ public:
++  static void Remember(content::WebContents* contents) {
++    if (!contents || contents->IsBeingDestroyed()) return;
++    auto* context = contents->GetBrowserContext();
++    auto* state = static_cast<ExternalTabFocus*>(context->GetUserData(&kKey));
++    if (!state) {
++      auto created = std::make_unique<ExternalTabFocus>();
++      state = created.get();
++      context->SetUserData(&kKey, std::move(created));
++    }
++    state->contents_ = contents->GetWeakPtr();
++  }
++  static content::WebContents* Get(content::BrowserContext* context) {
++    auto* state = context
++        ? static_cast<ExternalTabFocus*>(context->GetUserData(&kKey)) : nullptr;
++    auto* contents = state ? state->contents_.get() : nullptr;
++    return contents && !contents->IsBeingDestroyed() &&
++                   contents->GetBrowserContext() == context
++        ? contents : nullptr;
++  }
++ private:
++  inline static const int kKey = 0;
++  base::WeakPtr<content::WebContents> contents_;
+ };
+ // UI sequence only. Chrome owns all WebContents and their real session IDs.
+ // A group only retains weak identities, never a page or a physical window.
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -661,6 +661,7 @@
+     if (!ExternalFocus::GetOrCreateForWebContents(web_contents())->Set(widget_.get(), focused))
+       return false;
+     if (focused && contents) {
++      extensions::ExternalTabFocus::Remember(contents.get());
+       if (auto* model = extensions::ExternalTabModel::Get(contents.get())) model->Activate();
+     }
+     return !!contents;
+@@ -912,6 +913,7 @@
+   if (!contents || !ExternalFocus::GetOrCreateForWebContents(contents)
+                         ->Set(widget, focused)) return false;
+   if (focused) {
++    extensions::ExternalTabFocus::Remember(contents);
+     if (auto* model = extensions::ExternalTabModel::Get(contents)) model->Activate();
+     browser_view->RequestFocus();
+   }
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -1884,6 +1884,12 @@
+   BrowserWindowInterface* last_active_browser =
+       browser_window_util::GetLastActiveBrowserWithProfile(
+           *profile, include_incognito_information());
++  if (auto* focused = ExternalTabFocus::Get(profile)) {
++    auto* tab = ::tabs::TabInterface::MaybeGetFromContents(focused);
++    auto* window = tab ? tab->GetBrowserWindowInterface() : nullptr;
++    if (window && window->GetProfile() == profile && !window->IsDeleteScheduled())
++      last_active_browser = window;
++  }
+ 
+   // Note that the current browser is allowed to be null: you can still query
+   // the tabs in this case.
+--- a/chrome/browser/extensions/chrome_extension_function_details.cc
++++ b/chrome/browser/extensions/chrome_extension_function_details.cc
+@@ -5,6 +5,8 @@
+ #include "chrome/browser/extensions/chrome_extension_function_details.h"
+ 
+ #include "chrome/browser/extensions/browser_extension_window_controller.h"
++#include "chrome/browser/extensions/external_tab_model.h"
++#include "components/tabs/public/tab_interface.h"
+ #include "chrome/browser/extensions/window_controller.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -56,6 +58,14 @@
+   // we will search the incognito version only, regardless of the value of
+   // |include_incognito|.
+   Profile* profile = Profile::FromBrowserContext(function_->browser_context());
++  if (auto* focused = ExternalTabFocus::Get(profile)) {
++    auto* tab = tabs::TabInterface::MaybeGetFromContents(focused);
++    auto* window = tab ? tab->GetBrowserWindowInterface() : nullptr;
++    if (window && window->GetProfile() == profile && !window->IsDeleteScheduled()) {
++      if (auto* controller = BrowserExtensionWindowController::From(window))
++        return controller;
++    }
++  }
+ 
+   WindowController* window_controller = nullptr;
+   ForEachCurrentBrowserWindowInterfaceOrderedByActivation(

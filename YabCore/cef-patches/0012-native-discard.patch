@@ -1,0 +1,230 @@
+--- a/cef/include/cef_browser.h	2026-10-26 07:24:23
++++ b/cef/include/cef_browser.h	2026-10-26 23:13:22
+@@ -49,6 +49,9 @@
+ #include "include/cef_registration.h"
+ #include "include/cef_request_context.h"
+ 
++// Experimental Yab source-build capability, absent from official CEF SDKs.
++#define CEF_YAB_DISCARD_VERSION 1
++
+ class CefBrowserHost;
+ class CefClient;
+ 
+@@ -1088,6 +1091,52 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual void SetAxViewportCollapse(bool enabled) = 0;
++
++  ///
++  /// Returns true if this browser can discard its page natively: the
++  /// WebContentsDiscard feature is enabled (--enable-features=WebContentsDiscard)
++  /// and the browser is valid. This method can only be called on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool CanDiscardPage() = 0;
++
++  ///
++  /// Discards the page's renderer state in place. The navigation controller
++  /// keeps its history, the selected entry and its page state, so
++  /// RestoreDiscardedPage resumes the selected entry without replaying the
++  /// others. Refused (|callback| runs at once, IsPageDiscarded stays false)
++  /// when the page is visible, already discarded, has a navigation waiting to
++  /// commit or the feature is disabled. |callback| runs on the UI thread once
++  /// the attempt finished; check IsPageDiscarded for success. This method can
++  /// only be called on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void DiscardPage(CefRefPtr<CefCompletionCallback> callback) = 0;
++
++  ///
++  /// Returns true if the page was discarded and not restored since. This
++  /// method can only be called on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool IsPageDiscarded() = 0;
++
++  ///
++  /// Reloads the selected entry of a discarded page from its saved state (a
++  /// native restore, not a reload of the URL). Returns false when the page is
++  /// not discarded. This method can only be called on the UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool RestoreDiscardedPage() = 0;
++
++  ///
++  /// Freezes or unfreezes the page (a frozen page runs as few tasks as
++  /// possible). This is a request to the renderer, not an acknowledgement, and
++  /// not a discard. Returns false when the page is visible; making a frozen
++  /// page visible unfreezes it. This method can only be called on the UI
++  /// thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetPageFrozen(bool frozen) = 0;
+ #endif
+ };
+ 
+--- a/cef/include/cef_display_handler.h	2026-10-26 23:10:41
++++ b/cef/include/cef_display_handler.h	2026-10-26 23:13:22
+@@ -52,6 +52,7 @@
+ #define CEF_YAB_BACKGROUND_COLOR_VERSION 1
+ #define CEF_YAB_SELECT_MENU_VERSION 1
+ #define CEF_YAB_EXTENSION_HOOKS_VERSION 1
++#define CEF_YAB_DISCARD_NOTIFY_VERSION 1
+ 
+ ///
+ /// Implement this interface to handle events related to browser display state.
+@@ -253,6 +254,14 @@
+   /*--cef(added=experimental)--*/
+   virtual void OnExtensionTabCreated(CefRefPtr<CefBrowser> browser,
+                                      CefRefPtr<CefDictionaryValue> info) {}
++
++  ///
++  /// Called on the UI thread after the page was discarded (|discarded| true)
++  /// or restored from a discard (false). See CefBrowserHost::DiscardPage.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnPageDiscardedChange(CefRefPtr<CefBrowser> browser,
++                                     bool discarded) {}
+ #endif
+ 
+ #if CEF_API_ADDED(13700)
+--- a/cef/libcef/browser/browser_contents_delegate.cc	2026-10-26 23:10:41
++++ b/cef/libcef/browser/browser_contents_delegate.cc	2026-10-26 23:13:22
+@@ -871,6 +871,15 @@
+   }
+ }
+ 
++void CefBrowserContentsDelegate::WasDiscarded() {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) return;
++  if (auto c = client()) {
++    if (auto handler = c->GetDisplayHandler()) {
++      handler->OnPageDiscardedChange(browser(), true);
++    }
++  }
++}
++
+ void CefBrowserContentsDelegate::OnBackgroundColorChanged() {
+   if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !web_contents()) return;
+   const auto color = web_contents()->GetBackgroundColor();
+--- a/cef/libcef/browser/browser_contents_delegate.h	2026-10-26 23:10:41
++++ b/cef/libcef/browser/browser_contents_delegate.h	2026-10-26 23:13:22
+@@ -136,6 +136,7 @@
+   void RenderViewReady() override;
+   void OnAudioStateChanged(bool audible) override;
+   void OnBackgroundColorChanged() override;
++  void WasDiscarded() override;
+   void PrimaryMainFrameRenderProcessGone(
+       base::TerminationStatus status) override;
+   void OnFrameFocused(content::RenderFrameHost* render_frame_host) override;
+--- a/cef/libcef/browser/browser_host_base.cc	2026-10-26 07:24:23
++++ b/cef/libcef/browser/browser_host_base.cc	2026-10-26 23:13:22
+@@ -32,7 +32,12 @@
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/download_manager.h"
+ #include "content/public/browser/download_request_utils.h"
++#include "base/feature_list.h"
++#include "base/functional/callback_helpers.h"
+ #include "content/public/browser/file_select_listener.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/visibility.h"
++#include "content/public/common/content_features.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/render_view_host.h"
+ #include "content/public/browser/render_widget_host.h"
+@@ -988,6 +993,82 @@
+   if (auto* web_contents = GetWebContents()) {
+     web_contents->OnWebPreferencesChanged();
+   }
++}
++
++bool CefBrowserHostBase::CanDiscardPage() {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    DCHECK(false) << "called on invalid thread";
++    return false;
++  }
++  return GetWebContents() &&
++         base::FeatureList::IsEnabled(features::kWebContentsDiscard);
++}
++
++void CefBrowserHostBase::DiscardPage(
++    CefRefPtr<CefCompletionCallback> callback) {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    DCHECK(false) << "called on invalid thread";
++    return;
++  }
++  // The callback runs exactly once: after the renderer acknowledged the
++  // discard, or when this attempt is refused (Chromium then drops its
++  // closure, which destroys the runner).
++  base::ScopedClosureRunner done(base::BindOnce(
++      [](CefRefPtr<CefCompletionCallback> callback) {
++        if (callback) {
++          callback->OnComplete();
++        }
++      },
++      callback));
++  auto* web_contents = GetWebContents();
++  if (!web_contents || !CanDiscardPage() || web_contents->WasDiscarded() ||
++      web_contents->GetVisibility() == content::Visibility::VISIBLE) {
++    return;
++  }
++  web_contents->Discard(base::BindOnce(
++      [](base::ScopedClosureRunner) {}, std::move(done)));
++}
++
++bool CefBrowserHostBase::IsPageDiscarded() {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    DCHECK(false) << "called on invalid thread";
++    return false;
++  }
++  auto* web_contents = GetWebContents();
++  return web_contents && web_contents->WasDiscarded();
++}
++
++bool CefBrowserHostBase::RestoreDiscardedPage() {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    DCHECK(false) << "called on invalid thread";
++    return false;
++  }
++  auto* web_contents = GetWebContents();
++  if (!web_contents || !web_contents->WasDiscarded()) {
++    return false;
++  }
++  // Loads only the selected entry from its saved page state.
++  web_contents->GetController().LoadIfNecessary();
++  if (auto client = GetClient()) {
++    if (auto handler = client->GetDisplayHandler()) {
++      handler->OnPageDiscardedChange(this, web_contents->WasDiscarded());
++    }
++  }
++  return true;
++}
++
++bool CefBrowserHostBase::SetPageFrozen(bool frozen) {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    DCHECK(false) << "called on invalid thread";
++    return false;
++  }
++  auto* web_contents = GetWebContents();
++  if (!web_contents ||
++      web_contents->GetVisibility() == content::Visibility::VISIBLE) {
++    return false;
++  }
++  web_contents->SetPageFrozen(frozen);
++  return true;
+ }
+ 
+ void CefBrowserHostBase::ReplaceMisspelling(const CefString& word) {
+--- a/cef/libcef/browser/browser_host_base.h	2026-10-26 07:24:23
++++ b/cef/libcef/browser/browser_host_base.h	2026-10-26 23:13:22
+@@ -280,6 +280,11 @@
+   bool IsRenderProcessUnresponsive() override;
+   cef_runtime_style_t GetRuntimeStyle() override;
+   void SetAxViewportCollapse(bool enabled) override;
++  bool CanDiscardPage() override;
++  void DiscardPage(CefRefPtr<CefCompletionCallback> callback) override;
++  bool IsPageDiscarded() override;
++  bool RestoreDiscardedPage() override;
++  bool SetPageFrozen(bool frozen) override;
+ 
+   // CefBrowser methods:
+   bool IsValid() override;

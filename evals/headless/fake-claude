@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+# A stand-in Claude for evals/headless/check.py, speaking Claude Code's
+# stream-json: on each message it opens a page (FAKE_PAGE) through Yab's
+# own MCP server, calls `ask` (or `handoff` when the message says
+# "hands"), and ends its turn with what the tool said; a message naming a
+# color is the answer to its question. Each user message is said back
+# (isReplay), as --replay-user-messages makes the real one do, or Yab
+# waits for it forever; its server is ended, not waited for.
+import json, subprocess, sys, os
+args = sys.argv[1:]
+if "--mcp-config" not in args:
+    print(json.dumps({"loggedIn": True})); sys.exit(0)
+LOG = open(os.environ.get("FAKE_LOG", os.devnull), "a")
+config = json.loads(args[args.index("--mcp-config") + 1])
+server = next(iter(config["mcpServers"].values()))
+print(json.dumps({"type": "system", "subtype": "init", "session_id": "fake-thread"}), flush=True)
+for line in iter(sys.stdin.readline, ""):
+    try: msg = json.loads(line)
+    except ValueError: continue
+    if msg.get("type") != "user": continue
+    print(json.dumps(dict(msg, isReplay=True)), flush=True)
+    text = "".join(c.get("text", "") for c in msg["message"]["content"] if isinstance(c, dict))
+    print("heard", text[:80], file=LOG, flush=True)
+    p = subprocess.Popen([server["command"]] + server.get("args", []), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=LOG, text=True)
+    n = [0]
+    def call(m, params=None):
+        n[0] += 1
+        p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": n[0], "method": m, "params": params or {}}) + "\n"); p.stdin.flush()
+        while True:
+            l = p.stdout.readline()
+            print("mcp said", l[:200], file=LOG, flush=True)
+            if not l: return {"result": {"content": [{"text": "(server gone)"}]}}
+            r = json.loads(l)
+            if r.get("id") == n[0]: return r
+    def tool(name, **a): return call("tools/call", {"name": name, "arguments": a})["result"]["content"][0]["text"]
+    call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake", "version": "1"}})
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()
+    if "red" in text or "blue" in text:
+        said = "Going with " + ("red" if "red" in text else "blue") + "."
+    elif "press send" in text:
+        page = tool("open", url=os.environ.get("FAKE_PAGE", "https://example.com").rsplit("/", 1)[0] + "/reply.html")
+        tab = page.split()[1]
+        ref = next(w for line in page.splitlines() if 'button "Send"' in line for w in line.split() if w.startswith("e"))
+        said = tool("click", tab=tab, ref=ref)
+    else:
+        page = tool("open", url=os.environ.get("FAKE_PAGE", "https://example.com"))
+        print("opened", page[:80], file=LOG, flush=True)
+        if "hands" in text:
+            said = tool("handoff", tab=page.split()[1], reason="Sign in to example.com", seconds=60)
+        else:
+            said = tool("ask", question="Which color?", options=["red", "blue"], seconds=60)
+    print("tool said", said[:200], file=LOG, flush=True)
+    p.stdin.close(); p.terminate()
+    print(json.dumps({"type": "assistant", "message": {"id": "m%d" % n[0], "content": [{"type": "text", "text": said}]}}), flush=True)
+    print(json.dumps({"type": "result", "result": said, "session_id": "fake-thread"}), flush=True)

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The hardened runtime refuses the camera and the microphone unless the
+       app says up front that pages may ask for them. -->
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <!-- And the same for where you are, which pages ask for too. -->
+  <key>com.apple.security.personal-information.location</key><true/>
+  <!-- Your next meeting, read from the Mac's calendars (Meetings.swift). -->
+  <key>com.apple.security.personal-information.calendars</key><true/>
+  <!-- Your own card in Contacts, for your address, when you ask (Autofill). -->
+  <key>com.apple.security.personal-information.addressbook</key><true/>
+  <!-- Asking Dia which tabs are pinned, at import, is an Apple Event; the
+       hardened runtime sends none without this. -->
+  <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>

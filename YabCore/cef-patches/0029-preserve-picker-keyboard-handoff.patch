@@ -1,0 +1,93 @@
+--- a/cef/libcef/browser/views/external_host_mac.h
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -1,14 +1,10 @@
+ // Yab's explicit macOS producer-window bridge. Include-safe from C++.
+ #ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
+ #define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
+-#include <optional>
+ #include "cef/include/views/cef_browser_view.h"
+-namespace content { class WebContents; }
+ class CefBrowserHostBase;
+ namespace views { class Widget; }
+ namespace cef::external_host {
+-// Absent means an ordinary Chrome owner without delegated embedder focus.
+-std::optional<bool> FocusState(content::WebContents* contents);
+ bool Enable(views::Widget* widget);
+ bool SetFocus(views::Widget* widget, CefRefPtr<CefBrowserView> browser_view,
+               bool focused);
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -278,12 +278,11 @@
+   bool Set(views::Widget* widget, bool focused) {
+     if (!widget) return false;
+     auto self = weak_factory_.GetWeakPtr();
+-    const auto focus_generation = ++focus_generation_;
+     auto next_widget = widget->GetWeakPtr();
+     if (widget_ && widget_.get() != widget) {
+       desired_ = false;
+       Apply();
+-      if (!self || !next_widget || focus_generation != focus_generation_) return false;
++      if (!self || !next_widget) return false;
+     }
+     if (widget_.get() != widget) {
+       observation_.Reset();
+@@ -291,14 +290,8 @@
+       observation_.Observe(widget);
+     }
+     desired_ = focused;
+-    if (!focused) {
+-      // Publish loss before cancellation can reenter an embedder. A reentrant
+-      // new chooser must not inherit the old physical Chrome tab activation.
+-      cef::external_file::CancelForContents(web_contents());
+-      if (!self || !next_widget || focus_generation != focus_generation_) return false;
+-    }
+     const bool applied = Apply();
+-    if (!self || focus_generation != focus_generation_) return false;
++    if (!self) return false;
+     if (applied) return true;
+     desired_ = false;
+     return false;
+@@ -387,7 +380,6 @@
+                                  weak_factory_.GetWeakPtr()));
+   }
+   bool desired_ = false;
+-  uint64_t focus_generation_ = 0;
+   base::WeakPtr<views::Widget> widget_;
+   base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{this};
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+@@ -395,11 +387,6 @@
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalFocus);
+ }  // namespace
+-
+-std::optional<bool> FocusState(content::WebContents* contents) {
+-  auto* focus = contents ? ExternalFocus::FromWebContents(contents) : nullptr;
+-  return focus ? std::optional<bool>(focus->focused()) : std::nullopt;
+-}
+ 
+ namespace {
+ // The CEF browser and display handler whose page owns |contents|.
+--- a/cef/libcef/browser/external_file_dialog.cc
++++ b/cef/libcef/browser/external_file_dialog.cc
+@@ -1,10 +1,6 @@
+ #include "cef/libcef/browser/external_file_dialog.h"
+ #include "base/command_line.h"
+ #include "base/logging.h"
+-#include "build/build_config.h"
+-#if BUILDFLAG(IS_MAC)
+-#include "cef/libcef/browser/views/external_host_mac.h"
+-#endif
+ #include <map>
+ #include <utility>
+ #include "base/functional/bind.h"
+@@ -63,10 +59,6 @@
+         web_contents()->GetVisibility() == content::Visibility::HIDDEN ||
+         !frame || !frame->IsActive() || !frame->IsRenderFrameLive() ||
+         content::WebContents::FromRenderFrameHost(frame) != web_contents()) return false;
+-#if BUILDFLAG(IS_MAC)
+-    const auto external_focus = cef::external_host::FocusState(web_contents());
+-    if (external_focus && !*external_focus) return false;
+-#endif
+     auto* tab = tabs::TabInterface::MaybeGetFromContents(web_contents());
+     return !tab || tab->IsActivated();
+   }

@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""How many tabs yab can hold before the Mac feels it.
+
+    ./load                      awake tabs, heavy pages, until something gives
+    ./load --pages light        pages that sit still once loaded
+    ./load --pages real         real sites (needs a network; they change daily)
+    ./load --asleep             tabs brought back asleep: the row's own cost
+    ./load --steps 10,20,40     these counts instead of the default ladder
+    ./load --app PATH           this yab.app rather than build/yab Dev.app
+
+A world of its own, "yab (load)", wiped first: nothing of yours is touched.
+Launched with YAB_MEASURE, so hidden pages are slowed the way WebKit slows
+them and App Nap is left to macOS, what people get, and with YAB_HANGS,
+so a watchdog pings the main thread every 20 ms.
+
+At each step the tabs are opened (behind the one on screen, the way ⌘-click
+opens them), left to load and settle, and then, for ten quiet seconds:
+
+  cpu     every process yab is responsible for, itself, each page's
+          WebContent, the network and GPU processes, in % of one core
+  wakes   how often those processes woke the CPU, per second: what keeps a
+          core out of its idle state even when the % looks small
+  memory  their phys_footprint, what Activity Monitor calls Memory
+  lag     main-thread pings over 17 ms (a missed frame), over 50 ms and the
+          worst, while idle and while switching between tabs
+  system  macOS's memory pressure and swap
+
+It stops at the first step that fails any of the limits below, and says
+which one. The last step that passed is the answer.
+"""
+
+import ctypes
+import http.server
+import json
+import os
+import random
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+# YAB_LOAD_WORLD=NAME for a second run beside the first.
+WORLD = os.environ.get("YAB_LOAD_WORLD", "load")
+SUITE = f"dev.serafim.fast.test.{WORLD}"
+FOLDER = os.path.expanduser(f"~/Library/Application Support/Yab ({WORLD})")
+SOCK = os.path.join(FOLDER, "bench.sock")
+
+# What "nothing hangs" means, as numbers.
+LIMITS = {
+    "idle_cpu": 15.0,        # % of one core, everything yab owns, nobody touching it
+    "idle_lag_over100": 1,   # main-thread stalls over 100 ms while idle: one is the
+                             # window server's, on a busy Mac; two are ours
+    "switch_slow": 1,        # switches (of ten) that held the main thread over 100 ms
+    "pressure": 1,           # kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical
+}
+LADDER = [1, 10, 20, 40, 60, 80, 100, 150, 200, 250, 300, 400]
+ASLEEP_LADDER = [100, 250, 500, 1000, 2000, 4000]
+
+REAL = [
+    "https://en.wikipedia.org/wiki/Special:Random", "https://github.com/trending",
+    "https://news.ycombinator.com", "https://www.youtube.com", "https://www.reddit.com/r/programming",
+    "https://www.nytimes.com", "https://www.bbc.com/news", "https://stackoverflow.com/questions",
+    "https://developer.apple.com/documentation/webkit", "https://www.figma.com",
+    "https://x.com", "https://www.amazon.com", "https://medium.com", "https://vercel.com",
+    "https://www.theverge.com", "https://maps.google.com", "https://docs.python.org/3/",
+    "https://www.notion.so", "https://linear.app", "https://www.wikipedia.org",
+]
+
+# MARK: - pages
+#
+# Served from here, so a step measures the browser and not the network.
+# "heavy" is what a modern app page does when nobody looks at it: a few
+# thousand nodes, timers that touch the DOM, an animation frame loop, a CSS
+# animation, a few megabytes of script heap, a socket-like poll.
+
+HEAVY = """<!doctype html><meta charset=utf-8><title>heavy %(n)d</title>
+<style>body{font:14px -apple-system;margin:20px}.spin{width:40px;height:40px;background:#39f;animation:s 1s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}} td{padding:2px 6px}</style>
+<div class=spin></div><h1>heavy %(n)d</h1><p id=clock></p><table id=t></table>
+<script>
+const t=document.getElementById('t');
+for(let i=0;i<600;i++){const r=t.insertRow();for(let j=0;j<5;j++)r.insertCell().textContent=i*j}
+window.heap=Array.from({length:200000},(_, i)=>({i, s:'x'+i}));
+setInterval(()=>{document.getElementById('clock').textContent=new Date().toISOString();
+  t.rows[(Math.random()*600)|0].cells[0].textContent=Math.random().toFixed(4)},250);
+setInterval(()=>fetch('/ping?'+Date.now()).catch(()=>{}),5000);
+(function f(){document.title='heavy %(n)d '+(performance.now()|0)%%10;requestAnimationFrame(f)})();
+</script>"""
+
+LIGHT = """<!doctype html><meta charset=utf-8><title>light %(n)d</title>
+<body style="font:16px Georgia;max-width:40em;margin:40px auto"><h1>Article %(n)d</h1>%(text)s"""
+LOREM = "<p>" + ("The quick brown fox jumps over the lazy dog. " * 40) + "</p>"
+
+
+class Pages(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        kind, _, n = self.path.strip("/").partition("/")
+        n = int(n) if n.isdigit() else 0
+        if kind == "heavy":
+            body = HEAVY % {"n": n}
+        elif kind == "light":
+            body = LIGHT % {"n": n, "text": LOREM * 30}
+        else:
+            body = ""
+        data = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def serve():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server.server_address[1]
+
+# MARK: - the processes
+
+lib = ctypes.CDLL(None)
+lib.responsibility_get_pid_responsible_for_pid.restype = ctypes.c_int
+lib.responsibility_get_pid_responsible_for_pid.argtypes = [ctypes.c_int]
+
+
+class Rusage(ctypes.Structure):
+    # struct rusage_info_v2, <libproc.h>
+    _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [(f, ctypes.c_uint64) for f in (
+        "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups", "pageins",
+        "wired_size", "resident_size", "phys_footprint", "proc_start_abstime",
+        "proc_exit_abstime", "child_user_time", "child_system_time",
+        "child_pkg_idle_wkups", "child_interrupt_wkups", "child_pageins",
+        "child_elapsed_abstime", "diskio_bytesread", "diskio_byteswritten")]
+
+
+# The times are in the kernel's ticks. Not mach_timebase_info: a Python
+# run under Rosetta is told 1/1, and every number comes out 41 times small.
+TICK_NS = 1e9 / int(subprocess.run(["sysctl", "-n", "hw.tbfrequency"], capture_output=True, text=True).stdout)
+
+
+def family(root):
+    """yab and every process it is responsible for."""
+    out = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True).stdout
+    pids = []
+    for line in out.splitlines():
+        pid, _, comm = line.strip().partition(" ")
+        pid = int(pid)
+        if pid == root or ("WebKit" in comm and lib.responsibility_get_pid_responsible_for_pid(pid) == root):
+            pids.append((pid, comm.rsplit(".", 1)[-1].rsplit("/", 1)[-1]))
+    return pids
+
+
+def usage(root):
+    """{pid: (cpu seconds, wakeups, footprint bytes, kind)}"""
+    seen = {}
+    for pid, kind in family(root):
+        ri = Rusage()
+        if lib.proc_pid_rusage(pid, 2, ctypes.byref(ri)) != 0:
+            continue
+        cpu = (ri.user_time + ri.system_time) * TICK_NS / 1e9
+        seen[pid] = (cpu, ri.pkg_idle_wkups + ri.interrupt_wkups, ri.phys_footprint, kind)
+    return seen
+
+
+def over(a, b, seconds):
+    """What happened between two `usage` samples, per second."""
+    cpu = sum(b[p][0] - a[p][0] for p in b if p in a)
+    wakes = sum(b[p][1] - a[p][1] for p in b if p in a)
+    memory = sum(v[2] for v in b.values())
+    kinds = {}
+    for v in b.values():
+        kinds[v[3]] = kinds.get(v[3], 0) + 1
+    return {"cpu": 100 * cpu / seconds, "wakes": wakes / seconds, "mb": memory / 2**20, "procs": kinds}
+
+
+def sysctl(name):
+    return subprocess.run(["sysctl", "-n", name], capture_output=True, text=True).stdout.strip()
+
+
+def pressure():
+    return int(sysctl("kern.memorystatus_vm_pressure_level") or 1)
+
+
+def swap_mb():
+    # "total = 2048.00M  used = 713.25M  free = …"
+    parts = sysctl("vm.swapusage").split()
+    return float(parts[parts.index("used") + 2].rstrip("M")) if "used" in parts else 0.0
+
+# MARK: - the browser
+
+
+def ask(request, patience=60):
+    # A refusal is sometimes only a main thread too busy to take the call
+    # just then; five in a row, two and a half seconds, is an app gone.
+    for attempt in range(5):
+        try:
+            return call(request, patience)
+        except (ConnectionRefusedError, FileNotFoundError):
+            if request.get("do") == "census" and patience < 10:
+                raise
+            time.sleep(0.5)
+    sys.exit(f"yab ({WORLD}) went away during “{request.get('do')}”, see ~/Library/Logs/DiagnosticReports")
+
+
+def call(request, patience):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(patience)
+        s.connect(SOCK)
+        s.sendall((json.dumps(request) + "\n").encode())
+        chunks = []
+        while True:
+            chunk = s.recv(1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    answer = json.loads(b"".join(chunks).split(b"\n", 1)[0] or b"{}")
+    if "error" in answer:
+        sys.exit("bench: " + answer["error"])
+    return answer
+
+
+def quit_left():
+    """A run of this world still open from last time."""
+    try:
+        os.kill(ask({"do": "census"}, patience=3)["pid"], 15)
+        time.sleep(1)
+    except (OSError, SystemExit, ValueError, socket.timeout):
+        pass
+
+
+def launch(app, asleep):
+    quit_left()
+    subprocess.run(["rm", "-rf", FOLDER])
+    subprocess.run(["defaults", "delete", SUITE], capture_output=True)
+    for key, kind, value in (("bench", "-bool", "true"), ("welcomed", "-bool", "true"),
+                             ("tabs.sleep", "-bool", "false")):
+        subprocess.run(["defaults", "write", SUITE, key, kind, value], check=True)
+    # With `open`, so launchd starts it and macOS counts its WebKit
+    # processes as its own: started from here, they would be this script's
+    # terminal's, and `family` would find none of them.
+    subprocess.run(["open", "-n", "--env", f"YAB_PROBE={WORLD}", "--env", "YAB_MEASURE=1",
+                    "--env", "YAB_HANGS=1", app], check=True)
+    for _ in range(100):
+        if os.path.exists(SOCK):
+            try:
+                return ask({"do": "census"}, patience=3)["pid"]
+            except (ConnectionRefusedError, FileNotFoundError, socket.timeout):
+                pass
+        time.sleep(0.2)
+    sys.exit("yab (load) never started listening")
+
+
+def settled(limit):
+    end = time.time() + limit
+    while time.time() < end:
+        c = ask({"do": "census"})
+        if c["loading"] == 0:
+            return c
+        time.sleep(0.5)
+    return ask({"do": "census"})
+
+
+def switching(ids, times=10):
+    """Picks tabs one after another, the way a person flicks through them,
+    and what the main thread went through meanwhile."""
+    worst = []
+    pages = ids[1:] or ids
+    for tab in [random.choice(pages) for _ in range(times)]:
+        ask({"do": "census"})
+        ask({"do": "select", "id": tab})
+        time.sleep(0.4)
+        worst.append(ask({"do": "census"})["lag"]["worst_ms"])
+    # Back to the empty tab, so the next quiet ten seconds are every page
+    # hidden rather than whichever one the last pick left on screen.
+    ask({"do": "select", "id": ids[0]})
+    return worst
+
+# MARK: - the run
+
+
+def main(argv):
+    asleep = "--asleep" in argv
+    kind = argv[argv.index("--pages") + 1] if "--pages" in argv else "heavy"
+    app = argv[argv.index("--app") + 1] if "--app" in argv else os.path.join(HERE, "build/yab Dev.app")
+    steps = ([int(x) for x in argv[argv.index("--steps") + 1].split(",")] if "--steps" in argv
+             else ASLEEP_LADDER if asleep else LADDER)
+    quiet = float(argv[argv.index("--quiet") + 1]) if "--quiet" in argv else 10.0
+
+    port = serve()
+    def url(n):
+        if kind == "real":
+            return REAL[n % len(REAL)]
+        return f"http://127.0.0.1:{port}/{kind}/{n}"
+
+    ws = subprocess.run(["ps", "-Ao", "%cpu,comm"], capture_output=True, text=True).stdout
+    ws = next((l.split()[0] for l in ws.splitlines() if l.endswith("/WindowServer")), "?")
+    print(f"window server at {ws}% cpu, a busy Mac makes every stall longer")
+    print(f"{sysctl('machdep.cpu.brand_string')}, {int(sysctl('hw.memsize')) // 2**30} GB, "
+          f"load {sysctl('vm.loadavg').strip('{} ').split()[0]} before starting")
+    print(f"{'asleep' if asleep else 'awake'} tabs, {kind} pages, {app}")
+    root = launch(app, asleep)
+    # The first seconds of any app are its window being made and restored.
+    time.sleep(8)
+    base = usage(root)
+    time.sleep(quiet)
+    empty = over(base, usage(root), quiet)
+    print(f"empty browser: {empty['cpu']:.1f}% cpu, {empty['wakes']:.0f} wakes/s, {empty['mb']:.0f} MB\n")
+
+    head = f"{'tabs':>5} {'built':>5} {'open s':>6} │ {'cpu %':>6} {'wakes/s':>8} {'MB':>7} {'procs':>5} │ {'idle lag >17/>50/worst':>22} │ {'switch worst':>12} │ press swap"
+    print(head)
+    print("─" * len(head))
+    passed, results, have = None, [], 0
+    for n in steps:
+        t0 = time.time()
+        while have < n:
+            batch = min(10 if not asleep else 500, n - have)
+            ask({"do": "flood", "urls": [url(have + i) for i in range(batch)], "asleep": asleep})
+            have += batch
+            if not asleep:
+                settled(30)
+        census = settled(60 if not asleep else 5)
+        opened = time.time() - t0
+        # A hidden page runs on for ten to twenty seconds before WebKit
+        # suspends it; measured sooner, every step looks a page's worth
+        # of CPU heavier than it will be a minute later.
+        time.sleep(25)
+
+        ask({"do": "census"})
+        a = usage(root)
+        time.sleep(quiet)
+        b = usage(root)
+        idle = ask({"do": "census"})["lag"]
+        load = over(a, b, quiet)
+
+        ids = [t["id"] for t in ask({"do": "tabs"})["tabs"] if not t["bench"]]
+        switches = switching(ids)
+        row = {
+            "tabs": census["tabs"], "built": census["built"], "open_s": round(opened, 1),
+            "idle_cpu": round(load["cpu"], 1), "wakes": round(load["wakes"]), "mb": round(load["mb"]),
+            "procs": sum(load["procs"].values()), "idle_lag": idle, "switch_worst_ms": switches, "pressure": pressure(), "swap_mb": swap_mb(),
+        }
+        results.append(row)
+        print(f"{row['tabs']:>5} {row['built']:>5} {opened:>6.1f} │ {row['idle_cpu']:>6.1f} {row['wakes']:>8} "
+              f"{row['mb']:>7} {row['procs']:>5} │ {idle['over17']:>7}/{idle['over50']:>3}/{idle['worst_ms']:>6.0f} ms │ "
+              f"{max(switches):>9.0f} ms │ {row['pressure']:>5} {row['swap_mb']:>5.0f}", flush=True)
+
+        broke = []
+        if row["idle_cpu"] > LIMITS["idle_cpu"]: broke.append(f"idle cpu {row['idle_cpu']}% > {LIMITS['idle_cpu']}%")
+        if idle["over100"] > LIMITS["idle_lag_over100"]: broke.append(f"{idle['over100']} main-thread stalls over 100 ms while idle")
+        slow = [round(w) for w in switches if w > 100]
+        if len(slow) > LIMITS["switch_slow"]: broke.append(f"{len(slow)} of {len(switches)} switches held the main thread: {slow} ms")
+        if row["pressure"] > LIMITS["pressure"]: broke.append("macOS says memory is short")
+        if broke:
+            print(f"\n{n} tabs: " + "; ".join(broke))
+            break
+        passed = n
+
+    print(f"\nholds {passed} tabs {'asleep' if asleep else 'awake'} ({kind} pages) without a hitch"
+          if passed else "\nfailed at the first step")
+    out = os.path.join(FOLDER, f"load-{'asleep' if asleep else 'awake'}-{kind}.json")
+    json.dump({"empty": empty, "limits": LIMITS, "steps": results, "passed": passed}, open(out, "w"), indent=1)
+    print(f"→ {out}")
+    print("\nhangs:\n" + ask({"do": "hangs"})["report"])
+    os.kill(root, 15)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

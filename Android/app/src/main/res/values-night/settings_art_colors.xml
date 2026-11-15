@@ -1,0 +1,11 @@
+<resources>
+<color name="settings_art_ink">#fff1f1f3</color>
+<color name="settings_art_ai">#bfa96be0</color>
+<color name="settings_art_about">#ff8b6cf0</color>
+<color name="settings_art_spaces">#bf34b85a</color>
+<color name="settings_art_autofill">#bf34b85a</color>
+<color name="settings_art_passwords">#bf808087</color>
+<color name="settings_art_privacy">#bf3b82f0</color>
+<color name="settings_art_history">#bff0943a</color>
+<color name="settings_art_extensions">#bf615fd8</color>
+</resources>

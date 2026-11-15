@@ -1,0 +1,13 @@
+--- a/cef/libcef/browser/views/window_impl.cc
++++ b/cef/libcef/browser/views/window_impl.cc
+@@ -157,8 +157,9 @@
+   if (GetRuntimeStyle() != CEF_RUNTIME_STYLE_CHROME) return false;
+ #if BUILDFLAG(IS_MAC)
+   return cef::external_host::Enable(widget_);
+-#endif
++#else
+   return false;
++#endif
+ }
+ 
+ void CefWindowImpl::Show() {

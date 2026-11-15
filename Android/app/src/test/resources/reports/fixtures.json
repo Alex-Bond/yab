@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "scope": "Synthetic privacy fixtures encoded using official Android tombstone.proto; not captured user data or proof of real OS crash acquisition.",
+  "files": {
+    "anr.txt": {
+      "bytes": 879,
+      "sha256": "782066c70c29a03addcd3caf7dd35c93d09b5dc7a1fef116f51bd4a1fc011900"
+    },
+    "native-wire.json": {
+      "bytes": 811,
+      "sha256": "5145f5e3da0a3effcc959528953893ecd88e3afcf7b99c1164f0515b750cc989"
+    },
+    "tombstone.pb": {
+      "bytes": 902,
+      "sha256": "ef6d69539ec5a44772f4f45053d60a4ea06d60f23a317feb3c50bd772e60f516"
+    }
+  }
+}

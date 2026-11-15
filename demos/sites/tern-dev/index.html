@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script type="module" src="/@vite/client"></script>
+
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tern · Calm scheduling for busy teams</title>
+    <meta name="description" content="Tern finds meeting times that protect everyone's focus blocks. Fewer, better meetings, and whole mornings to do the work." />
+    <meta name="theme-color" content="#f9f8f6" />
+    <meta property="og:title" content="Tern · Calm scheduling for busy teams" />
+    <meta property="og:description" content="Meeting times that protect everyone's focus blocks." />
+    <meta property="og:image" content="/assets/og-preview.png" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/src/styles/tokens.css" />
+    <link rel="stylesheet" href="/src/styles/base.css" />
+    <link rel="stylesheet" href="/src/styles/landing.css" />
+  </head>
+  <body data-page="landing">
+    <header class="site-header" data-header>
+      <div class="container site-header__inner">
+        <a class="logo" href="/" aria-label="Tern home">
+          <svg class="logo__mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="tern-mark-head" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#2a807c" />
+                <stop offset="1" stop-color="#0e3332" />
+              </linearGradient>
+            </defs>
+            <rect width="32" height="32" rx="8" fill="url(#tern-mark-head)" />
+            <path fill="#ef6a43" d="M15.3 11.8 16 8l.7 3.8z" />
+            <g fill="#fff">
+              <path d="M15 14.2c-3.2-2.8-7-4.8-11.5-5.6 3.1 2.8 6.4 6 11.5 9z" />
+              <path d="M17 14.2c3.2-2.8 7-4.8 11.5-5.6-3.1 2.8-6.4 6-11.5 9z" />
+              <path d="M16 10.9c1.5 1.9 1.9 5.3 1.1 9.8h-2.2c-.8-4.5-.4-7.9 1.1-9.8z" />
+              <path d="M14.9 20.2c-.7 2.4-1.5 4.7-2.7 7.2 1.5-1.5 2.7-2.8 3.8-4.2 1.1 1.4 2.3 2.7 3.8 4.2-1.2-2.5-2-4.8-2.7-7.2z" />
+            </g>
+          </svg>
+          <span>Tern</span>
+        </a>
+        <nav class="nav" aria-label="Main">
+          <a class="nav__link" href="/#product">Product</a>
+          <a class="nav__link" href="/pricing">Pricing</a>
+          <a class="nav__link" href="/changelog">Changelog <span class="badge" data-tone="coral">New</span></a>
+          <a class="nav__link" href="/docs">Docs</a>
+        </nav>
+        <div class="site-header__actions">
+          <a class="button button--ghost button--sm site-header__signin" href="/signin" data-session>Sign in</a>
+          <a class="button button--primary button--sm" href="/signup" data-start="header">Start free</a>
+          <button class="button button--secondary button--sm site-header__menu" type="button" aria-label="Open menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h16M4 16h16" /></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero__backdrop" aria-hidden="true"></div>
+        <div class="container">
+          <a class="announce" href="/changelog">
+            <span class="announce__tag">New</span>
+            <span>Tern 2.0 lands October 21</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+          </a>
+          <h1>Calm scheduling for busy teams</h1>
+          <p class="hero__lede">Tern finds meeting times that protect everyone's focus blocks. Fewer, better meetings, and whole mornings to do the work.</p>
+          <div class="hero__actions">
+            <a class="button button--primary" href="/signup" data-start="hero">Start free</a>
+            <a class="button button--secondary" href="#product">See how it works</a>
+          </div>
+          <p class="hero__note">Free for up to 5 people · No credit card</p>
+
+          <div class="shot-frame">
+            <figure class="shot" role="img" aria-label="Tern's week view: focus blocks every morning, meetings in the afternoons, and Find a time suggesting Thursday at 2:00 PM.">
+              <div class="shot__bar">
+                <span class="shot__lights"><i></i><i></i><i></i></span>
+                <span class="shot__title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="3" /><path d="M3.5 10h17M8 3v4M16 3v4" /></svg>
+                  Tern · Mira's week
+                </span>
+                <span></span>
+              </div>
+              <div class="app">
+                <nav class="app__rail" aria-hidden="true">
+                  <span class="is-active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="3" /><path d="M3.5 10h17M8 3v4M16 3v4" /></svg></span>
+                  <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="4.5" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /></svg></span>
+                  <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="9" cy="8.5" r="3.25" /><path d="M3.5 19c.6-3 2.9-4.75 5.5-4.75s4.9 1.75 5.5 4.75M15.5 5.6a3.2 3.2 0 0 1 0 5.9M17.2 14.4c1.7.6 2.9 2.2 3.3 4.6" /></svg></span>
+                  <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16" /><rect x="5.5" y="11" width="3" height="6" rx="1" /><rect x="10.5" y="7" width="3" height="10" rx="1" /><rect x="15.5" y="13" width="3" height="4" rx="1" /></svg></span>
+                  <span class="app__me">ML</span>
+                </nav>
+
+                <section class="cal">
+                  <div class="cal__head">
+                    <div class="cal__title"><strong>October 2026</strong><span>Week 43</span></div>
+                    <div class="cal__controls">
+                      <span class="chip">Today</span>
+                      <span class="chip chip--icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6 8.5 12l6 6" /></svg></span>
+                      <span class="chip chip--icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9.5 6 6 6-6 6" /></svg></span>
+                      <span class="seg"><i>Day</i><b>Week</b><i>Month</i></span>
+                    </div>
+                  </div>
+                  <div class="cal__days">
+                    <span></span>
+                    <span class="cal__day">Mon <b>19</b></span>
+                    <span class="cal__day is-today">Tue <b>20</b></span>
+                    <span class="cal__day">Wed <b>21</b></span>
+                    <span class="cal__day">Thu <b>22</b></span>
+                    <span class="cal__day">Fri <b>23</b></span>
+                  </div>
+                  <div class="cal__allday">
+                    <span>all day</span>
+                    <span class="allday allday--launch">Tern 2.0 launch</span>
+                  </div>
+                  <div class="cal__body">
+                    <div class="cal__times">
+                      <span style="--h: 9">9 AM</span>
+                      <span style="--h: 10">10 AM</span>
+                      <span style="--h: 11">11 AM</span>
+                      <span style="--h: 12">12 PM</span>
+                      <span style="--h: 13">1 PM</span>
+                      <span style="--h: 14">2 PM</span>
+                      <span style="--h: 15">3 PM</span>
+                      <span style="--h: 16">4 PM</span>
+                      <span style="--h: 17">5 PM</span>
+                    </div>
+                    <div class="cal__col">
+                      <div class="ev ev--lilac ev--short" style="--s: 9; --e: 9.5"><strong>Standup</strong><span>9:00</span></div>
+                      <div class="ev ev--focus" style="--s: 9.5; --e: 12"><strong><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M8 1.75 3 3.6v3.6c0 3 2.1 5.2 5 6.3 2.9-1.1 5-3.3 5-6.3V3.6L8 1.75Z" /></svg>Focus</strong><span>Design system</span></div>
+                      <div class="ev ev--sand" style="--s: 13; --e: 14"><strong>Design crit</strong><span>1:00 PM · Studio</span></div>
+                      <div class="ev ev--lilac ev--short" style="--s: 14.5; --e: 15"><strong>1:1 Jonas</strong><span>2:30</span></div>
+                    </div>
+                    <div class="cal__col is-today">
+                      <div class="ev ev--lilac ev--short" style="--s: 9; --e: 9.5"><strong>Standup</strong><span>9:00</span></div>
+                      <div class="ev ev--focus" style="--s: 9.5; --e: 12"><strong><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M8 1.75 3 3.6v3.6c0 3 2.1 5.2 5 6.3 2.9-1.1 5-3.3 5-6.3V3.6L8 1.75Z" /></svg>Focus</strong><span>Launch page</span></div>
+                      <div class="ev" style="--s: 13; --e: 14"><strong>Launch sync</strong><span>1:00 PM · Anna, Jonas</span></div>
+                      <div class="ev ev--lilac" style="--s: 15; --e: 16"><strong>Interview</strong><span>Product designer</span></div>
+                      <div class="cal__now" style="--at: 10.6"></div>
+                    </div>
+                    <div class="cal__col">
+                      <div class="ev ev--lilac ev--short" style="--s: 9; --e: 9.5"><strong>Standup</strong><span>9:00</span></div>
+                      <div class="ev" style="--s: 9.5; --e: 10.5"><strong>Launch watch</strong><span>9:30 AM · Everyone</span></div>
+                      <div class="ev ev--focus" style="--s: 10.5; --e: 12"><strong><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M8 1.75 3 3.6v3.6c0 3 2.1 5.2 5 6.3 2.9-1.1 5-3.3 5-6.3V3.6L8 1.75Z" /></svg>Focus</strong><span>Release notes</span></div>
+                      <div class="ev ev--sand" style="--s: 12; --e: 13"><strong>Team lunch</strong><span>12:00 PM · Söder</span></div>
+                      <div class="ev" style="--s: 14; --e: 15.5"><strong>Customer calls</strong><span>2:00 PM · 3 calls</span></div>
+                    </div>
+                    <div class="cal__col">
+                      <div class="ev ev--lilac ev--short" style="--s: 9; --e: 9.5"><strong>Standup</strong><span>9:00</span></div>
+                      <div class="ev ev--focus" style="--s: 9.5; --e: 12.5"><strong><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M8 1.75 3 3.6v3.6c0 3 2.1 5.2 5 6.3 2.9-1.1 5-3.3 5-6.3V3.6L8 1.75Z" /></svg>Focus</strong><span>Onboarding flows</span></div>
+                      <div class="ev ev--proposed" style="--s: 14; --e: 14.75"><strong>Roadmap review</strong><span>Proposed · 5 people</span></div>
+                      <div class="ev ev--lilac ev--short" style="--s: 16; --e: 16.5"><strong>Eng sync</strong><span>4:00</span></div>
+                    </div>
+                    <div class="cal__col">
+                      <div class="ev ev--lilac ev--short" style="--s: 9; --e: 9.5"><strong>Standup</strong><span>9:00</span></div>
+                      <div class="ev ev--focus" style="--s: 9.5; --e: 12"><strong><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M8 1.75 3 3.6v3.6c0 3 2.1 5.2 5 6.3 2.9-1.1 5-3.3 5-6.3V3.6L8 1.75Z" /></svg>Focus</strong><span>Explorations</span></div>
+                      <div class="ev ev--lilac" style="--s: 15; --e: 16"><strong>Weekly review</strong><span>3:00 PM · Whole team</span></div>
+                    </div>
+                  </div>
+                </section>
+
+                <aside class="finder">
+                  <div class="finder__head">
+                    <strong><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3.5c.4 0 .7.3.8.6l1.3 3.9a3 3 0 0 0 1.9 1.9l3.9 1.3c.8.3.8 1.4 0 1.6l-3.9 1.3a3 3 0 0 0-1.9 1.9l-1.3 3.9c-.3.8-1.4.8-1.6 0l-1.3-3.9a3 3 0 0 0-1.9-1.9l-3.9-1.3c-.8-.3-.8-1.4 0-1.6l3.9-1.3a3 3 0 0 0 1.9-1.9l1.3-3.9c.1-.3.4-.6.8-.6Z" /></svg>Find a time</strong>
+                    <span class="chip chip--icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 7l10 10M17 7 7 17" /></svg></span>
+                  </div>
+                  <div class="finder__meeting">
+                    <strong>Roadmap review</strong>
+                    <div class="finder__meta">
+                      <span class="faces">
+                        <span class="face face--ml">ML</span>
+                        <span class="face face--jb">JB</span>
+                        <span class="face face--ae">AE</span>
+                        <span class="face face--ep">EP</span>
+                        <span class="face face--sh">SH</span>
+                      </span>
+                      <span>45 min · Video call</span>
+                    </div>
+                  </div>
+                  <div>
+                    <div class="finder__label">Rules</div>
+                    <div class="finder__rules">
+                      <div class="rule"><span>Protect focus blocks</span><i class="toggle is-on"></i></div>
+                      <div class="rule"><span>Keep 10 min buffers</span><i class="toggle is-on"></i></div>
+                      <div class="rule"><span>Allow before 10 AM</span><i class="toggle"></i></div>
+                    </div>
+                  </div>
+                  <div>
+                    <div class="finder__label">Best times</div>
+                    <div class="slots">
+                      <div class="slot is-picked">
+                        <i class="slot__radio"></i>
+                        <div class="slot__text"><strong>Thu, Oct 22 · 2:00 PM</strong><span>No focus time moved</span></div>
+                        <span class="badge" data-tone="fjord">Best</span>
+                      </div>
+                      <div class="slot">
+                        <i class="slot__radio"></i>
+                        <div class="slot__text"><strong>Wed, Oct 21 · 3:30 PM</strong><span>Launch day, 2 people tentative</span></div>
+                      </div>
+                      <div class="slot">
+                        <i class="slot__radio"></i>
+                        <div class="slot__text"><strong>Fri, Oct 23 · 1:30 PM</strong><span class="slot__cost">Shortens Sara's focus by 30 min</span></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="finder__check">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>
+                    Checked 5 calendars and 23 focus blocks
+                  </div>
+                  <div class="finder__send">Send invite to 5 people</div>
+                </aside>
+              </div>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="logos" aria-label="Customers">
+        <div class="container">
+          <p class="logos__label">Calm teams at fast companies plan their weeks with Tern</p>
+          <ul class="logos__row">
+            <li class="wordmark"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M2.5 18 9.6 7.5l4.2 5.6 2.4-2.9L21.5 18Z" /></svg>skerry</li>
+            <li class="wordmark wordmark--halden">HALDEN</li>
+            <li class="wordmark"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2.5 19 10.5l-7 11-7-11Z" /><path d="M12 3v18M5.5 10.5h13" fill="none" stroke="#f9f8f6" stroke-width="1.5" /></svg>Kitebird</li>
+            <li class="wordmark wordmark--orrery"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none" /><circle cx="18.2" cy="7" r="2" fill="currentColor" stroke="none" /></svg>orrery</li>
+            <li class="wordmark wordmark--tidewell"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M3 9.5c3-3 6 3 9 0s6 3 9 0M3 15.5c3-3 6 3 9 0s6 3 9 0" /></svg>Tidewell</li>
+            <li class="wordmark wordmark--northloop"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" /><path d="M12 5.5 15.4 16 12 13.8 8.6 16Z" fill="#f9f8f6" /></svg>Northloop</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section features" id="product">
+        <div class="container">
+          <div class="section-head">
+            <span class="eyebrow">Built around focus</span>
+            <h2>Everything a calm week needs</h2>
+            <p>Tern works on top of the calendar you already use. It keeps the shape of your week, and quietly fixes the rest.</p>
+          </div>
+          <div class="feature-grid" data-feature-grid></div>
+        </div>
+      </section>
+
+      <section class="focus" id="focus">
+        <div class="container">
+          <span class="eyebrow">Why Tern</span>
+          <div class="focus__head">
+            <h2>Focus first. <span>Meetings fit around it.</span></h2>
+            <p class="focus__lede">Most schedulers grab the first open slot. Tern picks the one that costs your team the least focus, and never moves a block without asking.</p>
+          </div>
+
+          <div class="focus__compare">
+            <div class="day">
+              <div class="day__label"><strong>A typical Tuesday</strong><span>Longest focus: 50 min</span></div>
+              <div class="day__track">
+                <span class="blk" style="--s: 9.25; --e: 10">Standup</span>
+                <span class="blk" style="--s: 10.5; --e: 11.25">Review</span>
+                <span class="blk" style="--s: 12; --e: 12.5">1:1</span>
+                <span class="blk" style="--s: 13.33; --e: 14">Planning</span>
+                <span class="blk" style="--s: 14.75; --e: 15.5">Call</span>
+                <span class="blk" style="--s: 16.25; --e: 17">Sync</span>
+              </div>
+            </div>
+            <div class="day day--tern">
+              <div class="day__label"><strong>The same Tuesday, with Tern</strong><span>Longest focus: 3 h 15 min</span></div>
+              <div class="day__track">
+                <span class="blk blk--focus" style="--s: 9.25; --e: 12.5">Focus · 3 h 15 min</span>
+                <span class="blk" style="--s: 13; --e: 13.75">Review</span>
+                <span class="blk" style="--s: 13.92; --e: 14.42">1:1</span>
+                <span class="blk" style="--s: 14.58; --e: 15.25">Planning</span>
+                <span class="blk" style="--s: 15.42; --e: 16">Call</span>
+                <span class="blk blk--focus" style="--s: 16; --e: 17">Focus</span>
+              </div>
+            </div>
+            <div class="day__hours" aria-hidden="true">
+              <span></span>
+              <ol>
+                <li style="--i: 0">9</li>
+                <li style="--i: 1">10</li>
+                <li style="--i: 2">11</li>
+                <li style="--i: 3">12</li>
+                <li style="--i: 4">1</li>
+                <li style="--i: 5">2</li>
+                <li style="--i: 6">3</li>
+                <li style="--i: 7">4</li>
+                <li style="--i: 8">5</li>
+              </ol>
+            </div>
+          </div>
+
+          <dl class="focus__stats">
+            <div><dt>6.5 h</dt><dd>more focus time for each person, every week</dd></div>
+            <div><dt>38%</dt><dd>fewer meetings that could have been a message</dd></div>
+            <div><dt>0</dt><dd>focus blocks moved without asking first</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section testimonials">
+        <div class="container">
+          <div class="section-head section-head--center">
+            <span class="eyebrow">From teams on Tern</span>
+            <h2>They got their mornings back</h2>
+          </div>
+          <div class="quotes" data-testimonials>
+            <figure class="card quote">
+              <blockquote>“We used to spend Monday mornings untangling calendars. Now Tern sorts the week before anyone has had coffee, and nobody's focus time gets eaten.”</blockquote>
+              <figcaption>
+                <span class="avatar avatar--sage">PR</span>
+                <span><strong>Priya Raman</strong><span>Head of Engineering, Kitebird</span></span>
+              </figcaption>
+            </figure>
+            <figure class="card quote">
+              <blockquote>“The first scheduling tool our designers didn't fight. It keeps two afternoons a week clear for every one of us, without a single reminder.”</blockquote>
+              <figcaption>
+                <span class="avatar avatar--lilac">TH</span>
+                <span><strong>Tomás Herrera</strong><span>Design Director, Orrery</span></span>
+              </figcaption>
+            </figure>
+            <figure class="card quote">
+              <blockquote>“Half of us are in Helsinki, half in Toronto. Tern is the reason our meetings land at hours that feel humane on both sides.”</blockquote>
+              <figcaption>
+                <span class="avatar avatar--sand">HV</span>
+                <span><strong>Hanna Virtanen</strong><span>COO, Tidewell</span></span>
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--flush-top pricing-teaser">
+        <div class="container">
+          <div class="section-head section-head--split">
+            <div>
+              <span class="eyebrow">Pricing</span>
+              <h2>Simple pricing, per seat</h2>
+              <p>Free for small teams. Pay per seat once Tern runs your whole team's week.</p>
+            </div>
+            <a class="button button--secondary" href="/pricing">Compare plans</a>
+          </div>
+          <div class="card teaser">
+            <div class="teaser__plan">
+              <h3>Free</h3>
+              <p class="teaser__price"><strong data-plan-price="free">$0</strong><span>forever</span></p>
+              <p>Up to 5 people, focus blocks and Find a time.</p>
+            </div>
+            <div class="teaser__plan">
+              <h3>Team <span class="badge" data-tone="fjord">Most popular</span></h3>
+              <p class="teaser__price"><strong data-plan-price="team">$8</strong><span>per seat / month</span></p>
+              <p>Team focus policies, smart buffers and meeting-free days.</p>
+            </div>
+            <div class="teaser__plan">
+              <h3>Business</h3>
+              <p class="teaser__price"><strong data-plan-price="business">$14</strong><span>per seat / month</span></p>
+              <p>SSO, an audit log, and your data kept in the EU.</p>
+            </div>
+            <div class="teaser__foot">
+              <span>Every plan includes unlimited calendars, booking links and the Tern apps for desktop, phone and the web.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--flush-top">
+        <div class="container">
+          <div class="cta-band">
+            <div class="cta-band__body">
+              <div>
+                <h2>Get your week back</h2>
+                <p>Tern 2.0 lands October 21. Join <span data-waitlist-count>2,481</span> teams on the early list, or start free today.</p>
+              </div>
+              <div class="cta-band__actions">
+                <a class="button" href="/signup" data-start="cta">Start free</a>
+                <a class="button button--ghost" href="/contact">Talk to us</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container">
+        <div class="footer-grid">
+          <div class="footer-brand">
+            <a class="logo" href="/" aria-label="Tern home">
+              <svg class="logo__mark" viewBox="0 0 32 32" aria-hidden="true">
+                <defs>
+                  <linearGradient id="tern-mark-foot" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#2a807c" />
+                    <stop offset="1" stop-color="#0e3332" />
+                  </linearGradient>
+                </defs>
+                <rect width="32" height="32" rx="8" fill="url(#tern-mark-foot)" />
+                <path fill="#ef6a43" d="M15.3 11.8 16 8l.7 3.8z" />
+                <g fill="#fff">
+                  <path d="M15 14.2c-3.2-2.8-7-4.8-11.5-5.6 3.1 2.8 6.4 6 11.5 9z" />
+                  <path d="M17 14.2c3.2-2.8 7-4.8 11.5-5.6-3.1 2.8-6.4 6-11.5 9z" />
+                  <path d="M16 10.9c1.5 1.9 1.9 5.3 1.1 9.8h-2.2c-.8-4.5-.4-7.9 1.1-9.8z" />
+                  <path d="M14.9 20.2c-.7 2.4-1.5 4.7-2.7 7.2 1.5-1.5 2.7-2.8 3.8-4.2 1.1 1.4 2.3 2.7 3.8 4.2-1.2-2.5-2-4.8-2.7-7.2z" />
+                </g>
+              </svg>
+              <span>Tern</span>
+            </a>
+            <p>Calm scheduling for busy teams. Made in Stockholm by Tern Labs.</p>
+          </div>
+          <div class="footer-col">
+            <h4>Product</h4>
+            <ul>
+              <li><a href="/#product">Features</a></li>
+              <li><a href="/pricing">Pricing</a></li>
+              <li><a href="/changelog">Changelog</a></li>
+              <li><a href="/integrations">Integrations</a></li>
+              <li><a href="/download">Download</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h4>Company</h4>
+            <ul>
+              <li><a href="/about">About</a></li>
+              <li><a href="/careers" data-badge="careers">Careers</a></li>
+              <li><a href="/blog">Blog</a></li>
+              <li><a href="/press">Press kit</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h4>Resources</h4>
+            <ul>
+              <li><a href="/docs">Docs</a></li>
+              <li><a href="/docs/api">API</a></li>
+              <li><a href="/help">Help center</a></li>
+              <li><a href="/status" data-badge="status">Status</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h4>Legal</h4>
+            <ul>
+              <li><a href="/privacy">Privacy</a></li>
+              <li><a href="/terms">Terms</a></li>
+              <li><a href="/security">Security</a></li>
+              <li><a href="/dpa">DPA</a></li>
+            </ul>
+          </div>
+        </div>
+        <div class="footer-bottom">
+          <span>© 2026 Tern Labs AB · Stockholm, Sweden</span>
+          <nav aria-label="Elsewhere">
+            <a href="/newsletter">Newsletter</a>
+            <a href="/rss.xml">RSS</a>
+            <a href="mailto:hello@ternlabs.com">hello@ternlabs.com</a>
+          </nav>
+        </div>
+      </div>
+      <img class="og-probe" src="/assets/og-preview.png" alt="" aria-hidden="true" width="1200" height="630" />
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+    <script defer src="/src/analytics.js"></script>
+  </body>
+</html>

@@ -1,0 +1,403 @@
+# Yab for iPhone. XcodeGen writes YabPhone.xcodeproj from this before every
+# build (Phone/scripts/phone); the project file is never committed, so branches
+# working in different folders never meet in a .pbxproj.
+name: YabPhone
+options:
+  bundleIdPrefix: dev.serafim.fast
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  developmentLanguage: en
+  # Treat the Icon Composer document as one native asset, including older XcodeGen.
+  fileTypes:
+    icon:
+      file: true
+
+settings:
+  base:
+    # Swift 5 mode, like the Mac app: the interface is main-thread by nature and
+    # strict isolation buys nothing here but ceremony.
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+    CODE_SIGN_STYLE: Automatic
+    # The one place Yab for iPhone's version lives: the app, SyncKit, the
+    # Activity extension and the share extension all carry it (App Store
+    # Connect refuses an embedded bundle without one, and an extension's must
+    # equal its app's). A build
+    # uploaded to TestFlight is tagged iphone-<version>-<build>, and the next
+    # commit raises this: Phone/AGENTS.md, "Versions".
+    MARKETING_VERSION: "0.1.40"
+    CURRENT_PROJECT_VERSION: "1"
+  configs:
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+
+targets:
+  # The Mac's sync module, the same sources: no AppKit in it.
+  SyncKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: ../Sources/SyncKit
+      - path: Sources/Design/DateOrder.swift  # Date >=/<= of our own (DateOrder.swift)
+      # Its own privacy manifest: ChatCommand reads the system uptime (35F9.1).
+      - path: SyncKit/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: SyncKit
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serafim.fast.iphone.synckit
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+  YabPhone:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # The Mac's ad blocker's lists and the converter that makes WebKit's
+      # rules of them, the same files (Page/Shield.swift): both devices block
+      # the same things.
+      - path: ../Sources/Fast/Filters.swift
+      - path: ../Sources/Fast/ShieldLists.swift
+      # A wide table in an answer read as cards, as the Mac's chat reads it
+      # (Chats/ChatMarkdown).
+      - path: ../Sources/Fast/TableCards.swift
+      # Reading mode's six themes and their edits, the Mac's (Page/PageReader,
+      # Settings/ReaderSettingsPage): an article reads the same on both.
+      - path: ../Sources/Fast/ReaderThemes.swift
+      # What the field works out from the words, the Mac's (Calc, Sum, Rates
+      # in Calculator.swift): AnswerPlate draws it over the rows.
+      - path: ../Sources/Fast/Calculator.swift
+      # The Mac's shim of the Chrome APIs WebKit lacks, the same script
+      # (Extensions/ExtensionShim).
+      - path: ../Resources/PageScripts/extension-shims.js
+        buildPhase: resources
+      # The same Dark Reader engine and stylesheet proxy as on the Mac.
+      - path: ../Resources/PageScripts/darkreader.js
+        buildPhase: resources
+      - path: ../Resources/PageScripts/darkreader-proxy.js
+        buildPhase: resources
+      # Test pages, favicons and worlds keep their folders inside the app:
+      # Yab.app/Pages/<stem>.html, Yab.app/Favicons/<host>.png,
+      # Yab.app/Worlds/<name>.json. Each folder of Resources on its own: a
+      # folder named Resources at an iOS bundle's root makes CFBundle read it
+      # as an old-style bundle, and the app has no identifier.
+      - path: Resources/Pages
+        type: folder
+        buildPhase: resources
+      - path: Resources/Favicons
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Resources/Icons
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Worlds
+        type: folder
+        buildPhase: resources
+      # An agent's question's own sound, the Mac's two notes
+      # (ApprovalNotice.sound, scripts/ask-sound). At the bundle's root, where
+      # notification sounds are looked up, for the app and Notify/ alike.
+      - path: Resources/Sounds/ask.caf
+        buildPhase: resources
+    dependencies:
+      - target: SyncKit
+        embed: true
+      # The Live Activity and the Dynamic Island, and the Search and Ask
+      # widgets (Activity/).
+      - target: YabActivity
+        embed: true
+      # Yab in other apps' share sheets (Share/): Open in Yab, Keep for Later.
+      - target: YabShare
+        embed: true
+      # An agent's question on the Lock Screen in full (Notify/).
+      - target: YabNotify
+        embed: true
+    # The keys Xcode's generated Info.plist can't say, merged with the
+    # generated ones below. Links from other apps open as a new tab: http and
+    # https once Yab is the default browser (the entitlement is asked of
+    # Apple), yab-open://<link> until then and for tests. yab:// is what the
+    # Live Activity and the Island open Yab with (yab://task/<id>/<action>).
+    # A silent push from the sync server wakes Yab in the back to catch up
+    # (R2); SyncKeychain looks for a Mac's key in the Mac's group first
+    # (written to), then decision 5's.
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: $(YAB_TASK_NAME)
+        CFBundleName: $(YAB_TASK_NAME)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Whether this build has Apple's browser entitlement (extensions'
+        # service workers, Extensions/ExtensionCompatibility).
+        YabBrowserEntitlement: $(YAB_BROWSER_ENTITLEMENT)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.productivity
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations: {}
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        "UISupportedInterfaceOrientations~ipad": [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIViewControllerBasedStatusBarAppearance: true
+        CADisableMinimumFrameDurationOnPhone: true
+        NSSupportsLiveActivities: true
+        # Documents/Downloads is the Yab folder in the Files app (Page/DownloadStore).
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSFaceIDUsageDescription: "Face ID unlocks your private tabs and signs the payment, post or change your Mac asks you to say yes to."
+        NSCameraUsageDescription: "Yab uses the camera to scan a QR code or take a photo for a chat when you ask it to, and websites you choose can ask to use it for calls or photos."
+        NSMicrophoneUsageDescription: "Yab listens when you search by voice, and websites you choose can ask to use your microphone for calls or recordings."
+        NSSpeechRecognitionUsageDescription: "Yab turns what you say into words when you search by voice, on this iPhone when it can."
+        NSPhotoLibraryAddUsageDescription: "Yab saves the images you choose to your photo library."
+        NSLocationWhenInUseUsageDescription: "Websites you choose can ask for your location while you use Yab."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoadsInWebContent: true
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.serafim.fast.iphone
+            CFBundleURLSchemes: [yab]
+          - CFBundleURLName: dev.serafim.fast.iphone.links
+            CFBundleURLSchemes: [yab-open, http, https]
+        # A page's audio and video go on with Yab in the background or the
+        # screen locked, and in Picture in Picture (Page/PagePlayback).
+        UIBackgroundModes: [remote-notification, audio]
+        # The page in front, handed off to a Mac signed in to the same Apple
+        # ID (PageContinuity); the Mac's Info.plist lists the same type.
+        NSUserActivityTypes: [dev.serafim.fast.page]
+        YabSyncKeychainGroups:
+          - $(AppIdentifierPrefix)dev.serafim.fast
+          - $(AppIdentifierPrefix)dev.serafim.fast.sync
+        # Where the day's count and crash reports go (Reports/): only the
+        # Release build (TestFlight, the App Store) has a site; Debug's is
+        # empty and sends nothing.
+        YabSite: $(YAB_SITE)
+    settings:
+      configs:
+        Release:
+          YAB_SITE: https://yetanotherbrowser.com
+      base:
+        PRODUCT_NAME: Yab
+        YAB_TASK_NAME: Yab
+        YAB_SITE: ""
+        PRODUCT_MODULE_NAME: YabPhone
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serafim.fast.iphone
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_KEY_CFBundleDisplayName: $(YAB_TASK_NAME)
+        INFOPLIST_KEY_CFBundleName: $(YAB_TASK_NAME)
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsMultipleScenes: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UIViewControllerBasedStatusBarAppearance: YES
+        INFOPLIST_KEY_CADisableMinimumFrameDurationOnPhone: YES
+        INFOPLIST_KEY_NSCameraUsageDescription: "Yab uses the camera to scan a QR code or take a photo for a chat when you ask it to, and websites you choose can ask to use it for calls or photos."
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Yab listens when you search by voice, and websites you choose can ask to use your microphone for calls or recordings."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Yab turns what you say into words when you search by voice, on this iPhone when it can."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Yab saves the images you choose to your photo library."
+        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Websites you choose can ask for your location while you use Yab."
+        # A task's Live Activity, and Face ID signing its yes (Tasks/).
+        INFOPLIST_KEY_NSSupportsLiveActivities: YES
+        INFOPLIST_KEY_NSFaceIDUsageDescription: "Face ID unlocks your private tabs and signs the payment, post or change your Mac asks you to say yes to."
+        # Real iOS alternate icons. Xcode generates CFBundleAlternateIcons.
+        # The primary AppIcon is Flat; the Mac's Default art is YabOriginal.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES: "YabAmber YabArcade YabCharm YabCharm_coral_coral YabCharm_coral_indigo YabCharm_coral_lemon YabCharm_coral_lilac YabCharm_coral_mint YabCharm_coral_rose YabCharm_coral_silver YabCharm_coral_sky YabCharm_indigo_coral YabCharm_indigo_indigo YabCharm_indigo_lemon YabCharm_indigo_lilac YabCharm_indigo_mint YabCharm_indigo_rose YabCharm_indigo_silver YabCharm_indigo_sky YabCharm_lemon_coral YabCharm_lemon_indigo YabCharm_lemon_lemon YabCharm_lemon_lilac YabCharm_lemon_mint YabCharm_lemon_rose YabCharm_lemon_silver YabCharm_lemon_sky YabCharm_lilac_coral YabCharm_lilac_indigo YabCharm_lilac_lemon YabCharm_lilac_lilac YabCharm_lilac_mint YabCharm_lilac_rose YabCharm_lilac_silver YabCharm_lilac_sky YabCharm_mint_coral YabCharm_mint_indigo YabCharm_mint_lemon YabCharm_mint_lilac YabCharm_mint_mint YabCharm_mint_rose YabCharm_mint_sky YabCharm_rose_coral YabCharm_rose_indigo YabCharm_rose_lemon YabCharm_rose_lilac YabCharm_rose_mint YabCharm_rose_rose YabCharm_rose_silver YabCharm_rose_sky YabCharm_sky_coral YabCharm_sky_indigo YabCharm_sky_lemon YabCharm_sky_lilac YabCharm_sky_mint YabCharm_sky_rose YabCharm_sky_silver YabCharm_sky_sky YabFirstEdition YabFriendshipBracelet YabGhost YabGoldenTicket YabMummy YabOpal YabOriginal YabPumpkin YabRedEnamel YabSmokedChrome YabWatercolorGlass YabWaxSeal YabWitch YabYearbook"
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+        ENABLE_PREVIEWS: YES
+        # Sync (M7): the keychain groups where a Mac's key is and silent
+        # pushes (its Info.plist keys are under info above). The team's, for
+        # a device.
+        DEVELOPMENT_TEAM: 25UG4QYN9F
+        # Also Apple's browser entitlement (Default Web Browser, granted
+        # 2026-10-12), on a device and in the simulator alike.
+        CODE_SIGN_ENTITLEMENTS: Sources/Sync/YabPhone.entitlements
+        YAB_BROWSER_ENTITLEMENT: YES
+
+  # A task's Live Activity: the Lock Screen card and the Dynamic Island. Its
+  # views and attributes live with the tasks (Sources/Tasks/Activity), which
+  # the app compiles too and draws in its pictures of the Lock Screen. And
+  # the Search and Ask widgets, whose faces live with the ways into Yab
+  # (Sources/Entrances/Shared), drawn by the app's pictures too.
+  YabActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Activity
+      - path: Sources/Design/DateOrder.swift  # Date >=/<= of our own (DateOrder.swift)
+      - path: ../Sources/SyncKit/EnglishDates.swift
+      - path: Sources/Tasks/Activity
+      - path: Sources/Entrances/Shared/YabRoute.swift
+      - path: Sources/Entrances/Shared/EntranceLook.swift
+      - path: Sources/Entrances/Shared/SearchWidgetViews.swift
+      - path: Sources/Entrances/Shared/NowShelf.swift
+      - path: Sources/Entrances/Shared/NowWidgetViews.swift
+      - path: Sources/Design/Art.xcassets
+      - path: Sources/Design/Glyphs.xcassets
+      - path: Resources/Favicons
+        type: folder
+        buildPhase: resources
+        optional: true
+    info:
+      path: Activity/Info.plist
+      properties:
+        CFBundleDisplayName: Yab
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_NAME: YabActivity
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serafim.fast.iphone.activity
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+        # The App Group with the app: the Now widget's rows (NowShelf).
+        CODE_SIGN_ENTITLEMENTS: Activity/YabActivity.entitlements
+
+  # Yab in any app's share sheet: a link (or words with one in them, or a
+  # page from Safari) opens in Yab as a tab, or is kept for later. It hands the
+  # link over through the App Group's queue (Sources/Entrances/Shared,
+  # SharedLinkQueue) and opens Yab at yab://shared; the card is drawn by the
+  # app's pictures too (share.1-3).
+  YabShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Share
+      - path: Sources/Design/DateOrder.swift  # Date >=/<= of our own (DateOrder.swift)
+      - path: Sources/Entrances/Shared/SharedLinks.swift
+      - path: Sources/Entrances/Shared/YabRoute.swift
+      - path: Sources/Entrances/Shared/EntranceLook.swift
+      - path: Sources/Entrances/Shared/ShareCard.swift
+      - path: Sources/Design/Art.xcassets
+      - path: Sources/Design/Glyphs.xcassets
+    info:
+      path: Share/Info.plist
+      properties:
+        CFBundleDisplayName: Yab
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            # A web link, or text (a link inside it, or words to search for).
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsText: true
+    settings:
+      base:
+        PRODUCT_NAME: YabShare
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serafim.fast.iphone.share
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+        # The App Group with the app (Share/YabShare.entitlements).
+        CODE_SIGN_ENTITLEMENTS: Share/YabShare.entitlements
+
+  # The sync server's alert of an agent's question, opened with this
+  # iPhone's Sync key and said in full on the Lock Screen (ApprovalNotice).
+  # It reads the key from the app's own keychain group, first in its list
+  # as in the app's, so the group is its default too.
+  YabNotify:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Notify
+      - path: Sources/Design/DateOrder.swift  # Date >=/<= of our own (DateOrder.swift)
+      - path: Sources/Sync/ApprovalNotice.swift
+      - path: Sources/Sync/SyncKeychain.swift
+    dependencies:
+      - target: SyncKit
+        embed: false
+    info:
+      path: Notify/Info.plist
+      properties:
+        CFBundleDisplayName: Yab
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        PRODUCT_NAME: YabNotify
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serafim.fast.iphone.notify
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        DEVELOPMENT_TEAM: 25UG4QYN9F
+        CODE_SIGN_ENTITLEMENTS: Notify/YabNotify.entitlements
+
+  YabPhoneTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+      # @testable sees the app's Date >=/<= beside Foundation's: its own
+      # copy shadows both, or every Date comparison here is ambiguous.
+      - path: Sources/Design/DateOrder.swift
+    dependencies:
+      - target: YabPhone
+      # Sync's tests talk to the engine's SyncKit (Tests/Sync*): linked, not
+      # embedded; the app carries it.
+      - target: SyncKit
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serafim.fast.iphone.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Yab.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Yab"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+  YabPhoneUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+      - path: Resources/Pages/duo-ruler.html
+        buildPhase: resources
+      # Shared links are queued by the tests with the share extension's own code.
+      - path: Sources/Entrances/Shared/SharedLinks.swift
+    dependencies:
+      - target: YabPhone
+      - target: SyncKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serafim.fast.iphone.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: YabPhone
+
+schemes:
+  YabPhone:
+    build:
+      targets:
+        YabPhone: all
+        YabPhoneTests: [test]
+        YabPhoneUITests: [test]
+    run:
+      config: Debug
+      commandLineArguments:
+        "-YabWorld mira": true
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - YabPhoneTests
+        - YabPhoneUITests

@@ -1,0 +1,21 @@
+----- pid 77 at 2026-01-01 00:00:00 -----
+Cmd line: OTHER_PROCESS_PRIVATE
+"main" prio=5 tid=1 Native
+  | sysTid=77 nice=0
+  at other.app.Hidden.run(Hidden.java:8)
+----- end 77 -----
+----- pid 4242 at 2026-01-01 00:00:00 -----
+Cmd line: PRIVATE_COMMAND_LINE https://private.example.invalid
+"PRIVATE_MAIN_THREAD_NAME" prio=5 tid=1 Native
+  | group="PRIVATE_GROUP" sCount=1
+  | sysTid=4242 nice=0 cgrp=PRIVATE_PATH
+  native: #00 pc 0000000100000000 /data/PRIVATE_MAP (PRIVATE_NATIVE_NAME+3)
+  at dev.yab.Fixture.waitForPage(Fixture.kt:42)
+  at java.lang.Object.wait(Native method)
+  at dev.yab.Fixture.secret(/data/user/PRIVATE_SOURCE:3)
+  at https://private.example.invalid(Private.java:9)
+  - waiting on <0x123456789abcdef0> (PRIVATE_LOCK_OBJECT)
+"PRIVATE_WORKER_THREAD" prio=5 tid=2 Native
+  | sysTid=4243 nice=0
+  at other.app.Worker.secret(Worker.java:18)
+----- end 4242 -----

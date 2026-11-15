@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "yab-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-20",
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ACCOUNT", "class_name": "Account" },
+      { "name": "PAIRING", "class_name": "Pairing" },
+      { "name": "WEBPUSH", "class_name": "PushBox" },
+      { "name": "DIRECTORY", "class_name": "Directory" },
+      { "name": "HOST", "class_name": "Host" },
+      { "name": "CENSUS", "class_name": "Counts" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Account", "Pairing"] },
+    { "tag": "v2", "new_sqlite_classes": ["PushBox"] },
+    { "tag": "v3", "new_sqlite_classes": ["Directory", "Host"] },
+    { "tag": "v4", "new_sqlite_classes": ["Counts"] }
+  ]
+}

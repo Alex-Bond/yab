@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "legacy-omitted-nil",
+      "input": "{\"ignored\":\"forward-field\",\"version\":1,\"id\":\"00000000-0000-0000-0000-000000000020\",\"account\":\"test-account\",\"phone\":\"test-android\",\"mac\":\"test-mac\",\"space\":\"test-space\",\"words\":\"Read café / 東京 \\\\ \\\"\\n 💡\",\"created\":1700000000,\"tab\":null,\"url\":null,\"title\":null,\"readOnlyEpoch\":null}",
+      "canonical": "{\"account\":\"test-account\",\"created\":1700000000,\"id\":\"00000000-0000-0000-0000-000000000020\",\"mac\":\"test-mac\",\"phone\":\"test-android\",\"space\":\"test-space\",\"version\":1,\"words\":\"Read café / 東京 \\\\ \\\"\\n 💡\"}",
+      "digest": "6feae61907adbf8fcc1f9aa34cef0ebd5934519a51caf1c6784699fb1e02c31d",
+      "observation": "{\"account\":\"test-account\",\"mac\":\"test-mac\",\"phone\":\"test-android\",\"progress\":\"Read three pages\",\"requestDigest\":\"6feae61907adbf8fcc1f9aa34cef0ebd5934519a51caf1c6784699fb1e02c31d\",\"result\":\"# Actual result\\n\\ncafé / 東京\",\"resultURL\":\"https://site.test/result\",\"revision\":4294967296,\"session\":\"session\",\"status\":\"done\",\"task\":\"00000000-0000-0000-0000-000000000020\",\"title\":\"Actual Mac title\",\"version\":1}"
+    },
+    {
+      "name": "readonly-public-space",
+      "input": "{\"ignored\":\"forward-field\",\"version\":1,\"id\":\"00000000-0000-0000-0000-000000000020\",\"account\":\"test-account\",\"phone\":\"test-android\",\"mac\":\"test-mac\",\"space\":\"test-space\",\"words\":\"Read café / 東京 \\\\ \\\"\\n 💡\",\"created\":1700000000,\"readOnlyEpoch\":\"00000000-0000-0000-0000-000000000021\",\"tab\":null,\"url\":null,\"title\":null}",
+      "canonical": "{\"account\":\"test-account\",\"created\":1700000000,\"id\":\"00000000-0000-0000-0000-000000000020\",\"mac\":\"test-mac\",\"phone\":\"test-android\",\"readOnlyEpoch\":\"00000000-0000-0000-0000-000000000021\",\"space\":\"test-space\",\"version\":1,\"words\":\"Read café / 東京 \\\\ \\\"\\n 💡\"}",
+      "digest": "0ae70ef347b06c08564c5be4c203a92c5dd31b93eeafcfafb2f25831e17a19dc",
+      "observation": "{\"account\":\"test-account\",\"mac\":\"test-mac\",\"phone\":\"test-android\",\"progress\":\"Read three pages\",\"requestDigest\":\"0ae70ef347b06c08564c5be4c203a92c5dd31b93eeafcfafb2f25831e17a19dc\",\"result\":\"# Actual result\\n\\ncafé / 東京\",\"resultURL\":\"https://site.test/result\",\"revision\":4294967296,\"session\":\"session\",\"status\":\"done\",\"task\":\"00000000-0000-0000-0000-000000000020\",\"title\":\"Actual Mac title\",\"version\":1}"
+    },
+    {
+      "name": "readonly-tab-fraction",
+      "input": "{\"ignored\":\"forward-field\",\"version\":1,\"id\":\"00000000-0000-0000-0000-000000000020\",\"account\":\"test-account\",\"phone\":\"test-android\",\"mac\":\"test-mac\",\"space\":\"test-space\",\"words\":\"Read café / 東京 \\\\ \\\"\\n 💡\",\"created\":1700000000.125,\"tab\":\"test-tab\",\"url\":\"https://site.test/a/b?q=caf%C3%A9\",\"title\":\"Quoted \\\" title / 東京\",\"readOnlyEpoch\":\"00000000-0000-0000-0000-000000000021\"}",
+      "canonical": "{\"account\":\"test-account\",\"created\":1700000000.125,\"id\":\"00000000-0000-0000-0000-000000000020\",\"mac\":\"test-mac\",\"phone\":\"test-android\",\"readOnlyEpoch\":\"00000000-0000-0000-0000-000000000021\",\"space\":\"test-space\",\"tab\":\"test-tab\",\"title\":\"Quoted \\\" title / 東京\",\"url\":\"https://site.test/a/b?q=caf%C3%A9\",\"version\":1,\"words\":\"Read café / 東京 \\\\ \\\"\\n 💡\"}",
+      "digest": "5b24eeacb6cc1648ef679e38ffab4e1913bc2593f205b64423b551e7f223a774",
+      "observation": "{\"account\":\"test-account\",\"mac\":\"test-mac\",\"phone\":\"test-android\",\"progress\":\"Read three pages\",\"requestDigest\":\"5b24eeacb6cc1648ef679e38ffab4e1913bc2593f205b64423b551e7f223a774\",\"result\":\"# Actual result\\n\\ncafé / 東京\",\"resultURL\":\"https://site.test/result\",\"revision\":4294967296,\"session\":\"session\",\"status\":\"done\",\"task\":\"00000000-0000-0000-0000-000000000020\",\"title\":\"Actual Mac title\",\"version\":1}"
+    }
+  ]
+}

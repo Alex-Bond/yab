@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Developers · Ledger</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="/assets/ledger.css">
+</head>
+<body data-page="developers">
+<script src="/assets/shell.js"></script>
+<main>
+  <div class="page">
+    <div class="head">
+      <div><h1>Developers</h1><p>Keys, webhooks and the requests Tern's servers make to Ledger.</p></div>
+      <div class="actions">
+        <a class="btn" href="#logs"><span data-icon="pulse" data-size="16"></span>Logs</a>
+        <button class="btn" type="button"><span data-icon="file" data-size="16"></span>API docs</button>
+      </div>
+    </div>
+    <div class="tabs">
+      <a class="on" href="#keys">API keys</a><a href="#webhooks">Webhooks</a><a href="#logs">Logs</a><a href="#events">Events</a>
+    </div>
+    <section class="card">
+      <div class="kv">
+        <div><span>API version</span><b><code>2026-09-15</code></b></div>
+        <div><span>Account ID</span><b><code>acct_1NqT8mLx2VcT</code></b></div>
+        <div><span>Requests, last 24 hours</span><b class="num">18,240</b></div>
+        <div><span>Error rate</span><b class="num">0.4%</b></div>
+      </div>
+    </section>
+    <h2 class="section" id="keys">API keys <a href="#keys">Learn about keys</a></h2>
+    <section class="card table-card">
+      <div class="card-head table-head"><h3>Standard keys</h3><span class="note">Tern's backend signs every request with the secret key.</span></div>
+      <div class="table-wrap">
+        <table class="t keys" id="std-keys">
+          <thead><tr><th>Name</th><th>Token</th><th>Last used</th><th class="hide-md">Created</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card table-card" style="margin-top:16px">
+      <div class="card-head table-head"><h3>Restricted keys</h3><span class="note">Limited access for the tools that read Tern's books.</span><button class="btn end" type="button"><span data-icon="plus" data-size="16"></span>Create restricted key</button></div>
+      <div class="table-wrap">
+        <table class="t keys" id="rk-keys">
+          <thead><tr><th>Name</th><th>Token</th><th>Permissions</th><th>Last used</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <h2 class="section" id="webhooks">Webhooks <a href="#webhooks">Add endpoint</a></h2>
+    <section class="card table-card">
+      <div class="table-wrap">
+        <table class="t" id="hooks">
+          <thead><tr><th>Endpoint</th><th>Listening to</th><th>Signing secret</th><th class="r">Error rate</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <h2 class="section" id="logs">Recent requests <a href="#logs">View all logs</a></h2>
+    <section class="card table-card">
+      <div class="table-wrap">
+        <table class="t" id="log">
+          <thead><tr><th>Status</th><th>Request</th><th class="hide-md">Request ID</th><th>Source</th><th>Time</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <h2 class="section" id="events">Events</h2>
+    <section class="card"><div class="card-body list-body"><div class="list" id="events-list"></div></div></section>
+  </div>
+</main>
+<script src="/assets/data.js"></script>
+<script src="/assets/pages.js"></script>
+</body>
+</html>

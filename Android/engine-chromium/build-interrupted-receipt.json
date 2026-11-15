@@ -1,0 +1,23 @@
+{
+  "startedAt": "2026-10-23T04:17:48.851784+00:00",
+  "completed": false,
+  "exitCode": 1,
+  "argv": [
+    "/data/yab-chromium-baseline/tools/depot_tools/autoninja",
+    "-C",
+    "out/YabDesktopArm64",
+    "-j6",
+    "chrome_public_apk"
+  ],
+  "sourceRevision": "ac19329a1d32108fd05ead15568cb6e188f8615a",
+  "depotToolsRevision": "b1c2e86792a7f2b6576c181b7327ddd53b1a42a8",
+  "localJobs": 6,
+  "configurationSha256": "23990d6ef913ecd24893380adcd7d3410e8892a3087085832ce53b023da77619",
+  "gnArgsSha256": "81f85749bc63cdd1094bc8622df525bd7f18e448cd7b0314563d1419f8f26150",
+  "resumedAfterControlledStop": true,
+  "previousCompletedActions": 22302,
+  "freeBytesBefore": 138692083712,
+  "runnerSha256": "a59f0dc7cc026bed70ddc8825810e4ab0e5a0d8e67fc1da0edb93b95c12abddd",
+  "finishedAt": "2026-10-23T07:56:32.834032+00:00",
+  "freeBytesAfter": 135253823488
+}

@@ -1,0 +1,69 @@
+{
+  "format": 1,
+  "provenance": "Node crypto reference; independently checked by Swift SyncKit harness",
+  "root": {
+    "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "account": "fckAWAxL8i-6DncGKuipbA",
+    "auth": "vMfAcBGs19aSRZUOeZfaVgYdXEtaTM4te4wr2fkdpuc",
+    "recovery": "AAAQ-EAYE-AUDA-OCAJ-BIFQ-YDIO-B4IB-CEQT-CQKR-MFYY-DENB-WHA5-DYPW-GDI",
+    "recordsKey": "f028ef5c7fbdea72fafd3d2a6efabbfea9155ae5a25a41df04faa3964dfc51d4",
+    "namesKey": "35b1d37dbb877aa207532867cd0123ce727c0c72d0c0d76cc5871de252a82e2e"
+  },
+  "record": {
+    "json": "{\"collection\":\"tab\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"fields\":{\"title\":\"A café / 東京\",\"seen\":123.5,\"enabled\":true,\"nothing\":null,\"future\":{\"nested\":[\"x\",2,false]}},\"stamps\":{\"title\":{\"wall\":1700000000000,\"count\":3,\"device\":\"mac-a\"},\"seen\":{\"wall\":1700000000000,\"count\":3,\"device\":\"mac-a\"},\"enabled\":{\"wall\":1700000000000,\"count\":3,\"device\":\"mac-a\"},\"nothing\":{\"wall\":1700000000000,\"count\":3,\"device\":\"mac-a\"},\"future\":{\"wall\":1700000000000,\"count\":3,\"device\":\"mac-a\"}},\"schema\":1}",
+    "name": "t9NlYdFVwXilXKc3BLssYeV1VNZJUcSjn7pc43gbAaE",
+    "sealed": "AAECAwQFBgcICQoLd7Po82IY4vjbeojPL1AkU1ofy7UFPXeYb7W+GimnbY+sNgC/rM48HiLLoWnn35Bg616DICRfXyfNNkB/hjc4jLZP5nmawZnHlF1HaGQApyaGZYU+cK3buKFm+MqWzrigKSVj6kxsod5qTxW8kgKLl3Ai9y2FPmv+vD8BQ/vk8K/jEnJjOrOdpAT97uMguWFz03YSDSKKGGnKN4r22kCuVjSCvW6o02FHz+MLgfEImwCBogL1j+JgfVzvZQojWIKZx/SG0FvEFYJuHzN9S3L4AMtpYqnHeyZIWSBMFTzILwi7RTRHeUscY7kwOJe+fxMTuwqf6l0aUV0dDnarACt23rqIUgZMNIYuHpRdwu+maMfRwsSDn0k/gSbfeJc9tc3/lkAiFltPr2oDQGXc1pnlVH2/EQdp8HIZOVGWv7dh1TntU248Jgg21A+QBBnjEwt9R2osCHfPrMbPOhP+2APoXaY8eNT7huN2Oj6rGUXAkJAzOMbzKyjUjsfvopFnyBPiYx9zFqQcVpY2Nmky2xTtrMOWaXvwa0eCyBzs7q6cphc87CKAObHxs4u9jIgT6wpL4Ck+36WunYDqJbUDw5SLJpBAAG9fg9fFB3dmBJ6R89ujCcCWTUb+PxnH18e6GHeZTWZ7bOBMC7W0q9AyNRml9v+uOVA++HYE1l/EHg+mmQ=="
+  },
+  "secret": {
+    "key": "login/site.test\u0001me",
+    "text": "pāssword 💡",
+    "sealed": "AAECAwQFBgcICQoL9PmBEidnUKvHpYUKy9XaRqMKH6KHo/hKBp4dKjna"
+  },
+  "pairing": {
+    "code": "K7QM-4XTD",
+    "receiverPrivate": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "receiverPublic": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254",
+    "senderPrivate": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "posted": "NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlSbz7dM9vlkcV1/yT10YSEQBv/S8IBdyF7WwiLmiTe/UA==",
+    "box": "86456814de8b80b6cae7a9ae5b019a873f72185255d9f86e262582f406d0256e",
+    "check": "1015",
+    "envelope": "eaYx7t4b+cmPEgMs3q3Q56B5OY/HhriMyEbsia+FpRoAAQIDBAUGBwgJCgsq4frhy4E+4dYmU7Tc5s8roybTw2DhdYFQHLKWY1jHxrM0uZU4pgtST6eTQoZHhKI="
+  },
+  "order": [
+    {
+      "after": null,
+      "before": null,
+      "key": "V"
+    },
+    {
+      "after": "V",
+      "before": null,
+      "key": "W"
+    },
+    {
+      "after": null,
+      "before": "V",
+      "key": "U"
+    },
+    {
+      "after": "A",
+      "before": "B",
+      "key": "AV"
+    },
+    {
+      "after": "z",
+      "before": null,
+      "key": "zV"
+    },
+    {
+      "after": null,
+      "before": "1",
+      "key": "0z"
+    },
+    {
+      "after": "A",
+      "before": "A1",
+      "key": "A0V"
+    }
+  ]
+}

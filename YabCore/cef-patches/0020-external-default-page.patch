@@ -1,0 +1,504 @@
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -53,6 +53,7 @@
+ #define CEF_YAB_DISCARD_VERSION 1
+ #define CEF_YAB_EXTERNAL_ACTION_VERSION 1
+ #define CEF_YAB_NATIVE_TAB_MODEL_VERSION 1
++#define CEF_YAB_EXTERNAL_PAGE_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ 
+ class CefBrowserHost;
+@@ -1153,6 +1154,42 @@
+   /*--cef(added=experimental)--*/
+   virtual bool FinishNativePrint(const CefString& request) = 0;
+ 
++
++  ///
++  /// Returns a native browser-bound external surface receipt for an adopted
++  /// default-client Chrome browser, or an empty dictionary if not bound.
++  /// Receipt includes binding token, native browser ID, context/frame geometry
++  /// and the exact page rectangle in the producer compositor. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefDictionaryValue> GetExternalPageState() = 0;
++
++  ///
++  /// Requests a page size on that browser's own native geometry endpoint.
++  /// Duplicate sizes are idempotent. A shared physical owner is refused.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetExternalPageSize(const CefSize& size) = 0;
++
++  ///
++  /// Delegates visibility and focus to the bound page without activating or
++  /// ordering the producer application. Focus on a hidden page is refused.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetExternalPageVisibility(bool visible) = 0;
++  ///
++  /// Delegates native key status to the exact bound page. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetExternalPageFocus(bool focused) = 0;
++
++  ///
++  /// Answers the exact native select menu for this bound page. Closed,
++  /// superseded or foreign menu tokens are refused. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool ReplyExternalPageSelect(int token, int index) = 0;
++
+   ///
+   /// Runs the enabled extension's original Chrome action for this externally
+   /// hosted, visible and externally focused browser. Call only for an actual
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -248,6 +248,15 @@
+                                 CefRefPtr<CefDictionaryValue> popup) {}
+ 
+   ///
++  /// Native compositor update for a default-client external page, with the
++  /// same browser-bound receipt returned by GetExternalPageState. A zero
++  /// context invalidates the previous surface; clients must drop that host.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnExternalPageFrame(CefRefPtr<CefBrowser> browser,
++                                   CefRefPtr<CefDictionaryValue> state) {}
++
++  ///
+   /// Called after chrome.tabs.create made |browser|. |info| has active, index
+   /// (-1 for the default position), openerBrowserId (0 for none) and
+   /// extensionId, as requested by the extension.
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1091,6 +1091,51 @@
+ #endif
+ }
+ 
++CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetExternalPageState() {
++  CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::PageState(this);
++#else
++  return CefDictionaryValue::Create();
++#endif
++}
++
++bool CefBrowserHostBase::SetExternalPageSize(const CefSize& size) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::ResizePage(this, size);
++#else
++  return false;
++#endif
++}
++
++bool CefBrowserHostBase::SetExternalPageVisibility(bool visible) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::ShowPage(this, visible);
++#else
++  return false;
++#endif
++}
++
++bool CefBrowserHostBase::SetExternalPageFocus(bool focused) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::FocusPage(this, focused);
++#else
++  return false;
++#endif
++}
++
++bool CefBrowserHostBase::ReplyExternalPageSelect(int token, int index) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::SelectPage(this, token, index);
++#else
++  return false;
++#endif
++}
++
+ bool CefBrowserHostBase::OpenExtensionAction(const CefString& extension_id,
+                                              const CefRect& anchor) {
+   CEF_REQUIRE_UIT_RETURN(false);
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -286,6 +286,11 @@
+   bool RestoreDiscardedPage() override;
+   bool SetPageFrozen(bool frozen) override;
+   bool FinishNativePrint(const CefString& request) override;
++  CefRefPtr<CefDictionaryValue> GetExternalPageState() override;
++  bool SetExternalPageSize(const CefSize& size) override;
++  bool SetExternalPageVisibility(bool visible) override;
++  bool SetExternalPageFocus(bool focused) override;
++  bool ReplyExternalPageSelect(int token, int index) override;
+   bool OpenExtensionAction(const CefString& extension_id,
+                            const CefRect& anchor) override;
+   bool ControlExtensionPopup(const CefString& token, const CefRect& anchor,
+--- a/cef/libcef/browser/chrome/chrome_browser_delegate.cc
++++ b/cef/libcef/browser/chrome/chrome_browser_delegate.cc
+@@ -561,13 +561,10 @@
+   CefRefPtr<ChromeBrowserHostImpl> browser_host =
+       new ChromeBrowserHostImpl(settings, client, std::move(platform_delegate),
+                                 browser_info, request_context_impl);
++  // A default-client native geometry endpoint must know its exact Browser
++  // before Attach publishes the first LifeSpanHandler notification.
++  if (!opener) browser_host->SetBrowser(browser);
+   browser_host->Attach(web_contents, is_devtools_popup, opener);
+-
+-  // The Chrome browser for a normal popup won't be created until
+-  // AddNewContents().
+-  if (!opener) {
+-    browser_host->SetBrowser(browser);
+-  }
+ 
+   return browser_host;
+ }
+--- a/cef/libcef/browser/chrome/chrome_browser_host_impl.cc
++++ b/cef/libcef/browser/chrome/chrome_browser_host_impl.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "cef/libcef/browser/chrome/chrome_browser_host_impl.h"
++#if BUILDFLAG(IS_MAC)
++#include "cef/libcef/browser/views/external_host_mac.h"
++#endif
+ 
+ #include "base/logging.h"
+ #include "base/notimplemented.h"
+@@ -514,6 +517,13 @@
+                                                      this, is_devtools_popup);
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (!opener && !platform_delegate_->IsViewsHosted()) {
++    // Before any client may publish tab.created, and before Chrome Show().
++    cef::external_host::BindDefaultPage(this);
++  }
++#endif
++
+   // 2. Notify the browser's LifeSpanHandler. This must always be the first
+   // notification for the browser.
+   {
+--- a/cef/libcef/browser/views/external_host_mac.h
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -12,6 +12,12 @@
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index);
+ // Installs Chrome's extension popup and tab-creation hooks (idempotent).
+ void InstallExtensionHooks();
++bool BindDefaultPage(CefBrowserHostBase* browser);
++CefRefPtr<CefDictionaryValue> PageState(CefBrowserHostBase* browser);
++bool ResizePage(CefBrowserHostBase* browser, const CefSize& size);
++bool ShowPage(CefBrowserHostBase* browser, bool visible);
++bool FocusPage(CefBrowserHostBase* browser, bool focused);
++bool SelectPage(CefBrowserHostBase* browser, int token, int index);
+ bool OpenAction(CefBrowserHostBase* browser, const std::string& extension_id,
+                 const CefRect& anchor);
+ bool ControlPopup(CefBrowserHostBase* browser, const std::string& token,
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -29,6 +29,11 @@
+ #include "ui/compositor/compositor.h"
+ #include "base/no_destructor.h"
+ #include <map>
++#include <cmath>
++#include "base/command_line.h"
++#include "cef/libcef/browser/chrome/chrome_browser_host_impl.h"
++#include "cef/libcef/browser/browser_platform_delegate.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "content/public/browser/browser_context.h"
+ #include "chrome/browser/extensions/extension_action_runner.h"
+ #include "chrome/browser/extensions/extension_view_host.h"
+@@ -527,6 +532,233 @@
+   handler->OnExtensionTabCreated(browser.get(), value);
+ }
+ }  // namespace
++
++
++bool BindNativeTabModel(content::WebContents* contents,
++                        content::WebContents* owner,
++                        content::WebContents* opener, bool active, int index);
++namespace {
++// A Chrome-created page is bound before OnAfterCreated. Its native Browser
++// must own exactly this one page; no view-tree search or borrowed geometry.
++class ExternalPage : public content::WebContentsObserver,
++                     public views::WidgetObserver,
++                     public content::WebContentsUserData<ExternalPage> {
++ public:
++  bool Bind(CefBrowserHostBase* browser, views::Widget* widget) {
++    if (!browser || !widget || widget_ || !Enable(widget)) return false;
++    widget_ = widget->GetWeakPtr();
++    observation_.Observe(widget);
++    visible_ = true;
++    ExternalVisibility::GetOrCreateForWebContents(web_contents())->Bind(widget);
++    ExternalSelect::GetOrCreateForWebContents(web_contents())->Install();
++    auto* compositor = widget->GetCompositor();
++    if (!compositor) { Reset(); return false; }
++    accelerated_ = compositor->widget();
++    if (!ui::AcceleratedWidgetMac::SetFrameCallback(accelerated_,
++          base::BindRepeating(&ExternalPage::Frame, weak_.GetWeakPtr()))) {
++      Reset(); return false;
++    }
++    return true;
++  }
++  bool Owns() const {
++    if (!widget_ || !web_contents() || web_contents()->IsBeingDestroyed()) return false;
++    auto browser = CefBrowserHostBase::GetBrowserForContents(web_contents());
++    if (!browser || !browser->IsChromeStyle()) return false;
++    auto chrome = ChromeBrowserHostImpl::FromBaseChecked(browser);
++    auto* native_browser = chrome->browser();
++    auto* view = native_browser ? BrowserView::GetBrowserViewForBrowser(native_browser) : nullptr;
++    if (!view || view->GetWidget() != widget_.get()) return false;
++    auto* tabs = native_browser->tab_strip_model();
++    return tabs->empty() || (tabs->count() == 1 &&
++                             tabs->GetActiveWebContents() == web_contents());
++  }
++  CefRefPtr<CefDictionaryValue> State() const {
++    auto result = CefDictionaryValue::Create();
++    if (!Owns()) return result;
++    auto browser = CefBrowserHostBase::GetBrowserForContents(web_contents());
++    result->SetBool("bound", true);
++    result->SetString("token", token_.ToString());
++    result->SetInt("browserId", browser->GetIdentifier());
++    result->SetBool("visible", visible_);
++    if (auto* model = extensions::ExternalTabModel::Get(web_contents())) {
++      result->SetBool("nativeTabModel", true);
++      result->SetBool("active", model->active());
++      result->SetInt("index", model->index());
++      result->SetInt("logicalWindowId", model->window());
++      auto opener = model->opener()
++          ? CefBrowserHostBase::GetBrowserForContents(model->opener()) : nullptr;
++      result->SetInt("openerBrowserId", opener ? opener->GetIdentifier() : 0);
++    }
++    result->SetDouble("contextId", static_cast<double>(context_));
++    result->SetInt("pixelWidth", pixels_.width());
++    result->SetInt("pixelHeight", pixels_.height());
++    result->SetDouble("scale", scale_);
++    NSWindow* window = widget_->GetNativeWindow().GetNativeNSWindow();
++    result->SetInt("windowNumber", window ? static_cast<int>(window.windowNumber) : 0);
++    auto* renderer = web_contents()->GetRenderWidgetHostView();
++    if (renderer && !static_cast<content::RenderWidgetHostViewBase*>(renderer)
++                         ->IsRenderWidgetHostViewChildFrame()) {
++      NSView* page = renderer->GetNativeView().GetNativeNSView();
++      // Native frame identity is supplied by WebContents, never a recursive
++      // first matching RenderWidgetHostViewCocoa or a rectangle heuristic.
++      if (page && page.window == window) {
++        NSRect rectangle = [page convertRect:page.bounds toView:window.contentView];
++        result->SetDouble("pageX", NSMinX(rectangle));
++        result->SetDouble("pageY", NSHeight(window.contentView.bounds) - NSMaxY(rectangle));
++        result->SetDouble("pageWidth", NSWidth(rectangle));
++        result->SetDouble("pageHeight", NSHeight(rectangle));
++        result->SetBool("rendererBound", true);
++      }
++    }
++    return result;
++  }
++  bool Resize(const gfx::Size& size) {
++    if (!Owns() || size.IsEmpty() || size.width() > 8192 || size.height() > 8192)
++      return false;
++    if (requested_ == size) return true;
++    requested_ = size;
++    applied_ = false;
++    ApplySize();
++    return true;
++  }
++  bool SetVisible(bool visible) {
++    if (!Owns()) return false;
++    visible_ = visible;
++    auto self = weak_.GetWeakPtr();
++    if (!visible) ExternalFocus::GetOrCreateForWebContents(web_contents())->Set(widget_.get(), false);
++    if (!self || !Owns()) return false;
++    if (visible) widget_->Show(); else widget_->Hide();
++    return true;
++  }
++  bool Focus(bool focused) {
++    if (!Owns() || (focused && !visible_)) return false;
++    auto contents = web_contents()->GetWeakPtr();
++    if (!ExternalFocus::GetOrCreateForWebContents(web_contents())->Set(widget_.get(), focused))
++      return false;
++    if (focused && contents) {
++      if (auto* model = extensions::ExternalTabModel::Get(contents.get())) model->Activate();
++    }
++    return !!contents;
++  }
++  void RenderViewReady() override { ScheduleSize(); }
++  void RenderViewHostChanged(content::RenderViewHost*, content::RenderViewHost*) override {
++    // A renderer replacement needs the same target applied to the new view.
++    applied_ = false;
++    ScheduleSize();
++  }
++  void OnWidgetDestroying(views::Widget*) override { Reset(); }
++  void WebContentsDestroyed() override { Reset(); Observe(nullptr); }
++ private:
++  friend class content::WebContentsUserData<ExternalPage>;
++  explicit ExternalPage(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<ExternalPage>(*contents),
++        token_(base::UnguessableToken::Create()) {}
++  ~ExternalPage() override { Reset(); }
++  void Reset() {
++    weak_.InvalidateWeakPtrs();
++    if (accelerated_ != gfx::kNullAcceleratedWidget)
++      ui::AcceleratedWidgetMac::SetFrameCallback(accelerated_, {});
++    accelerated_ = gfx::kNullAcceleratedWidget;
++    observation_.Reset();
++    widget_.reset();
++  }
++  void ScheduleSize() {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&ExternalPage::ApplySize, weak_.GetWeakPtr()));
++  }
++  void ApplySize() {
++    if (applied_ || requested_.IsEmpty() || !Owns()) return;
++    auto* renderer = web_contents()->GetRenderWidgetHostView();
++    if (!renderer || static_cast<content::RenderWidgetHostViewBase*>(renderer)
++                         ->IsRenderWidgetHostViewChildFrame()) return;
++    NSWindow* window = widget_->GetNativeWindow().GetNativeNSWindow();
++    NSView* page = renderer->GetNativeView().GetNativeNSView();
++    if (!page || page.window != window || NSWidth(page.bounds) <= 0 || NSHeight(page.bounds) <= 0)
++      return;
++    gfx::Rect bounds = widget_->GetWindowBoundsInScreen();
++    const int width = bounds.width() + requested_.width() - std::lround(NSWidth(page.bounds));
++    const int height = bounds.height() + requested_.height() - std::lround(NSHeight(page.bounds));
++    const double scale = window.backingScaleFactor;
++    if (width <= 0 || height <= 0 || scale <= 0 ||
++        width * scale > 16384 || height * scale > 16384) return;
++    // Mark BEFORE dispatch, including no-op sizes. Layout can be asynchronous;
++    // repeating outer-minus-page deltas before it settles grows the window.
++    applied_ = true;
++    bounds.set_size(gfx::Size(width, height));
++    widget_->SetBounds(bounds);
++  }
++  void Frame(uint32_t context, const gfx::Size& pixels, float scale) {
++    if (!Owns()) return;
++    context_ = context; pixels_ = pixels; scale_ = scale;
++    auto self = weak_.GetWeakPtr();
++    ApplySize();
++    if (!self) return;
++    CefRefPtr<CefBrowserHostBase> browser;
++    if (auto handler = DisplayHandlerFor(web_contents(), &browser))
++      handler->OnExternalPageFrame(browser.get(), State());
++  }
++  base::WeakPtr<views::Widget> widget_;
++  base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{this};
++  gfx::AcceleratedWidget accelerated_ = gfx::kNullAcceleratedWidget;
++  uint32_t context_ = 0;
++  gfx::Size pixels_, requested_;
++  float scale_ = 1;
++  bool visible_ = true, applied_ = false;
++  const base::UnguessableToken token_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++  base::WeakPtrFactory<ExternalPage> weak_{this};
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalPage);
++}  // namespace
++
++bool BindDefaultPage(CefBrowserHostBase* browser) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !browser || !browser->IsChromeStyle() ||
++      browser->platform_delegate()->IsViewsHosted() ||
++      !base::CommandLine::ForCurrentProcess()->HasSwitch("yab-external-default-windows"))
++    return false;
++  auto chrome = ChromeBrowserHostImpl::FromBaseChecked(browser);
++  auto* native_browser = chrome->browser();
++  auto* view = native_browser ? BrowserView::GetBrowserViewForBrowser(native_browser) : nullptr;
++  if (!view || !view->GetWidget() || !browser->GetWebContents()) return false;
++  auto* tabs = native_browser->tab_strip_model();
++  if (!tabs->empty() && (tabs->count() != 1 || tabs->GetActiveWebContents() != browser->GetWebContents()))
++    return false;
++  if (!ExternalPage::GetOrCreateForWebContents(browser->GetWebContents())->Bind(browser, view->GetWidget()))
++    return false;
++  if (auto* creation = extensions::ScopedExternalTabCreation::Current(); creation && creation->owner()) {
++    if (!BindNativeTabModel(browser->GetWebContents(), creation->owner(),
++                            creation->opener(), creation->active(), creation->index()))
++      return false;
++  }
++  return true;
++}
++CefRefPtr<CefDictionaryValue> PageState(CefBrowserHostBase* browser) {
++  auto* page = browser && browser->GetWebContents()
++      ? ExternalPage::FromWebContents(browser->GetWebContents()) : nullptr;
++  return page ? page->State() : CefDictionaryValue::Create();
++}
++bool ResizePage(CefBrowserHostBase* browser, const CefSize& size) {
++  auto* page = browser && browser->GetWebContents()
++      ? ExternalPage::FromWebContents(browser->GetWebContents()) : nullptr;
++  return page && page->Resize(gfx::Size(size.width, size.height));
++}
++bool ShowPage(CefBrowserHostBase* browser, bool visible) {
++  auto* page = browser && browser->GetWebContents()
++      ? ExternalPage::FromWebContents(browser->GetWebContents()) : nullptr;
++  return page && page->SetVisible(visible);
++}
++bool FocusPage(CefBrowserHostBase* browser, bool focused) {
++  auto* page = browser && browser->GetWebContents()
++      ? ExternalPage::FromWebContents(browser->GetWebContents()) : nullptr;
++  return page && page->Focus(focused);
++}
++bool SelectPage(CefBrowserHostBase* browser, int token, int index) {
++  auto* contents = browser ? browser->GetWebContents() : nullptr;
++  auto* page = contents ? ExternalPage::FromWebContents(contents) : nullptr;
++  auto* select = contents ? ExternalSelect::FromWebContents(contents) : nullptr;
++  return page && page->Owns() && select && select->Reply(token, index);
++}
+ 
+ bool BindNativeTabModel(content::WebContents* contents,
+                         content::WebContents* owner,
+--- a/chrome/browser/ui/browser_window/internal/create_browser_window_non_android.cc
++++ b/chrome/browser/ui/browser_window/internal/create_browser_window_non_android.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "base/functional/bind.h"
++#include "base/command_line.h"
+ #include "base/functional/callback.h"
+ #include "base/location.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -142,6 +143,16 @@
+   CHECK_EQ(BrowserWindowInterface::CreationStatus::kOk,
+            GetBrowserWindowCreationStatusForProfile(*create_params.profile));
+ 
++#if BUILDFLAG(ENABLE_CEF) && BUILDFLAG(IS_MAC)
++  if (!create_params.cef_params &&
++      create_params.type == BrowserWindowInterface::TYPE_NORMAL &&
++      base::CommandLine::ForCurrentProcess()->HasSwitch("yab-external-default-windows")) {
++    // One independent native producer per adopted page. A concealed physical
++    // container is not the embedder's logical tab/window model.
++    create_params.type = BrowserWindowInterface::TYPE_POPUP;
++    create_params.is_trusted_source = true;
++  }
++#endif
+   return Browser::Create(std::move(create_params));
+ }
+ 
+--- a/chrome/browser/ui/views/frame/browser_window_factory.cc
++++ b/chrome/browser/ui/views/frame/browser_window_factory.cc
+@@ -5,6 +5,10 @@
+ #include <memory>
+ 
+ #include "build/build_config.h"
++#if BUILDFLAG(ENABLE_CEF) && BUILDFLAG(IS_MAC)
++#include "base/command_line.h"
++#include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
++#endif
+ #include "chrome/browser/ui/browser_window_deleter.h"
+ #include "chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h"
+ #include "chrome/browser/ui/views/frame/browser_native_widget_factory.h"
+@@ -59,6 +63,16 @@
+     view->browser_widget()->SetTabDragKind(TabDragKind::kAllTabs);
+   }
+   view->browser_widget()->InitBrowserWidget();
++#if BUILDFLAG(ENABLE_CEF) && BUILDFLAG(IS_MAC)
++  if (browser->GetType() == BrowserWindowInterface::TYPE_POPUP &&
++      base::CommandLine::ForCurrentProcess()->HasSwitch("yab-external-default-windows")) {
++    // Conceal the producer at creation, before any asynchronous navigation or
++    // browser API can Show it. Failure must not expose an ordinary Chrome UI.
++    auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
++        view->GetWidget()->GetNativeWindow());
++    CHECK(host && host->EnableExternalHosting());
++  }
++#endif
+ 
+ #if BUILDFLAG(IS_MAC)
+   if (WindowFeatureController::From(view->browser())

@@ -1,0 +1,18 @@
+--- a/cef/libcef/browser/views/window_view.cc
++++ b/cef/libcef/browser/views/window_view.cc
+@@ -753,6 +753,15 @@
+   // Any overlays should already be removed.
+   DCHECK(overlay_hosts_.empty());
+ 
++#if BUILDFLAG(IS_MAC)
++  // Unregister before the CefWindow wrapper detaches from this view. A weak
++  // callback alone only protects destruction, not this earlier teardown phase.
++  if (auto* widget = GetWidget(); widget && widget->GetCompositor()) {
++    ui::AcceleratedWidgetMac::SetFrameCallback(
++        widget->GetCompositor()->widget(), {});
++  }
++#endif
++
+   // Remove all child Views before deleting the Window so that notifications
+   // resolve correctly.
+   RemoveAllChildViews();

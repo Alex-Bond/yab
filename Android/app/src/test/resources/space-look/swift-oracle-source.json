@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "job": "60cbd47db9b94e8d",
+  "snapshot": "1e036efc9303d24fa6ffc9c35ec5242526f6fa59",
+  "actualSwiftExit": 0,
+  "sourcePins": {
+    "Phone/Sources/Model/SpaceLook.swift": "2e2fd7f630f0d37d4d2435fca2590464a52e3ce97bd7e1ac32cfe3869da45063",
+    "Phone/Sources/Model/Tab.swift": "9a0db7af09d00565496e64ab845d823fbb8357b3faafc8aa4c4ff97154f081b3",
+    "Sources/SyncKit/Value.swift": "7af113002fe3ef6d58ab1e4bc576ee78adb5b36bc2d3f4df264a32f4a086c447"
+  },
+  "generatedSwiftSHA256": "e3f9ad3b471ffe85884c8d599afff094aa0a2d57edceb26fe58a8731695b8bda",
+  "outputSHA256": "533c2b9165446e37320dd04d1cee0c02bcf3cbc8cabc31a339b677b3cc4f507e",
+  "colors": 12,
+  "field": 75,
+  "sourceUnchanged": true,
+  "frameParityVerified": false,
+  "kotlinParityVerified": false
+}

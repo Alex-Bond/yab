@@ -1,0 +1,114 @@
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -9962,6 +9962,11 @@
+   OPTIONAL_TRACE_EVENT1("content", "WebContentsImpl::RunFileChooser",
+                         "render_frame_host", render_frame_host);
+ 
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("yab-trace-file-origin"))
++    LOG(ERROR) << "YAB_FILE webcontents admission visibility=" << static_cast<int>(visibility_)
++               << " active=" << (!delegate_ || delegate_->IsContentsActive(this))
++               << " pending=" << static_cast<bool>(active_file_chooser_)
++               << " frame_active=" << (render_frame_host && render_frame_host->IsActive());
+   absl::Cleanup cancel_chooser = [&listener] {
+     listener->FileSelectionCanceled();
+   };
+--- a/chrome/browser/file_select_helper.cc
++++ b/chrome/browser/file_select_helper.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/file_select_helper.h"
++#include "base/command_line.h"
++#include "base/logging.h"
+ #include "chrome/browser/external_file_origin.h"
+ 
+ #include <stddef.h>
+@@ -671,6 +673,9 @@
+   web_contents_ = WebContents::FromRenderFrameHost(render_frame_host);
+   listener_ = std::move(listener);
+   external_file_origin::Set(this, render_frame_host_, params->accept_types);
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("yab-trace-file-origin"))
++    LOG(ERROR) << "YAB_FILE helper entry origin=" << external_file_origin::Has(this)
++               << " frame_active=" << render_frame_host_->IsActive();
+   InitLifecycleObserver(web_contents_);
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -725,6 +730,13 @@
+     FileChooserParamsPtr params) {
+   DCHECK(params);
+   DCHECK(!select_file_dialog_);
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("yab-trace-file-origin")) {
++    auto* tab = web_contents_ ? tabs::TabInterface::MaybeGetFromContents(web_contents_) : nullptr;
++    LOG(ERROR) << "YAB_FILE helper UI contents=" << static_cast<bool>(web_contents_)
++               << " origin=" << external_file_origin::Has(this)
++               << " document=" << (external_file_origin::Get(this) != nullptr)
++               << " activated=" << (!tab || tab->IsActivated());
++  }
+   if (AbortIfWebContentsDestroyed())
+     return;
+ 
+--- a/ui/shell_dialogs/select_file_dialog.cc
++++ b/ui/shell_dialogs/select_file_dialog.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "ui/shell_dialogs/select_file_dialog.h"
++#include "base/command_line.h"
++#include "base/logging.h"
+ 
+ #include <stddef.h>
+ #include <algorithm>
+@@ -137,6 +139,9 @@
+     gfx::NativeWindow owning_window,
+     const GURL* caller) {
+   DCHECK(listener_);
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("yab-trace-file-origin"))
++    LOG(ERROR) << "YAB_FILE policy allowed="
++               << (!select_file_policy_ || select_file_policy_->CanOpenSelectFileDialog());
+ 
+   if (select_file_policy_.get() &&
+       !select_file_policy_->CanOpenSelectFileDialog()) {
+--- a/cef/libcef/browser/external_file_dialog.cc
++++ b/cef/libcef/browser/external_file_dialog.cc
+@@ -1,4 +1,6 @@
+ #include "cef/libcef/browser/external_file_dialog.h"
++#include "base/command_line.h"
++#include "base/logging.h"
+ #include <map>
+ #include <utility>
+ #include "base/functional/bind.h"
+@@ -137,6 +139,10 @@
+ bool Run(CefRefPtr<CefBrowserHostBase> browser, Listener* listener,
+          ui::SelectFileDialog::Type type, const std::u16string& title,
+          const base::FilePath& path, const ui::SelectFileDialog::FileTypeInfo* types) {
++  const bool trace = base::CommandLine::ForCurrentProcess()->HasSwitch("yab-trace-file-origin");
++  if (trace) LOG(ERROR) << "YAB_FILE cef entry api=" << CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
++                        << " browser=" << static_cast<bool>(browser) << " listener=" << (listener != nullptr)
++                        << " origin=" << external_file_origin::Has(listener);
+   if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !browser || !listener) return false;
+   if (!external_file_origin::Has(listener)) return false;
+   auto* frame = external_file_origin::Get(listener);
+@@ -146,6 +152,10 @@
+   if ( content::WebContents::FromRenderFrameHost(frame) != browser->GetWebContents()) return false;
+   auto handler = browser->client() ? browser->client()->GetDialogHandler() : nullptr;
+   auto cef_frame = browser->GetFrameForHost(frame);
++  if (trace) LOG(ERROR) << "YAB_FILE cef frame native=" << (frame != nullptr)
++                        << " handler=" << static_cast<bool>(handler)
++                        << " cef_frame=" << static_cast<bool>(cef_frame)
++                        << " cef_valid=" << (cef_frame && cef_frame->IsValid());
+   if (!handler || !cef_frame || !cef_frame->IsValid()) return false;
+   cef_file_dialog_mode_t mode;
+   switch (type) {
+@@ -170,6 +180,12 @@
+     listener->FileSelectionCanceled(); return true;
+   }
+   CefRefPtr<Callback> callback = new Callback(listener, frame, handler, mode);
++  if (trace) {
++    auto* tab = tabs::TabInterface::MaybeGetFromContents(browser->GetWebContents());
++    LOG(ERROR) << "YAB_FILE cef callback live=" << callback->Live()
++               << " visibility=" << static_cast<int>(browser->GetWebContents()->GetVisibility())
++               << " activated=" << (!tab || tab->IsActivated());
++  }
+   if (!callback->Live()) { callback->Cancel(); return true; }
+   Requests().emplace(listener, callback);
+   auto receipt = callback->receipt();

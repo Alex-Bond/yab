@@ -1,0 +1,20 @@
+--- a/third_party/blink/public/web/web_settings.h
++++ b/third_party/blink/public/web/web_settings.h
+@@ -112,2 +112,3 @@
+   virtual void SetAutoplayPolicy(mojom::AutoplayPolicy) = 0;
++  virtual void SetYabReadAutoplayLocked(bool) = 0;
+   virtual void SetRequireTransientActivationForGetDisplayMedia(bool) = 0;
+--- a/third_party/blink/renderer/core/exported/web_settings_impl.h
++++ b/third_party/blink/renderer/core/exported/web_settings_impl.h
+@@ -56,2 +56,3 @@
+   void SetAutoplayPolicy(mojom::blink::AutoplayPolicy) override;
++  void SetYabReadAutoplayLocked(bool) override;
+   void SetRequireTransientActivationForGetDisplayMedia(bool) override;
+--- a/third_party/blink/renderer/core/exported/web_settings_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_settings_impl.cc
+@@ -139,1 +139,5 @@
++void WebSettingsImpl::SetYabReadAutoplayLocked(bool locked) {
++  settings_->SetYabReadAutoplayLocked(locked);
++}
++
+ void WebSettingsImpl::SetAutoplayPolicy(mojom::blink::AutoplayPolicy policy) {

@@ -1,0 +1,273 @@
+--- a/cef/libcef/browser/views/external_consent.cc
++++ b/cef/libcef/browser/views/external_consent.cc
+@@ -5,6 +5,8 @@
+ #include <memory>
+ #include <string>
+ #include <utility>
++#include <vector>
++#include <optional>
+ 
+ #include "base/command_line.h"
+ #include "base/files/file_path.h"
+@@ -61,6 +63,7 @@
+   // Chrome withdrew the request (profile gone, dialog closed by Chrome).
+   virtual void Withdraw() = 0;
+   virtual bool Owns(const void*) const { return false; }
++  virtual bool OwnsInstallParent(const void*) const { return false; }
+ };
+ 
+ using Registry = std::map<std::string, std::unique_ptr<Pending>>;
+@@ -118,14 +121,17 @@
+  public:
+   InstallPending(std::string token,
+                  Profile* profile,
++                 content::WebContents* parent,
+                  std::unique_ptr<InstallPromptData> prompt,
+                  ExtensionInstallPromptClient::DoneCallback done)
+       : token_(std::move(token)),
++        parent_identity_(parent),
+         prompt_(std::move(prompt)),
+         done_(std::move(done)) {
+     observation_.Observe(profile);
+   }
+   void Answer(bool accept) override {
++    accept = accept && prompt_->ExternalReviewIsLive();
+     observation_.Reset();
+     Result result = Result::USER_CANCELED;
+     if (accept) {
+@@ -145,6 +151,9 @@
+     std::move(done_).Run(
+         ExtensionInstallPromptClient::DoneCallbackPayload(Result::ABORTED));
+   }
++  bool OwnsInstallParent(const void* parent) const override {
++    return parent && parent_identity_ == parent;
++  }
+   // ProfileObserver:
+   void OnProfileWillBeDestroyed(Profile*) override {
+     // Destroys this; nothing below touches a member.
+@@ -154,6 +163,7 @@
+ 
+  private:
+   const std::string token_;
++  const void* const parent_identity_;  // Identity only; never dereferenced.
+   std::unique_ptr<InstallPromptData> prompt_;
+   ExtensionInstallPromptClient::DoneCallback done_;
+   base::ScopedObservation<Profile, ProfileObserver> observation_{this};
+@@ -255,6 +265,8 @@
+   }
+   const std::string token = base::UnguessableToken::Create().ToString();
+   auto data = std::move(*prompt);
++  std::optional<std::string> verified_manifest;
++  if (auto* original = data->external_verified_manifest()) verified_manifest = *original;
+   auto request = Describe(token, OperationFor(data->type()), profile, extension);
+   request->SetInt("promptType", static_cast<int>(data->type()));
+   // Chrome's own permission messages for exactly this extension.
+@@ -270,7 +282,24 @@
+   }
+   request->SetList("warnings", warnings);
+   GetRegistry()[token] = std::make_unique<InstallPending>(
+-      token, profile, std::move(data), std::move(*done));
++      token, profile, parent, std::move(data), std::move(*done));
++  if (verified_manifest) {
++    // These bytes came from the original CRX before RewriteManifestFile.
++    // Permission messages above came from the same retained native Extension.
++    if (verified_manifest->empty() || verified_manifest->size() > kMaxManifestBytes ||
++        !base::IsStringUTF8(*verified_manifest)) {
++      Answer(token, false);
++      return true;
++    }
++    request->SetBool("verifiedCrx", true);
++    Manifest original;
++    original.ok = true;
++    original.text = std::move(*verified_manifest);
++    CEF_POST_TASK(CEF_UIT, base::BindOnce(&DeliverInstall, token, request,
++        parent ? parent->GetWeakPtr() : base::WeakPtr<content::WebContents>(),
++        std::move(original)));
++    return true;
++  }
+   base::ThreadPool::PostTaskAndReplyWithResult(
+       FROM_HERE,
+       {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
+@@ -313,6 +342,14 @@
+ 
+ }  // namespace
+ 
++void CancelInstallConsentFor(content::WebContents* parent) {
++  if (!parent) return;
++  std::vector<std::string> tokens;
++  for (const auto& [token, pending] : GetRegistry())
++    if (pending->OwnsInstallParent(parent)) tokens.push_back(token);
++  for (const auto& token : tokens) Withdrawn(token);
++}
++
+ void InstallConsentHooks() {
+   if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kConsentSwitch)) {
+     return;
+--- a/cef/libcef/browser/views/external_consent.h
++++ b/cef/libcef/browser/views/external_consent.h
+@@ -3,10 +3,12 @@
+ #define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_CONSENT_H_
+ #pragma once
+ 
++namespace content { class WebContents; }
+ namespace cef::external_host {
+ // Sets Chrome's consent hooks when the process runs with
+ // --yab-extension-consent (idempotent). UI thread.
+ void InstallConsentHooks();
++void CancelInstallConsentFor(content::WebContents* parent);
+ }  // namespace cef::external_host
+ 
+ #endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_CONSENT_H_
+--- a/chrome/browser/extensions/extension_install_prompt.cc
++++ b/chrome/browser/extensions/extension_install_prompt.cc
+@@ -132,7 +132,8 @@
+   // We special-case themes to not show any confirm UI. Instead they are
+   // immediately installed, and then we show an infobar (see OnInstallSuccess)
+   // to allow the user to revert if they don't like it.
+-  if (extension->is_theme() && extension->from_webstore() &&
++  if (!prompt_->external_verified_manifest() &&
++      extension->is_theme() && extension->from_webstore() &&
+       prompt_->type() != InstallPromptData::EXTENSION_REQUEST_PROMPT &&
+       prompt_->type() != InstallPromptData::EXTENSION_PENDING_REQUEST_PROMPT) {
+     std::move(done_callback_).Run(DoneCallbackPayload(Result::ACCEPTED));
+@@ -288,8 +289,14 @@
+   // Notify observers.
+   prompt_->OnDialogOpened();
+ 
+-  // If true, auto confirm is enabled and already handled the result.
+-  if (AutoConfirmPromptIfEnabled())
++  const bool mandatory_external_review = prompt_->external_verified_manifest() != nullptr;
++  if (!prompt_->ExternalReviewIsLive()) {
++    prompt_->OnDialogCanceled();
++    std::move(done_callback_).Run(DoneCallbackPayload(Result::ABORTED));
++    return;
++  }
++  // Tests and theme shortcuts cannot auto-accept this verified-package entry.
++  if (!mandatory_external_review && AutoConfirmPromptIfEnabled())
+     return;
+ 
+   // An embedder that asks its own user takes the prompt data and the result
+@@ -303,6 +310,13 @@
+     done_callback_ = std::move(done);
+   }
+ 
++  if (mandatory_external_review) {
++    // No native reviewer means cancel, never an unowned Chrome question.
++    if (prompt_) prompt_->OnDialogCanceled();
++    if (!done_callback_.is_null())
++      std::move(done_callback_).Run(DoneCallbackPayload(Result::ABORTED));
++    return;
++  }
+   if (show_dialog_callback_.is_null())
+     show_dialog_callback_ = GetDefaultShowDialogCallback();
+   // TODO(crbug.com/40625151): Use OnceCallback and eliminate the need for
+--- a/extensions/browser/crx_installer.h
++++ b/extensions/browser/crx_installer.h
+@@ -268,6 +268,9 @@
+   content::BrowserContext* browser_context() { return browser_context_; }
+ 
+   const Extension* extension() const { return extension_.get(); }
++  // UI sequence, after verification/unpack succeeded. Used by a mandatory
++  // native reviewer; not sufficient to authenticate an unpacked-directory load.
++  const std::string& original_manifest_bytes() const { return original_manifest_bytes_; }
+ 
+   // The currently installed version of the extension, for updates. Will be
+   // invalid if this isn't an update.
+@@ -314,6 +317,9 @@
+   void ShouldComputeHashesForOffWebstoreExtension(
+       scoped_refptr<const Extension> extension,
+       base::OnceCallback<void(bool)> callback) override;
++  void OnOriginalManifestRead(const std::string& bytes) override {
++    original_manifest_bytes_ = bytes;
++  }
+   void OnUnpackFailure(const CrxInstallError& error) override;
+   void OnUnpackSuccess(const base::FilePath& temp_dir,
+                        const base::FilePath& extension_dir,
+@@ -482,6 +488,7 @@
+   // A copy of the unmodified original manifest, before any transformations like
+   // localization have taken place.
+   std::unique_ptr<base::DictValue> original_manifest_;
++  std::string original_manifest_bytes_;
+ 
+   // If valid, contains the current version of the extension we're
+   // installing (for upgrades).
+--- a/extensions/browser/install_prompt_data.h
++++ b/extensions/browser/install_prompt_data.h
+@@ -6,6 +6,8 @@
+ #define EXTENSIONS_BROWSER_INSTALL_PROMPT_DATA_H_
+ 
+ #include <string>
++#include <optional>
++#include "base/functional/callback.h"
+ 
+ #include "base/memory/scoped_refptr.h"
+ #include "base/observer_list.h"
+@@ -63,6 +65,20 @@
+ 
+   ~InstallPromptData();
+ 
++  // Internal native verifier metadata. The original bytes are retained with
++  // the same prompt/Extension that supplies Chrome's permission messages.
++  void SetVerifiedManifestForExternalReview(std::string original,
++                                           base::RepeatingCallback<bool()> live) {
++    external_verified_manifest_ = std::move(original);
++    external_review_live_ = std::move(live);
++  }
++  const std::string* external_verified_manifest() const {
++    return external_verified_manifest_ ? &*external_verified_manifest_ : nullptr;
++  }
++  bool ExternalReviewIsLive() const {
++    return !external_verified_manifest_ ||
++        (!external_review_live_.is_null() && external_review_live_.Run());
++  }
+   void AddPermissionSet(const PermissionSet& permissions);
+   void AddPermissionMessages(const PermissionMessages& permissions);
+   void SetWebstoreData(const std::string& localized_user_count,
+@@ -132,6 +148,8 @@
+   void OnDialogCanceled();
+ 
+  private:
++  std::optional<std::string> external_verified_manifest_;
++  base::RepeatingCallback<bool()> external_review_live_;
+   PromptType type_;
+ 
+   // When this is non empty, means that this extension is an initial
+--- a/extensions/browser/sandboxed_unpacker.cc
++++ b/extensions/browser/sandboxed_unpacker.cc
+@@ -982,6 +982,7 @@
+   DCHECK(!temp_dir_.GetPath().empty());
+ 
+   // Client takes ownership of temporary directory, manifest, and extension.
++  client_->OnOriginalManifestRead(original_manifest_bytes_);
+   client_->OnUnpackSuccess(
+       temp_dir_.Take(), extension_root_,
+       std::make_unique<base::DictValue>(std::move(manifest_.value())),
+@@ -1059,6 +1060,7 @@
+     return;
+   }
+ 
++  original_manifest_bytes_ = contents;
+   base::JSONReader::Result result =
+       base::JSONReader::ReadAndReturnValueWithError(
+           contents, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+--- a/extensions/browser/sandboxed_unpacker.h
++++ b/extensions/browser/sandboxed_unpacker.h
+@@ -94,6 +94,10 @@
+       const Extension* extension,
+       const SkBitmap& install_icon,
+       base::DictValue ruleset_install_prefs) = 0;
++  // Exact manifest source before key injection, localization or JSON rewrite.
++  // Called immediately before OnUnpackSuccess on the same unpacker sequence.
++  // Directory installs can reach this too; only a CRX verifier establishes trust.
++  virtual void OnOriginalManifestRead(const std::string& bytes) {}
+   virtual void OnUnpackFailure(const CrxInstallError& error) = 0;
+ 
+   // Called after stage of installation is changed.
+@@ -275,6 +279,7 @@
+   // extension and working with its manifest, so after UnpackExtensionSucceeded
+   // is called.
+   std::optional<base::DictValue> manifest_;
++  std::string original_manifest_bytes_;
+ 
+   // Install prefs needed for the Declarative Net Request API.
+   base::DictValue ruleset_install_prefs_;

@@ -1,0 +1,287 @@
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -50,6 +50,7 @@
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_AUDIBLE_VERSION 1
+ #define CEF_YAB_BACKGROUND_COLOR_VERSION 1
++#define CEF_YAB_SELECT_MENU_VERSION 1
+ 
+ ///
+ /// Implement this interface to handle events related to browser display state.
+@@ -208,6 +209,29 @@
+   virtual void OnBackgroundColorChange(CefRefPtr<CefBrowser> browser,
+                                        cef_color_t color,
+                                        bool has_color) {}
++
++  ///
++  /// Called on macOS for an externally hosted browser when the page opens a
++  /// <select> popup. |menu| has token, x/y/width/height of the element in
++  /// root-page DIP, fontSize, rightAligned, selected and items (each with
++  /// label, toolTip, type option/checkable/group/separator/submenu, enabled,
++  /// checked). Return true to present it and answer through
++  /// CefWindow::ReplyExternalSelect exactly once; false cancels the popup.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool OnExternalSelectMenu(CefRefPtr<CefBrowser> browser,
++                                    CefRefPtr<CefDictionaryValue> menu) {
++    return false;
++  }
++
++  ///
++  /// Called when Chromium withdraws the <select> popup with |token| (page
++  /// navigation, element removal, hide). Close the embedder's presentation;
++  /// a later reply for |token| is ignored.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnExternalSelectMenuDismissed(CefRefPtr<CefBrowser> browser,
++                                             int token) {}
+ #endif
+ 
+ #if CEF_API_ADDED(13700)
+--- a/cef/include/views/cef_window.h
++++ b/cef/include/views/cef_window.h
+@@ -48,6 +48,7 @@
+ // Experimental source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_EXTERNAL_HOST_VERSION 1
+ #define CEF_YAB_EXTERNAL_FOCUS_VERSION 1
++#define CEF_YAB_EXTERNAL_SELECT_VERSION 1
+ 
+ class CefBrowserView;
+ class CefView;
+@@ -96,6 +97,17 @@
+   /*--cef(added=experimental)--*/
+   virtual bool SetExternalFocus(CefRefPtr<CefBrowserView> browser_view,
+                                 bool focused) = 0;
++
++  ///
++  /// Answer the <select> popup announced by
++  /// CefDisplayHandler::OnExternalSelectMenu for |browser_view| in this window.
++  /// |index| is the chosen item or -1 to cancel. Returns false for an unknown,
++  /// stale or already answered |token|; such a reply has no effect.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool ReplyExternalSelect(CefRefPtr<CefBrowserView> browser_view,
++                                   int token,
++                                   int index) = 0;
+ #endif
+ 
+   ///
+--- a/cef/libcef/browser/views/external_host_mac.h	2026-10-26 22:54:23
++++ b/cef/libcef/browser/views/external_host_mac.h	2026-10-26 22:55:05
+@@ -9,5 +9,6 @@
+ bool SetFocus(views::Widget* widget, CefRefPtr<CefBrowserView> browser_view,
+               bool focused);
+ void Attach(views::Widget* widget, CefBrowserHostBase* browser);
++bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index);
+ }  // namespace cef::external_host
+ #endif
+--- a/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 22:54:24
++++ b/cef/libcef/browser/views/external_host_mac.mm	2026-10-26 22:55:05
+@@ -18,8 +18,143 @@
+ #include "content/public/browser/web_contents_user_data.h"
+ #include "base/scoped_observation.h"
+ #include "ui/views/widget/widget_observer.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "cef/include/cef_values.h"
++#include "mojo/public/cpp/bindings/receiver.h"
+ 
+ namespace cef::external_host {
++namespace {
++// Delegates <select> popups of an externally hosted WebContents to the CEF
++// client. One popup at a time; a new one cancels the previous. Hide on the
++// PopupMenuRunner pipe (navigation, element removal) withdraws it.
++class ExternalSelect : public content::WebContentsObserver,
++                       public remote_cocoa::mojom::PopupMenuRunner,
++                       public content::WebContentsUserData<ExternalSelect> {
++ public:
++  void Install() {
++    if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !web_contents()) return;
++    auto* view = web_contents()->GetRenderWidgetHostView();
++    if (!view || static_cast<content::RenderWidgetHostViewBase*>(view)
++                     ->IsRenderWidgetHostViewChildFrame()) return;
++    static_cast<content::RenderWidgetHostViewMac*>(view)->SetExternalSelectCallback(
++        base::BindRepeating(&ExternalSelect::Show, weak_factory_.GetWeakPtr()));
++  }
++  void Uninstall() {
++    Finish(std::nullopt, true);
++    if (!web_contents()) return;
++    if (auto* view = web_contents()->GetRenderWidgetHostView()) {
++      if (!static_cast<content::RenderWidgetHostViewBase*>(view)
++               ->IsRenderWidgetHostViewChildFrame())
++        static_cast<content::RenderWidgetHostViewMac*>(view)
++            ->SetExternalSelectCallback({});
++    }
++  }
++  bool Reply(int token, int index) {
++    if (!closed_ || token != token_) return false;
++    if (index < 0 || index >= count_) Finish(std::nullopt, false);
++    else Finish(static_cast<uint32_t>(index), false);
++    return true;
++  }
++  // PopupMenuRunner:
++  void Hide() override { Finish(std::nullopt, true); }
++  // WebContentsObserver:
++  void RenderViewReady() override { Install(); }
++  void RenderViewHostChanged(content::RenderViewHost*,
++                             content::RenderViewHost*) override {
++    Finish(std::nullopt, true);
++    Install();
++  }
++  void WebContentsDestroyed() override {
++    closed_.Reset();
++    receiver_.reset();
++    Observe(nullptr);
++  }
++
++ private:
++  friend class content::WebContentsUserData<ExternalSelect>;
++  explicit ExternalSelect(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<ExternalSelect>(*contents) {}
++
++  static const char* TypeName(blink::mojom::MenuItem::Type type) {
++    switch (type) {
++      case blink::mojom::MenuItem::Type::kCheckableOption: return "checkable";
++      case blink::mojom::MenuItem::Type::kGroup: return "group";
++      case blink::mojom::MenuItem::Type::kSeparator: return "separator";
++      case blink::mojom::MenuItem::Type::kSubMenu: return "submenu";
++      default: return "option";
++    }
++  }
++
++  void Show(remote_cocoa::mojom::PopupMenuPtr menu,
++            base::OnceCallback<void(std::optional<uint32_t>)> closed) {
++    Finish(std::nullopt, true);
++    auto browser = CefBrowserHostBase::GetBrowserForContents(web_contents());
++    auto client = browser ? browser->client() : nullptr;
++    auto handler = client ? client->GetDisplayHandler() : nullptr;
++    if (!handler) {
++      std::move(closed).Run(std::nullopt);
++      return;
++    }
++    token_ = ++sequence_;
++    count_ = static_cast<int>(menu->items.size());
++    closed_ = std::move(closed);
++    receiver_.reset();
++    receiver_.Bind(std::move(menu->receiver));
++    receiver_.set_disconnect_handler(base::BindOnce(
++        &ExternalSelect::Hide, base::Unretained(this)));
++    auto value = CefDictionaryValue::Create();
++    value->SetInt("token", token_);
++    value->SetInt("x", menu->bounds.x());
++    value->SetInt("y", menu->bounds.y());
++    value->SetInt("width", menu->bounds.width());
++    value->SetInt("height", menu->bounds.height());
++    value->SetDouble("fontSize", menu->item_font_size);
++    value->SetBool("rightAligned", menu->right_aligned);
++    value->SetInt("selected", static_cast<int>(menu->selected_item));
++    auto items = CefListValue::Create();
++    items->SetSize(menu->items.size());
++    for (size_t i = 0; i < menu->items.size(); ++i) {
++      const auto& item = menu->items[i];
++      auto row = CefDictionaryValue::Create();
++      row->SetString("label", item->label.value_or(std::string()));
++      row->SetString("toolTip", item->tool_tip.value_or(std::string()));
++      row->SetString("type", TypeName(item->type));
++      row->SetBool("enabled", item->enabled);
++      row->SetBool("checked", item->checked);
++      items->SetDictionary(i, row);
++    }
++    value->SetList("items", items);
++    const int token = token_;
++    auto self = weak_factory_.GetWeakPtr();
++    // The client may reply synchronously or close the browser.
++    const bool presented = handler->OnExternalSelectMenu(browser.get(), value);
++    if (self && !presented && token_ == token) Finish(std::nullopt, false);
++  }
++
++  void Finish(std::optional<uint32_t> index, bool withdrawn) {
++    if (!closed_) return;
++    const int token = token_;
++    auto closed = std::move(closed_);
++    receiver_.reset();
++    if (withdrawn && web_contents()) {
++      auto browser = CefBrowserHostBase::GetBrowserForContents(web_contents());
++      auto client = browser ? browser->client() : nullptr;
++      if (auto handler = client ? client->GetDisplayHandler() : nullptr)
++        handler->OnExternalSelectMenuDismissed(browser.get(), token);
++    }
++    std::move(closed).Run(index);
++  }
++
++  base::OnceCallback<void(std::optional<uint32_t>)> closed_;
++  mojo::Receiver<remote_cocoa::mojom::PopupMenuRunner> receiver_{this};
++  int token_ = 0, sequence_ = 0, count_ = 0;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++  base::WeakPtrFactory<ExternalSelect> weak_factory_{this};
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalSelect);
++}  // namespace
++
+ bool Enable(views::Widget* widget) {
+   auto* host = widget ? views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
+                             widget->GetNativeWindow()) : nullptr;
+@@ -90,8 +225,12 @@
+       widget->GetNativeWindow());
+   if (host && host->externally_hosted()) {
+     ExternalVisibility::GetOrCreateForWebContents(contents)->Bind(widget);
+-  } else if (auto* owner = ExternalVisibility::FromWebContents(contents)) {
+-    owner->Reset();
++    ExternalSelect::GetOrCreateForWebContents(contents)->Install();
++  } else {
++    if (auto* owner = ExternalVisibility::FromWebContents(contents))
++      owner->Reset();
++    if (auto* select = ExternalSelect::FromWebContents(contents))
++      select->Uninstall();
+   }
+ }
+ namespace {
+@@ -213,6 +352,13 @@
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalFocus);
+ }  // namespace
++
++bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index) {
++  auto browser = CefBrowserHostBase::FromBrowser(browser_view->GetBrowser());
++  auto* contents = browser ? browser->GetWebContents() : nullptr;
++  auto* select = contents ? ExternalSelect::FromWebContents(contents) : nullptr;
++  return select && select->Reply(token, index);
++}
+ 
+ bool SetFocus(views::Widget* widget, CefRefPtr<CefBrowserView> browser_view,
+               bool focused) {
+--- a/cef/libcef/browser/views/window_impl.cc
++++ b/cef/libcef/browser/views/window_impl.cc
+@@ -175,6 +175,20 @@
+ #endif
+ }
+ 
++bool CefWindowImpl::ReplyExternalSelect(CefRefPtr<CefBrowserView> browser_view,
++                                        int token,
++                                        int index) {
++  CEF_REQUIRE_VALID_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  if (!widget_ || !browser_view) return false;
++  auto* view_impl = static_cast<CefBrowserViewImpl*>(browser_view.get());
++  if (view_impl->cef_window_impl() != this) return false;
++  return cef::external_host::ReplySelect(browser_view, token, index);
++#else
++  return false;
++#endif
++}
++
+ void CefWindowImpl::Show() {
+   CEF_REQUIRE_VALID_RETURN_VOID();
+   if (widget_) {
+--- a/cef/libcef/browser/views/window_impl.h
++++ b/cef/libcef/browser/views/window_impl.h
+@@ -48,6 +48,9 @@
+   bool EnableExternalHosting() override;
+   bool SetExternalFocus(CefRefPtr<CefBrowserView> browser_view,
+                          bool focused) override;
++  bool ReplyExternalSelect(CefRefPtr<CefBrowserView> browser_view,
++                           int token,
++                           int index) override;
+   void ShowAsBrowserModalDialog(
+       CefRefPtr<CefBrowserView> browser_view) override;
+   void Hide() override;

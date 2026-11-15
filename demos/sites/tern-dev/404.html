@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script type="module" src="/@vite/client"></script>
+
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Page not found · Tern</title>
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/src/styles/tokens.css" />
+    <link rel="stylesheet" href="/src/styles/base.css" />
+  </head>
+  <body data-page="not-found">
+    <header class="site-header" data-header>
+      <div class="container site-header__inner">
+        <a class="logo" href="/" aria-label="Tern home">
+          <svg class="logo__mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="tern-mark-head" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#2a807c" />
+                <stop offset="1" stop-color="#0e3332" />
+              </linearGradient>
+            </defs>
+            <rect width="32" height="32" rx="8" fill="url(#tern-mark-head)" />
+            <path fill="#ef6a43" d="M15.3 11.8 16 8l.7 3.8z" />
+            <g fill="#fff">
+              <path d="M15 14.2c-3.2-2.8-7-4.8-11.5-5.6 3.1 2.8 6.4 6 11.5 9z" />
+              <path d="M17 14.2c3.2-2.8 7-4.8 11.5-5.6-3.1 2.8-6.4 6-11.5 9z" />
+              <path d="M16 10.9c1.5 1.9 1.9 5.3 1.1 9.8h-2.2c-.8-4.5-.4-7.9 1.1-9.8z" />
+              <path d="M14.9 20.2c-.7 2.4-1.5 4.7-2.7 7.2 1.5-1.5 2.7-2.8 3.8-4.2 1.1 1.4 2.3 2.7 3.8 4.2-1.2-2.5-2-4.8-2.7-7.2z" />
+            </g>
+          </svg>
+          <span>Tern</span>
+        </a>
+        <nav class="nav" aria-label="Main">
+          <a class="nav__link" href="/#product">Product</a>
+          <a class="nav__link" href="/pricing">Pricing</a>
+          <a class="nav__link" href="/changelog">Changelog <span class="badge" data-tone="coral">New</span></a>
+          <a class="nav__link" href="/docs">Docs</a>
+        </nav>
+        <div class="site-header__actions">
+          <a class="button button--ghost button--sm site-header__signin" href="/signin" data-session>Sign in</a>
+          <a class="button button--primary button--sm" href="/signup" data-start="header">Start free</a>
+          <button class="button button--secondary button--sm site-header__menu" type="button" aria-label="Open menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h16M4 16h16" /></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="not-found">
+      <div class="container">
+        <span class="eyebrow">404</span>
+        <h1>This page flew south</h1>
+        <p>We couldn't find what you were looking for. It may have moved, or Tern 2.0 hasn't landed it yet.</p>
+        <div class="not-found__actions">
+          <a class="button" href="/">Back home</a>
+          <a class="button button--secondary" href="/pricing">See pricing</a>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer site-footer--slim">
+      <div class="container">
+        <div class="footer-bottom">
+          <span>© 2026 Tern Labs AB · Stockholm, Sweden</span>
+          <nav aria-label="Elsewhere">
+            <a href="/status">Status</a>
+            <a href="mailto:hello@ternlabs.com">hello@ternlabs.com</a>
+          </nav>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

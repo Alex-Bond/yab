@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{> head}}
+<title>{{title}} · Paper</title>
+</head>
+<body class="doc-page">
+{{> icons}}
+<header class="bar">
+  <div class="bar-l">
+    <a class="logo" href="/" title="All docs">{{> mark}}</a>
+    <nav class="crumbs" aria-label="Location">{{{crumbs}}}<span class="crumb-doc">{{title}}</span></nav>
+    <button class="star" type="button" title="Add to Starred" aria-pressed="false"><svg class="i"><use href="#i-star"/></svg></button>
+    <span class="edited" id="edited">{{edited}}</span>
+  </div>
+  <div class="bar-r">
+    <span class="saved" id="saved" data-state="saved" role="status"><svg class="i"><use href="#i-cloud"/></svg><span>Saved</span></span>
+    <div class="people">{{{people}}}</div>
+    <button class="icon-btn comments-btn" type="button" id="comments-btn" title="Comments"><svg class="i"><use href="#i-comment"/></svg><span>{{count}}</span></button>
+    <div class="share">
+      <button class="btn btn-dark" type="button" id="share-btn" aria-haspopup="dialog" aria-expanded="false"><svg class="i"><use href="#i-{{share_icon}}"/></svg>Share</button>
+      <div class="share-pop" id="share-pop" role="dialog" aria-label="Share" hidden>
+        <div class="sp-h"><b>Share</b><span>{{title}}</span></div>
+        <div class="sp-invite"><input type="text" placeholder="Add people, emails or groups" aria-label="Invite"><button class="btn btn-dark btn-md" type="button">Invite</button></div>
+        <ul class="sp-people">
+          <li><span class="av av-ML">ML</span><div><b>Mira Lindqvist <i>(you)</i></b><small>mira@ternlabs.com</small></div><span class="role">Can edit</span></li>
+          <li><span class="av av-AE">AE</span><div><b>Anna Ek</b><small>anna@ternlabs.com</small></div><span class="role">Owner</span></li>
+          <li><span class="av av-JB">JB</span><div><b>Jonas Berg</b><small>jonas@ternlabs.com</small></div><span class="role">Can edit<svg class="i"><use href="#i-down"/></svg></span></li>
+          <li><span class="av av-EP">EP</span><div><b>Elliot Park</b><small>elliot@ternlabs.com</small></div><span class="role">Can comment<svg class="i"><use href="#i-down"/></svg></span></li>
+        </ul>
+        <div class="sp-access"><span class="sp-globe"><svg class="i"><use href="#i-users"/></svg></span><div><b>Everyone at Tern Labs</b><small>Can find and comment</small></div><svg class="i"><use href="#i-down"/></svg></div>
+        <div class="sp-foot"><button class="btn btn-light btn-md" type="button" id="copy-link"><svg class="i"><use href="#i-link"/></svg><span>Copy link</span></button><button class="btn btn-dark btn-md" type="button" id="share-done">Done</button></div>
+      </div>
+    </div>
+    <button class="icon-btn" type="button" title="More"><svg class="i"><use href="#i-more"/></svg></button>
+    <span class="av av-ML me" title="Mira Lindqvist">ML</span>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="outline" aria-label="Outline">
+    <div class="side-h">Outline</div>
+    <nav id="outline"></nav>
+  </aside>
+  <main class="canvas">
+    <article class="sheet">
+      <div class="editor" id="editor" contenteditable="true" spellcheck="true" data-slug="{{slug}}" data-world="{{world}}" data-empty="{{empty}}">
+{{{body}}}
+      </div>
+      <script>
+        // The copy kept in this browser, unless the world was built again since or ?reset asks for a clean one.
+        (function () {
+          var ed = document.getElementById("editor"), key = "paper:doc:" + ed.dataset.slug, kept = null;
+          try {
+            if (/[?&]reset\b/.test(location.search)) { localStorage.removeItem(key); history.replaceState(null, "", location.pathname); }
+            kept = JSON.parse(localStorage.getItem(key) || "null");
+          } catch (e) {}
+          if (kept && kept.world === ed.dataset.world && typeof kept.html === "string" && kept.html.trim()) {
+            ed.innerHTML = kept.html;
+            ed.dataset.restored = kept.at || "";
+          }
+        })();
+      </script>
+    </article>
+  </main>
+  <aside class="rail" id="rail" aria-label="Comments">{{{comments}}}</aside>
+</div>
+<script src="/assets/editor.js" defer></script>
+</body>
+</html>

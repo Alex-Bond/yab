@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "geckoVersion": "158.0.20261021001945",
+  "mozillaRevision": "e4ce606692cd81e6898547e2edd7c552fefcbb04",
+  "upstreamRepository": "https://hg.mozilla.org/releases/mozilla-release",
+  "upstreamAar": {
+    "url": "https://maven.mozilla.org/maven2/org/mozilla/geckoview/geckoview/158.0.20261021001945/geckoview-158.0.20261021001945.aar",
+    "sha256": "45c5c4e452ad7b52778c27bc5e7583f3cb182df4c6615e42849afe2b8a2d71ba",
+    "source": "official-Maven-sha256-sidecar-and-POM-scm-tag",
+    "downloaded": false
+  },
+  "files": [
+    {
+      "path": "mobile/android/geckoview/src/main/java/org/mozilla/geckoview/StorageController.java",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/StorageController.java",
+      "bytes": 12619,
+      "sha256": "758c22b0b5815fb3dd74632231a75abc4c9645032d9b166b32f92d369e19b971"
+    },
+    {
+      "path": "mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs",
+      "bytes": 8416,
+      "sha256": "427027c14b47c1904ef75240962b225468e38155d6e34ae86b8f1ef06737913f"
+    },
+    {
+      "path": "mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs",
+      "bytes": 19758,
+      "sha256": "8cf315acdae8ee0b886439cca3635fbc9bf78e1d13ea39a1020b27fc3c6a60b0"
+    },
+    {
+      "path": "mobile/shared/modules/geckoview/moz.build",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/mobile/shared/modules/geckoview/moz.build",
+      "bytes": 1644,
+      "sha256": "09ac411291a259287c88e88154a09df2f5dbd15e592a357c8173369999a5a011"
+    },
+    {
+      "path": "toolkit/components/cleardata/ClearDataService.sys.mjs",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/toolkit/components/cleardata/ClearDataService.sys.mjs",
+      "bytes": 78242,
+      "sha256": "0a9bfaea05baabb77530599ae860ad0020dfd997934f3a77ec59fa78c58dff71"
+    },
+    {
+      "path": "netwerk/cache2/nsICacheStorageService.idl",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/netwerk/cache2/nsICacheStorageService.idl",
+      "bytes": 4800,
+      "sha256": "a1279315530dcd6136e545c8d0ee1a8c02eab0900045ff5f7bcedf79b15051a0"
+    },
+    {
+      "path": "netwerk/cache2/nsICacheStorageVisitor.idl",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/netwerk/cache2/nsICacheStorageVisitor.idl",
+      "bytes": 1130,
+      "sha256": "4f1570db7c8eb43a507b1e43a0a5221c1aa1d862b7f7bcca01c78080320e28e0"
+    },
+    {
+      "path": "netwerk/cache2/nsICacheStorage.idl",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/netwerk/cache2/nsICacheStorage.idl",
+      "bytes": 6902,
+      "sha256": "f30219502c279477e12f3e3462c9673b44abf8e4e700bf09d92f9259960b7079"
+    },
+    {
+      "path": "netwerk/cache2/nsICacheEntryDoomCallback.idl",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/netwerk/cache2/nsICacheEntryDoomCallback.idl",
+      "bytes": 496,
+      "sha256": "c2634eae0562b26d70f2cc1d64e44c39f8680f7161e6bc7c61b0683eadbe8af8"
+    },
+    {
+      "path": "netwerk/base/nsILoadContextInfo.idl",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/netwerk/base/nsILoadContextInfo.idl",
+      "bytes": 2362,
+      "sha256": "e1ab7974f63df787dff3dfaadae9e1fc84a1d795b29a5213642d972e28f3794c"
+    },
+    {
+      "path": "dom/media/nsIMediaManager.idl",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/dom/media/nsIMediaManager.idl",
+      "bytes": 1618,
+      "sha256": "3af0b5a29f62c4a1c2874982dc44f674dc790b89ff6c1995e522e2b4daa37520"
+    },
+    {
+      "path": "dom/media/systemservices/MediaParent.cpp",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/dom/media/systemservices/MediaParent.cpp",
+      "bytes": 17437,
+      "sha256": "7ad788b0bd18dfa23cabd941dc24fb4d2c2d2fe8988be02b333dcf489a739b47"
+    },
+    {
+      "path": "dom/media/systemservices/MediaParent.h",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/dom/media/systemservices/MediaParent.h",
+      "bytes": 2691,
+      "sha256": "7511531455c9cd3d71a76bf474de04d93b3ff961bbd228ae93b9e0019cee9062"
+    },
+    {
+      "path": "dom/media/eme/mediadrm/MediaDrmRemoteCDMParent.cpp",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/dom/media/eme/mediadrm/MediaDrmRemoteCDMParent.cpp",
+      "bytes": 33138,
+      "sha256": "1c53dcedea8fb1d283d12da2006607f89c85352fd61c36fb12c1f066d08cce94"
+    },
+    {
+      "path": "dom/media/eme/mediadrm/MediaDrmRemoteCDMParent.h",
+      "url": "https://hg.mozilla.org/releases/mozilla-release/raw-file/e4ce606692cd81e6898547e2edd7c552fefcbb04/dom/media/eme/mediadrm/MediaDrmRemoteCDMParent.h",
+      "bytes": 5471,
+      "sha256": "2f68669516c4c2ee2c940be8beb56c464c30e4730eca6aacf2d4cae1ed945139"
+    }
+  ],
+  "patchAppliedToApp": false,
+  "nativeAcceptance": false
+}

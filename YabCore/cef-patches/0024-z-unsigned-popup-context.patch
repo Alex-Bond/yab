@@ -1,0 +1,13 @@
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -464,7 +464,9 @@
+   auto* host = ExternalPopup::FromWebContents(popup);
+   value->SetInt("windowNumber", host ? host->window_number : 0);
+   if (context || std::string(state) == "frame") {
+-    value->SetInt("contextId", static_cast<int>(context));
++    // CAContext is uint32_t. Signed JSON int would trap the Swift UInt32
++    // consumer for contexts above INT32_MAX. IEEE double preserves all 32 bits.
++    value->SetDouble("contextId", static_cast<double>(context));
+     value->SetInt("pixelWidth", pixels.width());
+     value->SetInt("pixelHeight", pixels.height());
+     value->SetDouble("scale", scale);

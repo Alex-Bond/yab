@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "iphone-zero-tabs",
+  "summary": "iPhone: close the last tab and keep zero tabs",
+  "owner_session": "",
+  "origin_commits": [],
+  "platform": "ios",
+  "paths": [
+    "Phone/Sources/Model/BrowserStore.swift",
+    "Phone/Sources/Model/BrowserProfile.swift",
+    "Phone/Sources/Sync/SyncMapping.swift",
+    "Phone/Sources/Tabs/TabRecency.swift",
+    "Phone/Sources/Tabs/TabStack.swift",
+    "Phone/Sources/Chrome/ChromeNativeMenu.swift",
+    "Phone/Sources/Chrome/SharedBottomToolbar.swift",
+    "Phone/Sources/Chrome/PlateView.swift",
+    "Phone/Sources/Welcome/WelcomeLayer.swift"
+  ],
+  "suites": [
+    "YabPhoneTests.TabStackTests",
+    "YabPhoneTests.SyncBridgeTests"
+  ],
+  "checks": [],
+  "probes": [],
+  "manual": [
+    "With pins and kept tabs, close the last today's tab: empty page, + New Tab on the plate, no pin in front. Tap the plate: New Tab field.",
+    "One today's tab: the right button is +. Hold it: New Tab, New Private Tab, All Tabs. Swipe the one card away: empty page with Undo; Undo brings the tab back.",
+    "Fresh install, finish the welcome: zero tabs, New Tab field and keyboard. Cancel: empty page.",
+    "Paired with a Mac: zero tabs on the iPhone leaves the Mac's pins and kept in place, closed tabs do not return, a tab opened on the Mac waits in the stack without coming in front."
+  ],
+  "needs": [],
+  "avoid_hosts": [],
+  "request_ids": [1260]
+}

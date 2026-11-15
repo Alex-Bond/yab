@@ -1,0 +1,68 @@
+--- a/chrome/browser/external_file_origin.h
++++ b/chrome/browser/external_file_origin.h
+@@ -4,6 +4,7 @@
+ #include <map>
+ #include <vector>
+ #include "base/no_destructor.h"
++#include "base/unguessable_token.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "ui/shell_dialogs/select_file_dialog.h"
+@@ -12,6 +13,7 @@
+ struct Source {
+   content::WeakDocumentPtr document;
+   std::vector<std::u16string> accepts;
++  base::UnguessableToken generation;
+ };
+ inline auto& Origins() {
+   static base::NoDestructor<std::map<Listener*, Source>> origins;
+@@ -25,7 +27,7 @@
+ };
+ inline void Set(Listener* listener, content::RenderFrameHost* frame,
+                 const std::vector<std::u16string>& accepts) {
+-  if (frame && !suppressed) Origins().insert_or_assign(listener, Source{frame->GetWeakDocumentPtr(), accepts});
++  if (frame && !suppressed) Origins().insert_or_assign(listener, Source{frame->GetWeakDocumentPtr(), accepts, base::UnguessableToken::Create()});
+ }
+ inline bool Has(Listener* listener) { return Origins().contains(listener); }
+ inline void Remove(Listener* listener) { Origins().erase(listener); }
+--- a/cef/libcef/browser/external_file_dialog.cc
++++ b/cef/libcef/browser/external_file_dialog.cc
+@@ -16,6 +16,7 @@
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/visibility.h"
+ #include "ui/shell_dialogs/selected_file_info.h"
+ namespace cef::external_file {
+ namespace {
+@@ -53,6 +54,7 @@
+   bool Live() const {
+     auto* frame = document_.AsRenderFrameHostIfValid();
+     if (done_ || !listener_ || !web_contents() || web_contents()->IsBeingDestroyed() ||
++        web_contents()->GetVisibility() == content::Visibility::HIDDEN ||
+         !frame || !frame->IsActive() || !frame->IsRenderFrameLive() ||
+         content::WebContents::FromRenderFrameHost(frame) != web_contents()) return false;
+     auto* tab = tabs::TabInterface::MaybeGetFromContents(web_contents());
+@@ -154,8 +156,21 @@
+   }
+   // No pending request is inferred from renderer Page.fileChooserOpened.
+   // This entry is called only by SelectFileImpl after Chrome's policy passed.
+-  if (Requests().contains(listener)) return false;
++  const auto generation = external_file_origin::Origins().at(listener).generation;
++  const auto original_document = frame->GetWeakDocumentPtr();
++  CancelForContents(browser->GetWebContents());
++  // Cancelling the old request can reenter client code and retire this new
++  // listener, even allocating a different chooser at the same address.
++  const auto origin = external_file_origin::Origins().find(listener);
++  if (origin == external_file_origin::Origins().end() || origin->second.generation != generation)
++    return true;  // The original listener was already retired; never call a replacement.
++  frame = original_document.AsRenderFrameHostIfValid();
++  if (!frame || !frame->IsActive() || !frame->IsRenderFrameLive() || !browser->IsValid() ||
++      content::WebContents::FromRenderFrameHost(frame) != browser->GetWebContents()) {
++    listener->FileSelectionCanceled(); return true;
++  }
+   CefRefPtr<Callback> callback = new Callback(listener, frame, handler, mode);
++  if (!callback->Live()) { callback->Cancel(); return true; }
+   Requests().emplace(listener, callback);
+   auto receipt = callback->receipt();
+   receipt->SetInt("browserId", browser->GetIdentifier());

@@ -1,0 +1,31 @@
+{
+  "upstreamRevision": "ac19329a1d32108fd05ead15568cb6e188f8615a",
+  "startedAt": "2026-10-23T05:39:24.909900+00:00",
+  "kotlinVersion": "2.4.21",
+  "compilerSha256": "dc96436fac5160a39a071f3b82d7683f2912bbbf19fe7e26be66533c045a824e",
+  "composePluginSha256": "a53ea73d82469e29372f6eeaad3138b3cb45edd0ca400d0c6b91ceb26a08b3a9",
+  "probeSha256": "02c69d8ac2effe06e3720edcf7ba759cc61e9cb40dc37da29ccbb97fd2ee131d",
+  "inputManifestSha256": "beaed7025181e303e955835343d6924148bb87e80fc394038091c73c1ffc648b",
+  "classpathEntries": 185,
+  "expandedClassesBytes": 44613476,
+  "exitCode": 0,
+  "compiled": true,
+  "gnTargetBuilt": false,
+  "chromeActivityRendered": false,
+  "privateYabUiCompiled": false,
+  "apkBuilt": false,
+  "sourceUnchanged": true,
+  "artifacts": [
+    {
+      "path": "classes/org/chromium/chrome/browser/yab/probe/ComposableSingletons$YabChromeUiProbeKt.class",
+      "bytes": 3851,
+      "sha256": "2c240b09c79d58fa6a7e84088e77dfa65dae32c01564b2dd4c18c80897ea4258"
+    },
+    {
+      "path": "classes/org/chromium/chrome/browser/yab/probe/YabChromeUiProbeKt.class",
+      "bytes": 5133,
+      "sha256": "65f684d34cc4a1de16d76abae92db29d51878e22c8a7f5af0e74d8bb2e9eff7a"
+    }
+  ],
+  "composeTransformedSignature": true
+}

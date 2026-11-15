@@ -1,0 +1,1349 @@
+{
+  "nativeFieldUiVerified" : false,
+  "nowEpochSeconds" : 1790334000,
+  "rates" : {
+    "BTC" : 1.0000000000000001e-05,
+    "ETH" : 0.00029999999999999997,
+    "EUR" : 0.90000000000000002,
+    "GBP" : 0.80000000000000004,
+    "JPY" : 150,
+    "LINK" : 0.10000000000000001,
+    "USD" : 1
+  },
+  "schemaVersion" : 1,
+  "source" : "actual current Sources\/Fast\/Calculator.swift",
+  "units" : [
+    {
+      "base" : "m",
+      "coefficient" : 0.001,
+      "name" : "Millimeters",
+      "offset" : 0,
+      "symbol" : "mm",
+      "words" : [
+        "mm",
+        "millimeter",
+        "millimeters",
+        "millimetre",
+        "millimetres"
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 0.01,
+      "name" : "Centimeters",
+      "offset" : 0,
+      "symbol" : "cm",
+      "words" : [
+        "cm",
+        "centimeter",
+        "centimeters",
+        "centimetre",
+        "centimetres"
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 1,
+      "name" : "Meters",
+      "offset" : 0,
+      "symbol" : "m",
+      "words" : [
+        "m",
+        "meter",
+        "meters",
+        "metre",
+        "metres"
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 1000,
+      "name" : "Kilometers",
+      "offset" : 0,
+      "symbol" : "km",
+      "words" : [
+        "km",
+        "kilometer",
+        "kilometers",
+        "kilometre",
+        "kilometres"
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 0.025399999999999999,
+      "name" : "Inches",
+      "offset" : 0,
+      "symbol" : "in",
+      "words" : [
+        "in",
+        "inch",
+        "inches",
+        "\""
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 0.30480000000000002,
+      "name" : "Feet",
+      "offset" : 0,
+      "symbol" : "ft",
+      "words" : [
+        "ft",
+        "foot",
+        "feet",
+        "'"
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 0.91439999999999999,
+      "name" : "Yards",
+      "offset" : 0,
+      "symbol" : "yd",
+      "words" : [
+        "yd",
+        "yard",
+        "yards"
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 1609.3440000000001,
+      "name" : "Miles",
+      "offset" : 0,
+      "symbol" : "mi",
+      "words" : [
+        "mi",
+        "mile",
+        "miles"
+      ]
+    },
+    {
+      "base" : "m",
+      "coefficient" : 1852,
+      "name" : "Nautical Miles",
+      "offset" : 0,
+      "symbol" : "nmi",
+      "words" : [
+        "nmi",
+        "nautical mile",
+        "nautical miles"
+      ]
+    },
+    {
+      "base" : "kg",
+      "coefficient" : 9.9999999999999995e-07,
+      "name" : "Milligrams",
+      "offset" : 0,
+      "symbol" : "mg",
+      "words" : [
+        "mg",
+        "milligram",
+        "milligrams"
+      ]
+    },
+    {
+      "base" : "kg",
+      "coefficient" : 0.001,
+      "name" : "Grams",
+      "offset" : 0,
+      "symbol" : "g",
+      "words" : [
+        "g",
+        "gram",
+        "grams",
+        "gramme",
+        "grammes"
+      ]
+    },
+    {
+      "base" : "kg",
+      "coefficient" : 1,
+      "name" : "Kilograms",
+      "offset" : 0,
+      "symbol" : "kg",
+      "words" : [
+        "kg",
+        "kilogram",
+        "kilograms",
+        "kilo",
+        "kilos"
+      ]
+    },
+    {
+      "base" : "kg",
+      "coefficient" : 1000,
+      "name" : "Tonnes",
+      "offset" : 0,
+      "symbol" : "t",
+      "words" : [
+        "t",
+        "tonne",
+        "tonnes",
+        "ton",
+        "tons"
+      ]
+    },
+    {
+      "base" : "kg",
+      "coefficient" : 0.0283495,
+      "name" : "Ounces",
+      "offset" : 0,
+      "symbol" : "oz",
+      "words" : [
+        "oz",
+        "ounce",
+        "ounces"
+      ]
+    },
+    {
+      "base" : "kg",
+      "coefficient" : 0.453592,
+      "name" : "Pounds",
+      "offset" : 0,
+      "symbol" : "lb",
+      "words" : [
+        "lb",
+        "lbs",
+        "pound",
+        "pounds"
+      ]
+    },
+    {
+      "base" : "kg",
+      "coefficient" : 6.3502900000000002,
+      "name" : "Stones",
+      "offset" : 0,
+      "symbol" : "st",
+      "words" : [
+        "st",
+        "stone",
+        "stones"
+      ]
+    },
+    {
+      "base" : "K",
+      "coefficient" : 1,
+      "name" : "Celsius",
+      "offset" : 273.14999999999998,
+      "symbol" : "°C",
+      "words" : [
+        "c",
+        "°c",
+        "celsius",
+        "degc",
+        "degrees celsius",
+        "°"
+      ]
+    },
+    {
+      "base" : "K",
+      "coefficient" : 0.55555555555557135,
+      "name" : "Fahrenheit",
+      "offset" : 255.37222222222428,
+      "symbol" : "°F",
+      "words" : [
+        "f",
+        "°f",
+        "fahrenheit",
+        "degf",
+        "degrees fahrenheit"
+      ]
+    },
+    {
+      "base" : "K",
+      "coefficient" : 1,
+      "name" : "Kelvin",
+      "offset" : 0,
+      "symbol" : "K",
+      "words" : [
+        "k",
+        "kelvin",
+        "kelvins"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 0.001,
+      "name" : "Milliliters",
+      "offset" : 0,
+      "symbol" : "ml",
+      "words" : [
+        "ml",
+        "milliliter",
+        "milliliters",
+        "millilitre",
+        "millilitres"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 1,
+      "name" : "Liters",
+      "offset" : 0,
+      "symbol" : "l",
+      "words" : [
+        "l",
+        "liter",
+        "liters",
+        "litre",
+        "litres"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 3.7854100000000002,
+      "name" : "Gallons",
+      "offset" : 0,
+      "symbol" : "gal",
+      "words" : [
+        "gal",
+        "gallon",
+        "gallons"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 0.946353,
+      "name" : "Quarts",
+      "offset" : 0,
+      "symbol" : "qt",
+      "words" : [
+        "qt",
+        "quart",
+        "quarts"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 0.47317599999999999,
+      "name" : "Pints",
+      "offset" : 0,
+      "symbol" : "pt",
+      "words" : [
+        "pt",
+        "pint",
+        "pints"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 0.23999999999999999,
+      "name" : "Cups",
+      "offset" : 0,
+      "symbol" : "cups",
+      "words" : [
+        "cup",
+        "cups"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 0.029573499999999999,
+      "name" : "Fluid Ounces",
+      "offset" : 0,
+      "symbol" : "fl oz",
+      "words" : [
+        "fl oz",
+        "floz",
+        "fluid ounce",
+        "fluid ounces"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 0.014786799999999999,
+      "name" : "Tablespoons",
+      "offset" : 0,
+      "symbol" : "tbsp",
+      "words" : [
+        "tbsp",
+        "tablespoon",
+        "tablespoons"
+      ]
+    },
+    {
+      "base" : "L",
+      "coefficient" : 0.0049289199999999998,
+      "name" : "Teaspoons",
+      "offset" : 0,
+      "symbol" : "tsp",
+      "words" : [
+        "tsp",
+        "teaspoon",
+        "teaspoons"
+      ]
+    },
+    {
+      "base" : "m²",
+      "coefficient" : 1,
+      "name" : "Square Meters",
+      "offset" : 0,
+      "symbol" : "m²",
+      "words" : [
+        "m2",
+        "m²",
+        "sqm",
+        "sq m",
+        "square meter",
+        "square meters",
+        "square metres"
+      ]
+    },
+    {
+      "base" : "m²",
+      "coefficient" : 1000000,
+      "name" : "Square Kilometers",
+      "offset" : 0,
+      "symbol" : "km²",
+      "words" : [
+        "km2",
+        "km²",
+        "sq km",
+        "square kilometer",
+        "square kilometers"
+      ]
+    },
+    {
+      "base" : "m²",
+      "coefficient" : 0.092903040000000006,
+      "name" : "Square Feet",
+      "offset" : 0,
+      "symbol" : "ft²",
+      "words" : [
+        "ft2",
+        "ft²",
+        "sqft",
+        "sq ft",
+        "square foot",
+        "square feet"
+      ]
+    },
+    {
+      "base" : "m²",
+      "coefficient" : 2589988.1103360001,
+      "name" : "Square Miles",
+      "offset" : 0,
+      "symbol" : "mi²",
+      "words" : [
+        "mi2",
+        "mi²",
+        "sq mi",
+        "square mile",
+        "square miles"
+      ]
+    },
+    {
+      "base" : "m²",
+      "coefficient" : 4046.8564224000002,
+      "name" : "Acres",
+      "offset" : 0,
+      "symbol" : "ac",
+      "words" : [
+        "acre",
+        "acres",
+        "ac"
+      ]
+    },
+    {
+      "base" : "m²",
+      "coefficient" : 10000,
+      "name" : "Hectares",
+      "offset" : 0,
+      "symbol" : "ha",
+      "words" : [
+        "ha",
+        "hectare",
+        "hectares"
+      ]
+    },
+    {
+      "base" : "m\/s",
+      "coefficient" : 0.27777800000000002,
+      "name" : "Kilometers per Hour",
+      "offset" : 0,
+      "symbol" : "km\/h",
+      "words" : [
+        "km\/h",
+        "kmh",
+        "kph"
+      ]
+    },
+    {
+      "base" : "m\/s",
+      "coefficient" : 0.44703999999999999,
+      "name" : "Miles per Hour",
+      "offset" : 0,
+      "symbol" : "mph",
+      "words" : [
+        "mph",
+        "miles per hour"
+      ]
+    },
+    {
+      "base" : "m\/s",
+      "coefficient" : 1,
+      "name" : "Meters per Second",
+      "offset" : 0,
+      "symbol" : "m\/s",
+      "words" : [
+        "m\/s",
+        "meters per second"
+      ]
+    },
+    {
+      "base" : "m\/s",
+      "coefficient" : 0.51444400000000001,
+      "name" : "Knots",
+      "offset" : 0,
+      "symbol" : "kn",
+      "words" : [
+        "kn",
+        "knot",
+        "knots"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1,
+      "name" : "Bytes",
+      "offset" : 0,
+      "symbol" : "B",
+      "words" : [
+        "b",
+        "byte",
+        "bytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1000,
+      "name" : "Kilobytes",
+      "offset" : 0,
+      "symbol" : "KB",
+      "words" : [
+        "kb",
+        "kilobyte",
+        "kilobytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1000000,
+      "name" : "Megabytes",
+      "offset" : 0,
+      "symbol" : "MB",
+      "words" : [
+        "mb",
+        "megabyte",
+        "megabytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1000000000,
+      "name" : "Gigabytes",
+      "offset" : 0,
+      "symbol" : "GB",
+      "words" : [
+        "gb",
+        "gigabyte",
+        "gigabytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1000000000000,
+      "name" : "Terabytes",
+      "offset" : 0,
+      "symbol" : "TB",
+      "words" : [
+        "tb",
+        "terabyte",
+        "terabytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1024,
+      "name" : "Kibibytes",
+      "offset" : 0,
+      "symbol" : "KiB",
+      "words" : [
+        "kib",
+        "kibibyte",
+        "kibibytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1048576,
+      "name" : "Mebibytes",
+      "offset" : 0,
+      "symbol" : "MiB",
+      "words" : [
+        "mib",
+        "mebibyte",
+        "mebibytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 1073741824,
+      "name" : "Gibibytes",
+      "offset" : 0,
+      "symbol" : "GiB",
+      "words" : [
+        "gib",
+        "gibibyte",
+        "gibibytes"
+      ]
+    },
+    {
+      "base" : "B",
+      "coefficient" : 0.125,
+      "name" : "Bits",
+      "offset" : 0,
+      "symbol" : "bit",
+      "words" : [
+        "bit",
+        "bits"
+      ]
+    },
+    {
+      "base" : "s",
+      "coefficient" : 0.001,
+      "name" : "Milliseconds",
+      "offset" : 0,
+      "symbol" : "ms",
+      "words" : [
+        "ms",
+        "millisecond",
+        "milliseconds"
+      ]
+    },
+    {
+      "base" : "s",
+      "coefficient" : 1,
+      "name" : "Seconds",
+      "offset" : 0,
+      "symbol" : "s",
+      "words" : [
+        "s",
+        "sec",
+        "secs",
+        "second",
+        "seconds"
+      ]
+    },
+    {
+      "base" : "s",
+      "coefficient" : 60,
+      "name" : "Minutes",
+      "offset" : 0,
+      "symbol" : "min",
+      "words" : [
+        "min",
+        "mins",
+        "minute",
+        "minutes"
+      ]
+    },
+    {
+      "base" : "s",
+      "coefficient" : 3600,
+      "name" : "Hours",
+      "offset" : 0,
+      "symbol" : "h",
+      "words" : [
+        "h",
+        "hr",
+        "hrs",
+        "hour",
+        "hours"
+      ]
+    },
+    {
+      "base" : "s",
+      "coefficient" : 86400,
+      "name" : "Days",
+      "offset" : 0,
+      "symbol" : "d",
+      "words" : [
+        "d",
+        "day",
+        "days"
+      ]
+    },
+    {
+      "base" : "s",
+      "coefficient" : 604800,
+      "name" : "Weeks",
+      "offset" : 0,
+      "symbol" : "wk",
+      "words" : [
+        "wk",
+        "week",
+        "weeks"
+      ]
+    }
+  ],
+  "vectors" : [
+    {
+      "answer" : {
+        "copy" : "28800",
+        "question" : "2400 × 12",
+        "questionNote" : "Sum",
+        "result" : "28,800",
+        "resultNote" : "Twenty-eight thousand eight hundred"
+      },
+      "words" : "2400*12"
+    },
+    {
+      "answer" : {
+        "copy" : "4",
+        "question" : "2+2",
+        "questionNote" : "Sum",
+        "result" : "4",
+        "resultNote" : "Four"
+      },
+      "words" : "2+2"
+    },
+    {
+      "answer" : {
+        "copy" : "-4",
+        "question" : "1×-4",
+        "questionNote" : "Sum",
+        "result" : "-4",
+        "resultNote" : "Minus four"
+      },
+      "words" : "1×-4"
+    },
+    {
+      "answer" : {
+        "copy" : "3.5",
+        "question" : "(3+4) ÷ 2",
+        "questionNote" : "Sum",
+        "result" : "3.5",
+        "resultNote" : "Three point five"
+      },
+      "words" : "(3+4)\/2"
+    },
+    {
+      "answer" : {
+        "copy" : "1024",
+        "question" : "2^10",
+        "questionNote" : "Sum",
+        "result" : "1,024",
+        "resultNote" : "One thousand twenty-four"
+      },
+      "words" : "2^10"
+    },
+    {
+      "answer" : {
+        "copy" : "512",
+        "question" : "2^3^2",
+        "questionNote" : "Sum",
+        "result" : "512",
+        "resultNote" : "Five hundred twelve"
+      },
+      "words" : "2^3^2"
+    },
+    {
+      "answer" : {
+        "copy" : "4",
+        "question" : "-2^2",
+        "questionNote" : "Sum",
+        "result" : "4",
+        "resultNote" : "Four"
+      },
+      "words" : "-2^2"
+    },
+    {
+      "answer" : {
+        "copy" : "4.442883",
+        "question" : "sqrt(2) × pi",
+        "questionNote" : "Sum",
+        "result" : "4.442883",
+        "resultNote" : "Four point four four two eight eight two nine three eight one five eight three six six"
+      },
+      "words" : "sqrt(2)*pi"
+    },
+    {
+      "answer" : {
+        "copy" : "6.283185",
+        "question" : "2π",
+        "questionNote" : "Sum",
+        "result" : "6.283185",
+        "resultNote" : "Six point two eight three one eight five three zero seven one seven nine five eight six"
+      },
+      "words" : "2π"
+    },
+    {
+      "answer" : null,
+      "words" : "3√2"
+    },
+    {
+      "answer" : {
+        "copy" : "0.3",
+        "question" : "0.1+0.2",
+        "questionNote" : "Sum",
+        "result" : "0.3",
+        "resultNote" : "Zero point three zero zero zero zero zero zero zero zero zero zero zero zero zero zero zero four"
+      },
+      "words" : "0.1+0.2"
+    },
+    {
+      "answer" : {
+        "copy" : "0.3333333333",
+        "question" : "1 ÷ 3",
+        "questionNote" : "Sum",
+        "result" : "0.3333333333",
+        "resultNote" : "Zero point three three three three three three three three three three three three three three three three"
+      },
+      "words" : "1\/3"
+    },
+    {
+      "answer" : {
+        "copy" : "2400",
+        "question" : "1,200 × 2",
+        "questionNote" : "Sum",
+        "result" : "2,400",
+        "resultNote" : "Two thousand four hundred"
+      },
+      "words" : "1,200*2"
+    },
+    {
+      "answer" : {
+        "copy" : "0",
+        "question" : "100 × 0",
+        "questionNote" : "Sum",
+        "result" : "0",
+        "resultNote" : "Zero"
+      },
+      "words" : "100*0"
+    },
+    {
+      "answer" : null,
+      "words" : "1\/0"
+    },
+    {
+      "answer" : null,
+      "words" : "sqrt(-1)"
+    },
+    {
+      "answer" : null,
+      "words" : "2+"
+    },
+    {
+      "answer" : null,
+      "words" : "2026"
+    },
+    {
+      "answer" : null,
+      "words" : "12"
+    },
+    {
+      "answer" : null,
+      "words" : "2x"
+    },
+    {
+      "answer" : {
+        "copy" : "16",
+        "question" : "20% of 80",
+        "questionNote" : "Percentage",
+        "result" : "16",
+        "resultNote" : "Sixteen"
+      },
+      "words" : "20% of 80"
+    },
+    {
+      "answer" : {
+        "copy" : "68",
+        "question" : "80 − 15%",
+        "questionNote" : "Percentage",
+        "result" : "68",
+        "resultNote" : "Sixty-eight"
+      },
+      "words" : "15% off 80"
+    },
+    {
+      "answer" : {
+        "copy" : "92",
+        "question" : "80 + 15%",
+        "questionNote" : "Percentage",
+        "result" : "92",
+        "resultNote" : "Ninety-two"
+      },
+      "words" : "80 + 15%"
+    },
+    {
+      "answer" : {
+        "copy" : "68",
+        "question" : "80 − 15%",
+        "questionNote" : "Percentage",
+        "result" : "68",
+        "resultNote" : "Sixty-eight"
+      },
+      "words" : "80 - 15%"
+    },
+    {
+      "answer" : {
+        "copy" : "2",
+        "question" : "100% × 2",
+        "questionNote" : "Sum",
+        "result" : "2",
+        "resultNote" : "Two"
+      },
+      "words" : "100%*2"
+    },
+    {
+      "answer" : {
+        "copy" : "3.1069 mi",
+        "question" : "5 km",
+        "questionNote" : "Kilometers",
+        "result" : "3.1069 mi",
+        "resultNote" : "Miles"
+      },
+      "words" : "5 km to mi"
+    },
+    {
+      "answer" : {
+        "copy" : "12.7 cm",
+        "question" : "5 in",
+        "questionNote" : "Inches",
+        "result" : "12.7 cm",
+        "resultNote" : "Centimeters"
+      },
+      "words" : "5 in in cm"
+    },
+    {
+      "answer" : {
+        "copy" : "22.2222°C",
+        "question" : "72°F",
+        "questionNote" : "Fahrenheit",
+        "result" : "22.2222°C",
+        "resultNote" : "Celsius"
+      },
+      "words" : "72f in c"
+    },
+    {
+      "answer" : null,
+      "words" : "5 km to kg"
+    },
+    {
+      "answer" : {
+        "copy" : "1000 MB",
+        "question" : "1 GB",
+        "questionNote" : "Gigabytes",
+        "result" : "1,000 MB",
+        "resultNote" : "Megabytes"
+      },
+      "words" : "1 gb to mb"
+    },
+    {
+      "answer" : {
+        "copy" : "1024 MiB",
+        "question" : "1 GiB",
+        "questionNote" : "Gibibytes",
+        "result" : "1,024 MiB",
+        "resultNote" : "Mebibytes"
+      },
+      "words" : "1 gib to mib"
+    },
+    {
+      "answer" : {
+        "copy" : "8 bit",
+        "question" : "1 B",
+        "questionNote" : "Bytes",
+        "result" : "8 bit",
+        "resultNote" : "Bits"
+      },
+      "words" : "1 byte to bits"
+    },
+    {
+      "answer" : {
+        "copy" : "240 ml",
+        "question" : "1 cups",
+        "questionNote" : "Cups",
+        "result" : "240 ml",
+        "resultNote" : "Milliliters"
+      },
+      "words" : "1 cup to ml"
+    },
+    {
+      "answer" : {
+        "copy" : "0.453592 kg",
+        "question" : "1 lb",
+        "questionNote" : "Pounds",
+        "result" : "0.453592 kg",
+        "resultNote" : "Kilograms"
+      },
+      "words" : "1 lb to kg"
+    },
+    {
+      "answer" : {
+        "copy" : "4046.86 m²",
+        "question" : "1 ac",
+        "questionNote" : "Acres",
+        "result" : "4,046.86 m²",
+        "resultNote" : "Square Meters"
+      },
+      "words" : "1 acre to m2"
+    },
+    {
+      "answer" : {
+        "copy" : "1.852 km\/h",
+        "question" : "1 kn",
+        "questionNote" : "Knots",
+        "result" : "1.852 km\/h",
+        "resultNote" : "Kilometers per Hour"
+      },
+      "words" : "1 kn to km\/h"
+    },
+    {
+      "answer" : {
+        "copy" : "168 h",
+        "question" : "1 wk",
+        "questionNote" : "Weeks",
+        "result" : "168 h",
+        "resultNote" : "Hours"
+      },
+      "words" : "1 week to h"
+    },
+    {
+      "answer" : {
+        "copy" : "0xFF",
+        "question" : "255",
+        "questionNote" : "Decimal",
+        "result" : "0xFF",
+        "resultNote" : "Hexadecimal"
+      },
+      "words" : "255 in hex"
+    },
+    {
+      "answer" : {
+        "copy" : "255",
+        "question" : "0xFF",
+        "questionNote" : "Hexadecimal",
+        "result" : "255",
+        "resultNote" : "Decimal"
+      },
+      "words" : "0xff in decimal"
+    },
+    {
+      "answer" : {
+        "copy" : "0b1010",
+        "question" : "10",
+        "questionNote" : "Decimal",
+        "result" : "0b1010",
+        "resultNote" : "Binary"
+      },
+      "words" : "10 to binary"
+    },
+    {
+      "answer" : {
+        "copy" : "10",
+        "question" : "0b1010",
+        "questionNote" : "Binary",
+        "result" : "10",
+        "resultNote" : "Decimal"
+      },
+      "words" : "0b1010"
+    },
+    {
+      "answer" : {
+        "copy" : "8",
+        "question" : "0o10",
+        "questionNote" : "Octal",
+        "result" : "8",
+        "resultNote" : "Decimal"
+      },
+      "words" : "0o10 to decimal"
+    },
+    {
+      "answer" : {
+        "copy" : "0o377",
+        "question" : "255",
+        "questionNote" : "Decimal",
+        "result" : "0o377",
+        "resultNote" : "Octal"
+      },
+      "words" : "255 in octal"
+    },
+    {
+      "answer" : {
+        "copy" : "90",
+        "question" : "$100.00",
+        "questionNote" : "US Dollar",
+        "result" : "€90.00",
+        "resultNote" : "Euro"
+      },
+      "words" : "100 usd in eur"
+    },
+    {
+      "answer" : {
+        "copy" : "40",
+        "question" : "$50.00",
+        "questionNote" : "US Dollar",
+        "result" : "£40.00",
+        "resultNote" : "British Pound"
+      },
+      "words" : "$50 to GBP"
+    },
+    {
+      "answer" : {
+        "copy" : "90",
+        "question" : "$100.00",
+        "questionNote" : "US Dollar",
+        "result" : "€90.00",
+        "resultNote" : "Euro"
+      },
+      "words" : "100 dollars in euros"
+    },
+    {
+      "answer" : {
+        "copy" : "100000",
+        "question" : "1 BTC",
+        "questionNote" : "Bitcoin",
+        "result" : "$100,000.00",
+        "resultNote" : "US Dollar"
+      },
+      "words" : "1 BTC to USD"
+    },
+    {
+      "answer" : {
+        "copy" : "1000",
+        "question" : "LIN 100.00",
+        "questionNote" : "LINK",
+        "result" : "$1,000.00",
+        "resultNote" : "US Dollar"
+      },
+      "words" : "100 LINK in usd"
+    },
+    {
+      "answer" : null,
+      "words" : "100 link in usd"
+    },
+    {
+      "answer" : null,
+      "words" : "top 10"
+    },
+    {
+      "answer" : null,
+      "words" : "top 10 in usd"
+    },
+    {
+      "answer" : null,
+      "words" : "europe 100"
+    },
+    {
+      "answer" : null,
+      "words" : "100 usd in usd"
+    },
+    {
+      "answer" : {
+        "copy" : "8:00 PM",
+        "question" : "4:00 AM",
+        "questionNote" : "Here · Fri, Sep 25 · UTC−7",
+        "result" : "8:00 PM",
+        "resultNote" : "Tokyo · Fri, Sep 25 · UTC+9"
+      },
+      "words" : "time in tokyo"
+    },
+    {
+      "answer" : {
+        "copy" : "8:00 PM",
+        "question" : "4:00 AM",
+        "questionNote" : "Here · Fri, Sep 25 · UTC−7",
+        "result" : "8:00 PM",
+        "resultNote" : "Tokyo · Fri, Sep 25 · UTC+9"
+      },
+      "words" : "tokyo time"
+    },
+    {
+      "answer" : {
+        "copy" : "12:00 PM",
+        "question" : "4:00 AM",
+        "questionNote" : "Here · Fri, Sep 25 · UTC−7",
+        "result" : "12:00 PM",
+        "resultNote" : "London · Fri, Sep 25 · UTC+1"
+      },
+      "words" : "now in london"
+    },
+    {
+      "answer" : {
+        "copy" : "7:00 AM",
+        "question" : "3:00 PM",
+        "questionNote" : "London · Fri, Sep 25 · UTC+1",
+        "result" : "7:00 AM",
+        "resultNote" : "San Francisco · Fri, Sep 25 · UTC−7"
+      },
+      "words" : "3pm london in sf"
+    },
+    {
+      "answer" : {
+        "copy" : "5:00 AM",
+        "question" : "3:00 PM",
+        "questionNote" : "Moscow · Fri, Sep 25 · UTC+3",
+        "result" : "5:00 AM",
+        "resultNote" : "Pacific Time · Fri, Sep 25 · UTC−7"
+      },
+      "words" : "15:00 msk to pst"
+    },
+    {
+      "answer" : {
+        "copy" : "4:05 AM",
+        "question" : "9:05 AM",
+        "questionNote" : "London · Fri, Sep 25 · UTC+1",
+        "result" : "4:05 AM",
+        "resultNote" : "New York · Fri, Sep 25 · UTC−4"
+      },
+      "words" : "9:05 am london in nyc"
+    },
+    {
+      "answer" : {
+        "copy" : "7:00 AM",
+        "question" : "3:00 PM",
+        "questionNote" : "Here · Fri, Sep 25 · UTC−7",
+        "result" : "7:00 AM",
+        "resultNote" : "Tokyo · Sat, Sep 26 · UTC+9"
+      },
+      "words" : "3pm in tokyo"
+    },
+    {
+      "answer" : null,
+      "words" : "25:00 in tokyo"
+    },
+    {
+      "answer" : {
+        "copy" : "91",
+        "question" : "Today",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "91 days",
+        "resultNote" : "Until Fri, Dec 25"
+      },
+      "words" : "days until christmas"
+    },
+    {
+      "answer" : {
+        "copy" : "13",
+        "question" : "Today",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "13 weeks",
+        "resultNote" : "Until Fri, Dec 25"
+      },
+      "words" : "weeks until christmas"
+    },
+    {
+      "answer" : {
+        "copy" : "98",
+        "question" : "Today",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "98 days",
+        "resultNote" : "Until Fri, Jan 1"
+      },
+      "words" : "days until new year"
+    },
+    {
+      "answer" : {
+        "copy" : "Oct 16, 2026",
+        "question" : "Today + 3 weeks",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "Oct 16, 2026",
+        "resultNote" : "Friday"
+      },
+      "words" : "in 3 weeks"
+    },
+    {
+      "answer" : {
+        "copy" : "Sep 15, 2026",
+        "question" : "Today − 10 days",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "Sep 15, 2026",
+        "resultNote" : "Tuesday"
+      },
+      "words" : "10 days ago"
+    },
+    {
+      "answer" : {
+        "copy" : "Nov 9, 2026",
+        "question" : "Today + 45 days",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "Nov 9, 2026",
+        "resultNote" : "Monday"
+      },
+      "words" : "today + 45 days"
+    },
+    {
+      "answer" : {
+        "copy" : "Dec 24, 2026",
+        "question" : "Today + 90 days",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "Dec 24, 2026",
+        "resultNote" : "Thursday"
+      },
+      "words" : "90 days from now"
+    },
+    {
+      "answer" : {
+        "copy" : "Nov 25, 2026",
+        "question" : "Today + 2 months",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "Nov 25, 2026",
+        "resultNote" : "Wednesday"
+      },
+      "words" : "in 2 months"
+    },
+    {
+      "answer" : {
+        "copy" : "Sep 25, 2027",
+        "question" : "Today + 1 year",
+        "questionNote" : "Fri, Sep 25",
+        "result" : "Sep 25, 2027",
+        "resultNote" : "Saturday"
+      },
+      "words" : "in 1 year"
+    },
+    {
+      "answer" : null,
+      "words" : "iphone 15 to 16"
+    },
+    {
+      "answer" : null,
+      "words" : "lisbon weather october"
+    },
+    {
+      "answer" : null,
+      "words" : "https:\/\/example.com\/2+2"
+    },
+    {
+      "answer" : null,
+      "words" : "127.0.0.1"
+    },
+    {
+      "answer" : null,
+      "words" : "localhost:3000"
+    },
+    {
+      "answer" : null,
+      "words" : "İ to c"
+    },
+    {
+      "answer" : null,
+      "words" : "2√(-1)"
+    },
+    {
+      "answer" : {
+        "copy" : "20",
+        "question" : "(2+3) × 4",
+        "questionNote" : "Sum",
+        "result" : "20",
+        "resultNote" : "Twenty"
+      },
+      "words" : "(2+3)*4"
+    }
+  ],
+  "zone" : "America\/Los_Angeles"
+}

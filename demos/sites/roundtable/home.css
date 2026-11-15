@@ -1,0 +1,56 @@
+/* The home screen: your next call, and a code to join another. */
+
+body {
+  min-height: 100%;
+  background:
+    radial-gradient(900px 560px at 50% 0%, rgba(61, 219, 176, 0.08), transparent 70%),
+    radial-gradient(700px 520px at 90% 100%, rgba(124, 108, 240, 0.07), transparent 70%),
+    var(--bg);
+}
+
+.home-top { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 var(--s-8); }
+.home-account { display: flex; align-items: center; gap: var(--s-3); color: var(--muted); font-size: var(--fs-body); line-height: var(--lh-body); font-variant-numeric: tabular-nums; }
+.home-account .avatar { width: 32px; height: 32px; }
+
+.home { max-width: 592px; margin: 0 auto; padding: 80px var(--s-6) var(--s-16); display: flex; flex-direction: column; align-items: center; text-align: center; }
+.home-hello { margin: 0; font-size: var(--fs-display); line-height: var(--lh-display); font-weight: var(--fw-semibold); letter-spacing: -0.03em; }
+.home-sub { margin: var(--s-2) 0 0; color: var(--muted); font-size: var(--fs-lead); line-height: var(--lh-lead); }
+
+/* The next call: 24 round, 24 inside; Join sits on its middle. */
+.next {
+  width: 100%; margin-top: var(--s-10); padding: var(--s-6);
+  display: grid; grid-template-columns: 1fr auto; grid-template-areas: "when join" "title join" "people join";
+  align-items: center; column-gap: var(--s-6); text-align: left;
+  border-radius: var(--r-xl); background: var(--surface);
+  box-shadow: var(--ring-line), var(--shadow-md);
+}
+.next-when { grid-area: when; display: flex; align-items: center; gap: var(--s-2); color: var(--muted); font-size: var(--fs-small); line-height: var(--lh-small); font-weight: var(--fw-medium); }
+.next-when .icon { width: 16px; height: 16px; }
+.next-live { display: inline-flex; align-items: center; height: 20px; margin-left: var(--s-1); padding: 0 var(--s-2); border-radius: var(--r-pill); background: var(--accent-wash); color: var(--accent); font-size: var(--fs-caption); line-height: var(--lh-caption); font-weight: var(--fw-semibold); }
+.next-title { grid-area: title; margin: var(--s-2) 0 var(--s-3); font-size: var(--fs-title); line-height: var(--lh-title); font-weight: var(--fw-semibold); letter-spacing: -0.015em; }
+.next-people { grid-area: people; display: flex; align-items: center; gap: var(--s-3); color: var(--muted); font-size: var(--fs-small); line-height: var(--lh-small); }
+.next-stack { display: flex; padding-left: var(--s-2); flex: none; }
+.next-stack img { width: 28px; height: 28px; margin-left: calc(-1 * var(--s-2)); box-shadow: 0 0 0 2px var(--surface); }
+.next-join { grid-area: join; min-width: 96px; }
+
+.code { width: 100%; margin-top: var(--s-4); display: flex; gap: var(--s-3); }
+.code-field {
+  flex: 1; display: flex; align-items: center; gap: var(--s-3); height: var(--h-lg); padding: 0 var(--s-4);
+  border-radius: var(--r-pill); box-shadow: inset 0 0 0 1px var(--line-strong); color: var(--faint);
+  transition: box-shadow 0.15s;
+}
+.code-field:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.code-field .icon { width: 20px; height: 20px; }
+.code-field input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; background: transparent; outline: none; color: var(--text); }
+.code-field input:focus-visible { outline: none; }
+.code-field input::placeholder { color: var(--faint); }
+
+@media (max-height: 820px) {
+  .home { padding-top: var(--s-16); }
+}
+@media (max-width: 560px) {
+  .home-top { padding: 0 var(--s-4); }
+  .home-hello { font-size: var(--fs-heading); line-height: var(--lh-heading); }
+  .next { grid-template-columns: 1fr; grid-template-areas: "when" "title" "people" "join"; row-gap: var(--s-1); }
+  .next-join { margin-top: var(--s-3); }
+}

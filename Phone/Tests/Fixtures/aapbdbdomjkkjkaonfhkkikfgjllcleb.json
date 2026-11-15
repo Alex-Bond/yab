@@ -1,0 +1,11 @@
+{
+  "crx_file" : "aapbdbdomjkkjkaonfhkkikfgjllcleb.crx",
+  "extension_id" : "aapbdbdomjkkjkaonfhkkikfgjllcleb",
+  "name" : "Google Translate",
+  "version" : "2.0.18",
+  "original_crx_bytes" : 1156366,
+  "original_crx_sha256" : "f2717e06e01c458959f5935c45eb2bff9286ca66cff0fc51980803f3a3dbd1fd",
+  "source" : "https:\/\/clients2.google.com\/service\/update2\/crx (store update address, crx3)",
+  "fetched" : "2026-10-24",
+  "used_by" : "ExtensionPackageTests.swift (request 895)"
+}

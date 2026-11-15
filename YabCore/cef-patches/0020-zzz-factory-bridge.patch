@@ -1,0 +1,50 @@
+--- a/chrome/browser/ui/views/frame/browser_window_factory.cc
++++ b/chrome/browser/ui/views/frame/browser_window_factory.cc
+@@ -8,7 +8,6 @@
+ #include "cef/libcef/features/features.h"
+ #if BUILDFLAG(ENABLE_CEF) && BUILDFLAG(IS_MAC)
+ #include "base/command_line.h"
+-#include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
+ #endif
+ #include "chrome/browser/ui/browser_window_deleter.h"
+ #include "chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h"
+@@ -69,9 +68,7 @@
+       base::CommandLine::ForCurrentProcess()->HasSwitch("yab-external-default-windows")) {
+     // Conceal the producer at creation, before any asynchronous navigation or
+     // browser API can Show it. Failure must not expose an ordinary Chrome UI.
+-    auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
+-        view->GetWidget()->GetNativeWindow());
+-    CHECK(host && host->EnableExternalHosting());
++    CHECK(BrowserNativeWidgetFactory::EnableExternalHosting(view->browser_widget()));
+   }
+ #endif
+ 
+--- a/chrome/browser/ui/views/frame/browser_native_widget_factory.h
++++ b/chrome/browser/ui/views/frame/browser_native_widget_factory.h
+@@ -21,6 +21,10 @@
+       BrowserWidget* browser_widget,
+       BrowserView* browser_view);
+ 
++  // Mac implementation, callable from C++ without Objective-C headers.
++  // Conceals an initialized producer before the first Browser Show().
++  static bool EnableExternalHosting(BrowserWidget* browser_widget);
++
+   // Sets the factory. Takes ownership of |new_factory|, deleting existing
+   // factory. Use null to go back to default factory.
+   static void Set(BrowserNativeWidgetFactory* new_factory);
+--- a/chrome/browser/ui/views/frame/browser_native_widget_factory_mac.mm
++++ b/chrome/browser/ui/views/frame/browser_native_widget_factory_mac.mm
+@@ -5,6 +5,13 @@
+ #include "chrome/browser/ui/views/frame/browser_native_widget_factory.h"
+ 
+ #import "chrome/browser/ui/views/frame/browser_native_widget_mac.h"
++#include "chrome/browser/ui/views/frame/browser_widget.h"
++#include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
++
++bool BrowserNativeWidgetFactory::EnableExternalHosting(BrowserWidget* widget) {
++  auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(widget->GetNativeWindow());
++  return host && host->EnableExternalHosting();
++}
+ 
+ BrowserNativeWidget* BrowserNativeWidgetFactory::Create(
+     BrowserWidget* browser_widget,

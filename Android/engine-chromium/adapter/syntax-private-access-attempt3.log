@@ -1,0 +1,8 @@
+In file included from /data/yab-chromium-baseline/adapter-scaffold/syntax-private-access-attempt3/overlay/extensions/browser/api/cookies/yab_cookie_store_policy.cc:19:
+In file included from ../../extensions/browser/event_router.h:28:
+In file included from ../../extensions/browser/event_listener_map.h:20:
+In file included from ../../extensions/common/event_filter.h:17:
+../../extensions/common/event_matcher.h:9:10: fatal error: 'extensions/common/mojom/event_dispatcher.mojom-forward.h' file not found
+    9 | #include "extensions/common/mojom/event_dispatcher.mojom-forward.h"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1 error generated.

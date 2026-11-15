@@ -1,0 +1,83 @@
+--- a/content/browser/renderer_host/browser_compositor_view_mac.h
++++ b/content/browser/renderer_host/browser_compositor_view_mac.h
+@@ -41,6 +41,7 @@
+   virtual display::ScreenInfo GetCurrentScreenInfo() const = 0;
+   virtual void SetCurrentDeviceScaleFactor(float device_scale_factor) = 0;
+   virtual bool ShouldUseDefaultDeadlineOnResize() const = 0;
++  virtual bool ShouldUseInfiniteDeadlineOnResize() const { return false; }
+ };
+ 
+ // This class owns a DelegatedFrameHost, and will dynamically attach and
+--- a/content/browser/renderer_host/browser_compositor_view_mac.mm
++++ b/content/browser/renderer_host/browser_compositor_view_mac.mm
+@@ -350,6 +350,9 @@
+ }
+ 
+ cc::DeadlinePolicy BrowserCompositorMac::GetResizeDeadlinePolicy() const {
++  if (client_->ShouldUseInfiniteDeadlineOnResize()) {
++    return cc::DeadlinePolicy::UseInfiniteDeadline();
++  }
+   // For remote windows (PWA app shim), use the default deadline to give the
+   // renderer time to produce a correctly-sized frame. With deadline=0, the
+   // compositor immediately shows stale content, which is highly visible
+--- a/content/browser/renderer_host/external_resize_tracker.h
++++ b/content/browser/renderer_host/external_resize_tracker.h
+@@ -41,6 +41,7 @@
+         metadata.local_surface_id->IsSameOrNewerThan(*expected_);
+     return activated_;
+   }
++  bool pending() const { return valid_ && !activated_; }
+   uint64_t ready_serial() const { return activated_ ? serial_ : 0; }
+   void Invalidate() {
+     expected_.reset();
+--- a/content/browser/renderer_host/render_widget_host_impl.h
++++ b/content/browser/renderer_host/render_widget_host_impl.h
+@@ -805,6 +805,9 @@
+   // properties with renderer activation, not native widget presentation.
+   bool RequestExternalResize(uint64_t serial, const gfx::Size& pixels);
+   void ExternalResizeFrameActivated(const cc::RenderFrameMetadata& metadata);
++  bool ExternalResizePending() const {
++    return external_resize_tracker_.pending();
++  }
+   uint64_t ExternalResizeReadySerial() const {
+     return external_resize_tracker_.ready_serial();
+   }
+--- a/content/browser/renderer_host/render_widget_host_view_mac.h
++++ b/content/browser/renderer_host/render_widget_host_view_mac.h
+@@ -463,6 +463,7 @@
+   display::ScreenInfo GetCurrentScreenInfo() const override;
+   void SetCurrentDeviceScaleFactor(float device_scale_factor) override;
+   bool ShouldUseDefaultDeadlineOnResize() const override;
++  bool ShouldUseInfiniteDeadlineOnResize() const override;
+ 
+   // AcceleratedWidgetMacNSView implementation.
+   void AcceleratedWidgetCALayerParamsUpdated(
+--- a/content/browser/renderer_host/render_widget_host_view_mac.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
+@@ -201,6 +201,10 @@
+   screen_infos_.mutable_current().device_scale_factor = device_scale_factor;
+ }
+ 
++bool RenderWidgetHostViewMac::ShouldUseInfiniteDeadlineOnResize() const {
++  return host()->ExternalResizePending();
++}
++
+ bool RenderWidgetHostViewMac::ShouldUseDefaultDeadlineOnResize() const {
+   return use_default_deadline_on_resize_ || remote_ns_view_.is_bound();
+ }
+@@ -911,7 +915,15 @@
+     base::TimeTicks activation_time) {
+   const auto& metadata = host()->render_frame_metadata_provider()
+                              ->LastRenderFrameMetadata();
++  const auto previous_ready = host()->ExternalResizeReadySerial();
+   host()->ExternalResizeFrameActivated(metadata);
++  if (host()->ExternalResizeReadySerial() &&
++      host()->ExternalResizeReadySerial() != previous_ready) {
++    // Request a root-compositor frame after the matching child activation.
++    // The later CA frame still needs its serial/fence consumer contract.
++    if (auto* compositor = browser_compositor_->GetCompositor())
++      compositor->ScheduleFullRedraw();
++  }
+   // TODO(crbug.com/40219248): Remove toSkColor and make all SkColor4f.
+   last_frame_root_background_color_ = metadata.root_background_color.toSkColor();
+ }

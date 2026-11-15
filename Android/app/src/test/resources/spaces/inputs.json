@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {"id":"tap-end-60", "widths":[80,72,110,84], "current":1, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"down","x":119},{"kind":"up","x":119},{"kind":"step","dt":0.016666666666666666,"frames":150}]},
+    {"id":"press-current-120", "widths":[80,72,110,84], "current":1, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"down","x":195},{"kind":"up","x":195},{"kind":"step","dt":0.008333333333333333,"frames":180}]},
+    {"id":"fling-left-60", "widths":[80,72,110,84], "current":1, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"down","x":195},{"kind":"move","x":187},{"kind":"step","dt":0.016666666666666666,"frames":1},{"kind":"move","x":150},{"kind":"step","dt":0.016666666666666666,"frames":1},{"kind":"move","x":100},{"kind":"step","dt":0.016666666666666666,"frames":1},{"kind":"up","x":100},{"kind":"step","dt":0.016666666666666666,"frames":210}]},
+    {"id":"reverse-during-settle", "widths":[80,72,110,84], "current":1, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"select","index":3},{"kind":"step","dt":0.016666666666666666,"frames":5},{"kind":"down","x":195},{"kind":"move","x":208},{"kind":"step","dt":0.008333333333333333,"frames":1},{"kind":"move","x":257},{"kind":"step","dt":0.008333333333333333,"frames":1},{"kind":"up","x":257},{"kind":"step","dt":0.008333333333333333,"frames":360}]},
+    {"id":"vertical-takes-gesture", "widths":[80,72,110,84], "current":1, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"down","x":195},{"kind":"move","x":183},{"kind":"step","dt":0.016666666666666666,"frames":1},{"kind":"move","x":170},{"kind":"step","dt":0.016666666666666666,"frames":3},{"kind":"cancel"},{"kind":"step","dt":0.016666666666666666,"frames":200}]},
+    {"id":"pair-only-lens", "widths":[80,96], "current":0, "mid":187.5, "rest":215, "wide":351, "pair":true,
+      "operations":[{"kind":"select","index":1},{"kind":"step","dt":0.016666666666666666,"frames":180},{"kind":"select","index":0},{"kind":"step","dt":0.016666666666666666,"frames":180}]},
+    {"id":"long-name-at-end", "widths":[80,312,92], "current":1, "mid":215, "rest":246, "wide":362, "pair":false,
+      "operations":[{"kind":"select","index":2},{"kind":"step","dt":0.03333333333333333,"frames":120},{"kind":"select","index":0},{"kind":"step","dt":0.03333333333333333,"frames":120}]},
+    {"id":"external-page-follow", "widths":[80,72,110,84], "current":1, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"follow","position":1.2,"index":1},{"kind":"step","dt":0.016666666666666666,"frames":4},{"kind":"follow","position":1.7,"index":1},{"kind":"step","dt":0.016666666666666666,"frames":4},{"kind":"follow","position":2,"index":2},{"kind":"step","dt":0.016666666666666666,"frames":180}]},
+    {"id":"rubber-at-first", "widths":[80,72,110,84], "current":0, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"down","x":150},{"kind":"move","x":160},{"kind":"step","dt":0.016666666666666666,"frames":1},{"kind":"move","x":450},{"kind":"step","dt":0.016666666666666666,"frames":1},{"kind":"up","x":450},{"kind":"step","dt":0.016666666666666666,"frames":240}]},
+    {"id":"no-names-and-reset", "widths":[], "current":0, "mid":195, "rest":230, "wide":362, "pair":false,
+      "operations":[{"kind":"down","x":195},{"kind":"up","x":195},{"kind":"reset","index":0},{"kind":"step","dt":0.016666666666666666,"frames":2}]}
+  ],
+  "layouts": [
+    {"width":375,"height":812,"bottom":812,"plate":[81,736,213,48]},
+    {"width":390,"height":844,"bottom":844,"plate":[81,768,228,48]},
+    {"width":430,"height":932,"bottom":624,"plate":[81,856,268,48]},
+    {"width":768,"height":1024,"bottom":1024,"plate":[81,948,606,48]},
+    {"width":390,"height":844,"bottom":536,"plate":[112,768,166,48]}
+  ],
+  "reveals": [-0.1,0,0.01,0.04,0.05,0.06,0.15,0.2,0.24,0.25,0.35,0.5,0.75,0.998,0.999,1,1.06]
+}

@@ -1,0 +1,214 @@
+--- a/cef/libcef/browser/chrome/chrome_content_browser_client_cef.cc
++++ b/cef/libcef/browser/chrome/chrome_content_browser_client_cef.cc
+@@ -448,6 +448,7 @@
+   auto browser = CefBrowserHostBase::GetBrowserForContents(web_contents);
+   if (browser) {
+     renderer_prefs::SetCefPrefs(browser->settings(), *prefs);
++    prefs->yab_read_autoplay_locked=browser->native_read_autoplay_locked();
+ 
+ #if BUILDFLAG(IS_MAC)
+     // Use internal select menus for OSR, including when Blink reapplies
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1118,6 +1118,20 @@
+   return false;
+ #endif
+ }
++bool CefBrowserHostBase::LockNativeReadAutoplay() {
++  CEF_REQUIRE_UIT_RETURN(false);
++  if(!CEF_API_IS_ADDED(CEF_EXPERIMENTAL))return false;
++  if(native_read_autoplay_locked_)return true;
++  auto* contents=GetWebContents();
++  if(!contents || native_nonblank_document_seen_ || contents->IsBeingDestroyed() || !contents->GetPrimaryMainFrame() || contents->GetController().GetPendingEntry())return false;
++  bool blank=true;
++  contents->GetPrimaryMainFrame()->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
++    const auto& url=frame->GetLastCommittedURL();if(!url.is_empty() && !url.IsAboutBlank())blank=false;
++  });
++  if(!blank)return false;
++  native_read_autoplay_locked_=true;
++  contents->OnWebPreferencesChanged();return true;
++}
+ bool CefBrowserHostBase::ReleaseNativePrintSource(const CefString& source) {
+   CEF_REQUIRE_UIT_RETURN(false);
+ #if BUILDFLAG(IS_MAC)
+--- a/third_party/blink/public/mojom/webpreferences/web_preferences.mojom
++++ b/third_party/blink/public/mojom/webpreferences/web_preferences.mojom
+@@ -416,6 +416,7 @@
+ 
+   // Defines the current autoplay policy.
+   AutoplayPolicy autoplay_policy;
++  bool yab_read_autoplay_locked;
+ 
+   // `getDisplayMedia()`'s transient activation requirement can be bypassed via
+   // `ScreenCaptureWithoutGestureAllowedForOrigins` policy.
+--- a/third_party/blink/public/common/web_preferences/web_preferences_mojom_traits.h
++++ b/third_party/blink/public/common/web_preferences/web_preferences_mojom_traits.h
+@@ -726,6 +726,9 @@
+     return r.do_not_update_selection_on_mutating_selection_range;
+   }
+ 
++  static bool yab_read_autoplay_locked(const blink::web_pref::WebPreferences& r) {
++    return r.yab_read_autoplay_locked;
++  }
+   static blink::mojom::AutoplayPolicy autoplay_policy(
+       const blink::web_pref::WebPreferences& r) {
+     return r.autoplay_policy;
+--- a/third_party/blink/renderer/core/frame/settings.json5
++++ b/third_party/blink/renderer/core/frame/settings.json5
+@@ -53,6 +53,7 @@
+   },
+ 
+   data: [
++    {name: "yabReadAutoplayLocked", type: "bool", initial: false},
+     {
+       name: "batterySaverEnabled",
+       type: "bool",
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -293,6 +293,9 @@
+   bool PrintNativeSourceToPDF(const CefString& source,const CefString& path,
+       const CefPdfPrintSettings& settings,CefRefPtr<CefPdfPrintCallback> callback) override;
+   bool ReleaseNativePrintSource(const CefString& source) override;
++  bool LockNativeReadAutoplay() override;
++  bool native_read_autoplay_locked() const {return native_read_autoplay_locked_;}
++  void NoteNativeNonblankDocument() {native_nonblank_document_seen_=true;}
+   bool ValidateClosePreflight(const CefString& token) override;
+   bool CommitClosePreflight(const CefString& token) override;
+   bool CancelClosePreflight(const CefString& request) override;
+@@ -554,6 +557,8 @@
+ 
+   // Runtime override for CDP accessibility tree viewport collapse.
+   std::optional<bool> ax_viewport_collapse_;
++  bool native_read_autoplay_locked_ = false;
++  bool native_nonblank_document_seen_ = false;
+ 
+  private:
+   IMPLEMENT_REFCOUNTING(CefBrowserHostBase);
+--- a/third_party/blink/renderer/core/exported/web_view_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_view_impl.cc
+@@ -1888,6 +1888,7 @@
+   settings->SetAccessibilityViewportCollapse(
+       prefs.accessibility_viewport_collapse);
+   settings->SetAutoplayPolicy(prefs.autoplay_policy);
++  settings->SetYabReadAutoplayLocked(prefs.yab_read_autoplay_locked);
+   settings->SetRequireTransientActivationForGetDisplayMedia(
+       prefs.require_transient_activation_for_get_display_media);
+   settings->SetRequireTransientActivationForShowFileOrDirectoryPicker(
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -667,6 +667,10 @@
+ 
+ void CefBrowserContentsDelegate::DidFinishNavigation(
+     content::NavigationHandle* navigation_handle) {
++  if(navigation_handle->HasCommitted() && !navigation_handle->GetURL().is_empty() &&
++      !navigation_handle->GetURL().IsAboutBlank()) {
++    if(auto owner=CefBrowserHostBase::GetBrowserForContents(web_contents())) owner->NoteNativeNonblankDocument();
++  }
+   const net::Error error_code = navigation_handle->GetNetErrorCode();
+ 
+   // Skip calls where the navigation has not yet committed and there is no
+--- a/third_party/blink/public/common/web_preferences/web_preferences.h
++++ b/third_party/blink/public/common/web_preferences/web_preferences.h
+@@ -347,6 +347,8 @@
+ 
+   // If disabled, media controls should never be used.
+   bool media_controls_enabled = true;
++  // An irreversible native read-page lock, stronger than gesture autoplay.
++  bool yab_read_autoplay_locked = false;
+ 
+   // Whether we want to disable updating selection on mutating selection range.
+   // This is to work around Samsung's email app issue. See
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -60,6 +60,7 @@
+ #define CEF_YAB_NATIVE_VIDEO_PIP_VERSION 1
+ #define CEF_YAB_NATIVE_CLOSE_PREFLIGHT_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_SOURCE_VERSION 1
++#define CEF_YAB_NATIVE_READ_AUTOPLAY_LOCK_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1216,6 +1217,17 @@
+   virtual bool ReleaseNativePrintSource(const CefString& source) = 0;
+ 
+   ///
++  /// Irreversibly denies HTML media playback/autoplay, including muted video,
++  /// and realtime AudioContext starts for this exact browser and its frames.
++  /// Call before the first nonblank navigation of a newly created task-owned
++  /// browser; refuses an existing nonblank or pending navigation. This is only
++  /// the native media boundary, not a complete read-task permission policy.
++  /// Subsequent calls are idempotent. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool LockNativeReadAutoplay() = 0;
++
++  ///
+   /// Validates one approved opaque token and its entire unchanged native frame
+   /// tree, without mutating any page. Refuses navigation, a new prompt, loss,
+   /// cancellation or a replayed token. Batch callers validate every token in
+--- a/third_party/blink/common/web_preferences/web_preferences_mojom_traits.cc
++++ b/third_party/blink/common/web_preferences/web_preferences_mojom_traits.cc
+@@ -221,6 +221,7 @@
+   out->do_not_update_selection_on_mutating_selection_range =
+       data.do_not_update_selection_on_mutating_selection_range();
+   out->autoplay_policy = data.autoplay_policy();
++  out->yab_read_autoplay_locked = data.yab_read_autoplay_locked();
+   out->require_transient_activation_for_get_display_media =
+       data.require_transient_activation_for_get_display_media();
+   out->require_transient_activation_for_show_file_or_directory_picker =
+--- a/third_party/blink/renderer/core/html/media/autoplay_policy.cc
++++ b/third_party/blink/renderer/core/html/media/autoplay_policy.cc
+@@ -182,6 +182,8 @@
+ }
+ 
+ bool AutoplayPolicy::IsEligibleForAutoplayMuted() const {
++  if (element_->GetDocument().GetSettings() && element_->GetDocument().GetSettings()->GetYabReadAutoplayLocked())
++    return false;
+   if (!IsA<HTMLVideoElement>(element_.Get()))
+     return false;
+ 
+@@ -220,6 +222,8 @@
+ }
+ 
+ bool AutoplayPolicy::RequestAutoplayUnmute() {
++  if (element_->GetDocument().GetSettings() && element_->GetDocument().GetSettings()->GetYabReadAutoplayLocked())
++    return false;
+   DCHECK_NE(0, element_->EffectiveMediaVolume());
+   bool was_autoplaying_muted = IsAutoplayingMutedInternal(true);
+ 
+@@ -245,6 +249,8 @@
+ }
+ 
+ bool AutoplayPolicy::RequestAutoplayByAttribute() {
++  if (element_->GetDocument().GetSettings() && element_->GetDocument().GetSettings()->GetYabReadAutoplayLocked())
++    return false;
+   if (!ShouldAutoplay())
+     return false;
+ 
+@@ -287,6 +293,8 @@
+ }
+ 
+ std::optional<DOMExceptionCode> AutoplayPolicy::RequestPlay() {
++  if (element_->GetDocument().GetSettings() && element_->GetDocument().GetSettings()->GetYabReadAutoplayLocked())
++    return DOMExceptionCode::kNotAllowedError;
+   // Block autoplay only if the media element's visibility state is known.
+   if (!element_->CanPlayWhileHidden() && element_->IsFrameHidden()) {
+     return DOMExceptionCode::kNotAllowedError;
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/webaudio/audio_context.h"
++#include "third_party/blink/renderer/core/frame/settings.h"
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -1488,6 +1489,7 @@
+ }
+ 
+ bool AudioContext::IsAllowedToStart(bool should_suppress_warning) const {
++  if(GetWindow() && GetWindow()->GetFrame() && GetWindow()->GetFrame()->GetSettings()->GetYabReadAutoplayLocked())return false;
+   if (blocked_by_prerendering_) {
+     // In prerendering, the AudioContext will not start rendering. See:
+     // https://wicg.github.io/nav-speculation/prerendering.html#web-audio-patch

@@ -1,0 +1,44 @@
+{
+  "sourceSnapshot": "2b09ff549b77273ec2ed9ae5173ee7fa8843fa3a",
+  "inputs": [
+    {
+      "path": "Phone/Sources/Column/CapsuleModel.swift",
+      "sha256": "0b98b8f4a84f6a95073bbc9f49bd2d2b5eb65054abf89c4bb2f568d567dd3f97"
+    },
+    {
+      "path": "Phone/Sources/Field/FieldLayer.swift",
+      "sha256": "21f2c4451e8847b820d56c09c746f3eff96e9c580f09d92e7c2ce43d808b5bed"
+    },
+    {
+      "path": "Phone/Sources/Column/SpringValue.swift",
+      "sha256": "b688ce8e58eb23e3d39ce3dfb03bd8d664cfaa00e5d64a902a496691b327ceef"
+    },
+    {
+      "path": "Phone/Sources/Column/ColumnBar.swift",
+      "sha256": "e7cc5178be0e7572bea1b8dd0430cdceac9a0cdfe5a9232a214e393f115196c0"
+    },
+    {
+      "path": "Phone/Sources/Field/NewTabSpaces.swift",
+      "sha256": "52adf89a2cb9f9b58852f8609781649d3967be833073c81e054ea42e398e0163"
+    },
+    {
+      "path": "Phone/Sources/Field/FieldModel.swift",
+      "sha256": "76af1a1954dd4735097d306892a155923714b527005865e9a9a9bffea1ce8893"
+    },
+    {
+      "path": "Phone/Sources/Design/Motion.swift",
+      "sha256": "6486d3bcf161a7d97b8f8ae9e739c9eb59f367643a51ee3e82977f302c2e3672"
+    },
+    {
+      "path": "Android/parity/spaces/oracle.swift",
+      "sha256": "e9e3ef0151d56000b887fb4418faaf342e45483d51c014ea052363d2b2013015"
+    },
+    {
+      "path": "Android/app/src/test/resources/spaces/inputs.json",
+      "sha256": "2b831981fb8f0c093273e09a8c29d6d8808cf2821180883c90bccbe5883fd0e0"
+    }
+  ],
+  "sourceStateMachineOriginal": true,
+  "nativeFontMeasurementVerified": false,
+  "frameParityVerified": false
+}

@@ -1,0 +1,50 @@
+# Documentation index
+
+How parts of Yab work, and how they are tested, where a plan would be too
+short-lived for it:
+
+- [docs/tab-placement.md](tab-placement.md): where a new tab lands, measured in Arc case by case: a page's links stack right after it in order, a tab you ask for goes to the top of today's.
+- [docs/new-tab.md](new-tab.md): no empty tabs: ⌘T and Split View ask with the field over the page you are on, ⌘N opens a window whose field asks, and what stands under the field when no tab is in front.
+- [docs/new-tab-rows.md](new-tab-rows.md): a new tab's rows, what an agent found worth your while and what Yab does with it.
+- [docs/halloween.md](halloween.md): Halloween 2026: the update note in costume, the dress-up links from the changelog, the four icons that count down in App Icon and leave on November 3, and the Halloween drawings.
+- [docs/wrapped.md](wrapped.md): Yab Wrapped, the arcade recap: which levels a player gets, how time saved is counted, the ledger that counts what no store keeps, the 16:10 card and the Arcade icon.
+- [docs/sidebar-corners.md](sidebar-corners.md): every corner in the column and the rule behind it, with a live prototype of the column to check builds against.
+- [docs/column-door.md](column-door.md): the column's header row, its sidebar door (Arc's mark) that puts the column away, and where the row folds into "⋯" as the column narrows.
+- [docs/sidebar-smoothness.md](sidebar-smoothness.md): why the page lags and snaps when ⌘S slides the sidebar (feedback #162), the evidence, and the plan to fix it.
+- [docs/field-like-arc.md](field-like-arc.md): plan for an Arc-like field: Settings › Search "Empty Field Shows" (Sections or Open Tabs), Arc's timing, ⌘K actions as a page named at the bottom left; Arc measured frame by frame.
+- [docs/sync.md](sync.md): Sync between your Macs, end-to-end encrypted: the key, what syncs, how records merge, protocol v1 and the Cloudflare server in `sync-server/`.
+- [docs/extensions-sign-ins.md](extensions-sign-ins.md): extensions per sign-in, as Arc keeps them per profile: a space with sign-ins of its own has its own list, storage and controller; the split on upgrade.
+- [docs/iphone-duo.md](iphone-duo.md): Apple's rules for iPhone Duo (the shared side column, safe areas, vertical bars, reserved regions) and where Yab's chrome breaks them, with the fix in order.
+- [docs/state-observation.md](state-observation.md): the window's state in the Observation framework, so a change redraws only the views that read it: what Preferences, Browser and Tab hold and who reads it, the rules for new state, following it from AppKit, and the bodies counted per everyday change before and after.
+- [docs/pdf-desk.md](pdf-desk.md): the PDF desk against Acrobat and its plan; first step landed: an editable working copy saved as you go, kept across a restart at the same page, the original untouched, a final copy only on Done.
+- [docs/capture.md](capture.md): ⇧⌘2, a part of the page, what shows or all of it, framed on a backdrop and on the clipboard at once, and how it stays off the main thread.
+- [docs/get-to-know.md](get-to-know.md): Yab's own agent looking you up once, out of sight in a shut folder, where it starts, how it ends, and the morning look that waits for it.
+- [docs/link-folders.md](link-folders.md): ⌘-clicking links makes folders, Dia-style auto groups: the page and its links in a folder of today's, named by the model on the Mac with Dia's shimmer.
+- [docs/undo.md](undo.md): what ⌘Z takes back in the window, newest first, and who has it before the window does.
+- [docs/approvals.md](approvals.md): an agent's yes (pay, send, sign in) asked on the iPhone and other Macs too, proven with Face ID or Touch ID there; local agents as well as assistants, and the alert that carries the question sealed to the Lock Screen.
+- [docs/chat-asks.md](chat-asks.md): where an agent's question goes and how it finds you: its home first, the window's corner while Yab is in front, a Time Sensitive notification with its own sound and the Dock bouncing while it is behind, the iPhone only when you're away; never on the tab in front.
+- [docs/routines.md](routines.md): a task that comes back on its own, made in Settings, from a command, a chat's Repeat… or words that start with when, one chat for all its runs, and where what it finds waits.
+- [docs/agent-asks.md](agent-asks.md): asks the agent should do rather than explain ("save this page as pdf", "tell me when it drops under $200", "export this table"), what is done and the plan for the rest.
+- [docs/agent-row.md](agent-row.md): experimental, the tabs routines and agents from the terminal open kept out of the list, one row over the column's foot standing for them and turning into the tab that needs you.
+- [docs/chat-steps.md](chat-steps.md): an agent's steps said one way everywhere, in three forms of each verb, what waits on you and what failed in plain words, and the small marks that move on the light's beat at no cost to the main thread.
+- [docs/mail-providers.md](mail-providers.md): Mail beyond Gmail: the provider layer (built), IMAP and SMTP with autoconfig and `mail_probe` (built, Experimental), Microsoft Graph for Outlook and Microsoft 365 and JMAP (specified).
+- [docs/tab-cards.md](tab-cards.md): a tab's card on hover: who or where, one line of what is going on now and one button, from the tab itself and what live folders read.
+- [docs/live-folders.md](live-folders.md): Arc's smart tabs in Yab, planned: a folder that keeps your pull requests up to date, a count on a pin's corner when someone waits, and a pin's card listing what is there.
+- [docs/player.md](player.md): the island of Liquid Glass over the column's foot for what plays in other tabs, its buds when several do, how they swap, and why its corners are concentric.
+- [docs/card-ink.md](card-ink.md): the words on the column brought out over the page as a see-through card, the variants measured offscreen, and the veil worked out to keep them.
+- [docs/hung-pages.md](hung-pages.md): a page stuck in its own script, how Yab notices it, the card it asks with, and how reload, close and a pin's home get out of it on a fresh process.
+- [docs/feature-hints.md](feature-hints.md): a feature said at the moment it would have helped, a key after a menu's copy, Peek, Split View and a space each for two accounts, and never again once used.
+- [docs/command-builder.md](command-builder.md): planned: commands that write to Notion, Linear or Slack, kept as one readable sentence from what the chat just did or made in a builder, and run by a word.
+- [docs/snippets.md](snippets.md): snippets for all of Yab, `;name` in any field, ⌘; to find them, a hotkey each through Shortcuts, and an offer to keep text you paste often.
+- [docs/dark-pages.md](dark-pages.md): built 2026-10-21: Dark Reader's engine built into Yab, dark from the first frame, a site's own dark theme first, Dark page in Site Controls and ⌥⇧D, and how each page decides.
+- [docs/column-appkit.md](column-appkit.md): the column's rows, pins and space name on AppKit and Core Animation, each space a page of its own kept alive, its rows reusable cells, the row of spaces sliding the live pages; the switch, what replaces what, and the evals that hold it to the SwiftUI column.
+- [docs/space-switching.md](space-switching.md): Arc's space switching measured frame by frame, one row of space pages a column wide, half the fingers, one spring of a fifth of a second, and how Yab's column now does the same in Core Animation.
+- [docs/page-engine.md](page-engine.md): the page engine seam, its current migration boundary, and the contract another engine must implement.
+- [docs/chromium-webkit-only.md](chromium-webkit-only.md): WebKit-only features that do nothing on a Chromium tab, and how to give one a Chromium path.
+- [docs/haptics.md](haptics.md): what the trackpad's actuator can play, read from the framework's own table: one push of 4 to 8 ms at amplitude 14 to 70, longer feels as trains.
+- [docs/grain.md](grain.md): how much grain a space wears, set on a track under the lightness that ticks the trackpad and knocks at its ends, and what Arc does.
+- [docs/upstream.md](upstream.md): what came from Search, the browser Yab forked from, and what was declined.
+- [docs/files.md](files.md): Files (⇧⌘J), downloads with the files mail brought and sent and what sites were given, found by the words inside; files_search and files_read.
+- [docs/purchases.md](purchases.md): subscriptions, orders and receipts read from mail, a renewal row in Now for what you don't use, Do It: Don't Renew.
+- [docs/downloads.md](downloads.md): the downloads button, the cards that come up out of it in the column with each file's own picture, and the strip's list.
+- [docs/launch-videos.md](launch-videos.md): the three films for the first launch post, made of Yab's own frames in Remotion, and what is still to be filmed live.

@@ -1,0 +1,101 @@
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -49,6 +49,7 @@
+ 
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_AUDIBLE_VERSION 1
++#define CEF_YAB_BACKGROUND_COLOR_VERSION 1
+ 
+ ///
+ /// Implement this interface to handle events related to browser display state.
+@@ -196,6 +197,17 @@
+   /*--cef(added=experimental)--*/
+   virtual void OnAudioStateChanged(CefRefPtr<CefBrowser> browser,
+                                     bool audible) {}
++
++  ///
++  /// Called on the UI thread when the primary page's CSS background color
++  /// changes. |has_color| is false when the page has no background color.
++  /// An embedder that hosts the compositor remotely can fill area the page
++  /// has not yet drawn while resizing with this color, as Chromium does.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnBackgroundColorChange(CefRefPtr<CefBrowser> browser,
++                                       cef_color_t color,
++                                       bool has_color) {}
+ #endif
+ 
+ #if CEF_API_ADDED(13700)
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -869,6 +869,17 @@
+   }
+ }
+ 
++void CefBrowserContentsDelegate::OnBackgroundColorChanged() {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !web_contents()) return;
++  const auto color = web_contents()->GetBackgroundColor();
++  if (auto c = client()) {
++    if (auto handler = c->GetDisplayHandler()) {
++      handler->OnBackgroundColorChange(browser(), color.value_or(0),
++                                       color.has_value());
++    }
++  }
++}
++
+ void CefBrowserContentsDelegate::OnFullscreenModeChange(bool fullscreen) {
+   if (fullscreen == is_fullscreen_) {
+     return;
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -135,6 +135,7 @@
+       content::RenderWidgetHost* render_widget_host) override;
+   void RenderViewReady() override;
+   void OnAudioStateChanged(bool audible) override;
++  void OnBackgroundColorChanged() override;
+   void PrimaryMainFrameRenderProcessGone(
+       base::TerminationStatus status) override;
+   void OnFrameFocused(content::RenderFrameHost* render_frame_host) override;
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -34,12 +34,21 @@
+   void Bind(views::Widget* widget) {
+     observation_.Reset();
+     observation_.Observe(widget);
++    bound_ = true;
++    ApplyResizeDeadline();
+     Publish(widget->IsVisible());
+   }
+   void Reset() {
+     observation_.Reset();
++    bound_ = false;
++    ApplyResizeDeadline();
+     Publish(std::nullopt);
+   }
++  void RenderViewReady() override { ApplyResizeDeadline(); }
++  void RenderViewHostChanged(content::RenderViewHost*,
++                             content::RenderViewHost*) override {
++    ApplyResizeDeadline();
++  }
+   void OnWidgetVisibilityChanged(views::Widget*, bool visible) override {
+     Publish(visible);
+   }
+@@ -56,12 +65,18 @@
+   explicit ExternalVisibility(content::WebContents* contents)
+       : content::WebContentsObserver(contents),
+         content::WebContentsUserData<ExternalVisibility>(*contents) {}
++  void ApplyResizeDeadline() {
++    if (!web_contents() || web_contents()->IsBeingDestroyed()) return;
++    if (auto* view = web_contents()->GetRenderWidgetHostView())
++      view->SetShouldUseDefaultDeadlineOnResize(bound_);
++  }
+   void Publish(std::optional<bool> visible) {
+     if (!web_contents() || web_contents()->IsBeingDestroyed()) return;
+     auto* view = static_cast<content::WebContentsImpl*>(web_contents())->GetView();
+     if (view)
+       static_cast<content::WebContentsViewMac*>(view)->SetExternalVisibility(visible);
+   }
++  bool bound_ = false;
+   base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{this};
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };

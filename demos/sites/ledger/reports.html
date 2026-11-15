@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reports · Ledger</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="/assets/ledger.css">
+</head>
+<body data-page="reports">
+<script src="/assets/shell.js"></script>
+<main>
+  <div class="page">
+    <div class="head">
+      <div><h1>Reports</h1><p>Exports for the books, ready for your accountant.</p></div>
+      <div class="actions">
+        <button class="chip solid" type="button"><span data-icon="calendar" data-size="16"></span><span id="period">September 2026</span><span data-icon="chevDown" data-size="16"></span></button>
+        <button class="btn" type="button"><span data-icon="clock" data-size="16"></span>Schedule</button>
+      </div>
+    </div>
+    <section class="card summary-card">
+      <div class="card-head"><h3>Summary · <span id="period-2">September 2026</span></h3><span class="note end">All amounts in USD</span></div>
+      <div class="summary">
+        <div><span>Gross volume</span><b>$54,120.33</b></div>
+        <div><span>Refunds</span><b class="neg">-$1,240.00</b></div>
+        <div><span>Disputes</span><b class="neg">$0.00</b></div>
+        <div><span>Ledger fees</span><b class="neg">-$1,007.93</b></div>
+        <div class="total"><span>Net volume</span><b>$51,872.40</b></div>
+      </div>
+      <div class="bars" id="bars"></div>
+    </section>
+    <div class="grid reports" id="reports"></div>
+    <h2 class="section">Scheduled</h2>
+    <section class="card"><div class="card-body list-body"><div class="list" id="scheduled"></div></div></section>
+  </div>
+</main>
+<script src="/assets/data.js"></script>
+<script src="/assets/pages.js"></script>
+</body>
+</html>

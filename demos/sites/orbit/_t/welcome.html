@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{> head}}
+<link rel="stylesheet" href="/assets/welcome.css">
+<title>Welcome · Orbit</title>
+</head>
+<body>
+{{> icons}}
+<header class="w-top">
+  <a class="brand" href="/">{{> mark}}<span>Orbit</span></a>
+  <div class="w-right">
+    <span class="w-saved"><svg class="i"><use href="#i-check"/></svg>Account created</span>
+    <span class="avatar" title="{{name}}">{{initials}}</span>
+  </div>
+</header>
+<main class="w-main">
+  <section class="w-hero">
+    <h1>Welcome to Orbit, {{first}}</h1>
+    <p>Let's get your first events in. Most teams see their first funnel within five minutes.</p>
+    <div class="w-progress"><div class="w-bar"><i style="width:25%"></i></div><span>1 of 4 done</span></div>
+  </section>
+
+  <ol class="w-steps">
+    <li class="w-step done">
+      <span class="w-num"><svg class="i"><use href="#i-check"/></svg></span>
+      <div class="w-body">
+        <h2>Create your account</h2>
+        <p>Signed in as <b>{{email}}</b>. Your 14-day trial ends on <b id="trial-end">day 14</b>.</p>
+      </div>
+    </li>
+    <li class="w-step active">
+      <span class="w-num">2</span>
+      <div class="w-body">
+        <h2>Add Orbit to your app</h2>
+        <p>Install the package and start it with your project key. Page views, clicks and sign-ups are captured on their own.</p>
+        <div class="code">
+          <div class="code-h">
+            <div class="tabs"><button type="button" class="on">JavaScript</button><button type="button">React</button><button type="button">iOS</button><button type="button">Python</button></div>
+            <button class="copy" type="button" id="copy"><svg class="i"><use href="#i-copy"/></svg><span>Copy</span></button>
+          </div>
+<pre id="snippet"><span class="c"># In your project folder</span>
+npm install @orbit/web
+
+<span class="k">import</span> { orbit } <span class="k">from</span> <span class="s">"@orbit/web"</span>;
+
+orbit.<span class="f">init</span>(<span class="s">"{{key}}"</span>);
+orbit.<span class="f">track</span>(<span class="s">"Signed up"</span>, { plan: <span class="s">"trial"</span> });</pre>
+        </div>
+      </div>
+    </li>
+    <li class="w-step">
+      <span class="w-num">3</span>
+      <div class="w-body">
+        <h2>Send your first event</h2>
+        <p>Open your app in another tab and click around. Orbit checks for new events every few seconds.</p>
+        <div class="listen"><i class="live-dot"></i>Listening for events from your app</div>
+      </div>
+    </li>
+    <li class="w-step">
+      <span class="w-num">4</span>
+      <div class="w-body">
+        <h2>Invite your team</h2>
+        <p>Product, design and engineering look at the same numbers. Invites are free on every plan.</p>
+        <form class="invite" onsubmit="return false"><input class="input" type="email" placeholder="teammate@company.com" aria-label="Teammate's email"><button class="btn btn-secondary" type="submit">Send invite</button></form>
+      </div>
+    </li>
+  </ol>
+
+  <div class="w-foot">
+    <a class="btn btn-primary btn-lg" href="/">Go to your dashboard</a>
+    <a class="skip" href="/">I'll do this later</a>
+  </div>
+</main>
+<script>
+  (function () {
+    var end = new Date(Date.now() + 14 * 86400000);
+    var months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    document.getElementById("trial-end").textContent = months[end.getMonth()] + " " + end.getDate();
+    var copy = document.getElementById("copy");
+    copy.addEventListener("click", function () {
+      var text = document.getElementById("snippet").innerText;
+      if (navigator.clipboard) navigator.clipboard.writeText(text).catch(function () {});
+      copy.querySelector("span").textContent = "Copied";
+      setTimeout(function () { copy.querySelector("span").textContent = "Copy"; }, 1600);
+    });
+    document.querySelectorAll(".tabs").forEach(function (tabs) {
+      tabs.addEventListener("click", function (e) {
+        var b = e.target.closest("button");
+        if (b) tabs.querySelectorAll("button").forEach(function (o) { o.classList.toggle("on", o === b); });
+      });
+    });
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,792 @@
+--- a/content/browser/renderer_host/render_frame_host_impl.cc
++++ b/content/browser/renderer_host/render_frame_host_impl.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/public/browser/external_close_routes.h"
++#include "mojo/public/cpp/bindings/callback_helpers.h"
+ 
+ #include <algorithm>
+ #include <cstdint>
+@@ -7428,8 +7430,22 @@
+                      std::move(ipc_response_callback)));
+ }
+ 
++void RenderFrameHostImpl::RunBeforeUnloadPreflightConfirm(
++    const std::string& request, bool is_reload,
++    RunBeforeUnloadPreflightConfirmCallback callback) {
++  if(external_close::EvaluatePrompt(this,request,false)<0) {
++    std::move(callback).Run(false);return;
++  }
++  RunBeforeUnloadConfirmInternal(request,is_reload,std::move(callback));
++}
++
+ void RenderFrameHostImpl::RunBeforeUnloadConfirm(
+     bool is_reload,
++    RunBeforeUnloadConfirmCallback ipc_response_callback) {
++  RunBeforeUnloadConfirmInternal(std::string(),is_reload,std::move(ipc_response_callback));
++}
++void RenderFrameHostImpl::RunBeforeUnloadConfirmInternal(
++    const std::string& preflight_request,bool is_reload,
+     RunBeforeUnloadConfirmCallback ipc_response_callback) {
+   TRACE_EVENT1("navigation", "RenderFrameHostImpl::OnRunBeforeUnloadConfirm",
+                "render_frame_host", this);
+@@ -7461,6 +7477,12 @@
+     return;
+   }
+ 
++  // Apply the preflight prompt budget only after original policy, activation
++  // and sandbox checks, so an ineligible frame cannot suppress an eligible one.
++  if(!preflight_request.empty()) {
++    int policy=external_close::EvaluatePrompt(this,preflight_request,true);
++    if(policy!=0) {std::move(ipc_response_callback).Run(policy>0);return;}
++  }
+   // Allow at most one attempt to show a beforeunload dialog per navigation.
+   RenderFrameHostImpl* beforeunload_initiator = GetBeforeUnloadInitiator();
+   if (beforeunload_initiator) {
+@@ -7787,10 +7809,13 @@
+   // avoid closing via navigation.
+   CHECK(is_main_frame());
+   CHECK(IsOutermostMainFrame());
+-  if (!IsActive() && source == ClosePageSource::kRenderer) {
+-    return;
+-  }
+-
++  if (!IsActive() && (source == ClosePageSource::kRenderer || source == ClosePageSource::kExternalPreflight)) {
++    return;
++  }
++
++  close_preflight_document_ = source == ClosePageSource::kExternalPreflight
++      ? std::make_optional(GetDocumentToken()) : std::nullopt;
++  if(source != ClosePageSource::kExternalPreflight)close_preflight_validator_.Reset();
+   page_close_state_ = PageCloseState::kRunningUnloadHandlers;
+ 
+   if (IsRenderFrameLive() && !IsPageReadyToBeClosed()) {
+@@ -7831,11 +7856,20 @@
+   // came from the renderer, so return early in that case. We proceed with
+   // closing regardless if the request came from the browser so that renderers
+   // can't avoid closing via navigation.
+-  if (!IsActive() && source == ClosePageSource::kRenderer) {
++  if ((!IsActive() && source == ClosePageSource::kRenderer) ||
++      (source == ClosePageSource::kExternalPreflight &&
++       (!IsActive() || !close_preflight_document_ ||
++        *close_preflight_document_ != GetDocumentToken()))) {
++    if(source == ClosePageSource::kExternalPreflight && close_preflight_validator_)
++      close_preflight_validator_.Run();
+     page_close_state_ = PageCloseState::kNotClosing;
+     return;
+   }
+ 
++  if(source == ClosePageSource::kExternalPreflight &&
++      (!close_preflight_validator_ || !close_preflight_validator_.Run())) {
++    page_close_state_=PageCloseState::kNotClosing;return;
++  }
+   page_close_state_ = PageCloseState::kReadyToBeClosed;
+ 
+   // If this is triggered by an intended prerender cancellation, it should not
+@@ -12059,6 +12093,25 @@
+     return;
+   }
+   GetAssociatedLocalFrame()->StopLoading();
++}
++
++void RenderFrameHostImpl::ClosePreflightApprovedPage(base::RepeatingCallback<bool()> validator) {
++  close_preflight_validator_=std::move(validator);
++  ClosePage(ClosePageSource::kExternalPreflight);
++}
++void RenderFrameHostImpl::DispatchBeforeUnloadPreflight(const std::string& request, base::OnceCallback<void(bool)> callback) {
++  if (!IsActive() || !is_local_root() || IsNestedWithinFencedFrame() ||
++      is_waiting_for_beforeunload_completion_ || IsWaitingForUnloadACK() ||
++      delegate_->IsJavaScriptDialogShowing()) {
++    std::move(callback).Run(false); return;
++  }
++  if (!IsRenderFrameLive()) { std::move(callback).Run(true); return; }
++  GetAssociatedLocalFrame()->BeforeUnloadPreflight(request,
++      mojo::WrapCallbackWithDefaultInvokeIfNotRun(base::BindOnce(
++          [](content::WeakDocumentPtr document, base::OnceCallback<void(bool)> done, bool proceed) {
++            auto* frame = document.AsRenderFrameHostIfValid();
++            std::move(done).Run(proceed && frame && frame->IsActive());
++          }, GetWeakDocumentPtr(), std::move(callback)), false));
+ }
+ 
+ void RenderFrameHostImpl::DispatchBeforeUnload(BeforeUnloadType type,
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -616,6 +616,8 @@
+     "libcef/browser/download_manager_delegate.h",
+     "libcef/browser/download_manager_delegate_impl.cc",
+     "libcef/browser/download_manager_delegate_impl.h",
++    "libcef/browser/external_close.cc",
++    "libcef/browser/external_close.h",
+     "libcef/browser/external_capture.cc",
+     "libcef/browser/external_capture.h",
+     "libcef/browser/external_media_stream_ui.h",
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -223,6 +223,19 @@
+       CefRefPtr<CefDictionaryValue> state) {}
+ 
+   ///
++  /// Native non-destructive beforeunload decision or approval withdrawal.
++  /// Decision=true is terminal once per accepted request. Only approved
++  /// decisions carry an opaque commit token. A later withdrawn=true event
++  /// invalidates that exact token. After commit, final=true reports either
++  /// phase=closed/closed=true or phase=retained/closed=false for the exact
++  /// original request/document/token. Final callback occurs synchronously
++  /// before native Close may destroy the browser. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnClosePreflightState(CefRefPtr<CefBrowser> browser,
++      CefRefPtr<CefDictionaryValue> state) {}
++
++  ///
+   /// Native original video-PiP session/surface state for this exact browser.
+   /// Native document/frame/session ownership and surfaceReady are explicit.
+   /// An inactive state retires the previous token and compositor context.
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1105,6 +1105,24 @@
+       contents_delegate_.ControlNativeVideoPiP(token, action, size, value);
+ }
+ 
++CefRefPtr<CefDictionaryValue> CefBrowserHostBase::BeginClosePreflight() {
++  CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
++      ? contents_delegate_.BeginClosePreflight() : CefDictionaryValue::Create();
++}
++bool CefBrowserHostBase::ValidateClosePreflight(const CefString& token) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) && contents_delegate_.ValidateClosePreflight(token);
++}
++bool CefBrowserHostBase::CommitClosePreflight(const CefString& token) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) && contents_delegate_.CommitClosePreflight(token);
++}
++bool CefBrowserHostBase::CancelClosePreflight(const CefString& request) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) && contents_delegate_.CancelClosePreflight(request);
++}
++
+ CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetNativeCaptureState() {
+   CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
+   return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
+--- a/third_party/blink/renderer/core/page/chrome_client_impl.cc
++++ b/third_party/blink/renderer/core/page/chrome_client_impl.cc
+@@ -30,6 +30,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/page/chrome_client_impl.h"
++#include "third_party/blink/renderer/core/frame/local_frame_mojo_handler.h"
+ 
+ #include <memory>
+ #include <optional>
+@@ -516,7 +517,11 @@
+   }
+   bool success = false;
+   // Synchronous mojo call.
+-  frame->GetLocalFrameHostRemote().RunBeforeUnloadConfirm(is_reload, &success);
++  const String& preflight = LocalFrameMojoHandler::CurrentBeforeUnloadPreflightRequest();
++  if(preflight.empty())
++    frame->GetLocalFrameHostRemote().RunBeforeUnloadConfirm(is_reload, &success);
++  else
++    frame->GetLocalFrameHostRemote().RunBeforeUnloadPreflightConfirm(preflight, is_reload, &success);
+   return success;
+ }
+ 
+--- a/third_party/blink/public/mojom/frame/frame.mojom
++++ b/third_party/blink/public/mojom/frame/frame.mojom
+@@ -521,6 +521,10 @@
+   [Sync]
+   RunBeforeUnloadConfirm(bool is_reload) => (bool success);
+ 
++  // Native non-destructive preflight. A stale request cannot show a dialog.
++  [Sync]
++  RunBeforeUnloadPreflightConfirm(string request, bool is_reload) => (bool success);
++
+   // Notifies that the urls for the favicon of a site has been determined.
+   UpdateFaviconURL(
+       array<FaviconURL> favicon_urls, FaviconUpdateReason reason);
+@@ -931,6 +935,10 @@
+   // pending, which increases their priority while maintaining ordering
+   // guarantees. See also mojo/public/tools/bindings/README.md.
+   [SupportsUrgent]
++  BeforeUnloadPreflight(string request) => (bool proceed);
++
++  // Original destructive navigation/close dispatch remains unchanged.
++  [SupportsUrgent]
+   BeforeUnload(bool is_reload, bool force_to_proceed)
+       => (bool proceed,
+           mojo_base.mojom.TimeTicks before_unload_start_time,
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -58,6 +58,7 @@
+ #define CEF_YAB_NATIVE_MEDIA_SESSION_VERSION 1
+ #define CEF_YAB_NATIVE_CAPTURE_ACTIVITY_VERSION 1
+ #define CEF_YAB_NATIVE_VIDEO_PIP_VERSION 1
++#define CEF_YAB_NATIVE_CLOSE_PREFLIGHT_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1184,6 +1185,43 @@
+   virtual CefRefPtr<CefDictionaryValue> GetNativeCaptureState() = 0;
+ 
+   ///
++  /// Runs original native beforeunload without closing or unloading any page.
++  /// Returns accepted/request/document/phase. The exact native frame-document
++  /// tree owns one terminal OnClosePreflightState decision, including pages
++  /// without listeners. No synthetic gesture or JavaScript dispatch is used.
++  /// UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefDictionaryValue> BeginClosePreflight() = 0;
++
++  ///
++  /// Validates one approved opaque token and its entire unchanged native frame
++  /// tree, without mutating any page. Refuses navigation, a new prompt, loss,
++  /// cancellation or a replayed token. Batch callers validate every token in
++  /// one UI task before any commit. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool ValidateClosePreflight(const CefString& token) = 0;
++
++  ///
++  /// Consumes one validated approval and dispatches native unload to that
++  /// exact current document. True is dispatch acceptance, not close completion.
++  /// The final=true callback reports closed or retained after exact native
++  /// document revalidation at original unload ACK/timeout. Batch callers mark
++  /// all entries closing before committing any. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool CommitClosePreflight(const CefString& token) = 0;
++
++  ///
++  /// Cancels the exact pending request or approved token. A pending decision
++  /// is completed once with refusal; an approved token is withdrawn. Late
++  /// original beforeunload replies never close the page. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool CancelClosePreflight(const CefString& request) = 0;
++
++  ///
+   /// Returns the original native video-PiP session's exact requesting document,
+   /// opaque session token and independent overlay compositor surface. No main
+   /// frame inference, page reparenting, polling or video duplication is used.
+--- a/content/browser/renderer_host/render_frame_host_impl.h
++++ b/content/browser/renderer_host/render_frame_host_impl.h
+@@ -1308,6 +1308,14 @@
+   // false.
+   void DispatchBeforeUnload(BeforeUnloadType type, bool is_reload);
+ 
++  // Original renderer beforeunload for this native local-root, deliberately
++  // outside the closing/navigation state machine. Never dispatches unload.
++  // The callback is document-bound and defaults to refusal on disconnect.
++  void DispatchBeforeUnloadPreflight(const std::string& request, base::OnceCallback<void(bool)> callback);
++  // Validator returns whether the exact approved native tree may be closed,
++  // and receives the final ACK synchronously before this RFH can be destroyed.
++  void ClosePreflightApprovedPage(base::RepeatingCallback<bool()> validator);
++
+   // Simulate beforeunload completion callback on behalf of renderer if it's
+   // unrenresponsive.
+   void SimulateBeforeUnloadCompleted(bool proceed);
+@@ -2381,6 +2389,10 @@
+                             const std::u16string& default_value,
+                             bool disable_third_party_subframe_suppresion,
+                             RunModalPromptDialogCallback callback) override;
++  void RunBeforeUnloadConfirmInternal(const std::string& preflight_request,bool is_reload,
++      RunBeforeUnloadConfirmCallback callback);
++  void RunBeforeUnloadPreflightConfirm(const std::string& request, bool is_reload,
++      RunBeforeUnloadPreflightConfirmCallback callback) override;
+   void RunBeforeUnloadConfirm(bool is_reload,
+                               RunBeforeUnloadConfirmCallback callback) override;
+   void MaybeStartOutermostMainFrameNavigation(
+@@ -3003,7 +3015,7 @@
+   // to determine whether navigation should prevent the page from closing, since
+   // navigations should not prevent the page from closing if the browser or
+   // prerender cancellation is trying to close the page.
+-  enum class ClosePageSource { kRenderer, kBrowser, kPrerenderDiscard };
++  enum class ClosePageSource { kRenderer, kBrowser, kPrerenderDiscard, kExternalPreflight };
+ 
+   // Tells the renderer process to run the page's unload handler.
+   // A completion callback is invoked by the renderer when the handler
+@@ -4239,6 +4251,8 @@
+   // then it may be ignored if a different document commits first. The
+   // `completion_callback` parameter is fired on completion of page close only
+   // when source is kPrerenderDiscard. Otherwise, it's ignored.
++  std::optional<blink::DocumentToken> close_preflight_document_;
++  base::RepeatingCallback<bool()> close_preflight_validator_;
+   void ClosePageIgnoringUnloadEvents(
+       ClosePageSource source,
+       base::RepeatingClosure completion_callback = base::DoNothing());
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -6,6 +6,7 @@
+ #include "base/functional/bind.h"
+ #include "cef/libcef/browser/external_media_session.h"
+ #include "cef/libcef/browser/external_capture.h"
++#include "cef/libcef/browser/external_close.h"
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "cef/libcef/browser/browser_event_util.h"
+@@ -106,6 +107,7 @@
+ #if BUILDFLAG(IS_MAC)
+   external_pip_.reset();
+ #endif
++  external_close_.reset();
+   external_capture_.reset();
+   external_media_session_.reset();
+ #if BUILDFLAG(IS_MAC)
+@@ -119,6 +121,8 @@
+         base::BindRepeating(&CefBrowserContentsDelegate::OnNativeVideoPiPState,
+                            base::Unretained(this)));
+ #endif
++    external_close_ = std::make_unique<CefExternalClose>(new_contents,
++        base::BindRepeating(&CefBrowserContentsDelegate::OnClosePreflightState,base::Unretained(this)));
+     external_capture_ = std::make_unique<CefExternalCapture>(new_contents,
+         base::BindRepeating(&CefBrowserContentsDelegate::OnNativeCaptureState,
+                            base::Unretained(this)));
+@@ -185,6 +189,28 @@
+   if (auto handler = c->GetDisplayHandler()) {
+     state->SetInt("browserId", owner->GetIdentifier());
+     handler->OnNativeVideoPiPState(owner, state);
++  }
++}
++
++CefRefPtr<CefDictionaryValue> CefBrowserContentsDelegate::BeginClosePreflight() {
++  auto state = external_close_ ? external_close_->Begin() : CefDictionaryValue::Create();
++  if(auto owner=browser()) state->SetInt("browserId",owner->GetIdentifier());
++  return state;
++}
++bool CefBrowserContentsDelegate::ValidateClosePreflight(const CefString& token) {
++  return external_close_ && external_close_->Validate(token.ToString());
++}
++bool CefBrowserContentsDelegate::CommitClosePreflight(const CefString& token) {
++  return external_close_ && external_close_->Commit(token.ToString());
++}
++bool CefBrowserContentsDelegate::CancelClosePreflight(const CefString& request) {
++  return external_close_ && external_close_->Cancel(request.ToString());
++}
++void CefBrowserContentsDelegate::OnClosePreflightState(CefRefPtr<CefDictionaryValue> state) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !state) return;
++  auto owner=browser();auto c=client();if(!owner||!c)return;
++  if(auto handler=c->GetDisplayHandler()) {
++    state->SetInt("browserId",owner->GetIdentifier());handler->OnClosePreflightState(owner,state);
+   }
+ }
+ 
+--- a/third_party/blink/renderer/core/loader/frame_loader.h
++++ b/third_party/blink/renderer/core/loader/frame_loader.h
+@@ -193,7 +193,8 @@
+   bool ShouldClose(bool is_reload,
+                    bool force_to_proceed,
+                    base::TimeTicks& out_before_unload_dialog_opened_time,
+-                   base::TimeTicks& out_before_unload_dialog_closed_time);
++                   base::TimeTicks& out_before_unload_dialog_closed_time,
++                   bool non_destructive = false);
+ 
+   // Dispatches the Unload event for the current document and fills in this
+   // document's info in OldDocumentInfoForCommit if
+--- a/third_party/blink/renderer/core/frame/local_frame_mojo_handler.cc
++++ b/third_party/blink/renderer/core/frame/local_frame_mojo_handler.cc
+@@ -5,6 +5,8 @@
+ #include "third_party/blink/renderer/core/frame/local_frame_mojo_handler.h"
+ 
+ #include "base/command_line.h"
++#include "base/auto_reset.h"
++#include "base/no_destructor.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/time/time.h"
+@@ -707,6 +709,23 @@
+   frame_->RenderFallbackContent();
+ }
+ 
++namespace {
++String& NativeBeforeUnloadRequest() {
++  static base::NoDestructor<String> request;
++  return *request;
++}
++}  // namespace
++const String& LocalFrameMojoHandler::CurrentBeforeUnloadPreflightRequest() {
++  return NativeBeforeUnloadRequest();
++}
++void LocalFrameMojoHandler::BeforeUnloadPreflight(const String& request, BeforeUnloadPreflightCallback callback) {
++  base::AutoReset<String> scope(&NativeBeforeUnloadRequest(),request);
++  base::TimeTicks opened, closed;
++  bool proceed = frame_->Loader().ShouldClose(false, false, opened, closed,
++                                              /*non_destructive=*/true);
++  std::move(callback).Run(proceed);
++}
++
+ void LocalFrameMojoHandler::BeforeUnload(bool is_reload,
+                                          bool force_to_proceed,
+                                          BeforeUnloadCallback callback) {
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -53,6 +53,7 @@
+ // accessed on the UI thread.
+ class CefExternalMediaSession;
+ class CefExternalCapture;
++class CefExternalClose;
+ 
+ class CefBrowserContentsDelegate : public content::WebContentsDelegate,
+                                    public content::WebContentsObserver {
+@@ -85,6 +86,10 @@
+   void ObserveWebContents(content::WebContents* new_contents);
+   CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState();
+   CefRefPtr<CefDictionaryValue> GetNativeCaptureState();
++  CefRefPtr<CefDictionaryValue> BeginClosePreflight();
++  bool ValidateClosePreflight(const CefString& token);
++  bool CommitClosePreflight(const CefString& token);
++  bool CancelClosePreflight(const CefString& request);
+   CefRefPtr<CefDictionaryValue> GetNativeVideoPiPState();
+   bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
+       const CefSize& size, double value);
+@@ -217,6 +222,8 @@
+   void OnNativeMediaSessionState(CefRefPtr<CefDictionaryValue> state);
+   std::unique_ptr<CefExternalMediaSession> external_media_session_;
+   std::unique_ptr<CefExternalCapture> external_capture_;
++  std::unique_ptr<CefExternalClose> external_close_;
++  void OnClosePreflightState(CefRefPtr<CefDictionaryValue> state);
+ #if BUILDFLAG(IS_MAC)
+   std::unique_ptr<CefExternalPiP> external_pip_;
+ #endif
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -289,6 +289,10 @@
+   CefRefPtr<CefDictionaryValue> GetExternalPageState() override;
+   CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState() override;
+   CefRefPtr<CefDictionaryValue> GetNativeCaptureState() override;
++  CefRefPtr<CefDictionaryValue> BeginClosePreflight() override;
++  bool ValidateClosePreflight(const CefString& token) override;
++  bool CommitClosePreflight(const CefString& token) override;
++  bool CancelClosePreflight(const CefString& request) override;
+   CefRefPtr<CefDictionaryValue> GetNativeVideoPiPState() override;
+   bool ControlNativeVideoPiP(const CefString& token, const CefString& action,
+       const CefSize& size, double value) override;
+--- a/third_party/blink/renderer/core/frame/local_frame_mojo_handler.h
++++ b/third_party/blink/renderer/core/frame/local_frame_mojo_handler.h
+@@ -123,6 +123,8 @@
+   void SaveImageAt(const gfx::Point& window_point) final;
+   void ReportBlinkFeatureUsage(const Vector<mojom::blink::WebFeature>&) final;
+   void RenderFallbackContent() final;
++  static const String& CurrentBeforeUnloadPreflightRequest();
++  void BeforeUnloadPreflight(const String& request, BeforeUnloadPreflightCallback callback) final;
+   void BeforeUnload(bool is_reload,
+                     bool force_to_proceed,
+                     BeforeUnloadCallback callback) final;
+--- a/third_party/blink/renderer/core/loader/frame_loader.cc
++++ b/third_party/blink/renderer/core/loader/frame_loader.cc
+@@ -1703,7 +1703,8 @@
+     bool is_reload,
+     bool force_to_proceed,
+     base::TimeTicks& out_before_unload_dialog_opened_time,
+-    base::TimeTicks& out_before_unload_dialog_closed_time) {
++    base::TimeTicks& out_before_unload_dialog_closed_time,
++    bool non_destructive) {
+   TRACE_EVENT("loading", "FrameLoader::ShouldClose", "is_reload", is_reload,
+               "force_to_proceed", force_to_proceed);
+   const base::TimeTicks before_unload_events_start = base::TimeTicks::Now();
+@@ -1734,7 +1735,7 @@
+             &page->GetChromeClient(), is_reload, force_to_proceed,
+             did_allow_navigation, out_before_unload_dialog_opened_time,
+             out_before_unload_dialog_closed_time)) {
+-      frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
++      if (!non_destructive) frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
+       return false;
+     }
+ 
+@@ -1760,11 +1761,15 @@
+               &page->GetChromeClient(), is_reload, force_to_proceed,
+               did_allow_navigation, out_before_unload_dialog_opened_time,
+               out_before_unload_dialog_closed_time)) {
+-        frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
++        if (!non_destructive) frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
+         return false;
+       }
+     }
+   }
++
++  // A preflight preserves the existing document's lifecycle progress. It must
++  // remain runnable after Leave when a different page later cancels a batch.
++  if (non_destructive) return true;
+ 
+   // Now that none of the unloading frames canceled the BeforeUnload, tell each
+   // of them so they can advance to the appropriate load state.
+--- /dev/null
++++ b/content/public/browser/external_close_routes.h
+@@ -0,0 +1,33 @@
++// Native non-destructive beforeunload prompt policy, UI sequence only.
++#ifndef CONTENT_PUBLIC_BROWSER_EXTERNAL_CLOSE_ROUTES_H_
++#define CONTENT_PUBLIC_BROWSER_EXTERNAL_CLOSE_ROUTES_H_
++#include <map>
++#include <string>
++#include <utility>
++#include "base/functional/callback.h"
++#include "base/no_destructor.h"
++#include "base/unguessable_token.h"
++#include "content/public/browser/web_contents.h"
++namespace content::external_close {
++struct PromptGate {
++  base::UnguessableToken registration;
++  std::string request;
++  // -1: stale/refuse, 0: first native prompt, 1: duplicate/suppress.
++  base::RepeatingCallback<int(content::RenderFrameHost*,bool)> evaluate;
++};
++inline std::map<content::WebContents*, PromptGate>& Gates() {
++  static base::NoDestructor<std::map<content::WebContents*, PromptGate>> gates;
++  return *gates;
++}
++inline void Register(content::WebContents* owner, PromptGate gate) { Gates().insert_or_assign(owner,std::move(gate)); }
++inline void Remove(content::WebContents* owner,const base::UnguessableToken& registration) {
++  auto found=Gates().find(owner);
++  if(found!=Gates().end() && found->second.registration==registration) Gates().erase(found);
++}
++inline int EvaluatePrompt(content::RenderFrameHost* frame, const std::string& request, bool consume) {
++  auto found=Gates().find(content::WebContents::FromRenderFrameHost(frame));
++  if(found==Gates().end() || found->second.request!=request) return -1;
++  return found->second.evaluate.Run(frame,consume);
++}
++}  // namespace content::external_close
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/external_close.h
+@@ -0,0 +1,53 @@
++#ifndef CEF_LIBCEF_BROWSER_EXTERNAL_CLOSE_H_
++#define CEF_LIBCEF_BROWSER_EXTERNAL_CLOSE_H_
++#include <deque>
++#include <map>
++#include <string>
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/timer/timer.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_values.h"
++#include "content/public/browser/global_routing_id.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents_observer.h"
++
++class CefExternalClose final : public content::WebContentsObserver {
++ public:
++  using Changed=base::RepeatingCallback<void(CefRefPtr<CefDictionaryValue>)>;
++  CefExternalClose(content::WebContents*,Changed);
++  ~CefExternalClose() override;
++  CefRefPtr<CefDictionaryValue> Begin();
++  bool Validate(const std::string& token) const;
++  bool Commit(const std::string& token);
++  bool Cancel(const std::string& request);
++  void DidStartNavigation(content::NavigationHandle*) override;
++  void RenderFrameCreated(content::RenderFrameHost*) override;
++  void RenderFrameDeleted(content::RenderFrameHost*) override;
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
++  void WebContentsDestroyed() override;
++ private:
++  using Documents=std::map<content::GlobalRenderFrameHostId,content::WeakDocumentPtr>;
++  Documents CurrentDocuments() const;
++  bool ExactDocuments() const;
++  int EvaluatePrompt(content::RenderFrameHost* frame,bool consume);
++  void Completed(const std::string& request,bool allow);
++  void Invalidate(const char* reason);
++  bool CloseCompleted();
++  void Enqueue(CefRefPtr<CefDictionaryValue> event);
++  void Flush();
++  CefRefPtr<CefDictionaryValue> State(bool decision=false,bool withdrawn=false) const;
++  Changed changed_;
++  Documents documents_;
++  content::WeakDocumentPtr primary_;
++  base::UnguessableToken registration_;
++  std::string request_,token_,document_,phase_="idle",reason_;
++  size_t pending_=0;
++  bool prompt_shown_=false;
++  bool all_allowed_=true;
++  bool flush_pending_=false;
++  base::OneShotTimer timeout_;
++  std::deque<CefRefPtr<CefDictionaryValue>> events_;
++  base::WeakPtrFactory<CefExternalClose> weak_{this};
++};
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/external_close.cc
+@@ -0,0 +1,182 @@
++#include "external_close.h"
++#include <utility>
++#include <vector>
++#include "base/functional/bind.h"
++#include "base/task/single_thread_task_runner.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/browser/site_instance_impl.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/public/browser/external_close_routes.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/javascript_dialog_manager.h"
++#include "content/public/browser/web_contents_delegate.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++
++CefExternalClose::CefExternalClose(content::WebContents* owner,Changed changed)
++ : content::WebContentsObserver(owner),changed_(std::move(changed)),registration_(base::UnguessableToken::Create()) {}
++CefExternalClose::~CefExternalClose() { content::external_close::Remove(web_contents(),registration_); }
++CefExternalClose::Documents CefExternalClose::CurrentDocuments() const {
++  Documents result;
++  if (!web_contents() || web_contents()->IsBeingDestroyed()) return result;
++  auto* primary=web_contents()->GetPrimaryMainFrame();
++  if(!primary || !primary->IsActive()) return result;
++  primary->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
++    auto* native=static_cast<content::RenderFrameHostImpl*>(frame);
++    if(frame->IsActive() && !native->IsNestedWithinFencedFrame() &&
++       content::WebContents::FromRenderFrameHost(frame)==web_contents())
++      result.emplace(frame->GetGlobalId(),frame->GetWeakDocumentPtr());
++  });
++  return result;
++}
++bool CefExternalClose::ExactDocuments() const {
++  auto current=CurrentDocuments();
++  if(current.empty() || current.size()!=documents_.size() || !primary_.AsRenderFrameHostIfValid() ||
++     primary_.AsRenderFrameHostIfValid()!=web_contents()->GetPrimaryMainFrame()) return false;
++  for(const auto& [id,doc]:documents_) {
++    auto found=current.find(id);
++    if(found==current.end() || !doc.AsRenderFrameHostIfValid() ||
++       found->second.AsRenderFrameHostIfValid()!=doc.AsRenderFrameHostIfValid()) return false;
++  }
++  return true;
++}
++CefRefPtr<CefDictionaryValue> CefExternalClose::State(bool decision,bool withdrawn) const {
++  auto state=CefDictionaryValue::Create();state->SetInt("version",1);
++  state->SetString("request",request_);state->SetString("phase",phase_);
++  state->SetString("document",document_);state->SetString("reason",reason_);
++  state->SetBool("decision",decision);state->SetBool("withdrawn",withdrawn);
++  state->SetBool("final",phase_=="closed" || phase_=="retained");
++  state->SetBool("closed",phase_=="closed");
++  state->SetBool("allow",phase_=="approved");state->SetInt("frameCount",static_cast<int>(documents_.size()));
++  if(!token_.empty())state->SetString("token",token_);
++  return state;
++}
++CefRefPtr<CefDictionaryValue> CefExternalClose::Begin() {
++  if(phase_=="pending" || phase_=="approved" || phase_=="committing" || phase_=="closed") {
++    auto state=State();state->SetBool("accepted",false);return state;
++  }
++  documents_=CurrentDocuments();
++  auto* primary=web_contents() ? static_cast<content::RenderFrameHostImpl*>(web_contents()->GetPrimaryMainFrame()):nullptr;
++  if(documents_.empty() || !primary || primary->is_waiting_for_beforeunload_completion() ||
++     primary->IsWaitingForUnloadACK() || web_contents()->GetController().GetPendingEntry() ||
++     static_cast<content::WebContentsImpl*>(web_contents())->IsJavaScriptDialogShowing()) {
++    auto state=State();state->SetBool("accepted",false);return state;
++  }
++  primary_=primary->GetWeakDocumentPtr();document_=primary->GetDocumentToken().ToString();
++  request_=base::UnguessableToken::Create().ToString();token_.clear();phase_="pending";reason_.clear();
++  prompt_shown_=false;all_allowed_=true;
++  content::external_close::Register(web_contents(),{registration_,request_,
++    base::BindRepeating([](base::WeakPtr<CefExternalClose> self,content::RenderFrameHost* frame,bool consume) {
++      return self ? self->EvaluatePrompt(frame,consume) : -1;
++    },weak_.GetWeakPtr())});
++  std::vector<content::RenderFrameHostImpl*> roots;
++  for(const auto& [id,doc]:documents_) {
++    auto* frame=static_cast<content::RenderFrameHostImpl*>(doc.AsRenderFrameHostIfValid());
++    if(!frame || !frame->is_local_root())continue;
++    bool covered=false;
++    for(auto* parent=frame->GetParent();parent;parent=parent->GetParent()) {
++      if(content::WebContents::FromRenderFrameHost(parent)!=web_contents())break;
++      if(parent->GetSiteInstance()->group()==frame->GetSiteInstance()->group()) {covered=true;break;}
++    }
++    if(!covered)roots.push_back(frame);
++  }
++  pending_=roots.size();
++  timeout_.Start(FROM_HERE,base::Seconds(30),base::BindOnce(&CefExternalClose::Invalidate,weak_.GetWeakPtr(),"renderer-timeout"));
++  // All callbacks are separate from the normal closing/navigation state machine.
++  // Even a late Leave after cancellation cannot reach Browser::CloseContents.
++  for(auto* frame:roots) frame->DispatchBeforeUnloadPreflight(request_,base::BindOnce(
++      &CefExternalClose::Completed,weak_.GetWeakPtr(),request_));
++  if(roots.empty())Completed(request_,true);
++  auto state=State();state->SetBool("accepted",true);return state;
++}
++int CefExternalClose::EvaluatePrompt(content::RenderFrameHost* frame,bool consume) {
++  if(phase_!="pending" || !ExactDocuments())return -1;
++  auto found=documents_.find(frame->GetGlobalId());
++  if(found==documents_.end() || found->second.AsRenderFrameHostIfValid()!=frame)return -1;
++  if(!consume)return 0;
++  if(prompt_shown_)return 1;
++  prompt_shown_=true;timeout_.Stop();return 0;
++}
++void CefExternalClose::Completed(const std::string& request,bool allow) {
++  if(phase_!="pending" || request_!=request)return;
++  if(!ExactDocuments()) {Invalidate("document-retired");return;}
++  all_allowed_ &= allow;
++  if(pending_)--pending_;
++  if(pending_) {
++    if (!static_cast<content::WebContentsImpl*>(web_contents())->IsJavaScriptDialogShowing())
++      timeout_.Start(FROM_HERE,base::Seconds(30),base::BindOnce(&CefExternalClose::Invalidate,weak_.GetWeakPtr(),"renderer-timeout"));
++    return;
++  }
++  timeout_.Stop();content::external_close::Remove(web_contents(),registration_);
++  phase_=all_allowed_?"approved":"denied";
++  if(all_allowed_)token_=base::UnguessableToken::Create().ToString();
++  Enqueue(State(true));
++}
++bool CefExternalClose::Cancel(const std::string& request) {
++  if((phase_!="pending" && phase_!="approved") || (request!=request_ && request!=token_))return false;
++  Invalidate("cancelled-by-embedder");return true;
++}
++void CefExternalClose::Invalidate(const char* reason) {
++  if(phase_!="pending" && phase_!="approved" && phase_!="committing")return;
++  const bool committing=phase_=="committing";
++  const bool decision=phase_=="pending",withdrawn=phase_=="approved";
++  timeout_.Stop();content::external_close::Remove(web_contents(),registration_);
++  phase_=committing?"retained":withdrawn?"withdrawn":"retired";reason_=reason;
++  if(committing)changed_.Run(State());else Enqueue(State(decision,withdrawn));
++  // Only our currently pending native dialog can be withdrawn here. The phase
++  // and request gate retire before cancellation can synchronously reply.
++  if(decision && prompt_shown_ && web_contents() && web_contents()->GetDelegate()) {
++    if(auto* dialogs=web_contents()->GetDelegate()->GetJavaScriptDialogManager(web_contents()))
++      dialogs->CancelDialogs(web_contents(),true);
++  }
++}
++bool CefExternalClose::Validate(const std::string& token) const {
++  auto* primary=static_cast<content::RenderFrameHostImpl*>(primary_.AsRenderFrameHostIfValid());
++  return phase_=="approved" && !token.empty() && token==token_ && primary && ExactDocuments() &&
++     !primary->is_waiting_for_beforeunload_completion() && !primary->IsWaitingForUnloadACK() &&
++     !web_contents()->GetController().GetPendingEntry() &&
++     !static_cast<content::WebContentsImpl*>(web_contents())->IsJavaScriptDialogShowing();
++}
++bool CefExternalClose::Commit(const std::string& token) {
++  if(!Validate(token)) {Invalidate("approval-retired");return false;}
++  auto* primary=static_cast<content::RenderFrameHostImpl*>(primary_.AsRenderFrameHostIfValid());
++  phase_="committing";timeout_.Stop();content::external_close::Remove(web_contents(),registration_);
++  // The exact current RFH gets native unload now. No queued force-close can
++  // accidentally close a later document after a navigation or a new prompt.
++  primary->ClosePreflightApprovedPage(base::BindRepeating(
++      [](base::WeakPtr<CefExternalClose> self) {return self && self->CloseCompleted();},weak_.GetWeakPtr()));
++  return true;
++}
++bool CefExternalClose::CloseCompleted() {
++  if(phase_!="committing")return false;
++  const bool exact=ExactDocuments();
++  phase_=exact?"closed":"retained";reason_=exact?"native-unload-completed":"document-retired-before-close";
++  // Final success must be delivered before the following native Close destroys
++  // this observer. The embedder only writes this immutable receipt here.
++  changed_.Run(State());
++  return exact;
++}
++void CefExternalClose::Enqueue(CefRefPtr<CefDictionaryValue> event) {
++  events_.push_back(event);
++  if(flush_pending_)return;
++  flush_pending_=true;base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
++      base::BindOnce(&CefExternalClose::Flush,weak_.GetWeakPtr()));
++}
++void CefExternalClose::Flush() {
++  flush_pending_=false;
++  auto self=weak_.GetWeakPtr();
++  while(self && !events_.empty()) {
++    auto event=events_.front();events_.pop_front();changed_.Run(event);
++  }
++}
++void CefExternalClose::DidStartNavigation(content::NavigationHandle* handle) {
++  if(!handle->IsSameDocument())Invalidate("navigation-started");
++}
++void CefExternalClose::RenderFrameCreated(content::RenderFrameHost*) {Invalidate("frame-created");}
++void CefExternalClose::RenderFrameDeleted(content::RenderFrameHost*) {Invalidate("frame-deleted");}
++void CefExternalClose::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {Invalidate("renderer-gone");}
++void CefExternalClose::WebContentsDestroyed() {
++  if(phase_=="committing") {phase_="closed";reason_="browser-destroyed";changed_.Run(State());}
++  else Invalidate("browser-closed");
++  Observe(nullptr);
++}

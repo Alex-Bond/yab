@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "qualificationOnly": true,
+  "fullClearSupported": false,
+  "supportedTypes": 7,
+  "requiredFullTypes": 255,
+  "patch": "patches/0001-scoped-storage-qualification.patch",
+  "sha256": "11a4e5128f7e4a1771c9fe5b38501d329b726cb726a9e9b29509dbfe2cbf155f",
+  "files": [
+    {
+      "path": "mobile/android/geckoview/src/main/java/org/mozilla/geckoview/StorageController.java",
+      "beforeSHA256": "758c22b0b5815fb3dd74632231a75abc4c9645032d9b166b32f92d369e19b971",
+      "afterSHA256": "d4253e9ad56cf4f58024421c18ca2e36bb56af1014cb0e5a904723e03e0507c6"
+    },
+    {
+      "path": "mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs",
+      "beforeSHA256": "427027c14b47c1904ef75240962b225468e38155d6e34ae86b8f1ef06737913f",
+      "afterSHA256": "58db1af72f913efe63a80b5d5951f08b0c2349bc038b294a58991880047d4a23"
+    },
+    {
+      "path": "mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs",
+      "beforeSHA256": "8cf315acdae8ee0b886439cca3635fbc9bf78e1d13ea39a1020b27fc3c6a60b0",
+      "afterSHA256": "7695efec7220f11250d9a9389226fb7c3c772498ec6f38bf270fe1857a873915"
+    },
+    {
+      "path": "mobile/shared/modules/geckoview/moz.build",
+      "beforeSHA256": "09ac411291a259287c88e88154a09df2f5dbd15e592a357c8173369999a5a011",
+      "afterSHA256": "13c0aaa81e4d3f51e4e7f4be020392584d4fd0fd385f5c3db4a199e4dc5014cd"
+    },
+    {
+      "path": "mobile/shared/modules/geckoview/YabScopedSiteData.sys.mjs",
+      "beforeSHA256": null,
+      "afterSHA256": "a6b02e1bd632e2987a0eb8c4558cb281c6b76d4bd244ff48bf407804d4f7b8ae"
+    },
+    {
+      "path": "mobile/shared/modules/geckoview/YabScopedSitePolicy.sys.mjs",
+      "beforeSHA256": null,
+      "afterSHA256": "a4b2c74796baaa133b72d0d9c00dbce732ed3dc4043eba03762fe1abefe8c198"
+    }
+  ],
+  "nativeBinariesChanged": false,
+  "currentAppChanged": false,
+  "testsExecuted": false
+}

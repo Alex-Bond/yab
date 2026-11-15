@@ -1,0 +1,36 @@
+--- a/chrome/browser/extensions/external_tab_model.h
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -41,7 +41,7 @@
+ class ExternalTabModel : public base::SupportsUserData::Data {
+  public:
+   static ExternalTabModel* Get(const content::WebContents* contents) {
+-    return contents && !contents->IsBeingDestroyed()
++    return contents && !const_cast<content::WebContents*>(contents)->IsBeingDestroyed()
+         ? static_cast<ExternalTabModel*>(contents->GetUserData(&kKey)) : nullptr;
+   }
+   static bool Bind(content::WebContents* contents,
+@@ -78,12 +78,12 @@
+         new ExternalTabModel(contents, std::move(group), opener)));
+     return true;
+   }
+-  bool active() const { return contents_ && group_->active == contents_; }
++  bool active() const { return contents_ && group_->active.get() == contents_.get(); }
+   int window() const { return group_->window; }
+   int index() const {
+     Compact(*group_);
+     for (size_t i = 0; i < group_->tabs.size(); ++i)
+-      if (group_->tabs[i] == contents_) return static_cast<int>(i);
++      if (group_->tabs[i].get() == contents_.get()) return static_cast<int>(i);
+     return -1;
+   }
+   content::WebContents* opener() const {
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/extensions/api/tabs/tabs_api.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"

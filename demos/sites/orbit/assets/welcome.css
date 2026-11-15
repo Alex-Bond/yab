@@ -1,0 +1,74 @@
+/* After sign-up: four steps to a first funnel. Tokens are in base.css. */
+
+body { background: var(--surface-2); }
+.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.w-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+  padding: 0 var(--s-8);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.w-right { display: flex; align-items: center; gap: var(--s-4); }
+.w-saved { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--success); font-size: var(--fs-small); line-height: var(--lh-small); font-weight: var(--fw-medium); }
+.w-main { max-width: 720px; margin: 0 auto; padding: var(--s-16) var(--s-6); }
+.w-hero h1 { font-size: var(--fs-heading); line-height: var(--lh-heading); font-weight: var(--fw-semibold); letter-spacing: var(--tracking-tight); }
+.w-hero p { margin-top: var(--s-2); color: var(--text-2); font-size: var(--fs-lead); line-height: var(--lh-lead); }
+.w-progress { display: flex; align-items: center; gap: var(--s-3); margin-top: var(--s-6); color: var(--text-2); font-size: var(--fs-small); line-height: var(--lh-small); font-weight: var(--fw-medium); }
+.w-bar { flex: 1; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.w-bar i { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--brand-2), var(--brand)); }
+.w-steps { list-style: none; margin: var(--s-8) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-3); }
+.w-step {
+  display: flex;
+  gap: var(--s-4);
+  padding: var(--s-5) var(--s-6);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  box-shadow: var(--shadow-sm);
+}
+.w-step.active { border-color: var(--brand-line); box-shadow: var(--shadow-lg); }
+/* The number sits on the title's line: both are 24. */
+.w-num {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--fw-semibold);
+  flex: none;
+}
+.w-step.active .w-num { border-color: var(--brand); color: var(--brand); }
+.w-step.done .w-num { border-color: var(--success); background: var(--success); color: var(--text-inverse); }
+.w-body { flex: 1; min-width: 0; }
+.w-body h2 { font-size: var(--fs-lead); line-height: var(--lh-lead); font-weight: var(--fw-semibold); }
+.w-step.done h2 { color: var(--text-2); }
+.w-body p { margin-top: var(--s-1); color: var(--text-2); }
+.w-body p b { color: var(--text); font-weight: var(--fw-medium); }
+/* The code: 12 round; Copy sits 4 inside its corner, so it is 8 round. */
+.code { margin-top: var(--s-4); border-radius: var(--r-md); background: var(--code-bg); color: var(--code-text); overflow: hidden; }
+.code-h { display: flex; align-items: center; justify-content: space-between; padding: var(--s-1) var(--s-1) 0 var(--s-2); border-bottom: 1px solid var(--code-line); }
+.tabs { display: flex; }
+.tabs button { height: var(--h-md); padding: 0 var(--s-3); color: var(--code-muted); font-size: var(--fs-small); line-height: var(--lh-small); font-weight: var(--fw-medium); box-shadow: inset 0 -2px 0 transparent; }
+.tabs button:hover { color: var(--code-text); }
+.tabs button.on { color: var(--text-inverse); box-shadow: inset 0 -2px 0 var(--brand); }
+.copy { display: inline-flex; align-items: center; gap: var(--s-2); align-self: flex-start; height: var(--h-md); padding: 0 var(--s-3); border-radius: var(--r-sm); color: var(--code-muted); font-size: var(--fs-small); line-height: var(--lh-small); font-weight: var(--fw-medium); }
+.copy:hover { background: var(--code-line); color: var(--text-inverse); }
+.code pre { margin: 0; padding: var(--s-4) var(--s-5); font: var(--fs-small)/var(--lh-small) var(--mono); white-space: pre; overflow-x: auto; }
+.code .c { color: var(--code-muted); }
+.code .k { color: var(--code-keyword); }
+.code .s { color: var(--code-string); }
+.code .f { color: var(--code-function); }
+.listen { display: inline-flex; align-items: center; gap: var(--s-2); margin-top: var(--s-4); padding: var(--s-2) var(--s-3); border-radius: var(--r-sm); background: var(--surface-3); color: var(--text-2); font-size: var(--fs-small); line-height: var(--lh-small); font-weight: var(--fw-medium); }
+.listen .live-dot { background: var(--amber); }
+.invite { display: flex; gap: var(--s-2); margin-top: var(--s-4); max-width: 464px; }
+.invite .input { height: var(--h-md); }
+.w-foot { display: flex; align-items: center; gap: var(--s-4); margin-top: var(--s-8); }
+.skip { color: var(--text-2); font-weight: var(--fw-medium); }
+.skip:hover { color: var(--text); }

@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design review · Onboarding v3 · Roundtable</title>
+<meta name="theme-color" content="#0d0e11">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/base.css">
+<link rel="stylesheet" href="/room.css">
+<script type="module" src="/room.js"></script>
+</head>
+<body class="is-prejoin">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="rt-table" x1="0.15" y1="0.1" x2="0.85" y2="0.95">
+      <stop offset="0" stop-color="#6ff0ca"/><stop offset="1" stop-color="#15a882"/>
+    </linearGradient>
+  </defs>
+  <symbol id="rt-mark" viewBox="0 0 64 64">
+    <circle cx="32" cy="32" r="13.5" fill="url(#rt-table)"/>
+    <circle cx="32" cy="32" r="9" fill="none" stroke="#fff" stroke-opacity=".28" stroke-width="1.6"/>
+    <g fill="#34cfa3">
+      <circle cx="32" cy="7.5" r="5.5"/><circle cx="53.22" cy="19.75" r="5.5"/><circle cx="53.22" cy="44.25" r="5.5"/>
+      <circle cx="32" cy="56.5" r="5.5"/><circle cx="10.78" cy="44.25" r="5.5"/><circle cx="10.78" cy="19.75" r="5.5"/>
+    </g>
+  </symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11.5" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-mic-off" viewBox="0 0 24 24"><path d="M15 9.4V5.5a3 3 0 0 0-5.8-1.1M9 9v2a3 3 0 0 0 5.1 2.1M19 11a7 7 0 0 1-1.2 3.9M16.7 16.7A7 7 0 0 1 5 11M12 18v3M3.5 3.5l17 17"/></symbol>
+  <symbol id="i-cam" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13.5" height="12" rx="3"/><path d="M16 10.4l4.4-2.6a1 1 0 0 1 1.5.9v6.6a1 1 0 0 1-1.5.9L16 13.6"/></symbol>
+  <symbol id="i-cam-off" viewBox="0 0 24 24"><path d="M9.5 6H13a3 3 0 0 1 3 3v3.5M16 16.2A3 3 0 0 1 13 18H5.5a3 3 0 0 1-3-3V9a3 3 0 0 1 2.4-2.9M16 10.4l4.4-2.6a1 1 0 0 1 1.5.9v6.6a1 1 0 0 1-.6.9M3 3l18 18"/></symbol>
+  <symbol id="i-present" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="13" rx="2.5"/><path d="M8 21h8M12 17v4M12 13.5V8M9.5 10.5L12 8l2.5 2.5"/></symbol>
+  <symbol id="i-present-stop" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="13" rx="2.5"/><path d="M8 21h8M12 17v4M9.8 8.3l4.4 4.4M14.2 8.3l-4.4 4.4"/></symbol>
+  <symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.2a4.6 4.6 0 0 0 7 0"/><path d="M9 9.6h.01M15 9.6h.01" stroke-width="2.6"/></symbol>
+  <symbol id="i-captions" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10.6 10.3a2.1 2.1 0 1 0 0 3.4M16.6 10.3a2.1 2.1 0 1 0 0 3.4"/></symbol>
+  <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 12.5V7a1.6 1.6 0 0 0-3.2 0v4.5M14.8 11V4.6a1.6 1.6 0 0 0-3.2 0V11M11.6 11V5.8a1.6 1.6 0 0 0-3.2 0v7.4M8.4 13.2l-1.6-2a1.7 1.7 0 0 0-2.7 2l3 4.3a7 7 0 0 0 5.8 3h.6a6 6 0 0 0 6-6V12.5a1.6 1.6 0 0 0-3.2 0"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><path d="M12 5.5h.01M12 12h.01M12 18.5h.01" stroke-width="3"/></symbol>
+  <symbol id="i-leave" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M2.4 13.9a1.6 1.6 0 0 1 .1-2.2C5.1 9.2 8.4 8 12 8s6.9 1.2 9.5 3.7a1.6 1.6 0 0 1 .1 2.2l-1.5 1.7a1.6 1.6 0 0 1-2 .3l-2-1.2a1.6 1.6 0 0 1-.7-1.6l.2-1.5a12.2 12.2 0 0 0-7.2 0l.2 1.5a1.6 1.6 0 0 1-.7 1.6l-2 1.2a1.6 1.6 0 0 1-2-.3z"/></symbol>
+  <symbol id="i-people" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.7a3.5 3.5 0 0 1 0 6.6M18.2 14.3a6.5 6.5 0 0 1 3.3 5.7"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20.5 14.5a2.5 2.5 0 0 1-2.5 2.5H8.5L4 20.5V6a2.5 2.5 0 0 1 2.5-2.5H18A2.5 2.5 0 0 1 20.5 6z"/><path d="M8.5 8.8h7M8.5 12.2h4.5"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 14.5l5-5 5 5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M7 9.5l5 5 5-5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M11 5L6.5 9H3.5v6h3l4.5 4z"/><path d="M15.5 8.8a4.6 4.6 0 0 1 0 6.4M18.4 6a8.6 8.6 0 0 1 0 12"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M20.5 3.5L10 14M20.5 3.5l-6.6 17-3.9-6.5-6.5-3.9z"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3.2-3.2a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3.2 3.2a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></symbol>
+  <symbol id="i-add-person" viewBox="0 0 24 24"><circle cx="10" cy="8" r="3.5"/><path d="M3.5 20a6.5 6.5 0 0 1 13 0M19 8v6M16 11h6"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></symbol>
+</svg>
+
+<!-- Before joining: your picture, your devices, who is there. -->
+<section class="prejoin" id="prejoin" aria-label="Ready to join">
+  <header class="topbar">
+    <a class="brand" href="/"><svg class="brand-mark" aria-hidden="true"><use href="#rt-mark"/></svg><span>Roundtable</span></a>
+    <div class="account">
+      <span class="account-name">Mira Lindqvist</span>
+      <img class="avatar account-avatar" src="/googleusercontent/avatars/mira.svg" alt="" width="32" height="32">
+    </div>
+  </header>
+
+  <div class="prejoin-body">
+    <div class="preview-col">
+      <div class="preview" id="preview">
+        <video class="preview-video mirror" id="preview-video" autoplay muted playsinline></video>
+        <div class="preview-off" id="preview-off">
+          <img class="avatar preview-avatar" src="/googleusercontent/avatars/mira.svg" alt="" width="256" height="256">
+          <p class="preview-note" id="preview-note">Starting camera</p>
+        </div>
+        <div class="preview-name">Mira Lindqvist</div>
+        <div class="preview-meter" id="preview-meter" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div class="preview-controls">
+          <button class="round" id="pj-mic" type="button" data-mic-toggle jsname="hw0c9" data-is-muted="false" aria-pressed="false" aria-label="Turn off microphone">
+            <svg class="icon"><use href="#i-mic"/></svg>
+          </button>
+          <button class="round" id="pj-cam" type="button" data-cam-toggle jsname="psRWwc" data-is-muted="false" aria-pressed="false" aria-label="Turn off camera">
+            <svg class="icon"><use href="#i-cam"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="pickers">
+        <div class="picker">
+          <button class="picker-btn" type="button" aria-haspopup="menu" aria-controls="pj-mic-menu" aria-expanded="false" data-pop="pj-mic-pop" data-picker="audioinput">
+            <svg class="icon"><use href="#i-mic"/></svg><span class="picker-label">Microphone</span><svg class="icon picker-caret"><use href="#i-down"/></svg>
+          </button>
+          <div class="pop pop-up" id="pj-mic-pop" hidden>
+            <div class="pop-section">
+              <div class="pop-title">Microphone</div>
+              <div class="menu" role="menu" id="pj-mic-menu" data-kind="audioinput" aria-label="Microphone"></div>
+            </div>
+          </div>
+        </div>
+        <div class="picker">
+          <button class="picker-btn" type="button" aria-haspopup="menu" aria-controls="pj-speaker-menu" aria-expanded="false" data-pop="pj-speaker-pop" data-picker="audiooutput">
+            <svg class="icon"><use href="#i-speaker"/></svg><span class="picker-label">Speaker</span><svg class="icon picker-caret"><use href="#i-down"/></svg>
+          </button>
+          <div class="pop pop-up" id="pj-speaker-pop" hidden>
+            <div class="pop-section">
+              <div class="pop-title">Speaker</div>
+              <div class="menu" role="menu" id="pj-speaker-menu" data-kind="audiooutput" aria-label="Speaker"></div>
+            </div>
+          </div>
+        </div>
+        <div class="picker">
+          <button class="picker-btn" type="button" aria-haspopup="menu" aria-controls="pj-camera-menu" aria-expanded="false" data-pop="pj-camera-pop" data-picker="videoinput">
+            <svg class="icon"><use href="#i-cam"/></svg><span class="picker-label">Camera</span><svg class="icon picker-caret"><use href="#i-down"/></svg>
+          </button>
+          <div class="pop pop-up" id="pj-camera-pop" hidden>
+            <div class="pop-section">
+              <div class="pop-title">Camera</div>
+              <div class="menu" role="menu" id="pj-camera-menu" data-kind="videoinput" aria-label="Camera"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="join-col">
+      <h1 class="join-title" data-title>Design review · Onboarding v3</h1>
+      <div class="join-people">
+        <div class="stack" aria-hidden="true">
+          <img class="avatar" src="/googleusercontent/avatars/jonas.svg" alt="" width="34" height="34">
+          <img class="avatar" src="/googleusercontent/avatars/anna.svg" alt="" width="34" height="34">
+          <img class="avatar" src="/googleusercontent/avatars/elliot.svg" alt="" width="34" height="34">
+        </div>
+        <p>Jonas Berg, Anna Ek and Elliot Park are in this call</p>
+      </div>
+      <div class="join-actions">
+        <button class="btn btn-primary join-now" id="join-now" type="button">Join now</button>
+        <button class="btn btn-ghost" id="join-present" type="button"><svg class="icon"><use href="#i-present"/></svg>Present</button>
+      </div>
+      <p class="join-foot"><svg class="icon"><use href="#i-lock"/></svg>Only invited people can join</p>
+    </div>
+  </div>
+</section>
+
+<!-- In the call. -->
+<main class="call" id="call" hidden>
+  <div class="call-main">
+    <div class="stage" id="stage">
+      <div class="present-bar" id="present-bar" hidden>
+        <svg class="icon"><use href="#i-present"/></svg>
+        <span>You're presenting to everyone</span>
+        <button class="btn btn-sm btn-danger" id="stop-present" type="button" aria-label="Stop presenting">Stop presenting</button>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="captions" id="captions" aria-live="polite" hidden>
+        <img class="avatar captions-avatar" alt="" width="32" height="32">
+        <div class="captions-body"><div class="captions-name"></div><p class="captions-text"></p></div>
+      </div>
+      <div class="reactions" id="reactions" aria-hidden="true"></div>
+    </div>
+
+    <aside class="panel" id="panel" hidden>
+      <section class="panel-page" id="people-panel" aria-label="People" hidden>
+        <header class="panel-head"><h2>People</h2><button class="icon-btn" type="button" data-close-panel aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></header>
+        <button class="btn btn-sm btn-ghost add-people" id="add-people" type="button"><svg class="icon"><use href="#i-add-person"/></svg>Add people</button>
+        <div class="panel-label">In the call <span id="people-count">4</span></div>
+        <div class="people-list" id="people-list"></div>
+      </section>
+      <section class="panel-page" id="chat-panel" aria-label="In-call messages" hidden>
+        <header class="panel-head"><h2>In-call messages</h2><button class="icon-btn" type="button" data-close-panel aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></header>
+        <p class="chat-note">Messages are seen only by people in the call and are deleted when the call ends.</p>
+        <div class="chat-list" id="chat-list"></div>
+        <form class="chat-form" id="chat-form" autocomplete="off">
+          <input class="chat-input" id="chat-input" type="text" placeholder="Send a message to everyone" aria-label="Send a message to everyone">
+          <button class="icon-btn chat-send" type="submit" aria-label="Send message" disabled><svg class="icon"><use href="#i-send"/></svg></button>
+        </form>
+      </section>
+    </aside>
+  </div>
+
+  <footer class="bar">
+    <div class="bar-left">
+      <span class="clock" id="clock"></span>
+      <span class="bar-sep" aria-hidden="true"></span>
+      <span class="bar-title" data-title>Design review · Onboarding v3</span>
+    </div>
+
+    <div class="bar-center">
+      <div class="ctl-group" id="mic-group">
+        <button class="ctl ctl-toggle" id="mic-button" type="button" data-mic-toggle jsname="hw0c9" data-is-muted="false" aria-pressed="false" aria-label="Turn off microphone">
+          <svg class="icon"><use href="#i-mic"/></svg>
+        </button>
+        <button class="ctl-more" id="mic-options" type="button" aria-haspopup="menu" aria-controls="mic-menu" aria-expanded="false" aria-label="Audio settings" data-pop="audio-pop" data-tip="Audio settings">
+          <svg class="icon"><use href="#i-chevron"/></svg>
+        </button>
+        <div class="pop pop-up" id="audio-pop" hidden>
+          <div class="pop-section">
+            <div class="pop-title">Microphone</div>
+            <div class="menu" role="menu" id="mic-menu" data-kind="audioinput" aria-label="Microphone"></div>
+          </div>
+          <div class="pop-section">
+            <div class="pop-title">Speaker</div>
+            <div class="menu" role="menu" id="speaker-menu" data-kind="audiooutput" aria-label="Speaker"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="ctl-group" id="camera-group">
+        <button class="ctl ctl-toggle" id="camera-button" type="button" data-cam-toggle jsname="psRWwc" data-is-muted="false" aria-pressed="false" aria-label="Turn off camera">
+          <svg class="icon"><use href="#i-cam"/></svg>
+        </button>
+        <button class="ctl-more" id="camera-options" type="button" aria-haspopup="menu" aria-controls="camera-menu" aria-expanded="false" aria-label="Video settings" data-pop="camera-pop" data-tip="Video settings">
+          <svg class="icon"><use href="#i-chevron"/></svg>
+        </button>
+        <div class="pop pop-up" id="camera-pop" hidden>
+          <div class="pop-section">
+            <div class="pop-title">Camera</div>
+            <div class="menu" role="menu" id="camera-menu" data-kind="videoinput" aria-label="Camera"></div>
+          </div>
+        </div>
+      </div>
+
+      <button class="ctl" id="present-button" type="button" aria-label="Share screen" data-tip="Present">
+        <svg class="icon"><use href="#i-present"/></svg>
+      </button>
+
+      <div class="ctl-wrap">
+        <button class="ctl" id="react-button" type="button" aria-label="Send a reaction" aria-expanded="false" data-pop="react-pop" data-tip="Send a reaction">
+          <svg class="icon"><use href="#i-smile"/></svg>
+        </button>
+        <div class="pop pop-up pop-react" id="react-pop" hidden>
+          <button type="button" class="emoji" data-emoji="💖" aria-label="Heart">💖</button>
+          <button type="button" class="emoji" data-emoji="👍" aria-label="Thumbs up">👍</button>
+          <button type="button" class="emoji" data-emoji="🎉" aria-label="Celebrate">🎉</button>
+          <button type="button" class="emoji" data-emoji="👏" aria-label="Applause">👏</button>
+          <button type="button" class="emoji" data-emoji="😂" aria-label="Laugh">😂</button>
+          <button type="button" class="emoji" data-emoji="😮" aria-label="Surprised">😮</button>
+          <button type="button" class="emoji" data-emoji="🤔" aria-label="Thinking">🤔</button>
+        </div>
+      </div>
+
+      <button class="ctl ctl-hide-narrow" id="captions-button" type="button" aria-pressed="false" aria-label="Turn on captions" data-tip="Turn on captions">
+        <svg class="icon"><use href="#i-captions"/></svg>
+      </button>
+
+      <button class="ctl ctl-hide-narrow" id="hand-button" type="button" aria-pressed="false" aria-label="Raise hand" data-tip="Raise hand">
+        <svg class="icon"><use href="#i-hand"/></svg>
+      </button>
+
+      <div class="ctl-wrap">
+        <button class="ctl" id="more-button" type="button" aria-label="More options" aria-expanded="false" data-pop="more-pop" data-tip="More options">
+          <svg class="icon"><use href="#i-more"/></svg>
+        </button>
+        <div class="pop pop-up pop-more" id="more-pop" role="menu" aria-label="More options" hidden>
+          <button type="button" class="menu-item" role="menuitem" id="copy-link"><svg class="icon"><use href="#i-link"/></svg><span>Copy meeting link</span></button>
+          <button type="button" class="menu-item" role="menuitem" id="full-screen"><svg class="icon"><use href="#i-expand"/></svg><span id="full-screen-label">Full screen</span></button>
+        </div>
+      </div>
+
+      <button class="ctl ctl-leave" id="hangup-button" type="button" aria-label="Leave call" data-tip="Leave call">
+        <svg class="icon"><use href="#i-leave"/></svg>
+      </button>
+    </div>
+
+    <div class="bar-right">
+      <button class="ctl-flat" id="people-button" type="button" aria-pressed="false" aria-label="Show everyone" data-tip="People">
+        <svg class="icon"><use href="#i-people"/></svg><span class="ctl-count" id="people-badge">4</span>
+      </button>
+      <button class="ctl-flat" id="chat-button" type="button" aria-pressed="false" aria-label="Chat with everyone" data-tip="Chat">
+        <svg class="icon"><use href="#i-chat"/></svg><span class="ctl-dot" id="chat-dot" hidden></span>
+      </button>
+    </div>
+  </footer>
+</main>
+
+<!-- After leaving. -->
+<section class="left" id="left" hidden>
+  <div class="left-card">
+    <svg class="brand-mark left-mark" aria-hidden="true"><use href="#rt-mark"/></svg>
+    <h1>You left the meeting</h1>
+    <p class="left-sub" data-title>Design review · Onboarding v3</p>
+    <div class="left-actions">
+      <button class="btn btn-ghost" id="rejoin" type="button">Rejoin</button>
+      <a class="btn btn-primary" href="/">Return to home screen</a>
+    </div>
+    <div class="rate" id="rate">
+      <p>How was the audio and video?</p>
+      <div class="rate-row">
+        <button type="button" class="rate-pick">Poor</button>
+        <button type="button" class="rate-pick">Fair</button>
+        <button type="button" class="rate-pick">Good</button>
+        <button type="button" class="rate-pick">Great</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<div class="toast" id="toast" role="status"></div>
+<div class="feeds" id="feeds" aria-hidden="true"></div>
+</body>
+</html>

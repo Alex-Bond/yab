@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Lattice, a news site</title>
+<style>
+
+body{margin:0;--s-bg:#fbfaf7;--s-card:#fff;--s-fg:#1c1b19;--s-muted:#6b6862;--s-line:#e8e5de;--s-accent:#c2410c;--s-sat:1;
+  background:var(--s-bg);color:var(--s-fg);font-family:Georgia,"Times New Roman",serif;font-size:15px;line-height:var(--s-lh,1.45);}
+.s-top{display:flex;align-items:center;gap:22px;padding:14px 28px;border-bottom:1px solid var(--s-line);background:var(--s-card);position:sticky;top:0;z-index:2}
+.s-logo{font:800 20px/1 Georgia,serif;letter-spacing:-.02em}
+.s-logo b{color:var(--s-accent)}
+.s-nav{display:flex;gap:16px;font-family:-apple-system,sans-serif;font-size:.85em;color:var(--s-muted)}
+.s-sub{margin-left:auto;font:600 .8em -apple-system,sans-serif;background:var(--s-accent);color:#fff;border-radius:999px;padding:6px 14px}
+.s-body{display:grid;grid-template-columns:190px 1fr 230px;gap:26px;padding:22px 28px}
+.s-side h4,.s-rail h4{font:700 .72em -apple-system,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--s-muted);margin:0 0 8px}
+.s-side a{display:block;font:.86em -apple-system,sans-serif;padding:5px 0;color:var(--s-fg);border-bottom:1px solid var(--s-line)}
+.s-story{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:0 0 16px;margin:0 0 16px;border-bottom:1px solid var(--s-line)}
+.s-story .img{height:96px;border-radius:6px;filter:saturate(var(--s-sat))}
+.s-story h3{margin:0 0 4px;font-size:1.18em;line-height:1.2}
+.s-story p{margin:0;color:var(--s-muted);font-size:.9em}
+.s-kick{font:700 .7em -apple-system,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--s-accent)}
+.s-promo{border-radius:8px;padding:16px;background:linear-gradient(135deg,#fde047,#f97316);color:#3b1d00;font:600 .9em -apple-system,sans-serif;margin-bottom:14px;filter:saturate(var(--s-sat))}
+.s-promo small{display:block;font-weight:400;opacity:.8;margin-top:4px}
+.s-trend{font:.85em -apple-system,sans-serif;padding:7px 0;border-bottom:1px solid var(--s-line)}
+.s-trend span{color:var(--s-muted);display:block;font-size:.85em}
+.s-cookie{position:fixed;left:0;right:0;bottom:0;margin:0 28px 14px;background:var(--s-fg);color:var(--s-bg);border-radius:10px;padding:10px 14px;font:.82em -apple-system,sans-serif;display:flex;gap:10px;align-items:center}
+.s-cookie b{margin-left:auto;background:var(--s-bg);color:var(--s-fg);border-radius:6px;padding:3px 10px}
+.site.case-lower{text-transform:lowercase}.site.case-upper{text-transform:uppercase}
+.site.zapping [data-z]{cursor:crosshair}
+
+.s-story .img{height:96px}
+</style>
+<div class="s-top" id="top"><div class="s-logo">Lattice<b>.</b></div><nav class="s-nav"><span>World</span><span>Tech</span><span>Science</span><span>Culture</span><span>Opinion</span></nav><span class="s-sub">Subscribe $1</span></div>
+<div class="s-body">
+<aside class="s-side" id="side"><h4>Sections</h4><a>Today</a><a>Newsletters</a><a>Podcasts</a><a>Crosswords</a><a>Live</a></aside>
+<main>
+<article class="s-story" id="story-1"><img class="img" alt="" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSczMDAnIGhlaWdodD0nMTkyJz48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9J2cnIHgxPScwJyB5MT0nMCcgeDI9JzEnIHkyPScxJz48c3RvcCBvZmZzZXQ9JzAnIHN0b3AtY29sb3I9JyMwZWE1ZTknLz48c3RvcCBvZmZzZXQ9JzEnIHN0b3AtY29sb3I9JyMyMmM1NWUnLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0nMzAwJyBoZWlnaHQ9JzE5MicgZmlsbD0ndXJsKCNnKScvPjwvc3ZnPg==" style="object-fit:cover;width:150px"><div><div class="s-kick">Science</div><h3 class="headline">Tidal power plant in Orkney passes its first winter</h3><p>Turbines on the seabed kept 1,400 homes lit through four storms, the operator says.</p></div></article>
+<article class="s-story" id="story-2"><img class="img" alt="" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSczMDAnIGhlaWdodD0nMTkyJz48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9J2cnIHgxPScwJyB5MT0nMCcgeDI9JzEnIHkyPScxJz48c3RvcCBvZmZzZXQ9JzAnIHN0b3AtY29sb3I9JyNmNDNmNWUnLz48c3RvcCBvZmZzZXQ9JzEnIHN0b3AtY29sb3I9JyNhODU1ZjcnLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0nMzAwJyBoZWlnaHQ9JzE5MicgZmlsbD0ndXJsKCNnKScvPjwvc3ZnPg==" style="object-fit:cover;width:150px"><div><div class="s-kick">Culture</div><h3 class="headline">The last video rental shop in Ohio turns forty</h3><p>Its owner still writes every late fee by hand.</p></div></article>
+<article class="s-story" id="story-3"><img class="img" alt="" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSczMDAnIGhlaWdodD0nMTkyJz48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9J2cnIHgxPScwJyB5MT0nMCcgeDI9JzEnIHkyPScxJz48c3RvcCBvZmZzZXQ9JzAnIHN0b3AtY29sb3I9JyNmNTllMGInLz48c3RvcCBvZmZzZXQ9JzEnIHN0b3AtY29sb3I9JyNlZjQ0NDQnLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0nMzAwJyBoZWlnaHQ9JzE5MicgZmlsbD0ndXJsKCNnKScvPjwvc3ZnPg==" style="object-fit:cover;width:150px"><div><div class="s-kick">Tech</div><h3 class="headline">Why browser makers are quietly bringing back custom styles</h3><p>Users want the web to look like theirs again.</p></div></article>
+<article class="s-story" id="story-4"><img class="img" alt="" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSczMDAnIGhlaWdodD0nMTkyJz48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9J2cnIHgxPScwJyB5MT0nMCcgeDI9JzEnIHkyPScxJz48c3RvcCBvZmZzZXQ9JzAnIHN0b3AtY29sb3I9JyMxNGI4YTYnLz48c3RvcCBvZmZzZXQ9JzEnIHN0b3AtY29sb3I9JyM2MzY2ZjEnLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0nMzAwJyBoZWlnaHQ9JzE5MicgZmlsbD0ndXJsKCNnKScvPjwvc3ZnPg==" style="object-fit:cover;width:150px"><div><div class="s-kick">World</div><h3 class="headline">A city that measures its noise every minute</h3><p>Sensors on 900 lampposts feed a public map.</p></div></article>
+</main>
+<aside class="s-rail"><div class="s-promo" id="promo">Get Lattice Pro: no limits<small>First month free, then $9</small></div>
+<div id="trending"><h4>Trending</h4><div class="s-trend">Orkney tides<span>12.4k reading</span></div><div class="s-trend">Rental shop<span>8.1k reading</span></div><div class="s-trend">Noise map<span>3.9k reading</span></div></div></aside>
+</div>
+<div class="s-cookie" id="cookie">We use cookies to measure reading. <b>OK</b></div>

@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script type="module" src="/@vite/client"></script>
+
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pricing · Tern</title>
+    <meta name="description" content="Free for up to 5 people. Team is $8 per seat a month, Business $14. Every plan protects your team's focus blocks." />
+    <meta name="theme-color" content="#f9f8f6" />
+    <meta property="og:title" content="Pricing · Tern" />
+    <meta property="og:image" content="/assets/og-preview.png" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/src/styles/tokens.css" />
+    <link rel="stylesheet" href="/src/styles/base.css" />
+    <link rel="stylesheet" href="/src/styles/pricing.css" />
+  </head>
+  <body data-page="pricing">
+    <header class="site-header" data-header>
+      <div class="container site-header__inner">
+        <a class="logo" href="/" aria-label="Tern home">
+          <svg class="logo__mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="tern-mark-head" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#2a807c" />
+                <stop offset="1" stop-color="#0e3332" />
+              </linearGradient>
+            </defs>
+            <rect width="32" height="32" rx="8" fill="url(#tern-mark-head)" />
+            <path fill="#ef6a43" d="M15.3 11.8 16 8l.7 3.8z" />
+            <g fill="#fff">
+              <path d="M15 14.2c-3.2-2.8-7-4.8-11.5-5.6 3.1 2.8 6.4 6 11.5 9z" />
+              <path d="M17 14.2c3.2-2.8 7-4.8 11.5-5.6-3.1 2.8-6.4 6-11.5 9z" />
+              <path d="M16 10.9c1.5 1.9 1.9 5.3 1.1 9.8h-2.2c-.8-4.5-.4-7.9 1.1-9.8z" />
+              <path d="M14.9 20.2c-.7 2.4-1.5 4.7-2.7 7.2 1.5-1.5 2.7-2.8 3.8-4.2 1.1 1.4 2.3 2.7 3.8 4.2-1.2-2.5-2-4.8-2.7-7.2z" />
+            </g>
+          </svg>
+          <span>Tern</span>
+        </a>
+        <nav class="nav" aria-label="Main">
+          <a class="nav__link" href="/#product">Product</a>
+          <a class="nav__link" href="/pricing" aria-current="page">Pricing</a>
+          <a class="nav__link" href="/changelog">Changelog <span class="badge" data-tone="coral">New</span></a>
+          <a class="nav__link" href="/docs">Docs</a>
+        </nav>
+        <div class="site-header__actions">
+          <a class="button button--ghost button--sm site-header__signin" href="/signin" data-session>Sign in</a>
+          <a class="button button--primary button--sm" href="/signup" data-start="header">Start free</a>
+          <button class="button button--secondary button--sm site-header__menu" type="button" aria-label="Open menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h16M4 16h16" /></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="pricing-hero">
+        <div class="container">
+          <span class="eyebrow">Pricing</span>
+          <h1>Simple plans for calm teams</h1>
+          <p class="pricing-hero__lede">Start free with up to 5 people. Upgrade when Tern becomes how your whole team plans its week.</p>
+          <div class="billing-toggle" role="group" aria-label="Billing period" data-billing-toggle data-period="monthly">
+            <button type="button" data-period="monthly" aria-pressed="true">Monthly</button>
+            <button type="button" data-period="yearly" aria-pressed="false">Yearly <span class="badge" data-tone="sage">Save 20%</span></button>
+          </div>
+        </div>
+      </section>
+
+      <section class="plans-section">
+        <div class="container">
+          <div class="plans" data-plans data-period="monthly">
+            <article class="card plan">
+              <div>
+                <h3 class="plan__name">Free</h3>
+                <p class="plan__blurb">For small teams finding their rhythm.</p>
+              </div>
+              <p class="plan__price"><strong data-plan-price="free" data-monthly="$0" data-yearly="$0">$0</strong><span>forever</span></p>
+              <a class="button button--secondary" href="/signup" data-start="pricing" data-plan="free">Start free</a>
+              <ul class="plan__features">
+                <li>Up to 5 people</li>
+                <li>Focus blocks and Find a time</li>
+                <li>2 calendars per person</li>
+                <li>A personal booking link</li>
+                <li>Your own weekly focus report</li>
+              </ul>
+            </article>
+            <article class="card plan plan--featured">
+              <div>
+                <h3 class="plan__name">Team <span class="badge" data-tone="fjord">Most popular</span></h3>
+                <p class="plan__blurb">For teams that guard their focus together.</p>
+              </div>
+              <p class="plan__price"><strong data-plan-price="team" data-monthly="$8" data-yearly="$6.40">$8</strong><span data-billing-note data-monthly="per seat / month" data-yearly="per seat / month, billed yearly">per seat / month</span></p>
+              <a class="button button--primary" href="/signup" data-start="pricing" data-plan="team">Start free trial</a>
+              <ul class="plan__features">
+                <li>Everything in Free, for any team size</li>
+                <li>Team focus policies</li>
+                <li>Smart buffers and meeting-free days</li>
+                <li>Round robin and shared booking links</li>
+                <li>Unlimited calendars</li>
+              </ul>
+            </article>
+            <article class="card plan">
+              <div>
+                <h3 class="plan__name">Business</h3>
+                <p class="plan__blurb">For companies running many teams.</p>
+              </div>
+              <p class="plan__price"><strong data-plan-price="business" data-monthly="$14" data-yearly="$11.20">$14</strong><span data-billing-note data-monthly="per seat / month" data-yearly="per seat / month, billed yearly">per seat / month</span></p>
+              <a class="button button--secondary" href="/contact">Talk to sales</a>
+              <ul class="plan__features">
+                <li>Everything in Team</li>
+                <li>SSO and SCIM</li>
+                <li>Admin roles and an audit log</li>
+                <li>Company focus report</li>
+                <li>Priority support, 99.9% uptime SLA</li>
+              </ul>
+            </article>
+          </div>
+          <p class="plans__note">Prices in USD, before VAT. Nonprofits and schools get 50% off any paid plan.</p>
+        </div>
+      </section>
+
+      <section class="section compare">
+        <div class="container">
+          <div class="section-head section-head--center">
+            <h2>Compare plans</h2>
+            <p>Every plan keeps your data in the EU and works with the calendar you already use.</p>
+          </div>
+          <div class="card compare__table">
+            <table>
+              <thead>
+                <tr><th scope="col"><span class="sr-only">Feature</span></th><th scope="col">Free</th><th scope="col" class="is-featured">Team</th><th scope="col">Business</th></tr>
+              </thead>
+              <tbody>
+                  <tr class="compare__group"><th colspan="4" scope="rowgroup">Scheduling</th></tr>
+                  <tr><th scope="row">People</th><td>Up to 5</td><td class="is-featured">Unlimited</td><td>Unlimited</td></tr>
+                  <tr><th scope="row">Calendars per person</th><td>2</td><td class="is-featured">Unlimited</td><td>Unlimited</td></tr>
+                  <tr><th scope="row">Focus blocks and Find a time</th><td><span class="yes" role="img" aria-label="Included"></span></td><td class="is-featured"><span class="yes" role="img" aria-label="Included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr><th scope="row">Booking links</th><td>1</td><td class="is-featured">Unlimited</td><td>Unlimited</td></tr>
+                  <tr><th scope="row">Round robin</th><td><span class="no" role="img" aria-label="Not included"></span></td><td class="is-featured"><span class="yes" role="img" aria-label="Included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr class="compare__group"><th colspan="4" scope="rowgroup">Focus</th></tr>
+                  <tr><th scope="row">Team focus policies</th><td><span class="no" role="img" aria-label="Not included"></span></td><td class="is-featured"><span class="yes" role="img" aria-label="Included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr><th scope="row">Smart buffers</th><td><span class="no" role="img" aria-label="Not included"></span></td><td class="is-featured"><span class="yes" role="img" aria-label="Included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr><th scope="row">Meeting-free days</th><td><span class="no" role="img" aria-label="Not included"></span></td><td class="is-featured"><span class="yes" role="img" aria-label="Included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr><th scope="row">Weekly focus report</th><td>Personal</td><td class="is-featured">Team</td><td>Team and company</td></tr>
+                  <tr class="compare__group"><th colspan="4" scope="rowgroup">Admin and security</th></tr>
+                  <tr><th scope="row">SSO and SCIM</th><td><span class="no" role="img" aria-label="Not included"></span></td><td class="is-featured"><span class="no" role="img" aria-label="Not included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr><th scope="row">Audit log</th><td><span class="no" role="img" aria-label="Not included"></span></td><td class="is-featured"><span class="no" role="img" aria-label="Not included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr><th scope="row">Data kept in the EU</th><td><span class="yes" role="img" aria-label="Included"></span></td><td class="is-featured"><span class="yes" role="img" aria-label="Included"></span></td><td><span class="yes" role="img" aria-label="Included"></span></td></tr>
+                  <tr><th scope="row">Support</th><td>Help center</td><td class="is-featured">Email, within a day</td><td>Priority, 99.9% uptime SLA</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--flush-top faq">
+        <div class="container faq__layout">
+          <div class="faq__intro">
+            <span class="eyebrow">Questions</span>
+            <h2>Good to know</h2>
+            <p>Something else on your mind? <a href="mailto:hello@ternlabs.com">Write to us</a>, a person replies within a day.</p>
+          </div>
+          <div class="faq__list">
+            <details class="faq__item" name="faq" open>
+              <summary>How does Tern decide which time is best?</summary>
+              <p>Tern reads everyone's working hours and focus blocks, then scores every open slot by how much focus it would cost. The slot that moves the least focus time, for the fewest people, comes first. Nothing moves until you say so.</p>
+            </details>
+            <details class="faq__item" name="faq">
+              <summary>What counts as a seat?</summary>
+              <p>Anyone on your team whose calendar Tern looks after. Guests you invite to meetings, and people who only book time through your links, never need a seat.</p>
+            </details>
+            <details class="faq__item" name="faq">
+              <summary>Can I switch between monthly and yearly billing?</summary>
+              <p>Yes, whenever you like, from Settings › Billing. Moving to yearly takes effect right away, and what's left of your current month is credited.</p>
+            </details>
+            <details class="faq__item" name="faq">
+              <summary>Do you offer discounts for nonprofits and schools?</summary>
+              <p>Yes. Registered nonprofits and schools get 50% off Team and Business. Write to us from your organization's address and we'll set it up the same day.</p>
+            </details>
+            <details class="faq__item" name="faq">
+              <summary>Where is my calendar data stored?</summary>
+              <p>In the EU, in Frankfurt and Stockholm. Tern keeps only what it needs to find times, never stores event descriptions, and removes everything when you leave.</p>
+            </details>
+            <details class="faq__item" name="faq">
+              <summary>What changes when Tern 2.0 launches on October 21?</summary>
+              <p>Everyone on the early list gets access that morning. Paid plans move over on their own, at the same price, and your focus blocks come with you.</p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--flush-top">
+        <div class="container">
+          <div class="cta-band">
+            <div class="cta-band__body">
+              <div>
+                <h2>Get your week back</h2>
+                <p>Tern 2.0 lands October 21. Join <span data-waitlist-count>2,481</span> teams on the early list, or start free today.</p>
+              </div>
+              <div class="cta-band__actions">
+                <a class="button" href="/signup" data-start="cta">Start free</a>
+                <a class="button button--ghost" href="/contact">Talk to us</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container">
+        <div class="footer-grid">
+          <div class="footer-brand">
+            <a class="logo" href="/" aria-label="Tern home">
+              <svg class="logo__mark" viewBox="0 0 32 32" aria-hidden="true">
+                <defs>
+                  <linearGradient id="tern-mark-foot" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#2a807c" />
+                    <stop offset="1" stop-color="#0e3332" />
+                  </linearGradient>
+                </defs>
+                <rect width="32" height="32" rx="8" fill="url(#tern-mark-foot)" />
+                <path fill="#ef6a43" d="M15.3 11.8 16 8l.7 3.8z" />
+                <g fill="#fff">
+                  <path d="M15 14.2c-3.2-2.8-7-4.8-11.5-5.6 3.1 2.8 6.4 6 11.5 9z" />
+                  <path d="M17 14.2c3.2-2.8 7-4.8 11.5-5.6-3.1 2.8-6.4 6-11.5 9z" />
+                  <path d="M16 10.9c1.5 1.9 1.9 5.3 1.1 9.8h-2.2c-.8-4.5-.4-7.9 1.1-9.8z" />
+                  <path d="M14.9 20.2c-.7 2.4-1.5 4.7-2.7 7.2 1.5-1.5 2.7-2.8 3.8-4.2 1.1 1.4 2.3 2.7 3.8 4.2-1.2-2.5-2-4.8-2.7-7.2z" />
+                </g>
+              </svg>
+              <span>Tern</span>
+            </a>
+            <p>Calm scheduling for busy teams. Made in Stockholm by Tern Labs.</p>
+          </div>
+          <div class="footer-col">
+            <h4>Product</h4>
+            <ul>
+              <li><a href="/#product">Features</a></li>
+              <li><a href="/pricing">Pricing</a></li>
+              <li><a href="/changelog">Changelog</a></li>
+              <li><a href="/integrations">Integrations</a></li>
+              <li><a href="/download">Download</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h4>Company</h4>
+            <ul>
+              <li><a href="/about">About</a></li>
+              <li><a href="/careers" data-badge="careers">Careers</a></li>
+              <li><a href="/blog">Blog</a></li>
+              <li><a href="/press">Press kit</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h4>Resources</h4>
+            <ul>
+              <li><a href="/docs">Docs</a></li>
+              <li><a href="/docs/api">API</a></li>
+              <li><a href="/help">Help center</a></li>
+              <li><a href="/status" data-badge="status">Status</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h4>Legal</h4>
+            <ul>
+              <li><a href="/privacy">Privacy</a></li>
+              <li><a href="/terms">Terms</a></li>
+              <li><a href="/security">Security</a></li>
+              <li><a href="/dpa">DPA</a></li>
+            </ul>
+          </div>
+        </div>
+        <div class="footer-bottom">
+          <span>© 2026 Tern Labs AB · Stockholm, Sweden</span>
+          <nav aria-label="Elsewhere">
+            <a href="/newsletter">Newsletter</a>
+            <a href="/rss.xml">RSS</a>
+            <a href="mailto:hello@ternlabs.com">hello@ternlabs.com</a>
+          </nav>
+        </div>
+      </div>
+      <img class="og-probe" src="/assets/og-preview.png" alt="" aria-hidden="true" width="1200" height="630" />
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+    <script defer src="/src/analytics.js"></script>
+  </body>
+</html>

@@ -1,0 +1,99 @@
+--- a/cef/include/cef_download_item.h
++++ b/cef/include/cef_download_item.h
+@@ -40,6 +40,9 @@
+ 
+ #include "include/cef_base.h"
+ 
++// Experimental source-build native download provenance capability.
++#define CEF_YAB_DOWNLOAD_PROVENANCE_VERSION 1
++
+ ///
+ /// Class used to represent a download item.
+ ///
+@@ -169,6 +172,35 @@
+   ///
+   /*--cef()--*/
+   virtual CefString GetMimeType() = 0;
++
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Returns whether Chromium associated a user gesture with the original
++  /// download request. This is native provenance, not a recent-input estimate.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool HasUserGesture() = 0;
++
++  ///
++  /// Returns the serialized origin that initiated the download before redirects.
++  /// Returns an empty string if the initiator is absent or opaque.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefString GetRequestInitiator() = 0;
++
++  ///
++  /// Returns the top-level page URL when the download was initiated.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefString GetTabURL() = 0;
++
++  ///
++  /// Returns whether Chromium can resume this native download. Resume through
++  /// CefDownloadItemCallback rather than constructing a new GET request.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool CanResume() = 0;
++#endif
+ };
+ 
+ #endif  // CEF_INCLUDE_CEF_DOWNLOAD_ITEM_H_
+--- a/cef/libcef/browser/download_item_impl.h
++++ b/cef/libcef/browser/download_item_impl.h
+@@ -43,6 +43,10 @@
+   CefString GetSuggestedFileName() override;
+   CefString GetContentDisposition() override;
+   CefString GetMimeType() override;
++  bool HasUserGesture() override;
++  CefString GetRequestInitiator() override;
++  CefString GetTabURL() override;
++  bool CanResume() override;
+ };
+ 
+ #endif  // CEF_LIBCEF_BROWSER_DOWNLOAD_ITEM_IMPL_H_
+--- a/cef/libcef/browser/download_item_impl.cc
++++ b/cef/libcef/browser/download_item_impl.cc
+@@ -7,6 +7,7 @@
+ #include "cef/libcef/common/time_util.h"
+ #include "components/download/public/common/download_item.h"
+ #include "url/gurl.h"
++#include "url/origin.h"
+ 
+ CefDownloadItemImpl::CefDownloadItemImpl(download::DownloadItem* value)
+     : CefValueBase<CefDownloadItem, download::DownloadItem>(
+@@ -118,3 +119,27 @@
+   CEF_VALUE_VERIFY_RETURN(false, CefString());
+   return const_value().GetMimeType();
+ }
++
++bool CefDownloadItemImpl::HasUserGesture() {
++  CEF_VALUE_VERIFY_RETURN(false, false);
++  return const_value().HasUserGesture();
++}
++
++CefString CefDownloadItemImpl::GetRequestInitiator() {
++  CEF_VALUE_VERIFY_RETURN(false, CefString());
++  const auto& origin = const_value().GetRequestInitiator();
++  if (!origin || origin->opaque()) {
++    return CefString();
++  }
++  return origin->Serialize();
++}
++
++CefString CefDownloadItemImpl::GetTabURL() {
++  CEF_VALUE_VERIFY_RETURN(false, CefString());
++  return const_value().GetTabUrl().spec();
++}
++
++bool CefDownloadItemImpl::CanResume() {
++  CEF_VALUE_VERIFY_RETURN(false, false);
++  return const_value().CanResume();
++}

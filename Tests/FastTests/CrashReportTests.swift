@@ -1,0 +1,75 @@
+import Foundation
+import XCTest
+@testable import Fast
+
+final class CrashReportTests: XCTestCase {
+    private let bundle = "dev.serafim.fast"
+
+    func testAcceptsCrashMetadataWithJSONWhitespace() {
+        XCTAssertTrue(Crashes.isCrashReport(
+            #"{"bundleID" : "dev.serafim.fast", "bug_type" : "309"}"# + "\n{}", bundle: bundle
+        ))
+    }
+
+    /// Crash #9: a 0.0.3 crash sent by 0.0.8 goes as 0.0.3's.
+    func testAReportSaysWhichYabCrashed() {
+        let made = Crashes.madeBy(#"{"app_name":"yab","app_version":"0.0.3","build_version":"202609302000","bug_type":"309"}"# + "\n{}")
+        XCTAssertEqual(made?.version, "0.0.3")
+        XCTAssertEqual(made?.build, "202609302000")
+        XCTAssertNil(Crashes.madeBy(#"{"app_name":"yab","bug_type":"309"}"# + "\n{}"))
+        XCTAssertNil(Crashes.madeBy("not json\n{}"))
+    }
+
+    func testDiagnosticsAndInvalidHeadersDoNotBecomeCrashReports() {
+        for header in [
+            #"{"bundleID":"dev.serafim.fast","bug_type":"288"}"#,
+            #"{"bundleID":"dev.serafim.fast","bug_type":"298"}"#,
+            #"{"bundleID":"dev.serafim.fast"}"#,
+            #"{"bundleID":"dev.serafim.fast.dev","bug_type":"309"}"#,
+            #"{"bundleID":"","bug_type":"309"}"#,
+            #"{"bundleID":"dev.serafim.fast","bug_type":"309""#,
+            "{}\n" + #"{"bundleID":"dev.serafim.fast","bug_type":"309"}"#,
+        ] {
+            XCTAssertFalse(Crashes.isCrashReport(header, bundle: bundle), header)
+        }
+        XCTAssertFalse(Crashes.isCrashReport(#"{"bundleID":"","bug_type":"309"}"#, bundle: ""))
+    }
+
+    func testDiscoveryIncludesEarlierBuildCrashesButNotOtherDiagnosticsOrProcessedReports() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cutoff = Date(timeIntervalSince1970: 100)
+        let fixtures: [(String, String, TimeInterval)] = [
+            ("yab-old.ips", #"{"bundleID":"dev.serafim.fast","bug_type":"309"}"#, 100),
+            ("yab-diagnostic.ips", #"{"bundleID":"dev.serafim.fast","bug_type":"288"}"#, 110),
+            ("yab-dev.ips", #"{"bundleID":"dev.serafim.fast.dev","bug_type":"309"}"#, 120),
+            ("yab-new.ips", #"{"bundleID":"dev.serafim.fast","bug_type":"309","app_version":"0.0.5"}"#, 140),
+            ("yab-previous.ips", #"{"bundleID":"dev.serafim.fast","bug_type":"309","app_version":"0.0.4"}"#, 130),
+        ]
+        for (name, header, seconds) in fixtures {
+            let file = folder.appendingPathComponent(name)
+            try (header + "\n{}").write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: seconds)], ofItemAtPath: file.path)
+        }
+        let found = Crashes.reports(after: cutoff, bundle: bundle, folder: folder)
+        XCTAssertEqual(found.map { $0.0.lastPathComponent }, ["yab-previous.ips", "yab-new.ips"])
+        XCTAssertEqual(found.map { $0.1 }, [Date(timeIntervalSince1970: 130), Date(timeIntervalSince1970: 140)])
+    }
+
+    func testDiscoveryLooksInRetiredToo() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let retired = folder.appendingPathComponent("Retired")
+        try FileManager.default.createDirectory(at: retired, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let header = #"{"bundleID":"dev.serafim.fast","bug_type":"309"}"#
+        for (file, seconds) in [(folder.appendingPathComponent("yab-a.ips"), 150.0), (retired.appendingPathComponent("yab-b.ips"), 120),
+                                (retired.appendingPathComponent("yab-a.ips"), 150)] {
+            try (header + "\n{}").write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: seconds)], ofItemAtPath: file.path)
+        }
+        let found = Crashes.reports(after: Date(timeIntervalSince1970: 100), bundle: bundle, folder: folder)
+        let places = found.map { $0.0.deletingLastPathComponent().lastPathComponent + "/" + $0.0.lastPathComponent }
+        XCTAssertEqual(places, ["Retired/yab-b.ips", "\(folder.lastPathComponent)/yab-a.ips"])
+    }
+}

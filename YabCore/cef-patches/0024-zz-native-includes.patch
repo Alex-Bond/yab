@@ -1,0 +1,10 @@
+--- a/cef/libcef/browser/request_context_impl.cc
++++ b/cef/libcef/browser/request_context_impl.cc
+@@ -3,6 +3,7 @@
+ // can be found in the LICENSE file.
+ 
+ #include "cef/libcef/browser/request_context_impl.h"
++#include "content/public/browser/web_contents.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "cef/libcef/browser/views/external_crx.h"
+ #include "cef/libcef/browser/browser_host_base.h"

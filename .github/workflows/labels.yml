@@ -1,0 +1,33 @@
+# Keeps the repository's labels the same as .github/labels.yml. Runs on a push
+# to main that changes it (never on a pull request), with a token that can
+# only manage issues and labels. Creates and updates; never deletes a label,
+# so one a maintainer added by hand stays.
+
+name: Labels
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/labels.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Create or update each label
+        run: |
+          ruby -ryaml -e 'YAML.load_file(".github/labels.yml").each { |l| puts [l["name"], l["color"], l["description"]].join("\t") }' |
+          while IFS=$'\t' read -r name color description; do
+            gh label create "$name" --repo "$GITHUB_REPOSITORY" --color "$color" --description "$description" --force
+          done

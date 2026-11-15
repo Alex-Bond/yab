@@ -1,0 +1,9 @@
+{
+  "platform": "android",
+  "version": "0.1.0",
+  "build": "3",
+  "os": "Android fixture",
+  "device": "Fixture",
+  "report": "{\"app_name\":\"Yab\",\"app_version\":\"0.1.0\",\"build_version\":\"3\",\"platform\":\"android\",\"os_version\":\"Android fixture\",\"device\":\"Fixture\"}\n{\"source\":\"Android exit\",\"exception\":{\"type\":\"ANDROID_NATIVE_CRASH\"},\"androidTrace\":{\"version\":1,\"format\":\"NATIVE_TOMBSTONE\",\"availability\":\"AVAILABLE\"},\"faultingThread\":0,\"usedImages\":[{\"name\":\"libxul.so\",\"buildId\":\"0123456789abcdef0123456789abcdef01234567\"},{\"name\":\"libmozglue.so\",\"buildId\":\"abcdefabcdefabcdefabcdefabcdefabcdefabcd\"}],\"threads\":[{\"triggered\":true,\"frames\":[{\"imageIndex\":0,\"imageOffset\":4096},{\"imageIndex\":1,\"imageOffset\":0}]}]}",
+  "bytes": 582
+}

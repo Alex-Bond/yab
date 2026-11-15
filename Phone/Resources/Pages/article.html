@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#F4F4F6">
+<title>The thumb zone, ten years later</title>
+<!-- uxmatters.com/thumb-zone-ten-years-later Hand-made: the prototype lists this article on its Hacker News page (uxmatters.com) but does not draw it; the text is original filler for scrolling tests. -->
+<style>
+:root { --top: 54px; --f-ios: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, "Helvetica Neue", Arial, sans-serif; --f-mono: ui-monospace, "SF Mono", Menlo, monospace; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font: 400 16px/1.45 var(--f-ios); color: #111; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; letter-spacing: -.01em; }
+button { appearance: none; border: 0; padding: 0; margin: 0; font-family: var(--f-ios); cursor: pointer; }
+.pg { min-height: 100vh; overflow-x: hidden; }
+.pg .pad { padding: 0 20px; }
+.pg .bottom-space { height: 120px; }
+.pg h1, .pg h2, .pg h3 { margin: 0; font-family: var(--f-ios); letter-spacing: -.02em; }
+.pg p { margin: 0 0 12px; }
+.ic { display: block; flex: none; }
+.fv { display: block; flex: none; object-fit: cover; }
+.fv.sq { border-radius: 23%; }
+.fv.ci { border-radius: 50%; }
+.fv-draw { display: grid; place-items: center; flex: none; color: #fff; font: 700 11px/1 var(--f-ios); }
+.priv-pg { background: #17161C !important; min-height: 100vh; display: grid; place-items: center; }
+.priv-mid { display: grid; justify-items: center; gap: 10px; text-align: center; padding: 0 40px; color: #fff; }
+.priv-mid b { font: 700 22px/1.2 var(--f-ios); }
+.priv-mid span { font: 400 15px/1.45 var(--f-ios); color: rgba(255, 255, 255, .62); }
+html, body { background: #fff; }</style>
+</head>
+<body>
+<div class="pg" style="background:#fff">
+  <div style="background:#F4F4F6;color:#111;padding:calc(var(--top,54px) + 6px) 18px 12px"><div style="display:flex;align-items:center;gap:8px;font-weight:600"><span class="fv-draw" style="width:20px;height:20px;border-radius:23%;background:#2B5B84;color:#fff;font-size:10px">U</span><span>UXmatters</span><span style="margin-left:auto;font-weight:500;font-size:14px;color:#6e6e73">Columns</span></div></div>
+  <article class="pad" style="padding-top:18px">
+    <div style="font:600 12px/1 var(--f-ios);letter-spacing:.07em;text-transform:uppercase;color:#8e8e93">Mobile · 12 min read</div>
+    <h1 style="font-size:31px;line-height:1.1;margin:8px 0 6px;font-weight:700">The thumb zone, ten years later</h1>
+    <p style="color:#6e6e73;font-size:14px;margin-bottom:18px">By Sara Lindahl · October 2, 2026</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Ten years ago the advice was simple: put what people touch most where the thumb already rests. Phones were smaller then, and the top of the screen was a short stretch away. Today the same advice is louder, because the screen kept growing while hands did not.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Most people hold a phone in one hand for most of the day. They switch to two hands to type, and back to one the moment they are done. Any control that asks for the second hand asks for a pause, and people notice pauses even when they cannot name them.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">The bottom third of the screen is easy to reach with either thumb. The middle is comfortable. The top corners are a stretch, and the corner on the far side of the holding hand is the hardest place on the device. That map has not changed; only the distances have.</p>
+      <h3 style="font-size:20px;margin:18px 0 8px">Where the thumb goes</h3><p style="color:#2b2b2e;font-size:17px;line-height:1.55">Browsers were among the last apps to move their main controls down. An address bar at the top made sense when the page was the only thing on screen and the bar was rarely touched. Once people started switching tabs and asking questions many times an hour, the bar became the most touched control in the app, and it was in the worst place.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Moving it is not only about reach. A field at the bottom sits right above the keyboard, so the words appear where the eyes already are. Suggestions grow upward from the field, closest first, so the best guess is the shortest move away.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">There is a cost. The bottom edge is shared with the system: the home indicator, the gesture for switching apps, the keyboard. Every control placed there has to leave room for those, and every swipe has to be clear about what it means. A sideways swipe on a bar can change tabs; a sideways swipe from the very edge belongs to the system.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Sheets help. A sheet that rises from the bottom keeps its content within reach at half height and lets people pull it taller when they want more. The important part is that it rises from something: the control that summoned it, so the eye can follow where it came from and where it will go back.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Motion is part of reach too. When a control grows into a field, people do not have to look for the field. When a sheet folds back into a line above the bar, people know where to find it again. The fewer surprises in where things appear, the less people reach for the top of the screen to start over.</p>
+      <h3 style="font-size:20px;margin:18px 0 8px">What moved</h3><p style="color:#2b2b2e;font-size:17px;line-height:1.55">Not everything belongs at the bottom. Rare actions, settings and long lists are fine further up, where they do not compete with the controls people use every minute. Putting them up there is a statement: this is not the thing you usually want.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Ten years on, the thumb zone is less a rule than a habit of asking one question for every control: how often is this touched, and how far does the thumb have to travel to touch it? The answers keep changing as phones change. The question does not.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Ten years ago the advice was simple: put what people touch most where the thumb already rests. Phones were smaller then, and the top of the screen was a short stretch away. Today the same advice is louder, because the screen kept growing while hands did not.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Most people hold a phone in one hand for most of the day. They switch to two hands to type, and back to one the moment they are done. Any control that asks for the second hand asks for a pause, and people notice pauses even when they cannot name them.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">The bottom third of the screen is easy to reach with either thumb. The middle is comfortable. The top corners are a stretch, and the corner on the far side of the holding hand is the hardest place on the device. That map has not changed; only the distances have.</p>
+      <h3 style="font-size:20px;margin:18px 0 8px">Sheets that come from somewhere</h3><p style="color:#2b2b2e;font-size:17px;line-height:1.55">Browsers were among the last apps to move their main controls down. An address bar at the top made sense when the page was the only thing on screen and the bar was rarely touched. Once people started switching tabs and asking questions many times an hour, the bar became the most touched control in the app, and it was in the worst place.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Moving it is not only about reach. A field at the bottom sits right above the keyboard, so the words appear where the eyes already are. Suggestions grow upward from the field, closest first, so the best guess is the shortest move away.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">There is a cost. The bottom edge is shared with the system: the home indicator, the gesture for switching apps, the keyboard. Every control placed there has to leave room for those, and every swipe has to be clear about what it means. A sideways swipe on a bar can change tabs; a sideways swipe from the very edge belongs to the system.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Sheets help. A sheet that rises from the bottom keeps its content within reach at half height and lets people pull it taller when they want more. The important part is that it rises from something: the control that summoned it, so the eye can follow where it came from and where it will go back.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Motion is part of reach too. When a control grows into a field, people do not have to look for the field. When a sheet folds back into a line above the bar, people know where to find it again. The fewer surprises in where things appear, the less people reach for the top of the screen to start over.</p>
+      <h3 style="font-size:20px;margin:18px 0 8px">What stays up</h3><p style="color:#2b2b2e;font-size:17px;line-height:1.55">Not everything belongs at the bottom. Rare actions, settings and long lists are fine further up, where they do not compete with the controls people use every minute. Putting them up there is a statement: this is not the thing you usually want.</p>
+      <p style="color:#2b2b2e;font-size:17px;line-height:1.55">Ten years on, the thumb zone is less a rule than a habit of asking one question for every control: how often is this touched, and how far does the thumb have to travel to touch it? The answers keep changing as phones change. The question does not.</p>
+  </article><div class="bottom-space"></div></div>
+</body>
+</html>

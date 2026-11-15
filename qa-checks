@@ -1,0 +1,5 @@
+#!/bin/bash
+# Check cards travel with the change; the release runs their shared batch.
+set -euo pipefail
+cd "$(dirname "$0")"
+exec python3 scripts/runs/deferred_qa.py "$@"

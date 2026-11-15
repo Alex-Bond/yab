@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Vendors Dark Reader's engine and site lists for Yab's dark pages.
+
+  scripts/darkreader-update 4.9.133 [--no-tests]
+
+Fetches the npm package `darkreader` at VERSION, checks it against the
+registry's integrity hash, and takes from it `darkreader.js` as it ships
+(Resources/PageScripts/darkreader.js, its version in its first lines).
+Cuts the engine's `injectProxy` out of it into
+Resources/PageScripts/darkreader-proxy.js, the stylesheet proxy Yab puts in
+the page's own world (docs/dark-pages.md, "In the page"). Fetches
+`dynamic-theme-fixes.config` and `dark-sites.config` from the repository at
+the tag vVERSION into Resources/DarkReader/, and writes the version they came
+from in Resources/DarkReader/VERSION. Then runs the unit tests through the
+farm, unless --no-tests.
+
+Nothing is fetched at run time: the files go out with Yab's releases.
+"""
+import base64
+import hashlib
+import io
+import json
+import re
+import subprocess
+import sys
+import tarfile
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PAGES = ROOT / 'Resources/PageScripts'
+LISTS = ROOT / 'Resources/DarkReader'
+RAW = 'https://raw.githubusercontent.com/darkreader/darkreader/v{version}/src/config/{name}'
+
+
+def get(url):
+    with urllib.request.urlopen(url, timeout=60) as answer:
+        return answer.read()
+
+
+def proxy(engine, version):
+    """injectProxy, whole, from the engine's text: a function of four spaces'
+    indent that ends at the next closing brace at that indent."""
+    text = engine.replace('\r\n', '\n')
+    start = text.index('    function injectProxy(')
+    end = text.index('\n    }\n', start) + len('\n    }')
+    body = '\n'.join(line[4:] if line.startswith('    ') else line for line in text[start:end].split('\n'))
+    return (
+        f'// Dark Reader {version} (MIT, github.com/darkreader/darkreader): its injectProxy,\n'
+        '// cut out by scripts/darkreader-update. Yab runs it in the page\'s own world as\n'
+        '// a user script (DarkPages.swift), where a page\'s Content-Security-Policy\n'
+        '// cannot refuse it, when the engine in the yab-dark world asks with an event.\n'
+        '(() => {\n'
+        + '\n'.join('  ' + line if line else line for line in body.split('\n')) + '\n'
+        '  for (const sheets of [0, 1]) {\n'
+        '    for (const elements of [0, 1]) {\n'
+        '      document.addEventListener(`__yabdark__proxy${sheets}${elements}`,\n'
+        '        () => injectProxy(sheets === 1, elements === 1));\n'
+        '    }\n'
+        '  }\n'
+        '})();\n'
+    )
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    if len(args) != 1 or not re.fullmatch(r'\d+\.\d+\.\d+', args[0]):
+        raise SystemExit(__doc__)
+    version = args[0]
+    meta = json.loads(get(f'https://registry.npmjs.org/darkreader/{version}'))
+    tarball = get(meta['dist']['tarball'])
+    kind, digest = meta['dist']['integrity'].split('-', 1)
+    if kind != 'sha512' or base64.b64encode(hashlib.sha512(tarball).digest()).decode() != digest:
+        raise SystemExit('darkreader: the tarball does not match the registry\'s integrity hash')
+    with tarfile.open(fileobj=io.BytesIO(tarball)) as archive:
+        engine = archive.extractfile('package/darkreader.js').read().decode()
+    if f'Dark Reader v{version}' not in engine.splitlines()[1]:
+        raise SystemExit('darkreader: darkreader.js does not name its version where expected')
+    for needed in ('function injectProxy(', 'window.DarkReader?.Plugins?.fetch', '"darkreader--proxy"',
+                   'proxyScript.append(', '`(${injectProxy})(${enableStyleSheetsProxy}, ${enableCustomElementRegistryProxy})`'):
+        if needed not in engine:
+            raise SystemExit(f'darkreader: the engine no longer has {needed!r}; DarkPages.swift and dark-pages.js need a look')
+    PAGES.mkdir(parents=True, exist_ok=True)
+    LISTS.mkdir(parents=True, exist_ok=True)
+    (PAGES / 'darkreader.js').write_text(engine)
+    (PAGES / 'darkreader-proxy.js').write_text(proxy(engine, version))
+    for name in ('dynamic-theme-fixes.config', 'dark-sites.config'):
+        (LISTS / name).write_bytes(get(RAW.format(version=version, name=name)))
+    (LISTS / 'VERSION').write_text(version + '\n')
+    print('darkreader', version, 'vendored:', len(engine), 'bytes of engine')
+    subprocess.run(['node', '--check', str(PAGES / 'darkreader-proxy.js')], check=True)
+    if '--no-tests' not in sys.argv:
+        subprocess.run([str(ROOT / 'farm'), 'test', '--low', '--name', 'Dark pages tests', '--',
+                        '--filter', 'DarkPagesTests'], check=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,41 @@
+#!/bin/sh
+# What a commit without a compile can still check: every staged .swift file
+# must parse (balanced braces, no stray text, valid syntax). Takes seconds,
+# needs no build, and reads the staged content, not the working copy.
+# Types are not checked: a call that no longer fits its callee still waits
+# for a build (./farm build --low). Skip once with YAB_SKIP_PARSE=1.
+[ "$YAB_SKIP_PARSE" = 1 ] && exit 0
+root="$(git rev-parse --show-toplevel)" || exit 0
+# --base REF (CI): the .swift files this branch changed since REF, as
+# committed, instead of the staged ones.
+base=""
+[ "$1" = --base ] && base="$2"
+if [ -n "$base" ]; then
+  git rev-parse --verify --quiet "$base^{commit}" >/dev/null || { echo "swift parse: no commit $base" >&2; exit 2; }
+  files="$(git diff --name-only --diff-filter=ACM "$base...HEAD" -- '*.swift')"
+else
+  files="$(git diff --cached --name-only --diff-filter=ACM -- '*.swift')"
+fi
+[ -z "$files" ] && exit 0
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/yab-parse.XXXXXX")" || exit 0
+trap 'rm -rf "${tmp:?}"' EXIT
+n=0
+list=""
+for f in $files; do
+  n=$((n + 1))
+  mkdir -p "$tmp/$n"
+  git show "${base:+HEAD}:$f" > "$tmp/$n/$(basename "$f")" 2>/dev/null || continue
+  list="$list $tmp/$n/$(basename "$f")"
+done
+bad=0
+for p in $list; do
+  out="$(/usr/bin/xcrun swiftc -parse "$p" 2>&1)" || {
+    # Only syntax errors count: a missing type or symbol is for the build.
+    echo "$out" | grep -E "error:" | grep -vE "cannot find|has no member|undeclared|no such module|cannot infer|not in scope|ambiguous" | sed "s#$tmp/[0-9]*/##" | head -5 > "$tmp/err"
+    if [ -s "$tmp/err" ]; then bad=1; echo "swift parse: $(basename "$p")" >&2; cat "$tmp/err" >&2; fi
+  }
+done
+if [ "$bad" = 1 ]; then
+  echo "A staged .swift file does not parse. Fix it, or commit anyway with YAB_SKIP_PARSE=1." >&2
+  exit 1
+fi

@@ -1,0 +1,93 @@
+--- a/content/browser/renderer_host/render_widget_host_view_mac.h
++++ b/content/browser/renderer_host/render_widget_host_view_mac.h
+@@ -10,9 +10,11 @@
+ #include <optional>
+ #include <string>
+ #include <string_view>
++#include <utility>
+ #include <vector>
+ 
+ #include "base/gtest_prod_util.h"
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/memory/weak_ptr.h"
+@@ -386,6 +388,21 @@
+   void OnWindowIsKeyChanged(bool is_key) override;
+   // Explicit remote embedder state. Never makes the producer window key.
+   void SetExternalHostFocus(bool focused);
++
++  // Per-view external select prototype. The handler must bind the menu's
++  // PopupMenuRunner receiver so hide/navigation/owner loss dismisses the UI.
++  using ExternalSelectCallback = base::RepeatingCallback<void(
++      remote_cocoa::mojom::PopupMenuPtr,
++      base::OnceCallback<void(std::optional<uint32_t>)>)>;
++  void SetExternalSelectCallback(ExternalSelectCallback callback) {
++    external_select_callback_ = std::move(callback);
++  }
++  bool HasExternalSelectCallback() const {
++    return !external_select_callback_.is_null();
++  }
++  void ShowExternalSelect(
++      remote_cocoa::mojom::PopupMenuPtr menu,
++      base::OnceCallback<void(std::optional<uint32_t>)> closed);
+   void OnBoundsInWindowChanged(const gfx::Rect& view_bounds_in_window_dip,
+                                bool attached_to_window) override;
+   void OnWindowFrameInScreenChanged(
+@@ -659,6 +676,7 @@
+   // Whether or not the NSView's NSWindow is the key window.
+   bool is_window_key_ = false;
+   std::optional<bool> external_host_focus_;
++  ExternalSelectCallback external_select_callback_;
+ 
+   // Whether or not the NSView is first responder.
+   bool is_first_responder_ = false;
+--- a/content/browser/renderer_host/render_widget_host_view_mac.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
+@@ -2044,6 +2044,18 @@
+   }
+ }
+ 
++void RenderWidgetHostViewMac::ShowExternalSelect(
++    remote_cocoa::mojom::PopupMenuPtr menu,
++    base::OnceCallback<void(std::optional<uint32_t>)> closed) {
++  // Snapshot the callback; the external handler can dismiss its owner.
++  auto handler = external_select_callback_;
++  if (handler) {
++    handler.Run(std::move(menu), std::move(closed));
++  } else {
++    std::move(closed).Run(std::nullopt);
++  }
++}
++
+ void RenderWidgetHostViewMac::SetExternalHostFocus(bool focused) {
+   external_host_focus_ = focused;
+   ns_view_->SetExternalHostFocus(focused);
+--- a/content/browser/renderer_host/popup_menu_helper_mac.mm
++++ b/content/browser/renderer_host/popup_menu_helper_mac.mm
+@@ -86,12 +86,19 @@
+       &PopupMenuHelper::CheckPermissionPromptOcclusion);
+ 
+   remote_runner_.reset();
+-  rwhvm->GetNSView()->DisplayPopupMenu(
+-      remote_cocoa::mojom::PopupMenu::New(
+-          std::move(items), bounds, item_font_size, right_aligned,
+-          selected_item, remote_runner_.BindNewPipeAndPassReceiver()),
+-      base::BindOnce(&PopupMenuHelper::PopupMenuClosed,
+-                     weak_ptr_factory_.GetWeakPtr()));
++  auto menu = remote_cocoa::mojom::PopupMenu::New(
++      std::move(items), bounds, item_font_size, right_aligned,
++      selected_item, remote_runner_.BindNewPipeAndPassReceiver());
++  auto closed = base::BindOnce(&PopupMenuHelper::PopupMenuClosed,
++                              weak_ptr_factory_.GetWeakPtr());
++  if (rwhvm->HasExternalSelectCallback()) {
++    // Preserve the normal permission-occlusion checks and cancellation pipe.
++    // The embedder receives root-page bounds rather than a hidden window's
++    // screen anchor. Its own permission UI must also constrain presentation.
++    rwhvm->ShowExternalSelect(std::move(menu), std::move(closed));
++    return;
++  }
++  rwhvm->GetNSView()->DisplayPopupMenu(std::move(menu), std::move(closed));
+ }
+ 
+ void PopupMenuHelper::Hide() {

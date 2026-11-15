@@ -1,0 +1,163 @@
+<!doctype html>
+<html style="overflow:auto!important;scroll-behavior:smooth"><head><meta charset="utf-8"><title>Reader DOM loading</title></head>
+<body style="min-height:4000px;display:block!important;overflow-y:scroll!important;--reader-original:kept">
+<main id="article"><h1>Reader fixture title</h1><h2 data-private="discard">Structured heading</h2>
+<p>Reader keeps this paragraph, emphasis, headings, lists and table structure. This deliberately long paragraph is ordinary fixture prose with enough letters to qualify the existing article threshold. Current Phone excludes all link subtrees and their words; the copied article must follow that behavior while preserving the remaining safe document structure.</p>
+<p><strong>Strong words</strong><em>Emphasized words</em><a href="/target#paragraph" onclick="window.fixtureHandlerRan=true" data-secret="discard">Local link</a><a href="https://other.invalid/">External words</a><a href="javascript:window.fixtureHandlerRan=true">Script words</a></p>
+<p>Reader scoring counts real visible paragraphs rather than the name of their surrounding element. This public fixture keeps its original headings, emphasis, list and table while adding independent prose blocks. Each block contains enough ordinary text to exercise the same readable threshold as the current Phone source. The document remains deliberately plain so the structural copy and its original restoration can be examined independently.</p>
+<p>A separate paragraph contributes its own words to the article and to each containing element. Links are excluded from that contribution, hidden ancestors are rejected, and surrounding navigation is not treated as prose. This fixture does not need an external article or a remote provider. Its content belongs entirely to the local test and makes the document genuinely readable before any bounded copy operation is requested.</p>
+<p>The final independent prose block gives the fixture three substantial neighbors in the same article container. This is not a simulated availability flag: the exact APK integration script measures the real Gecko document. Later cases replace the candidate with similarly readable text before exceeding the character, node or title budget. A refusal must therefore come from the safe copy limit rather than from the readability precheck.</p>
+<ol><li>First item</li><li>Second item</li></ol><blockquote>Quoted words</blockquote><pre><code>literal &lt;source&gt;</code></pre>
+<table><thead><tr><th>Column</th></tr></thead><tbody><tr><td>Cell value</td></tr></tbody></table>
+<p hidden>HIDDEN_ATTRIBUTE</p><p aria-hidden="true">HIDDEN_ARIA</p><div style="display:none"><p>HIDDEN_DISPLAY</p></div>
+<p style="visibility:hidden">HIDDEN_VISIBILITY</p><p style="opacity:0">HIDDEN_OPACITY</p><aside>AROUND_ASIDE</aside><div class="related"><p>AROUND_RELATED</p></div>
+<form><p>ACTIVE_FORM</p><input value="ACTIVE_INPUT"><button>ACTIVE_BUTTON</button></form><iframe src="about:blank"></iframe><img alt="RESOURCE_IMAGE">
+<template><script>window.fixtureHandlerRan=true</script><p>TEMPLATE_WORDS</p></template></main>
+<script>
+(async () => {
+  "use strict";
+  let checks = 0;
+  let currentStage = "SCRIPT_START", assertionCode = "NONE";
+  function stage(value) { currentStage = value; document.title = "Reader DOM stage " + value; }
+  function must(value, code) { if (!value) { assertionCode = code; throw new Error("Owned Reader assertion"); } checks++; }
+  function finish(passed, failure) {
+    const output = document.createElement("output");
+    output.textContent = (passed ? "READER_DOM_PASS checks=" + checks : "READER_DOM_FAIL") +
+      " READER_DOM_STATE " + JSON.stringify({stage:currentStage, failure, assertion:assertionCode, checks}) + " END_READER_DOM_STATE";
+    (document.body || document.documentElement).append(output);
+    document.title = passed ? "Reader source DOM passed" : "Reader source DOM failed";
+  }
+  try {
+  stage("SETUP");
+  const body = document.body, root = document.documentElement, source = document.getElementById("article");
+  const originalMarkup = source.innerHTML;
+  // The installed production bridge applies the real initial site zoom. Take
+  // the style baseline after that write, not while it races this local DOM
+  // fixture. No style is injected here and every exact restoration check stays.
+  stage("NATIVE_PAGE_STYLE");
+  const nativeStyleDeadline = performance.now() + 15000;
+  while (root.style.getPropertyValue("zoom") !== "1" && performance.now() < nativeStyleDeadline)
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  must(root.style.getPropertyValue("zoom") === "1", "NATIVE_ZOOM_READY");
+  const originalBodyStyle = body.getAttribute("style"), originalRootStyle = root.getAttribute("style");
+  const shadows = [], messages = [];
+  let listener;
+  // Only this fixture's local exact-resource execution receives a transport stub.
+  // The installed APK content bridge and its real native port are unchanged.
+  const port = {postMessage(value) { messages.push(value); }, onMessage:{addListener(value) { listener = value; }}};
+  const attach = Element.prototype.attachShadow;
+  try {
+    Element.prototype.attachShadow = function(options) {
+      const shadow = attach.call(this, options);
+      if (options.mode === "closed") shadows.push({host:this, shadow});
+      return shadow;
+    };
+    stage("SOURCE_EXECUTE");
+    const bytes = Uint8Array.from(atob("__SOURCE_BASE64__"), c => c.charCodeAt(0));
+    new Function("browser", new TextDecoder().decode(bytes))({runtime:{connectNative() { return port; }}});
+    stage("SOURCE_READY");
+  } finally { Element.prototype.attachShadow = attach; }
+  const id = messages.find(value => value.kind === "state")?.documentID;
+  const active = () => shadows.filter(value => value.host.isConnected);
+  const command = (enabled, extra = {}) => {
+    // Shadow capture is active only during this fixture's local command call,
+    // never during the installed extension's asynchronous native-port work.
+    Element.prototype.attachShadow = function(options) {
+      const shadow = attach.call(this, options);
+      if (options.mode === "closed") shadows.push({host:this, shadow});
+      return shadow;
+    };
+    try { listener({command:"reader", enabled, expectedDocument:id, expectedURL:location.href, ...extra}); }
+    finally { Element.prototype.attachShadow = attach; }
+  };
+  const available = () => {
+    listener({command:"safety", request:"reader-fixture-availability"});
+    return messages.at(-1).readerAvailable === true;
+  };
+  const readableProse = () => Array.from({length:3}, () => {
+    const paragraph = document.createElement("p"); paragraph.textContent = "p".repeat(400); return paragraph;
+  });
+  const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+    stage("PORT_READY");
+    must(typeof id === "string" && typeof listener === "function", "ORIGINAL_LOCAL_PORT");
+    stage("STALE_COMMANDS");
+    command(true, {expectedDocument:"another-document"}); must(active().length === 0, "STALE_DOCUMENT_ENTER");
+    command(true, {expectedURL:location.origin + "/another"}); must(active().length === 0, "STALE_URL_ENTER");
+    command("true"); must(active().length === 0, "BOOLEAN_ONLY");
+    stage("WAIT_FRAME_ONE"); await frame(); stage("WAIT_FRAME_TWO"); await frame();
+    stage("SCROLL_READY"); window.scrollTo({left:0, top:180, behavior:"instant"});
+    const beforeX = scrollX, beforeY = scrollY;
+    must(beforeY > 0, "REAL_SCROLL_BEFORE_READER");
+    stage("STRUCTURE");
+    must(available(), "READABLE_STRUCTURE");
+    command(true);
+    must(active().length === 1, "ONE_READING_SURFACE");
+    const first = active()[0], reading = first.shadow;
+    must(reading.querySelectorAll("h1").length === 1 && reading.querySelector("h1").textContent === "Reader fixture title", "ONE_TITLE");
+    must(reading.querySelector("h2")?.textContent === "Structured heading", "HEADING_STRUCTURE");
+    must(reading.querySelectorAll("ol > li").length === 2, "LIST_STRUCTURE");
+    must(reading.querySelector("table th")?.textContent === "Column" && reading.querySelector("table td")?.textContent === "Cell value", "TABLE_STRUCTURE");
+    must(reading.querySelector("blockquote")?.textContent === "Quoted words" && reading.querySelector("pre code")?.textContent === "literal <source>", "PROSE_STRUCTURE");
+    must(reading.querySelector("strong")?.textContent === "Strong words" && reading.querySelector("em")?.textContent === "Emphasized words", "EMPHASIS_STRUCTURE");
+    must(reading.querySelectorAll("a").length === 0, "PHONE_EXCLUDES_ALL_LINK_SUBTREES");
+    must(!reading.textContent.includes("Local link") && !reading.textContent.includes("External words") && !reading.textContent.includes("Script words"), "LINK_WORDS_EXCLUDED_WITH_SUBTREE");
+    must([...reading.querySelectorAll("*")].every(value => value.attributes.length === 0), "NO_COPIED_ATTRIBUTES");
+    must(!reading.querySelector("script,link,iframe,frame,object,embed,img,picture,source,audio,video,form,input,button,select,textarea,template"), "NO_ACTIVE_RESOURCE_NODES");
+    for (const word of ["HIDDEN_ATTRIBUTE","HIDDEN_ARIA","HIDDEN_DISPLAY","HIDDEN_VISIBILITY","HIDDEN_OPACITY","AROUND_ASIDE","AROUND_RELATED","ACTIVE_FORM","ACTIVE_BUTTON","TEMPLATE_WORDS"]) must(!reading.textContent.includes(word), "EXCLUDED_" + word);
+    must(!window.fixtureHandlerRan, "NO_COPIED_HANDLER");
+    must(body.style.getPropertyValue("display") === "none" && body.style.getPropertyPriority("display") === "important", "HIDDEN_ORIGINAL_BODY");
+    must(root.style.getPropertyValue("overflow") === "hidden" && root.style.getPropertyPriority("overflow") === "important", "OWNED_ROOT_OVERFLOW");
+    command(true); must(active().length === 1 && active()[0] === first, "REPEATED_ENTER_NO_REPLACEMENT");
+    command(false, {expectedDocument:"another-document"}); must(first.host.isConnected, "STALE_DOCUMENT_EXIT");
+    command(false, {expectedURL:location.origin + "/another"}); must(first.host.isConnected, "STALE_URL_EXIT");
+    stage("STYLE_ROUNDTRIP"); command(false);
+    must(active().length === 0, "ORIGINAL_EXIT");
+    must(body.getAttribute("style") === originalBodyStyle && root.getAttribute("style") === originalRootStyle, "EXACT_STYLE_PRIORITY_ROUNDTRIP");
+    must(scrollX === beforeX && scrollY === beforeY, "ORIGINAL_SCROLL_RESTORED");
+    stage("STYLE_EDITS"); command(true);
+    root.style.setProperty("zoom", "1.25"); body.style.setProperty("color", "rgb(1, 2, 3)");
+    command(false);
+    must(root.style.getPropertyValue("zoom") === "1.25" && body.style.getPropertyValue("color") === "rgb(1, 2, 3)", "LATER_ZOOM_AND_SITE_EDITS_PRESERVED");
+    must(root.style.getPropertyValue("overflow") === "auto" && root.style.getPropertyPriority("overflow") === "important" &&
+      body.style.getPropertyValue("display") === "block" && body.style.getPropertyPriority("display") === "important", "ONLY_OWN_PROPERTIES_RESTORED");
+    body.setAttribute("style", originalBodyStyle); root.setAttribute("style", originalRootStyle);
+    command(true); body.style.setProperty("display", "grid", "important"); root.style.setProperty("overflow", "visible", "important");
+    command(false);
+    must(body.style.getPropertyValue("display") === "grid" && root.style.getPropertyValue("overflow") === "visible", "NEW_OWNER_PROPERTIES_NOT_OVERWRITTEN");
+    stage("STYLE_NULL"); body.removeAttribute("style"); root.removeAttribute("style"); command(true); command(false);
+    must(body.getAttribute("style") === null && root.getAttribute("style") === null, "ABSENT_STYLE_ATTRIBUTES_ROUNDTRIP");
+    body.setAttribute("style", originalBodyStyle); root.setAttribute("style", originalRootStyle);
+    stage("BUDGET_CHAR"); source.replaceChildren(...readableProse(), document.createTextNode("x".repeat(400001)));
+    must(available(), "CHARACTER_BUDGET_READABLE");
+    command(true); must(active().length === 0, "CHARACTER_BUDGET_REFUSES_WHOLE_COPY");
+    stage("BUDGET_NODES"); source.replaceChildren(...readableProse()); const many = document.createDocumentFragment();
+    for (let i = 0; i < 10001; i++) { const span = document.createElement("span"); span.textContent = "bounded words"; many.append(span); }
+    source.append(many); must(available(), "NODE_BUDGET_READABLE"); command(true); must(active().length === 0, "NODE_BUDGET_REFUSES_WHOLE_COPY");
+    stage("BUDGET_TITLE"); source.innerHTML = originalMarkup;
+    const title = source.querySelector("h1"); title.remove(); title.textContent = "t".repeat(400001); body.append(title);
+    must(available(), "TITLE_BUDGET_READABLE");
+    command(true); must(active().length === 0, "TITLE_CANNOT_BYPASS_CHARACTER_BUDGET");
+    title.remove(); source.innerHTML = originalMarkup; must(available(), "RESTORED_STRUCTURE_READABLE"); command(true); must(active().length === 1, "FRESH_VALID_STRUCTURE_AFTER_REFUSAL");
+    stage("BODY_REPLACEMENT"); const lost = active()[0], replacement = document.createElement("body");
+    replacement.style.cssText = "min-height:4000px;padding:7px!important";
+    replacement.append(document.createElement("main"));
+    root.replaceChild(replacement, body);
+    root.style.cssText = "overflow:scroll!important;padding:9px!important";
+    const replacementStyle = replacement.getAttribute("style"), replacementRootStyle = root.getAttribute("style"), replacementY = scrollY;
+    // A normal report observes source loss, not a fresh Reader command/authority.
+    listener({command:"safety", request:"reader-fixture"});
+    must(!lost.host.isConnected && active().length === 0, "REPORT_REMOVES_ORIGINAL_STALE_COVER");
+    must(replacement.getAttribute("style") === replacementStyle && root.getAttribute("style") === replacementRootStyle, "REPLACEMENT_STYLES_UNTOUCHED");
+    must(scrollY === replacementY, "NO_SCROLL_RESTORE_ON_REPLACEMENT");
+    must(messages.at(-1).readerEnabled === false, "STALE_READER_NOT_REPORTED_ENABLED");
+    root.replaceChild(body, replacement); command(true);
+    must(active().length === 0, "OBSERVED_BODY_ABA_CANNOT_REACQUIRE_READER");
+    stage("COMPLETE"); finish(true, "NONE");
+  } catch (error) {
+    const failure = assertionCode !== "NONE" ? "ASSERTION" : error instanceof SyntaxError ? "SYNTAX" :
+      error instanceof ReferenceError ? "REFERENCE" : error instanceof TypeError ? "TYPE" :
+      error instanceof RangeError ? "RANGE" : error?.name === "SecurityError" ? "SECURITY" : "OTHER";
+    finish(false, failure);
+  }
+})();
+</script></body></html>

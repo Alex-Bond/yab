@@ -1,0 +1,18 @@
+--- a/cef/libcef/browser/views/window_view.cc
++++ b/cef/libcef/browser/views/window_view.cc
+@@ -9,6 +9,7 @@
+ 
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
++#include "cef/libcef/common/api_version_util.h"
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
+@@ -869,6 +870,7 @@
+ void CefWindowView::OnAcceleratedFrame(uint32_t context_id,
+                                       const gfx::Size& pixel_size,
+                                       float scale) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) return;
+   if (cef_delegate()) {
+     cef_delegate()->OnAcceleratedFrame(
+         GetCefWindow(), context_id,

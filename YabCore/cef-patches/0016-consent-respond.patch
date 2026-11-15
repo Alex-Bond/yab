@@ -1,0 +1,31 @@
+--- a/cef/include/cef_browser_process_handler.h	2026-10-26 23:23:13
++++ b/cef/include/cef_browser_process_handler.h	2026-10-26 23:59:30
+@@ -52,7 +52,7 @@
+ 
+ #if CEF_API_ADDED(CEF_EXPERIMENTAL)
+ ///
+-/// Answers one extension consent request. Exactly the first Continue counts;
++/// Answers one extension consent request. Exactly the first Respond counts;
+ /// releasing the callback unanswered cancels the request. May be called on any
+ /// thread.
+ ///
+@@ -64,7 +64,7 @@
+   /// or uninstall the request describes.
+   ///
+   /*--cef()--*/
+-  virtual void Continue(bool accept) = 0;
++  virtual void Respond(bool accept) = 0;
+ };
+ #endif
+ 
+--- a/cef/libcef/browser/views/external_consent.cc	2026-10-26 23:23:13
++++ b/cef/libcef/browser/views/external_consent.cc	2026-10-26 23:59:30
+@@ -98,7 +98,7 @@
+  public:
+   explicit ConsentCallback(std::string token) : token_(std::move(token)) {}
+   ~ConsentCallback() override { Finish(false); }
+-  void Continue(bool accept) override { Finish(accept); }
++  void Respond(bool accept) override { Finish(accept); }
+ 
+  private:
+   void Finish(bool accept) {

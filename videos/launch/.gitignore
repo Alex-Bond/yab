@@ -1,0 +1,7 @@
+node_modules/
+out/
+.remotion/
+public/shots/
+public/audio/
+public/takes/
+public/brand/Caveat.ttf

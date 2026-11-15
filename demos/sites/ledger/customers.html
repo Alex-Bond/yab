@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Customers · Ledger</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="/assets/ledger.css">
+</head>
+<body data-page="customers">
+<script src="/assets/shell.js"></script>
+<main>
+  <div class="page">
+    <div class="head">
+      <div><h1>Customers</h1><p>Teams paying for Tern, their plans and how they pay.</p></div>
+      <div class="actions">
+        <a class="btn" href="/reports/customers.csv"><span data-icon="download" data-size="16"></span>Export</a>
+        <button class="btn primary" type="button"><span data-icon="plus" data-size="16"></span>Add customer</button>
+      </div>
+    </div>
+    <div class="tabs" id="tabs"></div>
+    <div class="filters">
+      <label class="find"><span data-icon="search" data-size="16"></span><input id="find" type="text" placeholder="Filter by name or email" aria-label="Filter customers"></label>
+      <button class="chip" type="button"><span data-icon="plus" data-size="16"></span>Plan</button>
+      <button class="chip" type="button"><span data-icon="plus" data-size="16"></span>Country</button>
+      <span class="grow"></span>
+    </div>
+    <section class="card table-card">
+      <div class="table-wrap">
+        <table class="t" id="table">
+          <thead><tr><th>Customer</th><th>Plan</th><th class="r">Seats</th><th class="r">MRR</th><th class="hide-md">Payment method</th><th>Status</th><th>Since</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="t-foot"><span id="count"></span><div class="pager"><button class="btn" type="button" disabled>Previous</button><button class="btn" type="button">Next</button></div></div>
+    </section>
+  </div>
+</main>
+<script src="/assets/data.js"></script>
+<script src="/assets/pages.js"></script>
+</body>
+</html>

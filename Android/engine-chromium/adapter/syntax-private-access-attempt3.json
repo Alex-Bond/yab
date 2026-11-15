@@ -1,0 +1,19 @@
+{
+  "upstreamRevision": "ac19329a1d32108fd05ead15568cb6e188f8615a",
+  "patchSha256": "1c40380ef47228382ed612cf1671d15a54e1da9fb2be4b3503328751b62ad052",
+  "targetFlagsSha256": "a13cc7ebb74b94efeb7d014f31f8887aaaba103a52352f4e535623034f3f09e5",
+  "sourceUnchanged": true,
+  "syntaxOnly": true,
+  "linked": false,
+  "testsExecuted": false,
+  "apkBuilt": false,
+  "checks": [
+    {
+      "file": "yab_cookie_store_policy.cc",
+      "targetFlagsSha256": "a13cc7ebb74b94efeb7d014f31f8887aaaba103a52352f4e535623034f3f09e5",
+      "startedAt": "2026-10-23T07:51:59.337159+00:00",
+      "exitCode": 1,
+      "log": "/data/yab-chromium-baseline/adapter-scaffold/syntax-private-access-attempt3/yab_cookie_store_policy.cc.log"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#E2001A">
+<title>TAP · Payment</title>
+<!-- flytap.com/en-se/booking/payment Hand-made: the prototype does not draw this page; its words and numbers come from the prototype (TASK_DEFS.lisbon, consentHTML('pay'), codeHTML). -->
+<style>
+:root { --top: 54px; --f-ios: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, "Helvetica Neue", Arial, sans-serif; --f-mono: ui-monospace, "SF Mono", Menlo, monospace; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font: 400 16px/1.45 var(--f-ios); color: #111; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; letter-spacing: -.01em; }
+button { appearance: none; border: 0; padding: 0; margin: 0; font-family: var(--f-ios); cursor: pointer; }
+.pg { min-height: 100vh; overflow-x: hidden; }
+.pg .pad { padding: 0 20px; }
+.pg .bottom-space { height: 120px; }
+.pg h1, .pg h2, .pg h3 { margin: 0; font-family: var(--f-ios); letter-spacing: -.02em; }
+.pg p { margin: 0 0 12px; }
+.ic { display: block; flex: none; }
+.fv { display: block; flex: none; object-fit: cover; }
+.fv.sq { border-radius: 23%; }
+.fv.ci { border-radius: 50%; }
+.fv-draw { display: grid; place-items: center; flex: none; color: #fff; font: 700 11px/1 var(--f-ios); }
+.priv-pg { background: #17161C !important; min-height: 100vh; display: grid; place-items: center; }
+.priv-mid { display: grid; justify-items: center; gap: 10px; text-align: center; padding: 0 40px; color: #fff; }
+.priv-mid b { font: 700 22px/1.2 var(--f-ios); }
+.priv-mid span { font: 400 15px/1.45 var(--f-ios); color: rgba(255, 255, 255, .62); }
+html, body { background: #fff; }</style>
+</head>
+<body>
+<div class="pg" style="background:#fff">
+  <div style="background:#E2001A;color:#fff;padding:calc(var(--top,54px) + 6px) 18px 12px"><div style="display:flex;align-items:center;gap:8px;font-weight:700"><span class="fv-draw" style="width:20px;height:20px;border-radius:23%;background:#fff;color:#fff;font-size:10px"><b style="color:#E2001A">T</b></span><span>TAP Air Portugal</span><span style="margin-left:auto;font-weight:500;font-size:14px;opacity:.85">Payment</span></div></div>
+  <div class="pad" style="padding-top:16px;display:grid;gap:14px">
+    <h1 style="font-size:24px;font-weight:700">Review and pay</h1>
+    <div id="facts" style="display:grid;border-radius:16px;background:#F4F4F6">
+      <div style="display:grid;grid-template-columns:76px 1fr;gap:10px;padding:11px 14px;border-bottom:.5px solid #DADCE0;font-size:14.5px;line-height:1.35"><span style="color:#6e6e73">Out</span><b style="font-weight:500">Tue, Oct 13 · ARN 18:35 → LIS 22:10 · nonstop</b></div><div style="display:grid;grid-template-columns:76px 1fr;gap:10px;padding:11px 14px;border-bottom:.5px solid #DADCE0;font-size:14.5px;line-height:1.35"><span style="color:#6e6e73">Back</span><b style="font-weight:500">Sat, Oct 17 · LIS 10:40 → ARN 15:15 · nonstop</b></div><div style="display:grid;grid-template-columns:76px 1fr;gap:10px;padding:11px 14px;border-bottom:.5px solid #DADCE0;font-size:14.5px;line-height:1.35"><span style="color:#6e6e73">Traveler</span><b style="font-weight:500">Mira Lindqvist · seat 14A, window</b></div><div style="display:grid;grid-template-columns:76px 1fr;gap:10px;padding:11px 14px;font-size:14.5px;line-height:1.35"><span style="color:#6e6e73">Card</span><b style="font-weight:500">Visa ·· 4242</b></div>
+    </div>
+    <div style="display:flex;align-items:baseline;gap:8px"><span style="flex:1;font-size:15px;color:#3a3a3c">Total, taxes included</span><b id="total" style="font-size:24px;font-weight:700">€238.00</b></div>
+    <label style="display:flex;gap:10px;align-items:flex-start;font-size:13.5px;color:#3a3a3c"><input type="checkbox" checked style="margin-top:2px">I accept the fare rules and TAP’s conditions of carriage.</label>
+    <button id="pay" data-amount="238.00" style="height:52px;border-radius:14px;background:#E2001A;color:#fff;font:600 17px/1 var(--f-ios)">Pay €238.00</button>
+    <p style="font-size:13px;color:#6e6e73;text-align:center">Your card is charged when you press Pay.</p>
+    <div style="height:10px;border-radius:5px;background:#EEF0F2;width:100%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF0F2;width:92%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF0F2;width:86%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF0F2;width:100%;margin:0 0 10px"></div>
+  </div><div class="bottom-space"></div></div>
+</body>
+</html>

@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "iphone-launch-cache",
+  "summary": "iPhone #1776: restore cached icons without blocking launch input",
+  "owner_session": "",
+  "origin_commits": [],
+  "platform": "ios",
+  "paths": [
+    "Phone/Sources/Page/SiteIcons.swift",
+    "Phone/Sources/App/AppModel.swift",
+    "Phone/Tests/LaunchWorkTests.swift",
+    "Phone/Tests/SiteIconsTests.swift",
+    "Phone/UITests/LaunchSpeedUITests.swift",
+    "Phone/scripts/phone",
+    "Phone/scripts/launch-speed-check.sh",
+    "evals/golden/iphone-launch-cache.sh"
+  ],
+  "suites": [
+    "YabPhoneTests.LaunchWorkTests",
+    "YabPhoneTests.SiteIconsTests",
+    "YabPhoneTests.BrowserProfileTests",
+    "YabPhoneTests.LaunchKeyboardTests",
+    "YabPhoneUITests.LaunchSpeedUITests"
+  ],
+  "checks": [],
+  "probes": [],
+  "manual": [
+    "On the published 0.1.30 build (202611020551), reproduce feedback #1776 on a physical iPhone 11 with a matching saved-tab, sync, extension and icon-cache profile. No diagnostic/profile was supplied; simulator timings do not establish A13 speed or reporter acceptance.",
+    "Run Phone/scripts/launch-speed-check.sh BASE in an exclusive display farm job with --needs ios-sim,xcodegen --exclude-host main --exclude-host m4. Read the exact-base expected assertion failure, cache main-queue delay, all candidate test results, and both start-page launch/resume samples. Do not treat missing tests, build errors or simulator failures as the expected baseline failure.",
+    "After clearing browsing data during cache restoration, cached icons stay cleared. A newer fetched icon survives an overlapping restore; corrupt cached files do not prevent valid icons appearing."
+  ],
+  "needs": [
+    "ios-sim",
+    "xcodegen"
+  ],
+  "avoid_hosts": [
+    "main",
+    "m4"
+  ],
+  "request_ids": []
+}

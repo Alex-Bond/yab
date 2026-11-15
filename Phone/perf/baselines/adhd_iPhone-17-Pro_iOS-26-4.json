@@ -1,0 +1,601 @@
+{
+ "date": "2026-10-06T08:16:31-0700",
+ "frames": {
+  "chromeFold": {
+   "chromeFold": {
+    "count": 5,
+    "median": {
+     "duration_ms": 367.5,
+     "expected_ms": 340,
+     "first_main_ms": 2.7,
+     "first_ms": 34.9,
+     "hitch_ms_per_s": 0,
+     "long_share": 0,
+     "main_avg_ms": 2.6,
+     "main_cpu_avg_ms": 2.6,
+     "main_cpu_max_ms": 3.4,
+     "main_max_ms": 3.4,
+     "worst_ms": 16.7
+    },
+    "repeats": [
+     {
+      "begin": 1791298775.895,
+      "duration_ms": 367.3,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 2.8,
+      "first_ms": 34.9,
+      "fps": 60,
+      "frames": 21,
+      "hitch_ms_per_s": 0,
+      "iteration": 2,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 2.5,
+      "main_cpu_avg_ms": 2.4,
+      "main_cpu_max_ms": 3.1,
+      "main_max_ms": 3.2,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 6.767,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298779.195,
+      "duration_ms": 383.9,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 1.4,
+      "first_ms": 33.8,
+      "fps": 60,
+      "frames": 22,
+      "hitch_ms_per_s": 0,
+      "iteration": 3,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 2.4,
+      "main_cpu_avg_ms": 2.4,
+      "main_cpu_max_ms": 3.2,
+      "main_max_ms": 3.2,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 10.083,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298789.428,
+      "duration_ms": 367.5,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 3.2,
+      "first_ms": 35.6,
+      "fps": 60,
+      "frames": 21,
+      "hitch_ms_per_s": 0,
+      "iteration": 4,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 2.8,
+      "main_cpu_avg_ms": 2.7,
+      "main_cpu_max_ms": 3.4,
+      "main_max_ms": 3.4,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 20.3,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298792.862,
+      "duration_ms": 383.9,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 1.6,
+      "first_ms": 33.9,
+      "fps": 60,
+      "frames": 22,
+      "hitch_ms_per_s": 0,
+      "iteration": 5,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 2.8,
+      "main_cpu_avg_ms": 2.6,
+      "main_cpu_max_ms": 3.7,
+      "main_max_ms": 4.3,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 23.75,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298796.178,
+      "duration_ms": 367.2,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 2.7,
+      "first_ms": 35,
+      "fps": 60,
+      "frames": 21,
+      "hitch_ms_per_s": 0,
+      "iteration": 6,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 2.6,
+      "main_cpu_avg_ms": 2.6,
+      "main_cpu_max_ms": 3.5,
+      "main_max_ms": 3.6,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 27.05,
+      "worst_ms": 16.7
+     }
+    ]
+   }
+  },
+  "chromeUnfold": {
+   "chromeFold": {
+    "count": 5,
+    "median": {
+     "duration_ms": 383.3,
+     "expected_ms": 340,
+     "first_main_ms": 12.3,
+     "first_ms": 32.5,
+     "hitch_ms_per_s": 0,
+     "long_share": 0,
+     "main_avg_ms": 3.8,
+     "main_cpu_avg_ms": 3.8,
+     "main_cpu_max_ms": 12.1,
+     "main_max_ms": 12.3,
+     "worst_ms": 16.7
+    },
+    "repeats": [
+     {
+      "begin": 1791298825.746,
+      "duration_ms": 383.3,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 11.3,
+      "first_ms": 32.5,
+      "fps": 60,
+      "frames": 20,
+      "hitch_ms_per_s": 0,
+      "iteration": 2,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 3.5,
+      "main_cpu_avg_ms": 3.4,
+      "main_cpu_max_ms": 11.3,
+      "main_max_ms": 11.3,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 0.383,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298833.512,
+      "duration_ms": 383.3,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 12,
+      "first_ms": 32.5,
+      "fps": 60,
+      "frames": 20,
+      "hitch_ms_per_s": 0,
+      "iteration": 3,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 3.6,
+      "main_cpu_avg_ms": 3.5,
+      "main_cpu_max_ms": 12,
+      "main_max_ms": 12,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 0.383,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298841.279,
+      "duration_ms": 383.2,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 12.3,
+      "first_ms": 32.4,
+      "fps": 60,
+      "frames": 20,
+      "hitch_ms_per_s": 0,
+      "iteration": 4,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 3.8,
+      "main_cpu_avg_ms": 3.8,
+      "main_cpu_max_ms": 12.1,
+      "main_max_ms": 12.3,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 0.383,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298849.196,
+      "duration_ms": 382.9,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 15.6,
+      "first_ms": 32.4,
+      "fps": 60,
+      "frames": 20,
+      "hitch_ms_per_s": 0,
+      "iteration": 5,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 4,
+      "main_cpu_avg_ms": 3.9,
+      "main_cpu_max_ms": 14.8,
+      "main_max_ms": 15.6,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 0.383,
+      "worst_ms": 16.7
+     },
+     {
+      "begin": 1791298857.228,
+      "duration_ms": 384.9,
+      "expected_ms": 340,
+      "fade": false,
+      "first_main_ms": 20.8,
+      "first_ms": 34.2,
+      "fps": 60,
+      "frames": 20,
+      "hitch_ms_per_s": 0,
+      "iteration": 6,
+      "long": 0,
+      "long_share": 0,
+      "main_avg_ms": 4.9,
+      "main_cpu_avg_ms": 4.3,
+      "main_cpu_max_ms": 17.5,
+      "main_max_ms": 20.8,
+      "name": "chromeFold",
+      "signpost": "chromeFold",
+      "t": 0.385,
+      "worst_ms": 16.7
+     }
+    ]
+   }
+  }
+ },
+ "key": "adhd_iPhone-17-Pro_iOS-26-4",
+ "load": 661.79,
+ "mac": "adhd",
+ "memory": {
+  "paging": {
+   "growth_mb": 1093.8,
+   "median": {
+    "app_mb": 259.4,
+    "low_mb": 1000.0,
+    "total_mb": 1602.4,
+    "web_mb": 1389.2,
+    "web_n": 29
+   },
+   "repeats": [
+    {
+     "app_mb": 262.7,
+     "iteration": 2,
+     "low_mb": 371.7,
+     "total_mb": 1082.0,
+     "web_mb": 819.3,
+     "web_n": 11
+    },
+    {
+     "app_mb": 259.4,
+     "iteration": 3,
+     "low_mb": 689.9,
+     "total_mb": 997.9,
+     "web_mb": 738.5,
+     "web_n": 19
+    },
+    {
+     "app_mb": 261.7,
+     "iteration": 4,
+     "low_mb": 1000.0,
+     "total_mb": 1889.9,
+     "web_mb": 1628.2,
+     "web_n": 29
+    },
+    {
+     "app_mb": 213.2,
+     "iteration": 5,
+     "low_mb": 1602.4,
+     "total_mb": 1602.4,
+     "web_mb": 1389.2,
+     "web_n": 36
+    },
+    {
+     "app_mb": 152.9,
+     "iteration": 6,
+     "low_mb": 1465.5,
+     "total_mb": 1778.2,
+     "web_mb": 1625.3,
+     "web_n": 46
+    }
+   ]
+  },
+  "scroll": {
+   "growth_mb": 1.8,
+   "median": {
+    "app_mb": 270.3,
+    "low_mb": 658.4,
+    "total_mb": 658.7,
+    "web_mb": 388.4,
+    "web_n": 1
+   },
+   "repeats": [
+    {
+     "app_mb": 268.9,
+     "iteration": 2,
+     "low_mb": 657.0,
+     "total_mb": 657.0,
+     "web_mb": 388.1,
+     "web_n": 1
+    },
+    {
+     "app_mb": 269.9,
+     "iteration": 3,
+     "low_mb": 657.8,
+     "total_mb": 658.2,
+     "web_mb": 388.3,
+     "web_n": 1
+    },
+    {
+     "app_mb": 270.3,
+     "iteration": 4,
+     "low_mb": 658.4,
+     "total_mb": 658.7,
+     "web_mb": 388.4,
+     "web_n": 1
+    },
+    {
+     "app_mb": 270.3,
+     "iteration": 5,
+     "low_mb": 658.7,
+     "total_mb": 658.7,
+     "web_mb": 388.4,
+     "web_n": 1
+    },
+    {
+     "app_mb": 270.5,
+     "iteration": 6,
+     "low_mb": 658.8,
+     "total_mb": 659.0,
+     "web_mb": 388.5,
+     "web_n": 1
+    }
+   ]
+  }
+ },
+ "model": "iPhone-17-Pro",
+ "repeats": 5,
+ "runtime": "iOS-26-4",
+ "snapshot": "7f95fb6bb35b254c02ae2abda048dc2fc3ecdd91",
+ "tests": {
+  "PerfTests/testChromeFold()": {
+   "Duration (chromeFold)": {
+    "floor": 0.02,
+    "identifier": "com.apple.dt.XCTMetric_OSSignpost-chromeFold.duration",
+    "median": 0.3679,
+    "polarity": "prefers smaller",
+    "unit": "s",
+    "values": [
+     0.36765166600000004,
+     0.384342458,
+     0.367876917,
+     0.38445316700000004,
+     0.367425875
+    ]
+   }
+  },
+  "PerfTests/testChromeUnfold()": {
+   "Duration (chromeFold)": {
+    "floor": 0.02,
+    "identifier": "com.apple.dt.XCTMetric_OSSignpost-chromeFold.duration",
+    "median": 0.3857,
+    "polarity": "prefers smaller",
+    "unit": "s",
+    "values": [
+     0.384945125,
+     0.38571916700000003,
+     0.386811917,
+     0.384901833,
+     0.38664358400000004
+    ]
+   }
+  },
+  "PerfTests/testLaunch()": {
+   "Duration (ApplicationFirstFramePresentationResponsive)": {
+    "floor": 0.02,
+    "identifier": "com.apple.dt.XCTMetric_ApplicationLaunch-ApplicationFirstFramePresentationResponsive.duration",
+    "median": 20.8994,
+    "polarity": "prefers smaller",
+    "unit": "s",
+    "values": [
+     22.158306958,
+     14.693940584000002,
+     1.4623784590000002,
+     20.899398958000003,
+     126.46926300000001
+    ]
+   }
+  },
+  "PerfTests/testPagingMemory()": {
+   "Absolute Memory Physical (iphone)": {
+    "floor": 2048.0,
+    "identifier": "com.apple.dt.XCTMetric_Memory-dev.serafim.fast.iphone.physical_absolute",
+    "median": 60606.984,
+    "polarity": "prefers smaller",
+    "unit": "kB",
+    "values": [
+     60607.008,
+     60246.56,
+     60197.408,
+     60983.84,
+     60606.984
+    ]
+   },
+   "CPU Cycles (iphone)": {
+    "floor": null,
+    "identifier": "com.apple.dt.XCTMetric_CPU-dev.serafim.fast.iphone.cycles",
+    "median": 1710204.116,
+    "polarity": "prefers smaller",
+    "unit": "kC",
+    "values": [
+     1789635.809,
+     1710204.116,
+     2871000.092,
+     1483919.155,
+     585292.348
+    ]
+   },
+   "CPU Instructions Retired (iphone)": {
+    "floor": null,
+    "identifier": "com.apple.dt.XCTMetric_CPU-dev.serafim.fast.iphone.instructions_retired",
+    "median": 1783244.328,
+    "polarity": "prefers smaller",
+    "unit": "kI",
+    "values": [
+     1899343.532,
+     1783244.328,
+     2908447.12,
+     1491312.62,
+     561920.205
+    ]
+   },
+   "CPU Time (iphone)": {
+    "floor": 0.05,
+    "identifier": "com.apple.dt.XCTMetric_CPU-dev.serafim.fast.iphone.time",
+    "median": 0.6157,
+    "polarity": "prefers smaller",
+    "unit": "s",
+    "values": [
+     0.615652925,
+     0.655073974,
+     0.9523981020000001,
+     0.519247001,
+     0.20133501
+    ]
+   },
+   "Memory Peak Physical (iphone)": {
+    "floor": 2048.0,
+    "identifier": "com.apple.dt.XCTMetric_Memory-dev.serafim.fast.iphone.physical_peak",
+    "median": 61131.296,
+    "polarity": "prefers smaller",
+    "unit": "kB",
+    "values": [
+     61049.376,
+     61131.296,
+     60820,
+     61377.08,
+     61688.352
+    ]
+   },
+   "Memory Physical (iphone)": {
+    "floor": 2048.0,
+    "identifier": "com.apple.dt.XCTMetric_Memory-dev.serafim.fast.iphone.physical",
+    "median": -49.152,
+    "polarity": "prefers smaller",
+    "unit": "kB",
+    "values": [
+     737.28,
+     -360.448,
+     -49.152,
+     786.432,
+     -376.856
+    ]
+   }
+  },
+  "PerfTests/testScrollMemory()": {
+   "Absolute Memory Physical (iphone)": {
+    "floor": 2048.0,
+    "identifier": "com.apple.dt.XCTMetric_Memory-dev.serafim.fast.iphone.physical_absolute",
+    "median": 58395.168,
+    "polarity": "prefers smaller",
+    "unit": "kB",
+    "values": [
+     57838.112,
+     58182.176,
+     58395.168,
+     58411.552,
+     58706.464
+    ]
+   },
+   "CPU Cycles (iphone)": {
+    "floor": null,
+    "identifier": "com.apple.dt.XCTMetric_CPU-dev.serafim.fast.iphone.cycles",
+    "median": 679282.018,
+    "polarity": "prefers smaller",
+    "unit": "kC",
+    "values": [
+     749554.413,
+     679282.018,
+     671534.514,
+     666682.944,
+     708621.169
+    ]
+   },
+   "CPU Instructions Retired (iphone)": {
+    "floor": null,
+    "identifier": "com.apple.dt.XCTMetric_CPU-dev.serafim.fast.iphone.instructions_retired",
+    "median": 813125.714,
+    "polarity": "prefers smaller",
+    "unit": "kI",
+    "values": [
+     827925.346,
+     813125.714,
+     799785.165,
+     792855.969,
+     827873.234
+    ]
+   },
+   "CPU Time (iphone)": {
+    "floor": 0.05,
+    "identifier": "com.apple.dt.XCTMetric_CPU-dev.serafim.fast.iphone.time",
+    "median": 0.2318,
+    "polarity": "prefers smaller",
+    "unit": "s",
+    "values": [
+     0.24305390400000002,
+     0.22738641,
+     0.22527204,
+     0.23184224900000003,
+     0.25152593900000003
+    ]
+   },
+   "Memory Peak Physical (iphone)": {
+    "floor": 2048.0,
+    "identifier": "com.apple.dt.XCTMetric_Memory-dev.serafim.fast.iphone.physical_peak",
+    "median": 58411.552,
+    "polarity": "prefers smaller",
+    "unit": "kB",
+    "values": [
+     57854.496,
+     58198.56,
+     58411.552,
+     58460.704,
+     58722.848
+    ]
+   },
+   "Memory Physical (iphone)": {
+    "floor": 2048.0,
+    "identifier": "com.apple.dt.XCTMetric_Memory-dev.serafim.fast.iphone.physical",
+    "median": 212.992,
+    "polarity": "prefers smaller",
+    "unit": "kB",
+    "values": [
+     131.072,
+     344.064,
+     212.992,
+     16.384,
+     294.912
+    ]
+   }
+  }
+ },
+ "xcode": "Xcode 26.4.1 Build version 17E202"
+}

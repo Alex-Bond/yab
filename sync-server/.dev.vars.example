@@ -1,0 +1,11 @@
+# Secrets the sync Worker reads. All optional: without them push and the
+# census are off and sync still works. Copy to .dev.vars for `wrangler dev`,
+# or set them with `wrangler secret put NAME` on your own Worker.
+# APNS_KEY=
+# APNS_KEY_ID=
+# APNS_TEAM=
+# APNS_HOST=
+# FCM_PROJECT_ID=
+# FCM_CLIENT_EMAIL=
+# FCM_PRIVATE_KEY=
+# CENSUS_TOKEN=

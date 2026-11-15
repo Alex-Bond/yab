@@ -1,0 +1,91 @@
+--- a/Sources/Fast/Stamp.swift
++++ b/Sources/Fast/Stamp.swift
+@@ -146,12 +146,12 @@
+     }
+ 
+     /// The earlier of two days, leaving out what can't be a day of Yab.
+-    static func earliest(_ a: Date?, _ b: Date?) -> Date? {
++    nonisolated static func earliest(_ a: Date?, _ b: Date?) -> Date? {
+         [a, b].compactMap { $0 }.filter(plausible).min()
+     }
+ 
+     /// Yab came out in 2026; nothing was used with it before 2025, nor tomorrow.
+-    static func plausible(_ day: Date) -> Bool {
++    nonisolated static func plausible(_ day: Date) -> Bool {
+         day >= Date(timeIntervalSince1970: 1_735_689_600) && day <= Date().addingTimeInterval(86_400)
+     }
+ 
+@@ -256,34 +256,51 @@
+ /// The first day in the login keychain too, under this Yab's name: it stays
+ /// when Yab and its data are deleted and installed again. Asked without the
+ /// keychain's password window, off the main thread.
+-private enum FirstDay {
++enum FirstDay {
++    /// One transaction, with raw storage supplied by the keychain in the app.
++    /// Tests supply their own memory and lock, without touching a keychain.
++    struct Storage {
++        let readData: () -> Data?
++        let writeData: (Data) -> Void
++        let withLock: (() -> Void) -> Void
++
++        static var keychain: Storage {
++            Storage(readData: {
++                var query = FirstDay.item
++                query[kSecReturnData as String] = true
++                query[kSecMatchLimit as String] = kSecMatchLimitOne
++                var found: AnyObject?
++                guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess else { return nil }
++                return found as? Data
++            }, writeData: { data in
++                if SecItemUpdate(FirstDay.item as CFDictionary, [kSecValueData as String: data] as CFDictionary) == errSecItemNotFound {
++                    var add = FirstDay.item
++                    add[kSecValueData as String] = data
++                    _ = SecItemAdd(add as CFDictionary, nil)
++                }
++            }, withLock: { body in Keychain.quietly(body) })
++        }
++    }
++
+     private static var item: [String: Any] {
+         [kSecClass as String: kSecClassGenericPassword,
+          kSecAttrService as String: "\(Store.name) First Day",
+          kSecAttrAccount as String: "since"]
+     }
+ 
+-    static func read() -> Date? {
+-        Keychain.quietly {
+-            var query = item
+-            query[kSecReturnData as String] = true
+-            query[kSecMatchLimit as String] = kSecMatchLimitOne
+-            var found: AnyObject?
+-            guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess,
+-                  let data = found as? Data, let seconds = Double(String(decoding: data, as: UTF8.self)), seconds > 0
+-            else { return nil }
+-            return Date(timeIntervalSince1970: seconds)
+-        }
+-    }
+-
+-    static func keep(_ day: Date) {
++    private static func decode(_ data: Data?) -> Date? {
++        guard let data, let seconds = Double(String(decoding: data, as: UTF8.self)), seconds > 0 else { return nil }
++        return Date(timeIntervalSince1970: seconds)
++    }
++
++    static func read(using storage: Storage = .keychain) -> Date? {
++        var day: Date?
++        storage.withLock { day = decode(storage.readData()) }
++        return day
++    }
++
++    static func keep(_ day: Date, using storage: Storage = .keychain) {
+         let data = Data(String(day.timeIntervalSince1970).utf8)
+-        Keychain.quietly {
+-            if SecItemUpdate(item as CFDictionary, [kSecValueData as String: data] as CFDictionary) == errSecItemNotFound {
+-                var add = item
+-                add[kSecValueData as String] = data
+-                _ = SecItemAdd(add as CFDictionary, nil)
+-            }
+-        }
++        storage.withLock { storage.writeData(data) }
+     }
+ }

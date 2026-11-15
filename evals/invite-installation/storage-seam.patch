@@ -1,0 +1,89 @@
+--- a/Sources/Fast/Invites.swift
++++ b/Sources/Fast/Invites.swift
+@@ -3,6 +3,7 @@
+ import Foundation
+ import SQLite3
+ import SyncKit
++import Security
+ 
+ // Invite a Friend: a link a friend opens to get Yab
+ // (yetanotherbrowser.com/hi/CODE), the app icons friends unlock, and one
+@@ -98,11 +99,73 @@
+ 
+     /// This Mac, to the invites site alone: random, made the first time.
+     static var installation: String {
+-        if let saved = Store.settings.string(forKey: "invite.installation") { return saved }
+-        let id = UUID().uuidString.lowercased()
+-        Store.settings.set(id, forKey: "invite.installation")
+-        return id
+-    }
++        installation(using: .current)!
++    }
++
++    enum InstallationBackup {
++        case found(String), missing, unavailable
++    }
++
++    /// One transaction. Tests inject memory, never the real settings/keychain.
++    struct InstallationStorage {
++        var read: () -> String?
++        var save: (String) -> Void
++        var backup: () -> InstallationBackup
++        var keep: (String) -> Bool
++        var make: () -> String = { UUID().uuidString.lowercased() }
++        var locked: (() -> Void) -> Void
++
++        static var current: Self {
++            let settings = Store.settings
++            // A probe or unit test never needs even a synthetic keychain item.
++            if Store.testing {
++                return Self(read: { settings.string(forKey: "invite.installation") },
++                            save: { settings.set($0, forKey: "invite.installation") },
++                            backup: { .missing }, keep: { _ in false }, locked: { $0() })
++            }
++            return Self(read: { settings.string(forKey: "invite.installation") },
++                        save: { settings.set($0, forKey: "invite.installation") },
++                        backup: {
++                            var query = installationItem
++                            query[kSecReturnData as String] = true
++                            query[kSecMatchLimit as String] = kSecMatchLimitOne
++                            var found: AnyObject?
++                            let status = SecItemCopyMatching(query as CFDictionary, &found)
++                            if status == errSecItemNotFound { return .missing }
++                            guard status == errSecSuccess, let data = found as? Data,
++                                  let value = String(data: data, encoding: .utf8) else { return .unavailable }
++                            return .found(value)
++                        }, keep: { id in
++                            let data = Data(id.utf8)
++                            var status = SecItemUpdate(installationItem as CFDictionary, [kSecValueData as String: data] as CFDictionary)
++                            if status == errSecItemNotFound {
++                                var add = installationItem
++                                add[kSecValueData as String] = data
++                                status = SecItemAdd(add as CFDictionary, nil)
++                            }
++                            return status == errSecSuccess
++                        }, locked: { Keychain.quietly($0) })
++        }
++    }
++
++    nonisolated private static var installationItem: [String: Any] {
++        [kSecClass as String: kSecClassGenericPassword,
++         kSecAttrService as String: "\(Store.name) Invites",
++         kSecAttrAccount as String: "installation"]
++    }
++
++    // Storage-only adapter of BASE's original read-or-generate behavior.
++    nonisolated static func installation(using storage: InstallationStorage) -> String? {
++        var result: String?
++        storage.locked {
++            if let saved = storage.read() { result = saved; return }
++            let id = storage.make()
++            storage.save(id)
++            result = id
++        }
++        return result
++    }
++
+ 
+     /// Your first name: Autofill › You's, else the Mac account's.
+     static var firstName: String {

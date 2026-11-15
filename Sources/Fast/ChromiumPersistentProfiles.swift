@@ -1,0 +1,132 @@
+import Foundation
+import WebKit
+
+/// A logical WebKit sign-in and a physical CEF directory are independent.
+/// Unknown old directories are quarantined, never attached to today's store.
+@MainActor
+enum ChromiumPersistentProfiles {
+    enum Refused: Error { case unverifiedAssociation, candidateAlreadyExists }
+    struct Plan: Equatable {
+        let logical: UUID
+        let aliases: Set<UUID>
+        let existing: Set<UUID>
+        let associated: Set<UUID>
+        let fresh: UUID
+        init(logical: UUID, aliases: Set<UUID>, existing: Set<UUID>, associated: Set<UUID> = [], fresh: UUID = UUID()) {
+            self.logical = logical; self.aliases = aliases
+            self.existing = existing
+            self.associated = associated.intersection(existing)
+            self.fresh = fresh
+        }
+        var primary: UUID {
+            if associated.contains(logical) { return logical }
+            if let known = associated.sorted(by: { $0.uuidString < $1.uuidString }).first { return known }
+            return existing.contains(logical) ? fresh : logical
+        }
+        var needsMerge: Bool { !existing.subtracting([primary]).isEmpty }
+        var quarantined: Set<UUID> { existing.subtracting(associated) }
+        func physical(for placement: UUID) -> UUID { primary }
+    }
+    private struct Key: Hashable { let root: String; let logical: UUID; let shared: Bool; let aliases: Set<UUID> }
+    private struct Association: Codable {
+        let version: Int
+        let logical: UUID
+        let shared: Bool
+        let physical: UUID
+        let provenance: String
+        let generation: String
+    }
+    private final class Record {
+        let key: Key
+        let plan: Plan
+        let receipt: URL
+        let generation: String
+        var authorized: Bool
+        var claimed = false
+        init(key: Key, plan: Plan, receipt: URL, generation: String, authorized: Bool) {
+            self.key = key; self.plan = plan; self.receipt = receipt; self.generation = generation; self.authorized = authorized
+        }
+    }
+    private static var records: [Key: Record] = [:]
+
+    private static func record(for store: WKWebsiteDataStore) -> Record {
+        precondition(store.isPersistent)
+        let sharedStore = Store.websites
+        let shared = store === sharedStore || store.identifier == sharedStore.identifier
+        let logical = shared ? Space.firstID : (store.identifier ?? Space.firstID)
+        let aliases: Set<UUID> = shared
+            ? Set(Spaces.read().filter { !$0.ownSignIns }.map(\.id)).union(Spaces.sharing)
+                .union([Space.firstID, Space.mailID, Space.pinsID]) : [logical]
+        let root = Store.file("Chromium"), metadata = Store.file("ChromiumImports")
+        let key = Key(root: root.path, logical: logical, shared: shared, aliases: aliases)
+        if let record = records[key] { return record }
+        let receipt = Store.file("ChromiumProfiles").appendingPathComponent(logical.uuidString + (shared ? "-shared" : "-named") + ".json")
+        let generation = Store.settings.string(forKey: "chromium.profile.generation." + logical.uuidString) ?? "initial"
+        var existing = Set(aliases.filter {
+            FileManager.default.fileExists(atPath: root.appendingPathComponent("space-" + $0.uuidString).path)
+            || FileManager.default.fileExists(atPath: metadata.appendingPathComponent($0.uuidString + ".json").path)
+        })
+        var associated: Set<UUID> = []
+        if let data = try? Data(contentsOf: receipt), data.count <= 65_536,
+           let state = try? JSONDecoder().decode(Association.self, from: data),
+           state.version == 2, state.logical == logical, state.shared == shared, state.generation == generation,
+           ["fresh", "verified-migration"].contains(state.provenance),
+           FileManager.default.fileExists(atPath: root.appendingPathComponent("space-" + state.physical.uuidString).path) {
+            associated.insert(state.physical); existing.insert(state.physical)
+        }
+        // Spaces.store(for:) always maps these three special stores to the
+        // shared store and Spaces.erase excludes them; no mutable space ID is
+        // trusted merely because it equals today's WK identifier.
+        if shared { associated.formUnion(existing.intersection([Space.firstID, Space.mailID, Space.pinsID])) }
+        var fresh = UUID()
+        while FileManager.default.fileExists(atPath: root.appendingPathComponent("space-" + fresh.uuidString).path) { fresh = UUID() }
+        let plan = Plan(logical: logical, aliases: aliases, existing: existing, associated: associated, fresh: fresh)
+        let record = Record(key: key, plan: plan, receipt: receipt, generation: generation, authorized: associated.contains(plan.primary))
+        records[key] = record
+        return record
+    }
+    static func plan(for store: WKWebsiteDataStore) -> Plan { record(for: store).plan }
+    static func profile(store: WKWebsiteDataStore, placement: UUID) -> String { record(for: store).plan.primary.uuidString }
+    static func profile(for browser: Browser) -> String { profile(store: Spaces.store(for: browser.spaceID), placement: browser.spaceID) }
+
+    /// Required BEFORE constructing cookie/extension bridges or opening CEF.
+    /// A new context is claimed and journaled before it can receive any data.
+    static func authorize(_ profile: String, store: WKWebsiteDataStore) throws {
+        guard store.isPersistent else { throw Refused.unverifiedAssociation }
+        let record = record(for: store)
+        guard profile == record.plan.primary.uuidString else { throw Refused.unverifiedAssociation }
+        if record.authorized { return }
+        let manager = FileManager.default
+        let directory = URL(fileURLWithPath: record.key.root).appendingPathComponent("space-" + profile)
+        if !record.claimed {
+            guard !manager.fileExists(atPath: directory.path) else { throw Refused.candidateAlreadyExists }
+            try manager.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+            try manager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            record.claimed = true
+        }
+        try manager.createDirectory(at: record.receipt.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+        if manager.fileExists(atPath: record.receipt.path) {
+            try manager.moveItem(at: record.receipt, to: record.receipt.appendingPathExtension("retired-" + UUID().uuidString))
+        }
+        let association = Association(version: 2, logical: record.plan.logical, shared: record.key.shared,
+                                      physical: record.plan.primary, provenance: "fresh", generation: record.generation)
+        try JSONEncoder().encode(association).write(to: record.receipt, options: [.atomic])
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.receipt.path)
+        record.authorized = true
+    }
+
+    /// Erasing/recreating a WK store must not revive its old native sign-ins.
+    /// Preserve the old directories and receipt for explicit migration review.
+    static func retireAssociation(_ logical: UUID) {
+        ChromiumDRMCookies.retireStore(logical)
+        ChromiumDRMExtensionSession.retireStore(logical)
+        Store.settings.set(UUID().uuidString, forKey: "chromium.profile.generation." + logical.uuidString)
+        records = records.filter { $0.key.logical != logical || $0.key.shared }
+        let receipt = Store.file("ChromiumProfiles").appendingPathComponent(logical.uuidString + "-named.json")
+        guard FileManager.default.fileExists(atPath: receipt.path) else { return }
+        do { try FileManager.default.moveItem(at: receipt, to: receipt.appendingPathExtension("retired-" + UUID().uuidString)) }
+        catch { DebugLog.note("profile-association", ["error": String(describing: error)]) }
+    }
+}

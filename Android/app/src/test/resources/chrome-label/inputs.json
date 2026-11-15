@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "canonicalUrls": [
+    "https://www.example.com/path?q=fixture#part",
+    "http://WWW.Example.COM:80/path",
+    "https://www.example.com:443/",
+    "https://user:secret@www.example.com:8443/path",
+    "http://127.0.0.1:49281/motion",
+    "http://localhost:3000/",
+    "https://xn--mnchen-3ya.de:8443/",
+    "http://[::1]/",
+    "http://[::1]:8080/path",
+    "https://[2001:db8::1]:443/path",
+    "https://[2001:db8:abcd:12::3]:8443/path",
+    "http://[fe80::1%25en0]:8080/",
+    "https://a-very-long-subdomain-for-the-native-browser-label.example.com:8443/path"
+  ],
+  "widths": [0, 18, 62, 114, 212],
+  "naturalWidths": [0, 41.2, 113.2, 114, 114.1, 211.2, 600]
+}

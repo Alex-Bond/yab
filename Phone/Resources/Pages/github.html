@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="rgb(246, 248, 250)">
+<title>feat(editor): wrap text at 800 and keep it clear of the side panels</title>
+<!-- PAGES['gh-pr'] from Phone/Reference/prototype.html: "feat(editor): wrap text at 800 and keep it clear of the side panels" (GitHub). Made by Phone/tools/extract-assets.js. -->
+<style>
+:root { --top: 54px; --f-ios: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, "Helvetica Neue", Arial, sans-serif; --f-mono: ui-monospace, "SF Mono", Menlo, monospace; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font: 400 16px/1.45 var(--f-ios); color: #111; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; letter-spacing: -.01em; }
+button { appearance: none; border: 0; padding: 0; margin: 0; font-family: var(--f-ios); cursor: pointer; }
+.pg { min-height: 100vh; overflow-x: hidden; }
+.pg .pad { padding: 0 20px; }
+.pg .bottom-space { height: 120px; }
+.pg h1, .pg h2, .pg h3 { margin: 0; font-family: var(--f-ios); letter-spacing: -.02em; }
+.pg p { margin: 0 0 12px; }
+.ic { display: block; flex: none; }
+.fv { display: block; flex: none; object-fit: cover; }
+.fv.sq { border-radius: 23%; }
+.fv.ci { border-radius: 50%; }
+.fv-draw { display: grid; place-items: center; flex: none; color: #fff; font: 700 11px/1 var(--f-ios); }
+.priv-pg { background: #17161C !important; min-height: 100vh; display: grid; place-items: center; }
+.priv-mid { display: grid; justify-items: center; gap: 10px; text-align: center; padding: 0 40px; color: #fff; }
+.priv-mid b { font: 700 22px/1.2 var(--f-ios); }
+.priv-mid span { font: 400 15px/1.45 var(--f-ios); color: rgba(255, 255, 255, .62); }
+html, body { background: rgb(255, 255, 255); }</style>
+</head>
+<body>
+<div class="pg" style="background:#fff">
+    <div style="background:#F6F8FA;color:#111;padding:calc(var(--top,54px) + 6px) 18px 12px"><div style="display:flex;align-items:center;gap:8px;font-size:14px;color:#57606a"><img class="fv ci" src="data:image/webp;base64,UklGRroCAABXRUJQVlA4IK4CAACwDgCdASoiACIAPjEUiEKiISEXFZggAwS0gFxkygka++/k5k/3tH5AflHqHP75+Q/5AZkf/O6Md+QHNFxq/7f1MM8f0n/sPcH/Uv/g9iMYj7kl4Nc10bvh/wHlX+GRdbG08M/wh0ijiY5oNSj0h9K+PEcaOmSmdZ81YPlDXYAA/v81iG6uZoPekEYUxY+x0NHD/hreKerAwlP8MCT/H6BQcDAsoGQoITXSyfjla8W/Wz27jc1F6KNPJD2T7PjhB01D+wjCkzEJCOpLXLRufplxSvxZV/Eu7nhk4PQDMD/6eJksO+kRsEA6nyGAR1PX+rJmBz3/aRaS2IMqAnI1/5E2X+9gbcL9m6JZOUR3FQ+odVrAlJgIzdB5U+WsLbVVbVac/Hxn7FlLtMfGAAXvJbEpOB4msSf9IrM1N7hCoZb5S3GKIN9oPJrHvJpPbvMa1EPAnGZMr3rnutGsv9fH5w2xeCliz+rGsxuB2bWn+uHntZ0vICRk8cr2C7OF/OvRNnd8z2BCTJ0EcFdmkZr4cBVmiN1v9UdVFLubj7ee6qaCxz7+MeHvU9LQA02dVMgoCWoVn/okljGOy84L3y9J/crykVsvxmvTK/J41YqhfScf40M3GAJs3he5LbKXn05Yo52wdpYSkrxa+faYt5tlHnIf1b+xZeBzTI97txEkVpk4JeeGt6ylw/8xLn/sBFzdT29OP6rNf8LZHIC241afgyT2n28bqk5oRzREEzIqzozegivwbTuhzIc+FouKPh3hHblQ2Hw+Hvt/bGNDf+/glO75jhi6Lr32hoEXuOy7TglBJX/vbDSJ8VQ8rBIsOGrvWne+w0R43ojX/yGio/YMgwDLmBSswOLPtav3rtsH7moAfC7iTZ6BusDUs8whzCqIpsHpbFVU+ni0fhq7AAAAAA==" width="20" height="20" alt="" style=""><span>excalidraw / <b style="color:#1f2328;font-weight:600">excalidraw</b></span></div></div>
+    <div class="pad" style="padding-top:14px;display:grid;gap:12px">
+      <h1 style="font-size:22px;line-height:1.25;font-weight:600;color:#1f2328">feat(editor): wrap text at 800 and keep it clear of the side panels <span style="color:#59636e;font-weight:400">#12192</span></h1>
+      <div style="display:flex;align-items:center;gap:8px;font-size:13.5px;color:#59636e"><span style="background:#1F883D;color:#fff;font-weight:600;padding:5px 10px;border-radius:999px">Open</span>3 commits · 3 files</div>
+      <div style="border:1px solid #d1d9e0;border-radius:12px;padding:12px;display:grid;gap:8px;background:#FFF8E5"><div style="font-weight:600;font-size:14.5px">Your review was requested</div><div style="font-size:13.5px;color:#59636e">Wraps long text at 800 px and keeps it out from under the library panel.</div><span style="justify-self:start;background:#1F883D;color:#fff;font-weight:600;font-size:13.5px;padding:7px 12px;border-radius:8px">Add your review</span></div>
+      <div style="border:1px solid #d1d9e0;border-radius:12px;overflow:hidden;font:12px/1.6 var(--f-mono)">
+        <div style="background:#F6F8FA;padding:6px 10px;color:#59636e">src/element/textWrapping.ts</div>
+        <div style="background:#FFEBE9;padding:0 10px;color:#82071e">- const MAX = window.innerWidth;</div>
+        <div style="background:#DAFBE1;padding:0 10px;color:#116329">+ const MAX = Math.min(800, free.width);</div>
+        <div style="background:#DAFBE1;padding:0 10px;color:#116329">+ if (panel.open) MAX -= panel.width;</div>
+        <div style="padding:0 10px;color:#59636e">  return wrap(text, MAX);</div>
+      </div>
+      <div style="height:10px;border-radius:5px;background:#EEF1F4;width:100%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF1F4;width:84%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF1F4;width:92%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF1F4;width:100%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF1F4;width:84%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF1F4;width:92%;margin:0 0 10px"></div>
+    </div><div class="bottom-space"></div></div>
+</body>
+</html>

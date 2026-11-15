@@ -1,0 +1,108 @@
+{
+  "status": "frozen_read_only_uncompiled_candidate",
+  "privateSourceUploaded": false,
+  "modelFiles": 12,
+  "uiFiles": 8,
+  "files": [
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/BrowserController.kt",
+      "category": "candidate-model",
+      "sha256": "e96881ea5cc38c8afff2d583672c3537e1c39c6e746d686a992cd4cf4361b811"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/BrowserEngine.kt",
+      "category": "candidate-model",
+      "sha256": "94d4664cd1aabedeb43e538658eef6aa4ad10256d253f3148819e2243234b8d5"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/BrowserHistory.kt",
+      "category": "candidate-model",
+      "sha256": "dfbbcc44c8532684550b7906e840e5daabf391fcd42d08fb379c65ec60999f1b"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/BrowserRepository.kt",
+      "category": "candidate-model",
+      "sha256": "646726efb00dba4c4a882831b350d7945419ffb883fceeac9c2411ef2612312f"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/BrowserTypes.kt",
+      "category": "candidate-model",
+      "sha256": "3d6c6d64c08436dc1b467d6caac6f38a28c01134bb82bd522cd2212df2bbf987"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/SettingsSearchIndex.kt",
+      "category": "candidate-model",
+      "sha256": "0f27a52f1cc5b9e3cd614245a5940b98f5ea791264e1ac382f52d9842f5aadd9"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/TabActivity.kt",
+      "category": "candidate-model",
+      "sha256": "e6e0044ad1a3acf8d46f372070c78fd72c88cd49dc45e219410b2036c0325247"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/model/WebFormValues.kt",
+      "category": "candidate-model",
+      "sha256": "601e5858f89738f5bdc06e71ee8ddfc18d6a63cab44f58d7380852dcd7b6c0e2"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/engine/SiteSettingsStore.kt",
+      "category": "candidate-model",
+      "sha256": "0a2a952d9f6d2888f747546429225daa0220939880c5cd649859af31b7a4f571"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/reports/ReportsController.kt",
+      "category": "candidate-model",
+      "sha256": "4c3a7f7e5071a89c97b5dcfb5828169c3887713dff374f1363f14f6f241b06c2"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/reports/ReportTypes.kt",
+      "category": "candidate-model",
+      "sha256": "f3865acd3363354e14e0f6ae7b4ce508d6fb3084bb8b9b3e350027de6a552bf0"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/reports/ExitTrace.kt",
+      "category": "candidate-model",
+      "sha256": "ed00526b9c4b8177cca9b0efebd0b3d18b40482e8f1b780229ec8818e9d6205f"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/ui/BrowserAccessibility.kt",
+      "category": "candidate-ui",
+      "sha256": "25dc3dab1761f7f7cdaa6a2c3576e092cfa063ceb3a65d7a74158e1a7d7c19ba"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/ui/BrowserField.kt",
+      "category": "candidate-ui",
+      "sha256": "3cca03fa3d209ee5a5e467e17e510d67430b555a369b877137ff6a43b1a6c054"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/ui/BrowserScreen.kt",
+      "category": "candidate-ui",
+      "sha256": "af655b662b09d32d83a5524ab6bde9626c9ef26adc847bee192afd7550a659f8"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/ui/BrowserSettingsPanel.kt",
+      "category": "candidate-ui",
+      "sha256": "8f463d36048dd61ec04f20803cb111261b825272cd821217c7d579fb7191e360"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/browser/ui/BrowserTheme.kt",
+      "category": "candidate-ui",
+      "sha256": "4d50d4d3b66d690cdaae5cf9132311a51d7bab9acbbb3621141d31d09ca87a1b"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/reports/ReportViews.kt",
+      "category": "candidate-ui",
+      "sha256": "89d3e5f2d89677e8a2730039545d760955cbced754389ccea771a24ab85769a2"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/android/AppIcons.kt",
+      "category": "candidate-ui",
+      "sha256": "3fe89e7fc30c5d034e26882cfbd10244aec6362f9b73fcaaef3393d45db1b7bd"
+    },
+    {
+      "path": "Android/app/src/main/kotlin/dev/yab/android/AppIconSettings.kt",
+      "category": "candidate-ui",
+      "sha256": "f0efd7dd519dbf36443563e9411f9ee9eabfd68c24c57099d9519eb9b6094eab"
+    }
+  ]
+}

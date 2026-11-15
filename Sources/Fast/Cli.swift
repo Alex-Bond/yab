@@ -1,0 +1,497 @@
+import AppKit
+
+// `yab`, from a terminal, yours or an agent's.
+//
+// The same binary as the browser, reached through the two-line script
+// Settings › Agents puts on the PATH. The first word says what is wanted;
+// anything that isn't one of the words below is a task, handed to an agent
+// the running browser starts, the way `aside "…"` is:
+//
+//     yab "find the unread message from Alex in Slack"
+//     yab https://github.com/notifications
+//     yab guide | session … | memory … | setup | remove
+//
+// None of it touches NSApplication. Memory is read straight from its folder,
+// so it answers with the browser closed; a task wakes the browser if it
+// has to (Wire.wake).
+
+enum Cli {
+    /// Whether a launch with these arguments is for here rather than the
+    /// browser. Launched from Finder or by `open`, a Mac app gets nothing,
+    /// or AppKit's own dashed flags, and so does the browser's own
+    /// --arrival, so a first word without a dash is always someone typing,
+    /// and so is one of the task's own flags (`yab --cli codex "…"`).
+    static func wants(_ first: String?) -> Bool {
+        guard let first else { return false }
+        return !first.hasPrefix("-") || flags.contains(first)
+    }
+
+    private static let flags: Set = ["-h", "--help", "-V", "--version", "--cli", "-m", "--model", "--effort",
+                                     "--access", "--permission", "--resume", "--socket", "--no-person", "--wait-person"]
+
+    static func run(_ args: [String]) -> Never {
+        setvbuf(stdout, nil, _IOLBF, 0)
+        let rest = Array(args.dropFirst())
+        // What follows a word, less where to reach Yab: `yab status --socket X`
+        // is still `status`.
+        let words: [String] = {
+            guard let at = rest.firstIndex(of: "--socket") else { return rest }
+            var kept = rest
+            kept.removeSubrange(at..<min(at + 2, kept.count))
+            return kept
+        }()
+        // A word of its own only when what follows fits it: "yab help me
+        // write an email" and "yab remove the draft" are tasks.
+        func fits(_ words: Set<String>) -> Bool { rest.isEmpty || words.contains(rest[0].lowercased()) || rest[0].hasPrefix("-") }
+        let first = args.first ?? ""
+        let word: String
+        switch first {
+        case "help", "version": word = words.isEmpty ? first : ""
+        case "status": word = words.allSatisfy { $0 == "--json" } ? first : ""
+        case "quit": word = words.allSatisfy { $0 == "--force" } ? first : ""
+        case "serve": word = words.allSatisfy { ["--no-person", "--stop"].contains($0) } ? first : ""
+        // "yab import chrome"; "yab import my contacts from gmail" is a task.
+        case "import": word = words.count <= 1 ? first : ""
+        case "guide": word = rest.count <= 1 ? first : ""
+        case "session", "sessions": word = fits(["list", "resume", "steer", "queue", "stop"]) ? first : ""
+        case "memory": word = fits(["search", "list", "show", "read", "path", "setup"]) ? first : ""
+        case "skills", "skill": word = fits(["list", "show", "read", "path"]) ? first : ""
+        case "every", "routines":
+            // A routine only when what follows reads as one: "yab every
+            // morning check my mail" is a task.
+            let when = Routines.leading(rest) != nil
+            word = fits(["list", "remove", "run", "pause", "resume"]) || when ? "every" : ""
+        case "mail": word = rest.first?.lowercased() == "flush" || CliFiles.mailWords(words) ? first : ""
+        // "yab files search lease"; "yab files from last week" is a task.
+        case "files": word = CliFiles.filesWords(words) ? first : ""
+        case "setup", "remove": word = rest.allSatisfy { ["claude", "codex", "cursor", "command"].contains($0.lowercased()) } ? first : ""
+        default: word = first
+        }
+        guard !args.isEmpty else { print(usage); exit(0) }
+        switch word {
+        case "mail":
+            // A thread and its files (CliFiles), or the sends set for
+            // later while yab itself is closed: the LaunchAgent's call
+            // (MailLater).
+            if rest.first?.lowercased() != "flush" { CliFiles.run("mail", rest) }
+            exit(MailLater.flushHeadless())
+        case "files":
+            CliFiles.run("files", rest)
+        case "-h", "--help", "help":
+            print(usage)
+            exit(0)
+        case "-V", "--version", "version":
+            print("Yab \(Guide.version)")
+            exit(0)
+        case "agent":
+            AgentCLI.run(rest)
+        case "exec":
+            CliExec.run(rest)
+        case "plugin":
+            BoostCLI.run(rest)
+        case "status":
+            status(rest)
+        case "serve":
+            serve(rest)
+        case "import":
+            bring(rest)
+        case "quit":
+            let got = Wire.ask(Wire.socket(rest), ["do": "app-quit", "force": rest.contains("--force")])
+            if let error = got["error"] as? String { fail(error) }
+            print("Quitting.")
+            exit(0)
+        case "guide":
+            guard let text = Guide.text(rest.first) else {
+                fail("No guide on \(rest.first ?? ""). There are: mcp, setup.", code: 2)
+            }
+            print(text)
+            exit(0)
+        case "session", "sessions":
+            session(rest)
+        case "memory":
+            memory(rest)
+        case "skills", "skill":
+            skills(rest)
+        case "every":
+            every(rest)
+        case "setup":
+            setup(rest, removing: false)
+        case "remove":
+            setup(rest, removing: true)
+        case let first where first.hasPrefix("http://") || first.hasPrefix("https://"):
+            openTab(first)
+        default:
+            if ((try? BoostLibrary(root: Store.file("boosts")).records()) ?? []).contains(where: { $0.id == first && $0.enabled }) { BoostCLI.run(args) }
+            AgentCLI.run(args)
+        }
+    }
+
+    static var usage: String {
+        let c = AgentSetup.command
+        return """
+        Yab, the browser, from a terminal. Agents: run `\(c) guide` first.
+
+        usage: \(c) "what to do"                   a task, done by an agent in Yab: its steps, then its answer
+               \(c) https://…                      open a page in Yab
+               \(c) guide [mcp|setup]              how to use Yab, for an agent
+               \(c) exec -f FILE.js [--json]       run browser steps directly; exec --help for stdin and limits
+               \(c) session list [--json]|resume|steer|queue|stop
+               \(c) memory search|list|show|path|setup
+               \(c) skills list|show NAME|path        what agents know about sites
+               \(c) mail read THREAD | mail file THREAD [N|NAME] [--path]   a thread of your mail; a file of it: its path and words
+               \(c) files search [WORDS] | files read ID|PATH [--path]      what Files lists; one file's path and words
+               \(c) every "weekdays 9:00" "what to do"  a routine, run while Yab is open; every list|run ID|pause ID|resume ID|remove ID
+                                                  when: daily 9:00,18:00 · mon,thu 8:15 · monthly 1 9:00 · monthly last 18:00
+                                                  first monday 9:00 · every 3 days 9:00 · every 2 weeks mon 9:00 · yearly oct 6 9:00
+               \(c) setup [claude|codex|cursor|command]   put Yab in your agents and on the PATH
+               \(c) remove [claude|codex|cursor|command]  take it out again
+               \(c) mcp                            Yab's tools over MCP, on stdin and stdout
+               \(c) status [--json] | quit [--force]  whether Yab is running, hidden or open; quit a hidden one
+               \(c) serve [--no-person] | --stop   keep a hidden Yab for agents, however long nothing comes
+               \(c) import [BROWSER]               another browser's sign-ins, passwords and cookies, into Yab
+
+        task options: --cli claude|codex|cursor  -m MODEL  --effort low|medium|high|xhigh|max  --access full|browser
+                      --no-person        nobody is there: what needs a person fails at once
+                      --wait-person MIN  how long to wait for a sign-in or a yes in Yab (10; 0.25 when an agent runs it)
+        exit: 0 done · 1 failed · 2 usage · 3 needs you · 130 stopped
+        """
+    }
+
+    /// A hidden Yab kept for agents for good: started so, or told so if it
+    /// is running; with --no-person, nobody is at this Mac to sign in or
+    /// say yes. --stop quits it.
+    private static func serve(_ args: [String]) -> Never {
+        let socket = Wire.socket([])
+        if args.contains("--stop") {
+            let got = Wire.ask(socket, ["do": "app-quit", "force": true])
+            if let error = got["error"] as? String { fail(Wire.running ? error : "Yab isn't running.") }
+            print("Stopped.")
+            exit(0)
+        }
+        guard Wire.allowed else { fail(Wire.offline()) }
+        let nobody = args.contains("--no-person")
+        var got = Wire.ask(socket, ["do": "app-serve", "nobody": nobody])
+        if got["error"] != nil, !Wire.running {
+            guard Wire.launch(socket, ["--headless", "--serve"] + (nobody ? ["--no-person"] : [])) else { fail("Yab didn't start.") }
+            got = Wire.ask(socket, ["do": "app-status"])
+        }
+        if let error = got["error"] as? String { fail(error) }
+        let pid = got["pid"] as? Int ?? 0
+        print(got["hidden"] as? Bool == true
+              ? "Yab is serving agents, hidden (pid \(pid))\(nobody ? ", with nobody to sign in or say yes" : ""). It stays until `\(AgentSetup.command) serve --stop`."
+              : "Yab is open (pid \(pid)), and serves agents as long as it is.")
+        exit(0)
+    }
+
+    /// Another browser's sign-ins into Yab, for someone who uses it from
+    /// a terminal: its passwords and its cookies, what the welcome brings
+    /// when Yab is opened. Only typed by a person: an agent that runs it
+    /// is told to ask them.
+    private static func bring(_ args: [String]) -> Never {
+        guard isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1 else {
+            fail("Ask the user to run `\(AgentSetup.command) import` in a terminal: it brings another browser's sign-ins into Yab.", code: 2)
+        }
+        let socket = Wire.socket([])
+        guard let name = args.first else {
+            let got = Wire.ask(socket, ["do": "app-import"])
+            if let error = got["error"] as? String { fail(error) }
+            let browsers = got["browsers"] as? [String] ?? []
+            print(browsers.isEmpty ? "No other browser on this Mac to bring sign-ins from."
+                  : "From: \(browsers.joined(separator: ", ")). `\(AgentSetup.command) import \(browsers[0].lowercased())`")
+            exit(0)
+        }
+        let found = Wire.ask(socket, ["do": "app-import", "source": name, "check": true])
+        if let error = found["error"] as? String { fail(error) }
+        let source = found["source"] as? String ?? name
+        print("Bringing \(source)'s sign-ins into Yab. macOS may ask for \(source)'s key: Always Allow.")
+        let got = Wire.ask(socket, ["do": "app-import", "source": source])
+        if let error = got["error"] as? String { fail(error) }
+        print("\(got["source"] as? String ?? name): \(got["passwords"] as? Int ?? 0) passwords, \(got["cookies"] as? Int ?? 0) cookies.")
+        if let trouble = got["trouble"] as? String { print(trouble + ".") }
+        exit(0)
+    }
+
+    /// Whether Yab is running, hidden for agents or open, and what it is
+    /// doing, in a line.
+    private static func status(_ args: [String]) -> Never {
+        let got = Wire.ask(Wire.socket(args), ["do": "app-status"])
+        // --json: what the app said, as an object, for a launcher to read.
+        if args.contains("--json") {
+            var said = got
+            said["running"] = got["error"] == nil
+            printJSON(said)
+            exit(got["error"] == nil ? 0 : 1)
+        }
+        if let error = got["error"] as? String { print(error.hasPrefix("Yab isn't running") ? "Yab isn't running." : error); exit(1) }
+        let pid = got["pid"] as? Int ?? 0
+        let working = got["working"] as? Int ?? 0, waiting = got["waiting"] as? Int ?? 0
+        var line = got["lingering"] as? Bool == true ? "Yab is finishing its tasks before it quits (pid \(pid))"
+            : got["serving"] as? Bool == true && got["hidden"] as? Bool == true ? "Yab is serving agents, hidden (pid \(pid))"
+            : got["hidden"] as? Bool == true ? "Yab is running hidden (pid \(pid))" : "Yab is open (pid \(pid))"
+        line += working == 0 ? ", nothing running" : ", \(working) task\(working == 1 ? "" : "s") running"
+        if waiting > 0 { line += ", \(waiting) waiting for you" }
+        if got["nobody"] as? Bool == true { line += ", nobody at this Mac" }
+        if got["hidden"] as? Bool == true, let after = got["quits_after"] as? Int, after > 0, let idle = got["idle"] as? Int, working == 0 {
+            line += "; quits in \((max(0, after - idle) + 59) / 60)m unless used"
+        }
+        print(line + ".")
+        if let room = got["room"] as? String, room != "seen" { print("Agent pages: \(room).") }
+        exit(0)
+    }
+
+    private static func printJSON(_ value: Any) {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
+        print(String(decoding: data, as: UTF8.self))
+    }
+
+    /// `session list --json`: each session as a launcher lists it, from
+    /// what the app says of its agents (Bench "agents").
+    static func sessionsJSON(_ agents: [[String: Any]]) -> [[String: Any]] {
+        agents.map { found in
+            let prompt = found["prompt"] as? String ?? ""
+            let title = (found["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? Chat.title(from: prompt)
+            let state = found["state"] as? String ?? ""
+            return ["id": found["session"] as? String ?? "", "state": state, "agent": found["name"] as? String ?? "",
+                    "cli": found["cli"] as? String ?? "", "title": title,
+                    "started": (found["started"] as? String).map { $0 as Any } ?? NSNull(),
+                    "finished": (found["finished"] as? String).map { $0 as Any } ?? NSNull(),
+                    "waiting": found["waiting"] as? Bool ?? (state == "waiting")]
+        }
+    }
+
+    private static func fail(_ text: String, code: Int32 = 1) -> Never {
+        FileHandle.standardError.write(Data((text + "\n").utf8))
+        exit(code)
+    }
+
+    // MARK: - sessions
+
+    private static func session(_ args: [String]) -> Never {
+        let socket = Wire.socket(args)
+        let json = args.contains("--json")
+        let words = args.filter { $0 != "--socket" && $0 != socket && $0 != "--json" }
+        let verb = words.first ?? "list"
+        let id = words.dropFirst().first
+        var said = Array(words.dropFirst(2))
+        // Flags for the follow, not words for the agent.
+        said.removeAll { $0 == "--no-person" }
+        if let at = said.firstIndex(of: "--wait-person") { said.removeSubrange(at..<min(at + 2, said.count)) }
+        let text = said.joined(separator: " ")
+        switch verb {
+        case "list" where json:
+            let got = Wire.ask(socket, ["do": "agents"])
+            if let error = got["error"] as? String { fail(error) }
+            printJSON(sessionsJSON(got["agents"] as? [[String: Any]] ?? []))
+            exit(0)
+        case "list":
+            AgentCLI.run(["list"] + passing(args, socket))
+        case "steer", "queue":
+            guard let id, !text.isEmpty else { fail("usage: \(AgentSetup.command) session \(verb) SESSION \"text\"", code: 2) }
+            AgentCLI.run([verb, id, text] + passing(args, socket))
+        case "stop":
+            guard let id else { fail("usage: \(AgentSetup.command) session stop SESSION", code: 2) }
+            AgentCLI.run(["stop", id] + passing(args, socket))
+        case "resume":
+            guard let id else { fail("usage: \(AgentSetup.command) session resume SESSION [\"follow-up\"]", code: 2) }
+            if text.isEmpty { AgentCLI.follow(socket, id, person: AgentCLI.person(args), patience: AgentCLI.patience(args, person: AgentCLI.person(args))) }
+            AgentCLI.run(["--resume", id, text] + passing(args, socket))
+        default:
+            fail("No session command \(verb). There are: list, resume, steer, queue, stop.", code: 2)
+        }
+    }
+
+    private static func passing(_ args: [String], _ socket: String) -> [String] {
+        var kept = args.contains("--socket") ? ["--socket", socket] : []
+        if args.contains("--no-person") { kept.append("--no-person") }
+        if let minutes = Wire.value(args, "--wait-person") { kept += ["--wait-person", minutes] }
+        return kept
+    }
+
+    // MARK: - memory
+
+    /// Read-only, like `aside memory`: writing is the agents' job, through
+    /// `remember`, and the person's, in a text editor.
+    private static func memory(_ args: [String]) -> Never {
+        let verb = args.first ?? "list"
+        let json = args.contains("--json")
+        let words = args.dropFirst().filter { $0 != "--json" }
+        switch verb {
+        case "path":
+            print(Memory.folder.path)
+        case "setup":
+            // What the new tab offers first: an agent that looks you up
+            // everywhere it can and files what it finds.
+            MainActor.assumeIsolated {
+                AgentCLI.run(["--effort", "high", "--access", "browser", Agents.setUpMemoryPrompt] + args.dropFirst())
+            }
+        case "list":
+            let files = Memory.files()
+            if json {
+                emit(files.map { path -> [String: Any] in
+                    let url = Memory.folder.appendingPathComponent(path)
+                    let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                    return ["file": path, "modified": date.map { ISO8601DateFormatter().string(from: $0) } ?? ""]
+                })
+            } else if files.isEmpty {
+                print("Nothing remembered yet.")
+            } else {
+                for path in files { print(path) }
+            }
+        case "show", "read":
+            guard let name = words.first else { fail("usage: \(AgentSetup.command) memory show FILE", code: 2) }
+            guard let body = Memory.read(name) else {
+                fail("No \(name) in memory. There are: \(Memory.files().joined(separator: ", "))")
+            }
+            print(body)
+        case "search":
+            let query = words.joined(separator: " ")
+            guard !query.isEmpty else { fail("usage: \(AgentSetup.command) memory search WORDS", code: 2) }
+            let hits = Memory.search([query], limit: 12)
+            if json {
+                emit(hits.map { ["file": $0.file, "line": $0.line, "text": $0.text] })
+            } else if hits.isEmpty {
+                print("Nothing in memory about that.")
+            } else {
+                print(hits.map { "\($0.file):\($0.line)\n\($0.text)" }.joined(separator: "\n\n"))
+            }
+        default:
+            // `yab memory some words` searches, as `yab agent memory` did.
+            memory(["search"] + args)
+        }
+        exit(0)
+    }
+
+    private static func emit(_ value: Any) {
+        if let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .withoutEscapingSlashes]) {
+            print(String(decoding: data, as: UTF8.self))
+        }
+    }
+
+    // MARK: - skills
+
+    // MARK: - routines
+
+    private static func every(_ args: [String]) -> Never {
+        let socket = Wire.socket(args)
+        let words = args.filter { $0 != "--socket" && $0 != socket }
+        let verb = words.first?.lowercased() ?? "list"
+        func ask(_ request: [String: Any]) -> [String: Any] {
+            let got = Wire.ask(socket, request)
+            if let error = got["error"] as? String { fail(error) }
+            return got
+        }
+        switch verb {
+        case "list":
+            let all = ask(["do": "agent-routines"])["routines"] as? [[String: Any]] ?? []
+            if all.isEmpty { print("No routines. Add one: \(AgentSetup.command) every \"weekdays 9:00\" \"what to do\""); exit(0) }
+            for routine in all {
+                print("\(routine["id"] ?? "")  \(routine["when"] ?? "")  \(routine["prompt"] ?? "")")
+                // What its row in Settings says: Off, Running now, how its last run went.
+                if let status = routine["status"] as? String, !status.isEmpty { print("       \(status)") }
+            }
+            exit(0)
+        case "pause", "resume":
+            guard words.count > 1 else { fail("usage: \(AgentSetup.command) every \(verb) ID", code: 2) }
+            _ = ask(["do": "agent-routine-turn", "id": words[1], "on": verb == "resume"])
+            print(verb == "pause" ? "Paused: kept, not run." : "Resumed: it runs at its next time.")
+            exit(0)
+        case "remove", "run":
+            guard words.count > 1 else { fail("usage: \(AgentSetup.command) every \(verb) ID", code: 2) }
+            let got = ask(["do": verb == "remove" ? "agent-routine-remove" : "agent-routine-run", "id": words[1]])
+            print(verb == "remove" ? "Removed." : "Running, session \(got["session"] ?? "")")
+            exit(0)
+        default:
+            // The time in a word or a few: "weekdays 9:00" quoted, or not,
+            // "every 3 days 9:00", "first monday 9:00".
+            let (when, rest) = Routines.leading(words) ?? (words[0], Array(words.dropFirst()))
+            let prompt = rest.joined(separator: " ")
+            guard !prompt.isEmpty else { fail("usage: \(AgentSetup.command) every \"weekdays 9:00\" \"what to do\"", code: 2) }
+            let got = ask(["do": "agent-routine-add", "when": when, "prompt": prompt])
+            print("Routine \(got["id"] ?? "") set for \(got["when"] ?? when). It runs while Yab is open; what it finds comes to your new tab.")
+            exit(0)
+        }
+    }
+
+    private static func skills(_ args: [String]) -> Never {
+        switch args.first ?? "list" {
+        case "list":
+            print(Skills.index())
+        case "show", "read":
+            guard let name = args.dropFirst().first, let skill = Skills.named(name) else {
+                fail("usage: \(AgentSetup.command) skills show NAME. There are: \(Skills.all().map(\.name).joined(separator: ", "))", code: 2)
+            }
+            print("# \(skill.name)\n\n\(skill.body)")
+        case "path":
+            print(Skills.mine.path)
+        default:
+            fail("No skills command \(args.first ?? ""). There are: list, show, path.", code: 2)
+        }
+        exit(0)
+    }
+
+    // MARK: - a page
+
+    /// In front of the person, the way a link from any other app opens.
+    private static func openTab(_ url: String) -> Never {
+        let open = Process()
+        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        let bundle = Bundle.main.bundlePath
+        open.arguments = bundle.hasSuffix(".app") ? ["-a", bundle, url] : [url]
+        do { try open.run() } catch { fail(error.localizedDescription) }
+        open.waitUntilExit()
+        exit(open.terminationStatus)
+    }
+
+    // MARK: - setup
+
+    private static func setup(_ args: [String], removing: Bool) -> Never {
+        let known: Set = ["claude", "codex", "cursor", "command"]
+        let asked = Set(args.map { $0.lowercased() })
+        if let odd = asked.subtracting(known).first { fail("No \(odd) to set up. There are: claude, codex, cursor, command.", code: 2) }
+        let only = asked.isEmpty ? nil : asked
+        Task { @MainActor in
+            let found = await Shell.find()
+            if removing {
+                await AgentSetup.remove(found, only: only)
+                changed()
+                print("Removed.")
+                exit(0)
+            }
+            let localSetup = found.claude.map { LocalAgentSetupPermit.userSetupClaude(binary: $0) }
+            defer { localSetup?.revoke() }
+            let troubles = await AgentSetup.setUp(found, only: only, localSetup: localSetup)
+            changed()
+            // The browser listens only when allowed to; being set up is
+            // asking for that.
+            if only == nil || only?.contains("command") == true { allowAgents() }
+            let status = AgentSetup.status()
+            let c = AgentSetup.command
+            print("""
+            command  \(status.command ? "✓ \(AgentSetup.shim.path)" : "-")\(status.command && !AgentSetup.onPath(found.env["PATH"]) ? "  (add \(AgentSetup.shim.deletingLastPathComponent().path) to your PATH)" : "")
+            claude   \(status.claude ? "✓ skill \(AgentSetup.skill), MCP \(AgentSetup.server)" : found.claude == nil ? "not installed" : "-")
+            codex    \(status.codex ? "✓ skill \(AgentSetup.skill), MCP \(AgentSetup.server)" : found.codex == nil ? "not installed" : "-")
+            """)
+            for trouble in troubles { FileHandle.standardError.write(Data((trouble + "\n").utf8)) }
+            if troubles.isEmpty { print("\nReady. New agent sessions will find Yab; try: \(c) guide") }
+            exit(troubles.isEmpty ? 0 : 1)
+        }
+        dispatchMain()
+    }
+
+    /// Turns on the browser's socket: the setting, and a word to a browser
+    /// already open to read it again.
+    private static func allowAgents() {
+        Store.settings.set(true, forKey: "bench")
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.allowed, object: Bundle.main.bundleIdentifier, userInfo: nil, deliverImmediately: true)
+    }
+
+    /// A settings page showing what is set up reads it again.
+    private static func changed() {
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.setUp, object: Bundle.main.bundleIdentifier, userInfo: nil, deliverImmediately: true)
+    }
+
+    static let allowed = Notification.Name("dev.serafim.fast.agents-allowed")
+    static let setUp = Notification.Name("dev.serafim.fast.agents-set-up")
+}

@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Yab's AppleScript dictionary (Scripting.swift, docs/applescript.md).
+     Shaped as Arc's: windows hold tabs and spaces, a tab is selected, a
+     space focused. Names and codes are Arc's and Chrome's where they have
+     them, so a script or a launcher written for either works here with the
+     application's name changed. -->
+<dictionary title="Yab Terminology">
+
+  <suite name="Standard Suite" code="core" description="Common classes and commands for all applications.">
+
+    <command name="count" code="corecnte" description="Return the number of elements of a particular class within an object.">
+      <cocoa class="NSCountCommand"/>
+      <direct-parameter description="The object whose elements are to be counted." type="specifier"/>
+      <parameter name="each" code="kocl" description="The class of objects to be counted." type="type" optional="yes">
+        <cocoa key="ObjectClass"/>
+      </parameter>
+      <result description="The count." type="integer"/>
+    </command>
+
+    <command name="exists" code="coredoex" description="Verify that an object exists.">
+      <cocoa class="NSExistsCommand"/>
+      <direct-parameter description="The object to check." type="any"/>
+      <result description="Did the object exist?" type="boolean"/>
+    </command>
+
+    <command name="make" code="corecrel" description="Make a new tab or window.">
+      <cocoa class="YabCreateCommand"/>
+      <parameter name="new" code="kocl" description="The class of the new object." type="type">
+        <cocoa key="ObjectClass"/>
+      </parameter>
+      <parameter name="at" code="insh" description="The location at which to insert the object." type="location specifier" optional="yes">
+        <cocoa key="Location"/>
+      </parameter>
+      <parameter name="with properties" code="prdt" description="The initial values for properties of the object." type="record" optional="yes">
+        <cocoa key="KeyDictionary"/>
+      </parameter>
+      <result description="The new object." type="specifier"/>
+    </command>
+
+    <command name="close" code="coreclos" description="Close a tab or a window.">
+      <cocoa class="NSCloseCommand"/>
+      <direct-parameter description="The tab or window to close." type="specifier"/>
+    </command>
+
+    <command name="quit" code="aevtquit" description="Quit Yab.">
+      <cocoa class="NSQuitCommand"/>
+    </command>
+
+    <class name="application" code="capp" description="Yab.">
+      <cocoa class="NSApplication"/>
+      <element description="The browser windows, front to back." type="window" access="r">
+        <cocoa key="scriptWindows"/>
+      </element>
+      <element description="A tab made here opens in the front window." type="tab" access="w">
+        <cocoa key="scriptNewTabs"/>
+      </element>
+      <property name="name" code="pnam" description="The name of the application." type="text" access="r"/>
+      <property name="frontmost" code="pisf" description="Is this the active application?" type="boolean" access="r">
+        <cocoa key="isActive"/>
+      </property>
+      <property name="version" code="vers" description="The version of the application." type="text" access="r"/>
+      <responds-to command="quit">
+        <cocoa method="handleQuitScriptCommand:"/>
+      </responds-to>
+    </class>
+
+    <class name="window" code="cwin" description="A browser window." plural="windows">
+      <cocoa class="YabScriptWindow"/>
+      <element description="Every tab of the window, its space's first and then the other spaces' tabs." type="tab" access="rw">
+        <cocoa key="scriptTabs"/>
+      </element>
+      <element description="The window's spaces, in their order." type="space" access="r">
+        <cocoa key="scriptSpaces"/>
+      </element>
+      <property name="id" code="ID  " description="The window's unique identifier." type="text" access="r">
+        <cocoa key="uniqueID"/>
+      </property>
+      <property name="name" code="pnam" description="The window's title." type="text" access="r">
+        <cocoa key="title"/>
+      </property>
+      <property name="index" code="pidx" description="The window's place, front to back." type="integer" access="r">
+        <cocoa key="orderedIndex"/>
+      </property>
+      <property name="minimized" code="pmnd" description="Whether the window is in the Dock." type="boolean">
+        <cocoa key="isMiniaturized"/>
+      </property>
+      <property name="visible" code="pvis" description="Whether the window is on screen." type="boolean" access="r">
+        <cocoa key="isVisible"/>
+      </property>
+      <property name="active tab" code="acTa" description="The tab in front." type="tab" access="r">
+        <cocoa key="activeTab"/>
+      </property>
+      <property name="active tab index" code="acTI" description="The place of the tab in front among the window's tabs. Set it to select another." type="integer">
+        <cocoa key="activeTabIndex"/>
+      </property>
+      <property name="active space" code="acSp" description="The space on screen." type="space" access="r">
+        <cocoa key="activeSpace"/>
+      </property>
+      <property name="mode" code="mode" description="'incognito' for a private window, 'normal' for the others. Private tabs are never listed." type="text" access="r">
+        <cocoa key="mode"/>
+      </property>
+      <property name="incognito" code="iNcO" description="Whether it is a private window. Give it to make: make new window with properties {incognito:true}." type="boolean">
+        <cocoa key="incognito"/>
+      </property>
+      <responds-to command="close">
+        <cocoa method="handleCloseScriptCommand:"/>
+      </responds-to>
+    </class>
+
+  </suite>
+
+  <suite name="Yab Suite" code="YabS" description="Tabs, spaces and the rest of Yab.">
+
+    <command name="select" code="CrSelect" description="Bring a tab to the front of its window, going to its space if it is in another.">
+      <direct-parameter description="The tab." type="specifier"/>
+    </command>
+
+    <command name="focus" code="SpaFocus" description="Go to a space, or bring a tab to the front.">
+      <direct-parameter description="The space or tab." type="specifier"/>
+    </command>
+
+    <command name="go back" code="CrSuBack" description="Go back, if the tab can.">
+      <direct-parameter description="The tab." type="specifier"/>
+    </command>
+
+    <command name="go forward" code="CrSuFwd " description="Go forward, if the tab can.">
+      <direct-parameter description="The tab." type="specifier"/>
+    </command>
+
+    <command name="reload" code="CrSuRlod" description="Reload a tab.">
+      <direct-parameter description="The tab." type="specifier"/>
+    </command>
+
+    <command name="stop" code="CrSustop" description="Stop a tab's page loading.">
+      <direct-parameter description="The tab." type="specifier"/>
+    </command>
+
+    <command name="open small window" code="YabSSmal" description="Open a page in a Small Window, whatever Settings say links do; with no address, an empty one, as its key does.">
+      <cocoa class="YabSmallWindowCommand"/>
+      <direct-parameter description="The address." type="text" optional="yes"/>
+    </command>
+
+    <command name="ask" code="YabSAskJ" description="Ask about the page in front, as ⌘J does, the words typed in.">
+      <cocoa class="YabAskCommand"/>
+      <direct-parameter description="The words." type="text"/>
+      <parameter name="send" code="aSnd" description="Send them too, as Return would." type="boolean" optional="yes">
+        <cocoa key="send"/>
+      </parameter>
+    </command>
+
+    <command name="show mail" code="YabSMail" description="Show a thread in Mail, by the 'account|thread id' yab mcp's mail tools give.">
+      <cocoa class="YabShowMailCommand"/>
+      <direct-parameter description="The thread: 'sam@mail.example|1a16d91e433c8fe4'." type="text"/>
+    </command>
+
+    <class name="tab" code="tAbB" description="A tab." plural="tabs">
+      <cocoa class="YabScriptTab"/>
+      <property name="id" code="ID  " description="The tab's unique identifier." type="text" access="r">
+        <cocoa key="uniqueID"/>
+      </property>
+      <property name="title" code="pnam" description="The tab's title." type="text" access="r">
+        <cocoa key="title"/>
+      </property>
+      <property name="URL" code="URL " description="The tab's address. Set it to go somewhere else." type="text">
+        <cocoa key="URL"/>
+      </property>
+      <property name="loading" code="ldng" description="Whether the page is loading." type="boolean" access="r">
+        <cocoa key="loading"/>
+      </property>
+      <property name="location" code="loca" description="Where the tab sits, as Arc says: 'topApp' for a pin, 'pinned' for a kept tab, 'unpinned' for today's." type="text" access="r">
+        <cocoa key="location"/>
+      </property>
+      <property name="space" code="sPaC" description="The space the tab is in." type="space" access="r">
+        <cocoa key="space"/>
+      </property>
+      <responds-to command="select">
+        <cocoa method="handleSelectCommand:"/>
+      </responds-to>
+      <responds-to command="focus">
+        <cocoa method="handleSelectCommand:"/>
+      </responds-to>
+      <responds-to command="go back">
+        <cocoa method="handleBackCommand:"/>
+      </responds-to>
+      <responds-to command="go forward">
+        <cocoa method="handleForwardCommand:"/>
+      </responds-to>
+      <responds-to command="reload">
+        <cocoa method="handleReloadCommand:"/>
+      </responds-to>
+      <responds-to command="stop">
+        <cocoa method="handleStopCommand:"/>
+      </responds-to>
+      <responds-to command="close">
+        <cocoa method="handleCloseScriptCommand:"/>
+      </responds-to>
+    </class>
+
+    <class name="space" code="sPaC" description="A space." plural="spaces">
+      <cocoa class="YabScriptSpace"/>
+      <element description="The space's tabs. A tab made here opens in this space, which comes on screen." type="tab" access="rw">
+        <cocoa key="scriptTabs"/>
+      </element>
+      <property name="id" code="ID  " description="The space's unique identifier." type="text" access="r">
+        <cocoa key="uniqueID"/>
+      </property>
+      <property name="title" code="pnam" description="The space's name." type="text" access="r">
+        <cocoa key="title"/>
+      </property>
+      <property name="icon" code="spIc" description="The space's emoji." type="text" access="r">
+        <cocoa key="icon"/>
+      </property>
+      <property name="color" code="colr" description="The space's color in the light look, as hex: 'F2E9E3'." type="text" access="r">
+        <cocoa key="color"/>
+      </property>
+      <responds-to command="focus">
+        <cocoa method="handleFocusCommand:"/>
+      </responds-to>
+    </class>
+
+  </suite>
+
+</dictionary>

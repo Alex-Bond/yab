@@ -1,0 +1,219 @@
+{
+  "timeStampBegin": "2026-10-08 15:40:00 +0000",
+  "timeStampEnd": "2026-10-08 15:42:11 +0000",
+  "crashDiagnostics": [
+    {
+      "version": "1.0.0",
+      "callStackTree": {
+        "callStacks": [
+          {
+            "threadAttributed": false,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "CAFEBABE-1111-3222-8333-444455556666",
+                "offsetIntoBinaryTextSegment": 7188,
+                "sampleCount": 1,
+                "binaryName": "libsystem_kernel.dylib",
+                "address": 8053070868,
+                "subFrames": [
+                  {
+                    "binaryUUID": "CAFEBABE-1111-3222-8333-444455556666",
+                    "offsetIntoBinaryTextSegment": 10768,
+                    "sampleCount": 1,
+                    "binaryName": "libsystem_pthread.dylib",
+                    "address": 8053074448
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "threadAttributed": true,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "0A1B2C3D-4E5F-3A6B-8C7D-9E0F1A2B3C4D",
+                "offsetIntoBinaryTextSegment": 238064,
+                "sampleCount": 1,
+                "binaryName": "libswiftCore.dylib",
+                "address": 6920839664,
+                "subFrames": [
+                  {
+                    "binaryUUID": "8F3B6C1E-2D4A-3B5C-9E7F-1A2B3C4D5E6F",
+                    "offsetIntoBinaryTextSegment": 127652,
+                    "sampleCount": 1,
+                    "binaryName": "Yab",
+                    "address": 4339020452,
+                    "subFrames": [
+                      {
+                        "binaryUUID": "8F3B6C1E-2D4A-3B5C-9E7F-1A2B3C4D5E6F",
+                        "offsetIntoBinaryTextSegment": 122896,
+                        "sampleCount": 1,
+                        "binaryName": "Yab",
+                        "address": 4339015696,
+                        "subFrames": [
+                          {
+                            "binaryUUID": "11223344-5566-3778-8899-AABBCCDDEEFF",
+                            "offsetIntoBinaryTextSegment": 630960,
+                            "sampleCount": 1,
+                            "binaryName": "UIKitCore",
+                            "address": 6610854064,
+                            "subFrames": [
+                              {
+                                "binaryUUID": "11223344-5566-3778-8899-AABBCCDDEEFF",
+                                "offsetIntoBinaryTextSegment": 74560,
+                                "sampleCount": 1,
+                                "binaryName": "UIKitCore",
+                                "address": 6610297664,
+                                "subFrames": [
+                                  {
+                                    "binaryUUID": "8F3B6C1E-2D4A-3B5C-9E7F-1A2B3C4D5E6F",
+                                    "offsetIntoBinaryTextSegment": 1216,
+                                    "sampleCount": 1,
+                                    "binaryName": "Yab",
+                                    "address": 4338894016,
+                                    "subFrames": [
+                                      {
+                                        "binaryUUID": "DEADBEEF-0000-3111-8222-333344445555",
+                                        "offsetIntoBinaryTextSegment": 24108,
+                                        "sampleCount": 1,
+                                        "binaryName": "dyld",
+                                        "address": 7247781420
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "callStackPerThread": true
+      },
+      "diagnosticMetaData": {
+        "appBuildVersion": "202610081530",
+        "appVersion": "0.0.8",
+        "regionFormat": "US",
+        "exceptionType": 6,
+        "osVersion": "iPhone OS 26.0.1 (23A355)",
+        "deviceType": "iPhone17,1",
+        "signal": 5,
+        "exceptionCode": 1,
+        "platformArchitecture": "arm64e",
+        "terminationReason": "Namespace SIGNAL, Code 5 Trace/BPT trap: 5",
+        "virtualMemoryRegionInfo": "0 is not in any region. /private/var/containers/Bundle/Application/1234/Yab.app/Yab",
+        "isTestFlightApp": true,
+        "lowPowerModeEnabled": false,
+        "pid": 4321,
+        "bundleIdentifier": "dev.serafim.fast.iphone"
+      }
+    },
+    {
+      "version": "1.0.0",
+      "callStackTree": {
+        "callStacks": [
+          {
+            "threadAttributed": true,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "11223344-5566-3778-8899-AABBCCDDEEFF",
+                "offsetIntoBinaryTextSegment": 20224,
+                "sampleCount": 1,
+                "binaryName": "CoreFoundation",
+                "address": 6610243328,
+                "subFrames": [
+                  {
+                    "binaryUUID": "CAFEBABE-1111-3222-8333-444455556666",
+                    "offsetIntoBinaryTextSegment": 4660,
+                    "sampleCount": 1,
+                    "binaryName": "libobjc.A.dylib",
+                    "address": 8053068340,
+                    "subFrames": [
+                      {
+                        "binaryUUID": "8F3B6C1E-2D4A-3B5C-9E7F-1A2B3C4D5E6F",
+                        "offsetIntoBinaryTextSegment": 139264,
+                        "sampleCount": 1,
+                        "binaryName": "Yab",
+                        "address": 4339032064
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "callStackPerThread": true
+      },
+      "diagnosticMetaData": {
+        "appBuildVersion": "202610081530",
+        "appVersion": "0.0.8",
+        "regionFormat": "US",
+        "exceptionType": 10,
+        "osVersion": "iPhone OS 26.0.1 (23A355)",
+        "deviceType": "iPhone17,1",
+        "signal": 6,
+        "exceptionCode": 0,
+        "platformArchitecture": "arm64e",
+        "terminationReason": "Namespace SIGNAL, Code 6 Abort trap: 6",
+        "objectiveCexceptionReason": {
+          "composedMessage": "*** -[__NSArrayM objectAtIndexedSubscript:]: index 7 beyond bounds [0 .. 2] mira@example.com",
+          "formatString": "*** -[__NSArrayM objectAtIndexedSubscript:]: index %lu beyond bounds [0 .. %lu]",
+          "arguments": [
+            "7",
+            "2"
+          ],
+          "exceptionType": "NSException",
+          "className": "NSException",
+          "exceptionName": "NSRangeException"
+        }
+      }
+    }
+  ],
+  "hangDiagnostics": [
+    {
+      "version": "1.0.0",
+      "callStackTree": {
+        "callStacks": [
+          {
+            "threadAttributed": true,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "CAFEBABE-1111-3222-8333-444455556666",
+                "offsetIntoBinaryTextSegment": 4096,
+                "sampleCount": 1,
+                "binaryName": "libsystem_kernel.dylib",
+                "address": 8053067776,
+                "subFrames": [
+                  {
+                    "binaryUUID": "8F3B6C1E-2D4A-3B5C-9E7F-1A2B3C4D5E6F",
+                    "offsetIntoBinaryTextSegment": 196608,
+                    "sampleCount": 1,
+                    "binaryName": "Yab",
+                    "address": 4339089408
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "callStackPerThread": true
+      },
+      "diagnosticMetaData": {
+        "appBuildVersion": "202610081530",
+        "appVersion": "0.0.8",
+        "hangDuration": "2.5 sec",
+        "osVersion": "iPhone OS 26.0.1 (23A355)",
+        "deviceType": "iPhone17,1",
+        "platformArchitecture": "arm64e",
+        "regionFormat": "US"
+      }
+    }
+  ]
+}

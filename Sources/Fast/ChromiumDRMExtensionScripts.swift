@@ -1,0 +1,61 @@
+import Foundation
+
+/// Runs only in one extension's isolated WKContentWorld. MAIN scripts get no API.
+enum ChromiumDRMExtensionScripts {
+    static let shim = #"""
+    (()=>{
+      if(globalThis.__yabWK)return;
+      const config=__CONFIG__,handler=webkit.messageHandlers.yabChromiumExtension;
+      const nonce=crypto.randomUUID(),ports=new Map();let serial=0;
+      const event=()=>{const listeners=new Set();return {addListener:f=>listeners.add(f),removeListener:f=>listeners.delete(f),hasListener:f=>listeners.has(f),hasListeners:()=>!!listeners.size,listeners}};
+      const ready=handler.postMessage({op:'hello',nonce,epoch:config.epoch,url:location.href});
+      const call=(op,args)=>ready.then(()=>handler.postMessage({op,args,nonce,epoch:config.epoch,url:location.href}));
+      const runtime={id:config.id,getManifest:()=>config.manifest,getURL:path=>'chrome-extension://'+config.id+'/'+String(path||'').replace(/^\//,''),onMessage:event(),onConnect:event()};
+      const callback=(promise,cb)=>{if(typeof cb!=='function')return promise;promise.then(x=>cb(x),e=>{runtime.lastError={message:String(e.message||e)};try{cb()}finally{delete runtime.lastError}})};
+      runtime.sendMessage=(...args)=>{const cb=typeof args.at(-1)==='function'?args.pop():null;if(args.length>1&&typeof args[0]==='string'&&/^[a-p]{32}$/.test(args[0])){if(args.shift()!==config.id)return callback(Promise.reject(Error('Cross-extension messaging is unavailable')),cb)}return callback(call('runtime.sendMessage',[args[0]]),cb)};
+      const port=(id,name,sender)=>{const p={name,sender,onMessage:event(),onDisconnect:event(),postMessage:message=>{call('port.message',{port:id,message}).catch(()=>p.onDisconnect.listeners.forEach(f=>f(p)))},disconnect:()=>{ports.delete(id);call('port.disconnect',{port:id});p.onDisconnect.listeners.forEach(f=>f(p))}};ports.set(id,p);return p};
+      runtime.connect=(info={})=>{const id='wk-'+nonce+'-'+(++serial),p=port(id,info.name||'');call('runtime.connect',{port:id,name:p.name}).catch(()=>p.onDisconnect.listeners.forEach(f=>f(p)));return p};
+      const storage={onChanged:event()};for(const area of ['local','sync','session','managed']){storage[area]={onChanged:event()};for(const method of ['get','set','remove','clear','getBytesInUse'])storage[area][method]=(...args)=>{const cb=typeof args.at(-1)==='function'?args.pop():null;return callback(call('storage.'+area+'.'+method,args),cb)}}
+      const i18n={getUILanguage:()=>config.language,getMessage:(name,substitutions=[])=>{const entry=config.messages[name]||config.messages[String(name).toLowerCase()];if(!entry)return '';const substitutionsArray=[substitutions].flat();return String(entry.message||'').replace(/\$([\w]+)\$/g,(_,key)=>entry.placeholders?.[key.toLowerCase()]?.content||'').replace(/\$(\d)/g,(_,i)=>substitutionsArray[Number(i)-1]||'').replace(/\$\$/g,'$')}};
+      for(const method of ['getAcceptLanguages','detectLanguage'])i18n[method]=(...args)=>{const cb=typeof args.at(-1)==='function'?args.pop():null;return callback(call('i18n.'+method,args),cb)};
+      globalThis.chrome={runtime,storage,i18n};
+      const receive=async(op,args)=>{
+        if(op==='tabs.sendMessage')return new Promise((resolve,reject)=>{let answered=false,async=false;const done=v=>{if(!answered){answered=true;resolve(v??null)}};for(const f of runtime.onMessage.listeners){try{const value=f(args.message,{id:config.id},done);if(value===true)async=true;else if(value&&typeof value.then==='function'){async=true;value.then(done,reject)}}catch(e){reject(e)}}if(!answered&&!async)reject(Error('Receiving end does not exist'));else if(!answered)setTimeout(()=>reject(Error('Content script did not reply')),10000)});
+        if(op==='tabs.connect'){const p=port(args.port,args.info?.name||'',{id:config.id});runtime.onConnect.listeners.forEach(f=>f(p));return null}
+        if(op==='port.message'){const p=ports.get(args.port);if(!p)throw Error('Port is disconnected');p.onMessage.listeners.forEach(f=>f(args.message,p));return null}
+        if(op==='port.disconnect'){const p=ports.get(args.port);ports.delete(args.port);p?.onDisconnect.listeners.forEach(f=>f(p));return null}
+        if(op==='storage.changed'){storage.onChanged.listeners.forEach(f=>f(args.changes,args.area));storage[args.area]?.onChanged.listeners.forEach(f=>f(args.changes));return null}
+        throw Error('Unsupported content event');
+      };
+      globalThis.__yabWK={nonce,receive,ready,epoch:config.epoch};
+    })();
+    """#
+
+    static func json(_ value: Any) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+    static func bootstrap(_ config: [String: Any]) throws -> String {
+        shim.replacingOccurrences(of: "__CONFIG__", with: try json(config))
+    }
+    static func matches(_ pattern: String, url: URL) -> Bool {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let host = url.host?.lowercased() else { return false }
+        if pattern == "<all_urls>" { return true }
+        guard let delimiter = pattern.range(of: "://"), let slash = pattern[delimiter.upperBound...].firstIndex(of: "/") else { return false }
+        let scheme = String(pattern[..<delimiter.lowerBound]), domain = String(pattern[delimiter.upperBound..<slash]).lowercased()
+        guard scheme == "*" || scheme == url.scheme?.lowercased() else { return false }
+        guard domain == "*" || domain == host || (domain.hasPrefix("*.") && ChromiumDRM.matches(host: host, domain: String(domain.dropFirst(2)))) else { return false }
+        let path = NSRegularExpression.escapedPattern(for: String(pattern[slash...])).replacingOccurrences(of: "\\*", with: ".*")
+        let candidate = (url.path.isEmpty ? "/" : url.path) + (url.query.map { "?" + $0 } ?? "")
+        return candidate.range(of: "^" + path + "$", options: .regularExpression) != nil
+    }
+    /// The native handler repeats the grant check using WKFrameInfo, not this guard.
+    static func guardSource(matches: [String], excludes: [String], globs: [String], excludeGlobs: [String]) throws -> String {
+        // Multiple independent guards share one content-script function. Keep
+        // their lexical helpers scoped, while return still exits that function.
+        "{" + #"const glob=(p,u)=>new RegExp('^'+p.replace(/[.+^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/\?/g,'.')+'$').test(u);const match=p=>{const u=new URL(location.href);if(!['http:','https:'].includes(u.protocol))return false;if(p==='<all_urls>')return true;const m=p.match(/^(\*|https?):\/\/([^/]+)(\/.*)$/);return !!m&&(m[1]==='*'||m[1]+':'===u.protocol)&&(m[2]==='*'||m[2]===u.hostname||m[2].startsWith('*.')&&(u.hostname===m[2].slice(2)||u.hostname.endsWith(m[2].slice(1))))&&glob(m[3],u.pathname+u.search)};"#
+        + "if(!\(try json(matches)).some(match)||\(try json(excludes)).some(match))return;"
+        + "if(\(try json(globs)).length&&!\(try json(globs)).some(p=>glob(p,location.href)))return;if(\(try json(excludeGlobs)).some(p=>glob(p,location.href)))return;"
+        + "}"
+    }
+}

@@ -1,0 +1,185 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1113,6 +1113,8 @@
+       "libcef/browser/views/ns_window.h",
+       "libcef/browser/views/ns_window.mm",
+       "libcef/browser/views/view_util_mac.mm",
++      "libcef/browser/views/external_host_mac.h",
++      "libcef/browser/views/external_host_mac.mm",
+       "libcef/common/util_mac.h",
+       "libcef/common/util_mac.mm",
+ 
+--- a/cef/include/views/cef_window.h
++++ b/cef/include/views/cef_window.h
+@@ -45,6 +45,9 @@
+ #include "include/views/cef_panel.h"
+ #include "include/views/cef_window_delegate.h"
+ 
++// Experimental source-build capability, absent from official CEF SDKs.
++#define CEF_YAB_EXTERNAL_HOST_VERSION 1
++
+ class CefBrowserView;
+ class CefView;
+ 
+@@ -71,6 +74,18 @@
+   /*--cef()--*/
+   virtual void Show() = 0;
+ 
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// On macOS Chrome style opt into remote hosting before the first Show().
++  /// Show/Hide control compositor/Views visibility without ordering NSWindow.
++  /// Returns false for unsupported platforms, remote app shims, parented
++  /// windows or an already visible window. Does not delegate focus or IME.
++  /// Native modal dialogs and fullscreen transitions are not supported.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool EnableExternalHosting() = 0;
++#endif
++
+   ///
+   /// Show the Window as a browser modal dialog relative to |browser_view|. A
+   /// parent Window must be returned via CefWindowDelegate::GetParentWindow()
+--- /dev/null
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -0,0 +1,8 @@
++// Yab's explicit macOS producer-window bridge. Include-safe from C++.
++#ifndef CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
++#define CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_HOST_MAC_H_
++namespace views { class Widget; }
++namespace cef::external_host {
++bool Enable(views::Widget* widget);
++}  // namespace cef::external_host
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -0,0 +1,11 @@
++#include "cef/libcef/browser/views/external_host_mac.h"
++#include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
++#include "ui/views/widget/widget.h"
++
++namespace cef::external_host {
++bool Enable(views::Widget* widget) {
++  auto* host = widget ? views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
++                            widget->GetNativeWindow()) : nullptr;
++  return host && host->EnableExternalHosting();
++}
++}  // namespace cef::external_host
+--- a/cef/libcef/browser/views/window_impl.cc
++++ b/cef/libcef/browser/views/window_impl.cc
+@@ -26,6 +26,10 @@
+ #include "ui/views/controls/menu/menu_runner.h"
+ #include "ui/views/controls/webview/webview.h"
+ 
++#if BUILDFLAG(IS_MAC)
++#include "cef/libcef/browser/views/external_host_mac.h"
++#endif
++
+ #if defined(USE_AURA)
+ #include "ui/aura/window.h"
+ #endif  // defined(USE_AURA)
+@@ -148,6 +152,15 @@
+   return window;
+ }
+ 
++bool CefWindowImpl::EnableExternalHosting() {
++  CEF_REQUIRE_VALID_RETURN(false);
++  if (GetRuntimeStyle() != CEF_RUNTIME_STYLE_CHROME) return false;
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::Enable(widget_);
++#endif
++  return false;
++}
++
+ void CefWindowImpl::Show() {
+   CEF_REQUIRE_VALID_RETURN_VOID();
+   if (widget_) {
+--- a/cef/libcef/browser/views/window_impl.h
++++ b/cef/libcef/browser/views/window_impl.h
+@@ -45,6 +45,7 @@
+ 
+   // CefWindow methods:
+   void Show() override;
++  bool EnableExternalHosting() override;
+   void ShowAsBrowserModalDialog(
+       CefRefPtr<CefBrowserView> browser_view) override;
+   void Hide() override;
+--- a/ui/views/cocoa/native_widget_mac_ns_window_host.h
++++ b/ui/views/cocoa/native_widget_mac_ns_window_host.h
+@@ -271,7 +271,14 @@
+ 
+   // A window is physically visible on screen if it is visible and on an active
+   // space.
+-  bool IsVisibleOnScreen() const { return is_visible_ && is_on_active_space_; }
++  bool IsVisibleOnScreen() const {
++    return is_visible_ && (externally_hosted_ || is_on_active_space_);
++  }
++
++  // Opt in before Show(). The real NSWindow stays ordered out; visibility
++  // belongs to the remote embedder. Remote app-shim windows are unsupported.
++  bool EnableExternalHosting();
++  bool externally_hosted() const { return externally_hosted_; }
+ 
+   void SetVisibilityState(remote_cocoa::mojom::WindowVisibilityState new_state);
+ 
+@@ -567,6 +574,7 @@
+   gfx::Rect content_bounds_in_screen_;
+   std::vector<uint8_t> state_restoration_data_;
+   bool is_visible_ = false;
++  bool externally_hosted_ = false;
+   // This tracks -[NSWindow isOnActiveSpace].
+   bool is_on_active_space_ = false;
+   bool target_fullscreen_state_ = false;
+@@ -603,6 +611,7 @@
+       remote_ns_window_host_receiver_{this};
+ 
+   void UpdateCompositorVisibility();
++  void UpdateVisibilityForEmbedder(bool visible);
+   void OnVideoCaptureLockDestroyed();
+ 
+   // Number of active video capture locks.
+--- a/ui/views/cocoa/native_widget_mac_ns_window_host.mm
++++ b/ui/views/cocoa/native_widget_mac_ns_window_host.mm
+@@ -888,8 +888,27 @@
+   return is_window_key_;
+ }
+ 
++bool NativeWidgetMacNSWindowHost::EnableExternalHosting() {
++  if (application_host_ || !in_process_ns_window_ || is_visible_ ||
++      [in_process_ns_window_ parentWindow]) {
++    return false;
++  }
++  externally_hosted_ = true;
++  // Also block direct AppKit/framework order-in attempts, which do not pass
++  // through SetVisibilityState. This existing guard preserves isVisible=NO.
++  [in_process_ns_window_ enforceNeverMadeVisible];
++  return true;
++}
++
+ void NativeWidgetMacNSWindowHost::SetVisibilityState(
+     remote_cocoa::mojom::WindowVisibilityState new_state) {
++  if (externally_hosted_) {
++    // Never show, activate or miniaturize the producer's native window.
++    UpdateVisibilityForEmbedder(
++        new_state != WindowVisibilityState::kHideWindow &&
++        new_state != WindowVisibilityState::kMiniaturizeWindow);
++    return;
++  }
+   // On macOS 14 an application can't generally activate themselves. If we're
+   // trying to activate a window in a remote application host, this yield
+   // should make sure this works as long as chrome is the currently active
+@@ -1161,6 +1180,14 @@
+ // remote_cocoa::mojom::NativeWidgetNSWindowHost:
+ 
+ void NativeWidgetMacNSWindowHost::OnVisibilityChanged(bool window_visible) {
++  if (externally_hosted_) {
++    return;
++  }
++  UpdateVisibilityForEmbedder(window_visible);
++}
++
++void NativeWidgetMacNSWindowHost::UpdateVisibilityForEmbedder(
++    bool window_visible) {
+   TRACE_EVENT("ui", __PRETTY_FUNCTION__, "window_visible", window_visible);
+   if (is_visible_ == window_visible) {
+     return;

@@ -1,0 +1,300 @@
+--- a/cef/libcef/browser/views/external_print.h
++++ b/cef/libcef/browser/views/external_print.h
+@@ -7,6 +7,7 @@
+ 
+ namespace content {
+ class WebContents;
++class RenderFrameHost;
+ }
+ 
+ namespace cef::external_host {
+@@ -15,6 +16,9 @@
+ void InstallPrintHooks();
+ // Finishes the print request |token| of |contents|. False if unknown.
+ bool FinishPrint(content::WebContents* contents, const std::string& token);
++// Original requesting native document, retained independently of print.finish.
++content::RenderFrameHost* ResolvePrintSource(content::WebContents*,const std::string& token);
++bool ReleasePrintSource(content::WebContents*,const std::string& token);
+ }  // namespace cef::external_host
+ 
+ #endif  // CEF_LIBCEF_BROWSER_VIEWS_EXTERNAL_PRINT_H_
+--- a/cef/libcef/browser/printing/print_util.h
++++ b/cef/libcef/browser/printing/print_util.h
+@@ -10,6 +10,7 @@
+ 
+ namespace content {
+ class WebContents;
++class RenderFrameHost;
+ }
+ 
+ namespace print_util {
+@@ -21,7 +22,8 @@
+ void PrintToPDF(content::WebContents* web_contents,
+                 const CefString& path,
+                 const CefPdfPrintSettings& settings,
+-                CefRefPtr<CefPdfPrintCallback> callback);
++                CefRefPtr<CefPdfPrintCallback> callback,
++                content::RenderFrameHost* source_frame = nullptr);
+ 
+ }  // namespace print_util
+ 
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1105,6 +1105,29 @@
+       contents_delegate_.ControlNativeVideoPiP(token, action, size, value);
+ }
+ 
++bool CefBrowserHostBase::PrintNativeSourceToPDF(const CefString& source,const CefString& path,
++    const CefPdfPrintSettings& settings,CefRefPtr<CefPdfPrintCallback> callback) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  if(!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !callback || path.empty())return false;
++  auto* contents=GetWebContents();if(!contents)return false;
++  auto* frame=cef::external_host::ResolvePrintSource(contents,source.ToString());
++  if(!frame)return false;
++  print_util::PrintToPDF(contents,path,settings,callback,frame);return true;
++#else
++  return false;
++#endif
++}
++bool CefBrowserHostBase::ReleaseNativePrintSource(const CefString& source) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  auto* contents=GetWebContents();
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) && contents &&
++      cef::external_host::ReleasePrintSource(contents,source.ToString());
++#else
++  return false;
++#endif
++}
+ CefRefPtr<CefDictionaryValue> CefBrowserHostBase::BeginClosePreflight() {
+   CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
+   return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
+--- a/cef/libcef/browser/printing/print_util.cc
++++ b/cef/libcef/browser/printing/print_util.cc
+@@ -5,6 +5,8 @@
+ #include "cef/libcef/browser/printing/print_util.h"
+ 
+ #include "base/files/file_util.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/render_frame_host.h"
+ #include "cef/libcef/browser/thread_util.h"
+ #include "chrome/browser/printing/print_view_manager.h"
+ #include "chrome/browser/printing/print_view_manager_common.h"
+@@ -30,10 +32,14 @@
+   }
+ }
+ 
+-void OnPDFCreated(const CefString& path,
++void OnPDFCreated(content::WeakDocumentPtr document, const CefString& path,
+                   CefRefPtr<CefPdfPrintCallback> callback,
+                   print_to_pdf::PdfPrintResult print_result,
+                   scoped_refptr<base::RefCountedMemory> data) {
++  if (!document.AsRenderFrameHostIfValid()) {
++    if(callback) callback->OnPdfPrintFinished(CefString(),false);
++    return;
++  }
+   if (print_result != print_to_pdf::PdfPrintResult::kPrintSuccess) {
+     LOG(ERROR) << "PrintToPDF failed with error: "
+                << print_to_pdf::PdfPrintResultToString(print_result);
+@@ -58,7 +64,12 @@
+ void PrintToPDF(content::WebContents* web_contents,
+                 const CefString& path,
+                 const CefPdfPrintSettings& settings,
+-                CefRefPtr<CefPdfPrintCallback> callback) {
++                CefRefPtr<CefPdfPrintCallback> callback, content::RenderFrameHost* source_frame) {
++  auto* frame=source_frame?source_frame:web_contents->GetPrimaryMainFrame();
++  if(!frame || !frame->IsActive() || content::WebContents::FromRenderFrameHost(frame)!=web_contents) {
++    if(callback) callback->OnPdfPrintFinished(CefString(),false);
++    return;
++  }
+   const bool display_header_footer = !!settings.display_header_footer;
+ 
+   // Defaults to no header/footer.
+@@ -109,7 +120,7 @@
+ 
+   std::variant<printing::mojom::PrintPagesParamsPtr, std::string>
+       print_pages_params = print_to_pdf::GetPrintPagesParams(
+-          web_contents->GetPrimaryMainFrame()->GetLastCommittedURL(),
++          frame->GetLastCommittedURL(),
+           !!settings.landscape, display_header_footer,
+           !!settings.print_background, scale, paper_width, paper_height,
+           margin_top, margin_bottom, margin_left, margin_right,
+@@ -130,10 +141,10 @@
+   if (auto* print_manager =
+           printing::PrintViewManager::FromWebContents(web_contents)) {
+     print_manager->PrintToPdf(
+-        web_contents->GetPrimaryMainFrame(), CefString(&settings.page_ranges),
++        frame, CefString(&settings.page_ranges),
+         std::move(absl::get<printing::mojom::PrintPagesParamsPtr>(
+             print_pages_params)),
+-        base::BindOnce(&OnPDFCreated, path, callback));
++        base::BindOnce(&OnPDFCreated, frame->GetWeakDocumentPtr(), path, callback));
+     return;
+   }
+ 
+--- a/cef/libcef/browser/views/external_print.cc
++++ b/cef/libcef/browser/views/external_print.cc
+@@ -19,6 +19,8 @@
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_process_host.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+ 
+@@ -41,10 +43,23 @@
+                       public content::WebContentsUserData<ExternalPrint> {
+  public:
+   size_t size() const { return pending_.size(); }
++  bool CanRetainSource() const {return sources_.size()<64;}
++  content::RenderFrameHost* Resolve(const std::string& token) {
++    auto found=sources_.find(token);
++    auto* frame=found==sources_.end()?nullptr:found->second.AsRenderFrameHostIfValid();
++    return frame && frame->IsActive() &&
++        content::WebContents::FromRenderFrameHost(frame)==web_contents()?frame:nullptr;
++  }
++  bool Release(const std::string& token) {
++    bool removed=sources_.erase(token)>0;
++    if(removed)Finish(token);
++    return removed;
++  }
+ 
+   std::string Add(base::OnceClosure done, content::RenderFrameHost* frame) {
+     std::string token = base::UnguessableToken::Create().ToString();
+     pending_[token] = Entry{std::move(done), frame->GetGlobalId()};
++    sources_.emplace(token,frame->GetWeakDocumentPtr());
+     return token;
+   }
+ 
+@@ -60,15 +75,18 @@
+   // Chromium dropped the document: finish what is pending and say so.
+   void WithdrawAll(const content::GlobalRenderFrameHostId* only_frame) {
+     std::vector<std::string> tokens;
+-    for (auto& [token, entry] : pending_) {
+-      if (!only_frame || entry.frame == *only_frame) tokens.push_back(token);
++    for (auto& [token, document] : sources_) {
++      auto* frame=document.AsRenderFrameHostIfValid();
++      if (!only_frame || !frame || frame->GetGlobalId()==*only_frame) tokens.push_back(token);
+     }
+     for (const auto& token : tokens) {
+       auto found = pending_.find(token);
+-      if (found == pending_.end()) continue;
+-      auto done = std::move(found->second.done);
+-      pending_.erase(found);
+-      std::move(done).Run();
++      sources_.erase(token);
++      if (found != pending_.end()) {
++        auto done = std::move(found->second.done);
++        pending_.erase(found);
++        std::move(done).Run();
++      }
+       CefRefPtr<CefBrowserHostBase> browser;
+       if (web_contents()) {
+         if (auto handler = DisplayHandler(web_contents(), &browser)) {
+@@ -84,6 +102,20 @@
+     WithdrawAll(&id);
+   }
+   void PrimaryPageChanged(content::Page&) override { WithdrawAll(nullptr); }
++  void DidStartNavigation(content::NavigationHandle* navigation) override {
++    if(navigation->IsSameDocument()) return;
++    if(navigation->IsInPrimaryMainFrame()) {WithdrawAll(nullptr);return;}
++    std::vector<content::GlobalRenderFrameHostId> retired;
++    for(const auto& [token,document]:sources_) {
++      auto* frame=document.AsRenderFrameHostIfValid();
++      for(auto* ancestor=frame;ancestor;ancestor=ancestor->GetParent()) {
++        if(ancestor->GetFrameTreeNodeId()==navigation->GetFrameTreeNodeId()) {
++          retired.push_back(frame->GetGlobalId());break;
++        }
++      }
++    }
++    for(const auto& id:retired)WithdrawAll(&id);
++  }
+   void WebContentsDestroyed() override { WithdrawAll(nullptr); }
+ 
+  private:
+@@ -96,6 +128,7 @@
+     content::GlobalRenderFrameHostId frame;
+   };
+   std::map<std::string, Entry> pending_;
++  std::map<std::string,content::WeakDocumentPtr> sources_;
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalPrint);
+@@ -110,10 +143,14 @@
+   if (!handler) return false;
+   auto* print = ExternalPrint::GetOrCreateForWebContents(contents);
+   // Past the limit Chrome's own preview takes over rather than piling up.
+-  if (print->size() >= kMaxPending) return false;
++  if (print->size() >= kMaxPending || !print->CanRetainSource()) return false;
+   const std::string token = print->Add(std::move(done), frame);
+   auto request = CefDictionaryValue::Create();
+   request->SetString("request", token);
++  request->SetString("source",token);
++  request->SetInt("sourceVersion",1);
++  request->SetString("nativeDocument",static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString());
++  request->SetString("frameId",frame->GetDevToolsFrameToken().ToString());
+   request->SetBool("scripted", scripted);
+   request->SetString("url", frame->GetLastCommittedURL().spec());
+   request->SetBool("mainFrame", frame->IsInPrimaryMainFrame());
+@@ -134,4 +171,10 @@
+   return print && print->Finish(token);
+ }
+ 
++content::RenderFrameHost* ResolvePrintSource(content::WebContents* contents,const std::string& token) {
++  auto* print=ExternalPrint::FromWebContents(contents);return print?print->Resolve(token):nullptr;
++}
++bool ReleasePrintSource(content::WebContents* contents,const std::string& token) {
++  auto* print=ExternalPrint::FromWebContents(contents);return print && print->Release(token);
++}
+ }  // namespace cef::external_host
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -290,6 +290,9 @@
+   CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState() override;
+   CefRefPtr<CefDictionaryValue> GetNativeCaptureState() override;
+   CefRefPtr<CefDictionaryValue> BeginClosePreflight() override;
++  bool PrintNativeSourceToPDF(const CefString& source,const CefString& path,
++      const CefPdfPrintSettings& settings,CefRefPtr<CefPdfPrintCallback> callback) override;
++  bool ReleaseNativePrintSource(const CefString& source) override;
+   bool ValidateClosePreflight(const CefString& token) override;
+   bool CommitClosePreflight(const CefString& token) override;
+   bool CancelClosePreflight(const CefString& request) override;
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -59,6 +59,7 @@
+ #define CEF_YAB_NATIVE_CAPTURE_ACTIVITY_VERSION 1
+ #define CEF_YAB_NATIVE_VIDEO_PIP_VERSION 1
+ #define CEF_YAB_NATIVE_CLOSE_PREFLIGHT_VERSION 1
++#define CEF_YAB_NATIVE_PRINT_SOURCE_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1195,6 +1196,26 @@
+   virtual CefRefPtr<CefDictionaryValue> BeginClosePreflight() = 0;
+ 
+   ///
++  /// Exports the original native requesting document identified by the opaque
++  /// source in OnPrintRequest, including an original child frame or PDF frame.
++  /// The source survives FinishPrintRequest, and expires on cross-document
++  /// navigation, frame loss, explicit release or browser destruction. Returns
++  /// false without dispatch for a stale/foreign source. An accepted export
++  /// reports native generation/write completion through |callback|. UI only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool PrintNativeSourceToPDF(const CefString& source,
++      const CefString& path, const CefPdfPrintSettings& settings,
++      CefRefPtr<CefPdfPrintCallback> callback) = 0;
++
++  ///
++  /// Releases one retained native print source after the embedder dismisses or
++  /// finishes its export UI. Returns false for a stale source. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool ReleaseNativePrintSource(const CefString& source) = 0;
++
++  ///
+   /// Validates one approved opaque token and its entire unchanged native frame
+   /// tree, without mutating any page. Refuses navigation, a new prompt, loss,
+   /// cancellation or a replayed token. Batch callers validate every token in

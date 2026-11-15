@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="now_widget_surface">#FF242321</color>
+    <color name="now_widget_primary">#FFF7F3ED</color>
+    <color name="now_widget_secondary">#FFBDB5A9</color>
+</resources>

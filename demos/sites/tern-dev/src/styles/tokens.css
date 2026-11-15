@@ -1,0 +1,225 @@
+/* Tern design tokens. Every length on the page comes from here: spacing on
+   a 4 px grid, four radii and a pill, three control heights, one type
+   scale with its line heights, two shadows. Components read these, never
+   raw values; the one exception is .button and the hero's two rules over
+   it, which say their padding and radius in px so Measure's plate reads
+   them plainly. */
+
+:root {
+  /* Palette. Neutrals: a warm paper with cool ink. */
+  --gray-0: #ffffff;
+  --gray-25: #f9f8f6;
+  --gray-50: #f3f2ef;
+  --gray-100: #ebe9e5;
+  --gray-200: #dfddd8;
+  --gray-300: #c9c6c0;
+  --gray-400: #a3a19c;
+  --gray-500: #76777a;
+  --gray-600: #55585d;
+  --gray-800: #23262a;
+  --gray-900: #15171a;
+
+  /* Fjord: Tern's teal. */
+  --fjord-25: #f6faf9;
+  --fjord-50: #eef6f5;
+  --fjord-100: #d9ecea;
+  --fjord-300: #82bdb8;
+  --fjord-500: #2a807c;
+  --fjord-600: #1c6865;
+  --fjord-700: #175553;
+  --fjord-800: #134443;
+  --fjord-900: #0e3332;
+  --fjord-950: #0a2423;
+
+  /* Coral: the tern's beak, the one accent. */
+  --coral-25: #fffbfa;
+  --coral-50: #fef1ec;
+  --coral-100: #fde0d5;
+  --coral-500: #ef6a43;
+  --coral-600: #d9542e;
+
+  /* The calendar's event tints (50 ground, 200 or 300 edge, 500 face,
+     600 second line, 700 title). */
+  --sage-50: #eff6ef;
+  --sage-75: #e7f2e7;
+  --sage-100: #dcecdc;
+  --sage-200: #c1dcc3;
+  --sage-300: #9cc79f;
+  --sage-500: #5f9a68;
+  --sage-600: #65926d;
+  --sage-700: #2f6b3a;
+  --lilac-50: #f2f0fc;
+  --lilac-100: #e4e0f8;
+  --lilac-300: #b9b0ec;
+  --lilac-500: #7a6bd0;
+  --lilac-600: #7e74c0;
+  --lilac-700: #4c3fa6;
+  --sky-50: #edf4fc;
+  --sky-300: #9fc0ea;
+  --sky-500: #4f86c6;
+  --sky-600: #5e85b8;
+  --sky-700: #275a9e;
+  --sand-50: #fcf4ea;
+  --sand-100: #f8e7d1;
+  --sand-300: #e9c08f;
+  --sand-500: #d98a4a;
+  --sand-600: #ac8356;
+  --sand-700: #8a5216;
+  --red-50: #fdeeec;
+  --red-600: #c93a31;
+
+  /* Roles: text */
+  --text-primary: var(--gray-900);
+  --text-secondary: var(--gray-600);
+  --text-tertiary: var(--gray-500);
+  --text-faint: var(--gray-400);
+  --text-on-dark: var(--gray-0);
+  --text-on-dark-secondary: rgba(255, 255, 255, 0.72);
+  --text-on-dark-tertiary: rgba(255, 255, 255, 0.48);
+
+  /* Roles: lines and grounds */
+  --border: var(--gray-100);
+  --border-strong: var(--gray-200);
+  --border-on-dark: rgba(255, 255, 255, 0.08);
+  --border-on-dark-strong: rgba(255, 255, 255, 0.16);
+  --surface-page: var(--gray-25);
+  --surface: var(--gray-0);
+  --surface-muted: var(--gray-50);
+  --surface-glass: rgba(255, 255, 255, 0.64);
+  --surface-header: rgba(249, 248, 246, 0.82);
+  --surface-on-dark: rgba(255, 255, 255, 0.04);
+  --fill-subtle: rgba(21, 23, 26, 0.05); /* hovers on paper, the hero grid */
+  --fill-on-dark: rgba(255, 255, 255, 0.08);
+  --fill-on-dark-hover: rgba(255, 255, 255, 0.16);
+
+  /* Roles: brand, accent, status */
+  --primary: var(--gray-900);
+  --primary-hover: var(--gray-800);
+  --on-primary: var(--gray-0);
+  --brand: var(--fjord-600);
+  --brand-strong: var(--fjord-700);
+  --brand-soft: var(--fjord-50);
+  --brand-line: var(--fjord-100);
+  --accent: var(--coral-500);
+  --accent-strong: var(--coral-600);
+  --accent-soft: var(--coral-50);
+  --success: var(--sage-700);
+  --success-soft: var(--sage-50);
+  --warning: var(--sand-700);
+  --warning-soft: var(--sand-50);
+  --danger: var(--red-600);
+  --danger-soft: var(--red-50);
+  --focus-ring: rgba(42, 128, 124, 0.45);
+
+  /* The Focus first band, on fjord-950: meetings and focus as blocks. */
+  --night-meeting: #2f3a52;
+  --night-meeting-line: rgba(185, 176, 236, 0.32);
+  --night-focus: #1f4a3b;
+  --night-focus-line: rgba(156, 199, 159, 0.5);
+  --night-focus-stripe: rgba(156, 199, 159, 0.16);
+
+  /* Glows behind heroes and on the dark bands. */
+  --glow-fjord: rgba(130, 189, 184, 0.32);
+  --glow-coral: rgba(253, 224, 213, 0.56);
+  --glow-lilac: rgba(228, 224, 248, 0.56);
+  --glow-deep: rgba(79, 157, 152, 0.48);
+  --glow-deep-soft: rgba(28, 104, 101, 0.28);
+
+  /* Type: one scale, each size with its line height. 10 and 11 are the
+     product shot's and the badges'. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --text-3xs: 10px;
+  --leading-3xs: 12px;
+  --text-2xs: 11px;
+  --leading-2xs: 16px;
+  --text-xs: 12px;
+  --leading-xs: 16px;
+  --text-sm: 14px;
+  --leading-sm: 20px;
+  --text-md: 15px;
+  --leading-md: 24px;
+  --text-base: 16px;
+  --leading-base: 24px;
+  --text-lg: 18px;
+  --leading-lg: 28px;
+  --text-xl: 20px;
+  --leading-xl: 28px;
+  --text-3xl: 32px;
+  --leading-3xl: 40px;
+  --text-4xl: 40px;
+  --leading-4xl: 44px;
+  --text-5xl: 56px;
+  --leading-5xl: 60px;
+  --text-6xl: 72px;
+  --leading-6xl: 76px;
+  --tracking-display: -0.04em;
+  --tracking-tighter: -0.03em;
+  --tracking-tight: -0.01em;
+  --tracking-caps: 0.06em;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Space: the 4 px grid, named by size. */
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-64: 64px;
+  --space-80: 80px;
+  --space-96: 96px;
+
+  /* Radii: four and a pill. A box inside a rounded box takes the outer
+     radius less the inset (16 around 4 is 12, 12 around 4 is 8). */
+  --radius-4: 4px;
+  --radius-8: 8px;
+  --radius-12: 12px;
+  --radius-16: 16px;
+  --radius-pill: 999px;
+
+  /* Controls: 28 in the product shot and the billing toggle, 32 small,
+     40 the default, 48 large. Badges are 20. */
+  --control-xs: 28px;
+  --control-sm: 32px;
+  --control-md: 40px;
+  --control-lg: 48px;
+  --badge: 20px;
+
+  /* Icons: 16, 20, 24, one stroke for all. */
+  --icon-16: 16px;
+  --icon-20: 20px;
+  --icon-24: 24px;
+  --icon-stroke: 1.5px;
+
+  /* Elevation: a hairline lift, and a float. */
+  --shadow-sm: 0 1px 2px rgba(21, 23, 26, 0.06);
+  --shadow-lg: 0 2px 4px rgba(21, 23, 26, 0.04), 0 24px 48px -24px rgba(14, 51, 50, 0.32);
+
+  /* Layout */
+  --container: 1200px;
+  --gutter: var(--space-24);
+  --header-height: 64px;
+  --section-space: var(--space-96);
+  --card-padding: var(--space-32);
+  --card-radius: var(--radius-16);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+}
+
+@media (max-width: 720px) {
+  :root {
+    --gutter: var(--space-16);
+    --section-space: var(--space-80);
+    --card-padding: var(--space-24);
+  }
+}

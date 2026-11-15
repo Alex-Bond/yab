@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>New Tab</title>
+<!--
+  Two pages in one. With no words in the address it is the blank page that
+  slides in past the last tab (the prototype's .ft-blank). With them,
+  yab-page://blank?title=…&site=…&icon=…, it is the prototype's generic page
+  for a site it has no drawing of: the site's head under the status bar, the
+  title, and lines of text.
+-->
+<style>
+  :root { --top: 54px; color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 400 16px/1.45 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    letter-spacing: -0.01em; color: #111; background: #EDEDF1;
+    -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%;
+  }
+  body.site { background: #fff; }
+  .head { background: #F4F4F6; padding: calc(var(--top) + 6px) 18px 12px; }
+  .head .row { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .fv { width: 20px; height: 20px; flex: none; display: block; object-fit: cover; border-radius: 23%; }
+  .fv.ci { border-radius: 50%; }
+  .fv-draw { width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: 23%;
+    color: #fff; font: 700 10px/1 -apple-system, system-ui, sans-serif; }
+  .pad { padding: 16px 20px 0; }
+  h1 { font-size: 26px; line-height: 1.15; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 14px; }
+  .line { height: 10px; border-radius: 5px; background: #E9E9EC; margin: 0 0 10px; }
+  .bottom-space { height: 120px; }
+</style>
+</head>
+<body>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var title = q.get('title'), site = q.get('site') || '', icon = q.get('icon') || '';
+  if (!title) { document.title = 'New Tab'; return; }
+  document.title = title;
+  document.body.className = 'site';
+  // The prototype's drawn tiles, for sites without a picture.
+  var drawn = { orbit: ['#5B47E0', 'O'], paul: ['#B31B1B', 'PG'], rams: ['#FFFFFF', 'W'], nng: ['#1B1B1B', 'N'], tap: ['#E2001A', 'T'],
+    linnea: ['#8C6E4E', 'L'], skandi: ['#2F4A3A', 'S'], llm: ['#FF0033', ''] };
+  var round = { github: 1, lumen: 1, nordbutik: 1, google: 1 };
+  function tile() {
+    var d = drawn[icon] || ['#8E8E93', (icon[0] || '?').toUpperCase()];
+    var n = document.createElement('span');
+    n.className = 'fv-draw';
+    n.style.background = d[0];
+    if (d[0] === '#FFFFFF') { n.style.color = '#111'; n.style.boxShadow = 'inset 0 0 0 1px rgba(0,0,0,.12)'; }
+    n.textContent = d[1];
+    return n;
+  }
+  var head = document.createElement('div');
+  head.className = 'head';
+  var row = document.createElement('div');
+  row.className = 'row';
+  var mark = tile();
+  if (icon) {
+    var img = new Image();
+    img.className = 'fv' + (round[icon] ? ' ci' : '');
+    img.alt = '';
+    img.onload = function () { mark.replaceWith(img); };
+    img.src = 'Favicons/' + encodeURIComponent(icon) + '.png';
+  }
+  var name = document.createElement('span');
+  name.textContent = site;
+  row.append(mark, name);
+  head.append(row);
+  var pad = document.createElement('div');
+  pad.className = 'pad';
+  var h1 = document.createElement('h1');
+  h1.textContent = title.split(' · ')[0];
+  pad.append(h1);
+  var widths = [100, 96, 88, 92, 70];
+  for (var i = 0; i < 14; i++) {
+    var line = document.createElement('div');
+    line.className = 'line';
+    line.style.width = widths[i % widths.length] + '%';
+    pad.append(line);
+  }
+  var space = document.createElement('div');
+  space.className = 'bottom-space';
+  document.body.append(head, pad, space);
+})();
+</script>
+</body>
+</html>

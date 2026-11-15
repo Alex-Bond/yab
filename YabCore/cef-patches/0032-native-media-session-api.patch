@@ -1,0 +1,468 @@
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -55,6 +55,7 @@
+ #define CEF_YAB_NATIVE_TAB_MODEL_VERSION 1
+ #define CEF_YAB_EXTERNAL_PAGE_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
++#define CEF_YAB_NATIVE_MEDIA_SESSION_VERSION 1
+ 
+ class CefBrowserHost;
+ class CefClient;
+@@ -1165,6 +1166,26 @@
+   virtual CefRefPtr<CefDictionaryValue> GetExternalPageState() = 0;
+ 
+   ///
++  /// Returns this browser's current native MediaSession snapshot. The native
++  /// routed frame and committed document own its opaque control token. An
++  /// unavailable routed frame yields available=false. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState() = 0;
++
++  ///
++  /// Dispatches a supported action to that exact live native session token.
++  /// Actions: play, pause, toggle, seek, seekForward, seekBackward, next,
++  /// previous. Seconds is used by seek actions. Stale tokens, unsupported
++  /// actions and invalid offsets are refused. Preserves native site handlers
++  /// and autoplay policy; true means dispatched, not playback completion.
++  /// UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SendNativeMediaSessionAction(const CefString& token,
++      const CefString& action, double seconds) = 0;
++
++  ///
+   /// Requests a page size on that browser's own native geometry endpoint.
+   /// Duplicate sizes are idempotent. A shared physical owner is refused.
+   ///
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -203,6 +203,16 @@
+                                     bool audible) {}
+ 
+   ///
++  /// Called on the UI thread with a full native MediaSession snapshot for
++  /// this exact browser/request context. Token, frame and document ownership
++  /// come from the native routed service. available=false retires ownership.
++  /// Native capture/PiP activity is a separate capability.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnNativeMediaSessionState(CefRefPtr<CefBrowser> browser,
++      CefRefPtr<CefDictionaryValue> state) {}
++
++  ///
+   /// Called on the UI thread when the primary page's CSS background color
+   /// changes. |has_color| is false when the page has no background color.
+   /// An embedder that hosts the compositor remotely can fill area the page
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -287,6 +287,9 @@
+   bool SetPageFrozen(bool frozen) override;
+   bool FinishNativePrint(const CefString& request) override;
+   CefRefPtr<CefDictionaryValue> GetExternalPageState() override;
++  CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState() override;
++  bool SendNativeMediaSessionAction(const CefString& token,
++      const CefString& action, double seconds) override;
+   bool SetExternalPageSize(const CefSize& size) override;
+   bool SetExternalPageVisibility(bool visible) override;
+   bool SetExternalPageFocus(bool focused) override;
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "cef/libcef/browser/browser_host_base.h"
++#include "cef/libcef/common/api_version_util.h"
+ 
+ #include <tuple>
+ 
+@@ -1091,6 +1092,20 @@
+ #endif
+ }
+ 
++
++CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetNativeMediaSessionState() {
++  CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL)
++      ? contents_delegate_.GetNativeMediaSessionState() : CefDictionaryValue::Create();
++}
++
++bool CefBrowserHostBase::SendNativeMediaSessionAction(const CefString& token,
++    const CefString& action, double seconds) {
++  CEF_REQUIRE_UIT_RETURN(false);
++  return CEF_API_IS_ADDED(CEF_EXPERIMENTAL) &&
++      contents_delegate_.SendNativeMediaSessionAction(token, action, seconds);
++}
++
+ CefRefPtr<CefDictionaryValue> CefBrowserHostBase::GetExternalPageState() {
+   CEF_REQUIRE_UIT_RETURN(CefDictionaryValue::Create());
+ #if BUILDFLAG(IS_MAC)
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -50,6 +50,8 @@
+ // Tracks state and executes client callbacks based on WebContents callbacks.
+ // Includes functionality that is shared by Alloy and Chrome styles. Only
+ // accessed on the UI thread.
++class CefExternalMediaSession;
++
+ class CefBrowserContentsDelegate : public content::WebContentsDelegate,
+                                    public content::WebContentsObserver {
+  public:
+@@ -79,6 +81,9 @@
+       delete;
+ 
+   void ObserveWebContents(content::WebContents* new_contents);
++  CefRefPtr<CefDictionaryValue> GetNativeMediaSessionState();
++  bool SendNativeMediaSessionAction(const CefString& token,
++      const CefString& action, double seconds);
+ 
+   // Manage observer objects. The observer must either outlive this object or
+   // be removed before destruction.
+@@ -202,6 +207,8 @@
+   void OnFullscreenModeChange(bool fullscreen);
+ 
+   void OnStateChanged(State state_changed);
++  void OnNativeMediaSessionState(CefRefPtr<CefDictionaryValue> state);
++  std::unique_ptr<CefExternalMediaSession> external_media_session_;
+ 
+   scoped_refptr<CefBrowserInfo> browser_info_;
+ 
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "cef/libcef/browser/browser_contents_delegate.h"
++#include "base/functional/bind.h"
++#include "cef/libcef/browser/external_media_session.h"
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "cef/libcef/browser/browser_event_util.h"
+@@ -99,11 +101,17 @@
+ 
+ void CefBrowserContentsDelegate::ObserveWebContents(
+     content::WebContents* new_contents) {
++  external_media_session_.reset();
+ #if BUILDFLAG(IS_MAC)
+   external_text_input_.reset();
+   cef::external_host::InstallExtensionHooks();
+ #endif
+   WebContentsObserver::Observe(new_contents);
++  if (new_contents && CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
++    external_media_session_ = std::make_unique<CefExternalMediaSession>(new_contents,
++        base::BindRepeating(&CefBrowserContentsDelegate::OnNativeMediaSessionState,
++                           base::Unretained(this)));
++  }
+ #if BUILDFLAG(IS_MAC)
+   if (new_contents && CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
+     external_text_input_ = std::make_unique<CefExternalTextInput>(
+@@ -137,6 +145,29 @@
+   }
+ }
+ #endif
++
++
++CefRefPtr<CefDictionaryValue> CefBrowserContentsDelegate::GetNativeMediaSessionState() {
++  auto state = external_media_session_ ? external_media_session_->State()
++                                      : CefDictionaryValue::Create();
++  if (auto owner = browser()) state->SetInt("browserId", owner->GetIdentifier());
++  return state;
++}
++bool CefBrowserContentsDelegate::SendNativeMediaSessionAction(
++    const CefString& token, const CefString& action, double seconds) {
++  return external_media_session_ &&
++      external_media_session_->Action(token.ToString(), action.ToString(), seconds);
++}
++void CefBrowserContentsDelegate::OnNativeMediaSessionState(CefRefPtr<CefDictionaryValue> state) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !state) return;
++  auto owner = browser();
++  auto c = client();
++  if (!owner || !c) return;
++  if (auto handler = c->GetDisplayHandler()) {
++    state->SetInt("browserId", owner->GetIdentifier());
++    handler->OnNativeMediaSessionState(owner, state);
++  }
++}
+ 
+ void CefBrowserContentsDelegate::AddObserver(Observer* observer) {
+   observers_.AddObserver(observer);
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -616,6 +616,8 @@
+     "libcef/browser/download_manager_delegate.h",
+     "libcef/browser/download_manager_delegate_impl.cc",
+     "libcef/browser/download_manager_delegate_impl.h",
++    "libcef/browser/external_media_session.cc",
++    "libcef/browser/external_media_session.h",
+     "libcef/browser/external_file_dialog.cc",
+     "libcef/browser/external_file_dialog.h",
+     "libcef/browser/file_dialog_manager.cc",
+--- /dev/null
++++ b/cef/libcef/browser/external_media_session.h
+@@ -0,0 +1,58 @@
++// Deferred native MediaSession boundary. Not installed in the active SDK.
++#ifndef CEF_LIBCEF_BROWSER_EXTERNAL_MEDIA_SESSION_H_
++#define CEF_LIBCEF_BROWSER_EXTERNAL_MEDIA_SESSION_H_
++
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_values.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "services/media_session/public/mojom/media_session.mojom.h"
++
++namespace content { class MediaSession; }
++
++// UI sequence only. All ownership comes from the original native session's
++// routed frame. An absent routed frame is unavailable, never the main frame.
++class CefExternalMediaSession final
++    : public content::WebContentsObserver,
++      public media_session::mojom::MediaSessionObserver {
++ public:
++  using Changed = base::RepeatingCallback<void(CefRefPtr<CefDictionaryValue>)>;
++  CefExternalMediaSession(content::WebContents* contents, Changed changed);
++  ~CefExternalMediaSession() override;
++
++  CefRefPtr<CefDictionaryValue> State();
++  bool Action(const std::string& token, const std::string& action, double seconds);
++
++  void MediaSessionCreated(content::MediaSession* session) override;
++  void DidFinishNavigation(content::NavigationHandle*) override;
++  void RenderFrameDeleted(content::RenderFrameHost*) override;
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
++  void WebContentsDestroyed() override;
++
++  void MediaSessionInfoChanged(media_session::mojom::MediaSessionInfoPtr) override;
++  void MediaSessionMetadataChanged(
++      const std::optional<media_session::MediaMetadata>&) override;
++  void MediaSessionActionsChanged(
++      const std::vector<media_session::mojom::MediaSessionAction>&) override;
++  void MediaSessionImagesChanged(
++      const base::flat_map<media_session::mojom::MediaSessionImageType,
++                          std::vector<media_session::MediaImage>>&) override;
++  void MediaSessionPositionChanged(
++      const std::optional<media_session::MediaPosition>&) override;
++
++ private:
++  void Publish();
++  void Clear(const char* reason);
++  Changed changed_;
++  mojo::Receiver<media_session::mojom::MediaSessionObserver> receiver_{this};
++  content::WeakDocumentPtr document_;
++  base::UnguessableToken token_;
++  base::UnguessableToken registration_;
++  std::string request_;
++  base::WeakPtrFactory<CefExternalMediaSession> weak_{this};
++};
++
++#endif
+--- /dev/null
++++ b/cef/libcef/browser/external_media_session.cc
+@@ -0,0 +1,205 @@
++#include "external_media_session.h"
++#include "content/public/browser/external_media_session_routes.h"
++
++#include <algorithm>
++#include <cmath>
++#include <utility>
++#include "base/functional/bind.h"
++#include "base/strings/utf_string_conversions.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/public/browser/media_session.h"
++#include "content/browser/media/session/media_session_impl.h"
++#include "content/public/browser/web_contents.h"
++
++namespace {
++using Action = media_session::mojom::MediaSessionAction;
++using Playback = media_session::mojom::MediaPlaybackState;
++using Suspend = media_session::mojom::MediaSession::SuspendType;
++
++const char* Name(Action action) {
++  switch (action) {
++    case Action::kPlay: return "play";
++    case Action::kPause: return "pause";
++    case Action::kSeekTo: return "seek";
++    case Action::kSeekBackward: return "seekBackward";
++    case Action::kSeekForward: return "seekForward";
++    case Action::kNextTrack: return "next";
++    case Action::kPreviousTrack: return "previous";
++    case Action::kToggleMicrophone: return "toggleMicrophone";
++    case Action::kToggleCamera: return "toggleCamera";
++    case Action::kHangUp: return "hangUp";
++    default: return nullptr;
++  }
++}
++bool Live(content::WebContents* contents, content::RenderFrameHost* frame) {
++  return contents && !contents->IsBeingDestroyed() && frame && frame->IsActive() &&
++      frame->IsRenderFrameLive() &&
++      content::WebContents::FromRenderFrameHost(frame) == contents;
++}
++}  // namespace
++
++CefExternalMediaSession::CefExternalMediaSession(
++    content::WebContents* contents, Changed changed)
++    : content::WebContentsObserver(contents), changed_(std::move(changed)) {
++  registration_ = content::external_media_session::Register(contents,
++      base::BindRepeating(&CefExternalMediaSession::Publish, weak_.GetWeakPtr()));
++  if (auto* session = content::MediaSession::GetIfExists(contents))
++    MediaSessionCreated(session);
++}
++CefExternalMediaSession::~CefExternalMediaSession() {
++  content::external_media_session::Remove(web_contents(), registration_);
++}
++
++void CefExternalMediaSession::MediaSessionCreated(content::MediaSession* session) {
++  receiver_.reset();
++  if (session) session->AddObserver(receiver_.BindNewPipeAndPassRemote());
++}
++
++CefRefPtr<CefDictionaryValue> CefExternalMediaSession::State() {
++  auto result = CefDictionaryValue::Create();
++  result->SetInt("version", 1);
++  result->SetBool("available", false);
++  auto* contents = web_contents();
++  auto* session = contents && !contents->IsBeingDestroyed()
++      ? content::MediaSession::GetIfExists(contents) : nullptr;
++  auto* frame = session ? session->GetRoutedFrame() : nullptr;
++  if (!Live(contents, frame)) {
++    token_ = {}; document_ = {}; request_.clear();
++    return result;
++  }
++  const std::string request = content::MediaSession::GetRequestIdFromWebContents(contents).ToString();
++  if (token_.is_empty() || document_.AsRenderFrameHostIfValid() != frame || request_ != request) {
++    document_ = frame->GetWeakDocumentPtr();
++    request_ = request;
++    token_ = base::UnguessableToken::Create();
++  }
++  auto info = session->GetMediaSessionInfoSync();
++  if (!info) {
++    token_ = {}; document_ = {}; request_.clear();
++    return result;
++  }
++  result->SetBool("available", true);
++  result->SetString("token", token_.ToString());
++  result->SetString("session", request_);
++  result->SetString("document", static_cast<content::RenderFrameHostImpl*>(frame)->GetDocumentToken().ToString());
++  result->SetString("frameId", frame->GetDevToolsFrameToken().ToString());
++  result->SetBool("main", frame == contents->GetPrimaryMainFrame());
++  result->SetString("url", frame->GetLastCommittedURL().spec());
++  result->SetString("origin", frame->GetLastCommittedOrigin().Serialize());
++  result->SetBool("controllable", info->is_controllable);
++  result->SetBool("hideMetadata", info->hide_metadata);
++  // These are the site's native MediaSession declarations. They neither
++  // establish capture ownership nor replace MediaStreamCaptureIndicator.
++  using SessionState = media_session::mojom::MediaSessionInfo::SessionState;
++  const char* session_state = "inactive";
++  switch (info->state) {
++    case SessionState::kActive: session_state = "active"; break;
++    case SessionState::kDucking: session_state = "ducking"; break;
++    case SessionState::kSuspended: session_state = "suspended"; break;
++    case SessionState::kInactive: break;
++  }
++  result->SetString("sessionState", session_state);
++  using Microphone = media_session::mojom::MicrophoneState;
++  using Camera = media_session::mojom::CameraState;
++  result->SetString("reportedMicrophone", info->microphone_state == Microphone::kMuted
++      ? "muted" : info->microphone_state == Microphone::kUnmuted ? "unmuted" : "unknown");
++  result->SetString("reportedCamera", info->camera_state == Camera::kTurnedOn
++      ? "on" : info->camera_state == Camera::kTurnedOff ? "off" : "unknown");
++  result->SetBool("reportedPiP", info->picture_in_picture_state ==
++      media_session::mojom::MediaPictureInPictureState::kInPictureInPicture);
++  result->SetBool("outputMuted", info->muted);
++  result->SetString("playback", info->playback_state == Playback::kPlaying ? "playing" : "paused");
++  const auto& metadata = session->GetMediaSessionMetadata();
++  result->SetString("title", info->hide_metadata ? "" : base::UTF16ToUTF8(metadata.title));
++  result->SetString("artist", info->hide_metadata ? "" : base::UTF16ToUTF8(metadata.artist));
++  result->SetString("album", info->hide_metadata ? "" : base::UTF16ToUTF8(metadata.album));
++  auto artwork=CefListValue::Create();
++  if(!info->hide_metadata) {
++    for(const auto& image:static_cast<content::MediaSessionImpl*>(session)->GetExternalArtwork()) {
++      if(artwork->GetSize()>=8)break;
++      if(!image.src.is_valid() || image.src.spec().size()>8192)continue;
++      auto item=CefDictionaryValue::Create();item->SetString("src",image.src.spec());
++      item->SetString("type",base::UTF16ToUTF8(image.type).substr(0,256));
++      auto sizes=CefListValue::Create();
++      for(const auto& size:image.sizes) {
++        if(sizes->GetSize()>=8)break;
++        auto bounds=CefDictionaryValue::Create();bounds->SetInt("width",size.width());bounds->SetInt("height",size.height());
++        sizes->SetDictionary(sizes->GetSize(),bounds);
++      }
++      item->SetList("sizes",sizes);artwork->SetDictionary(artwork->GetSize(),item);
++    }
++  }
++  result->SetList("artwork",artwork);
++  auto actions = CefListValue::Create();
++  for (auto action : session->GetMediaSessionActionsSync())
++    if (const char* name = Name(action)) actions->SetString(actions->GetSize(), name);
++  result->SetList("actions", actions);
++  if (auto position = session->GetMediaSessionPosition()) {
++    const double duration = position->duration().InSecondsF();
++    const double current = position->GetPosition().InSecondsF();
++    const double rate = position->playback_rate();
++    if (std::isfinite(duration) && std::isfinite(current) && std::isfinite(rate)) {
++      auto value = CefDictionaryValue::Create();
++      value->SetDouble("duration", duration);
++      value->SetDouble("position", current);
++      value->SetDouble("rate", rate);
++      result->SetDictionary("position", value);
++    }
++  }
++  return result;
++}
++
++bool CefExternalMediaSession::Action(
++    const std::string& token, const std::string& action, double seconds) {
++  auto state = State();
++  if (token.empty() || !state->GetBool("available") ||
++      state->GetString("token").ToString() != token || !std::isfinite(seconds)) return false;
++  auto* session = content::MediaSession::GetIfExists(web_contents());
++  if (!session || document_.AsRenderFrameHostIfValid() != session->GetRoutedFrame()) return false;
++  const auto actions = session->GetMediaSessionActionsSync();
++  const std::string requested = action == "toggle"
++      ? (state->GetString("playback") == "playing" ? "pause" : "play") : action;
++  if (!std::ranges::any_of(actions, [&](auto value) {
++        const char* name = Name(value); return name && requested == name;
++      })) return false;
++  if (requested == "play") session->Resume(Suspend::kUI);
++  else if (requested == "pause") session->Suspend(Suspend::kUI);
++  else if (requested == "next") session->NextTrack();
++  else if (requested == "previous") session->PreviousTrack();
++  else if (requested == "toggleMicrophone") session->ToggleMicrophone();
++  else if (requested == "toggleCamera") session->ToggleCamera();
++  else if (requested == "hangUp") session->HangUp();
++  else if (requested == "seek") {
++    auto position = session->GetMediaSessionPosition();
++    if (seconds < 0 || !position || seconds > position->duration().InSecondsF()) return false;
++    session->SeekTo(base::Seconds(seconds));
++  } else if (requested == "seekForward" || requested == "seekBackward") {
++    if (seconds <= 0 || seconds > 86400) return false;
++    session->Seek(base::Seconds(requested == "seekBackward" ? -seconds : seconds));
++  } else return false;
++  return true;
++}
++
++void CefExternalMediaSession::Publish() { changed_.Run(State()); }
++void CefExternalMediaSession::Clear(const char* reason) {
++  token_ = {}; document_ = {}; request_.clear();
++  auto result = CefDictionaryValue::Create();
++  result->SetInt("version", 1); result->SetBool("available", false);
++  result->SetString("reason", reason);
++  changed_.Run(result);
++}
++void CefExternalMediaSession::DidFinishNavigation(content::NavigationHandle*) { Publish(); }
++void CefExternalMediaSession::RenderFrameDeleted(content::RenderFrameHost*) { Publish(); }
++void CefExternalMediaSession::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
++  Clear("renderer-gone");
++}
++void CefExternalMediaSession::WebContentsDestroyed() {
++  content::external_media_session::Remove(web_contents(), registration_);
++  weak_.InvalidateWeakPtrs();
++  receiver_.reset(); Observe(nullptr); Clear("browser-closed");
++}
++void CefExternalMediaSession::MediaSessionInfoChanged(media_session::mojom::MediaSessionInfoPtr) { Publish(); }
++void CefExternalMediaSession::MediaSessionMetadataChanged(const std::optional<media_session::MediaMetadata>&) { Publish(); }
++void CefExternalMediaSession::MediaSessionActionsChanged(const std::vector<media_session::mojom::MediaSessionAction>&) { Publish(); }
++void CefExternalMediaSession::MediaSessionImagesChanged(const base::flat_map<media_session::mojom::MediaSessionImageType, std::vector<media_session::MediaImage>>&) { Publish(); }
++void CefExternalMediaSession::MediaSessionPositionChanged(const std::optional<media_session::MediaPosition>&) { Publish(); }

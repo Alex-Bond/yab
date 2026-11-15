@@ -1,0 +1,71 @@
+--- a/chrome/browser/extensions/external_tab_model.h
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -108,7 +108,7 @@
+       group->active = requested_owner->GetWeakPtr();
+       group->tabs.push_back(requested_owner->GetWeakPtr());
+       requested_owner->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
+-          new ExternalTabModel(requested_owner, group, nullptr)));
++          new ExternalTabModel(requested_owner, group, nullptr, requested_owner)));
+       owner = Get(requested_owner);
+     }
+     auto group = owner->group_;
+@@ -122,7 +122,7 @@
+     tabs.insert(tabs.begin() + at, contents->GetWeakPtr());
+     if (active) group->active = contents->GetWeakPtr();
+     contents->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
+-        new ExternalTabModel(contents, std::move(group), opener)));
++        new ExternalTabModel(contents, std::move(group), opener, requested_owner)));
+     return true;
+   }
+   bool active() const { return contents_ && group_->active.get() == contents_.get(); }
+@@ -135,6 +135,9 @@
+   }
+   content::WebContents* opener() const {
+     return opener_ && !opener_->IsBeingDestroyed() ? opener_.get() : nullptr;
++  }
++  content::WebContents* owner() const {
++    return owner_ && !owner_->IsBeingDestroyed() ? owner_.get() : nullptr;
+   }
+   bool Activate() {
+     if (!contents_ || contents_->IsBeingDestroyed()) return false;
+@@ -155,12 +158,13 @@
+     if (group.active && group.active->IsBeingDestroyed()) group.active.reset();
+   }
+   ExternalTabModel(content::WebContents* contents, std::shared_ptr<Group> group,
+-                   content::WebContents* opener)
++                   content::WebContents* opener, content::WebContents* owner)
+       : group_(std::move(group)), contents_(contents->GetWeakPtr()),
+-        opener_(opener ? opener->GetWeakPtr() : base::WeakPtr<content::WebContents>()) {}
++        opener_(opener ? opener->GetWeakPtr() : base::WeakPtr<content::WebContents>()),
++        owner_(owner ? owner->GetWeakPtr() : base::WeakPtr<content::WebContents>()) {}
+   inline static const int kKey = 0;
+   std::shared_ptr<Group> group_;
+-  base::WeakPtr<content::WebContents> contents_, opener_;
++  base::WeakPtr<content::WebContents> contents_, opener_, owner_;
+ };
+ }  // namespace extensions
+ #endif
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -552,6 +552,11 @@
+   value->SetInt("openerBrowserId",
+                 opener_browser ? opener_browser->GetIdentifier() : 0);
+   value->SetString("extensionId", extension_id);
++  auto* model=extensions::ExternalTabModel::Get(contents);
++  auto owner=model && model->owner()?CefBrowserHostBase::GetBrowserForContents(model->owner()):nullptr;
++  value->SetInt("ownerBrowserId",owner?owner->GetIdentifier():0);
++  value->SetInt("ownerVersion",1);
++  value->SetString("requestedKind","tab");
+   handler->OnExtensionTabCreated(browser.get(), value);
+ }
+ }  // namespace
+@@ -613,6 +618,9 @@
+       auto opener = model->opener()
+           ? CefBrowserHostBase::GetBrowserForContents(model->opener()) : nullptr;
+       result->SetInt("openerBrowserId", opener ? opener->GetIdentifier() : 0);
++      auto owner=model->owner()?CefBrowserHostBase::GetBrowserForContents(model->owner()):nullptr;
++      result->SetInt("ownerBrowserId",owner?owner->GetIdentifier():0);
++      result->SetInt("ownerVersion",1);
+     }
+     result->SetDouble("contextId", static_cast<double>(context_));
+     result->SetInt("pixelWidth", pixels_.width());

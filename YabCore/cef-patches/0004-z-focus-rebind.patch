@@ -1,0 +1,158 @@
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -4,6 +4,14 @@
+ #include "cef/libcef/browser/browser_host_base.h"
+ #include "content/browser/renderer_host/render_widget_host_view_mac.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "content/public/browser/visibility.h"
++#include "base/functional/bind.h"
++#include "base/scoped_observation.h"
++#include "ui/views/widget/widget_observer.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/sequenced_task_runner.h"
+ #include "content/browser/web_contents/web_contents_impl.h"
+ #include "content/browser/web_contents/web_contents_view_mac.h"
+ #include "content/public/browser/web_contents_observer.h"
+@@ -71,18 +79,132 @@
+     owner->Reset();
+   }
+ }
++namespace {
++// WebContents owns this state; the native owner is weak. Never retain a
++// CefBrowserView here, which could form a BrowserView/browser ownership cycle.
++class ExternalFocus : public content::WebContentsObserver,
++                      public views::WidgetObserver,
++                      public content::WebContentsUserData<ExternalFocus> {
++ public:
++  bool Set(views::Widget* widget, bool focused) {
++    if (!widget) return false;
++    auto self = weak_factory_.GetWeakPtr();
++    auto next_widget = widget->GetWeakPtr();
++    if (widget_ && widget_.get() != widget) {
++      desired_ = false;
++      Apply();
++      if (!self || !next_widget) return false;
++    }
++    if (widget_.get() != widget) {
++      observation_.Reset();
++      widget_ = widget->GetWeakPtr();
++      observation_.Observe(widget);
++    }
++    desired_ = focused;
++    const bool applied = Apply();
++    if (!self) return false;
++    if (applied) return true;
++    desired_ = false;
++    return false;
++  }
++  void OnWidgetDestroying(views::Widget*) override {
++    desired_ = false;
++    weak_factory_.InvalidateWeakPtrs();
++    observation_.Reset();
++    widget_.reset();
++    // Detach before native focus dispatch, which can destroy this owner.
++    // The native widget is already tearing down. Clear only its surviving
++    // renderer-side override; do not query its native window here.
++    auto* view = web_contents() ? web_contents()->GetRenderWidgetHostView() : nullptr;
++    if (view && !static_cast<content::RenderWidgetHostViewBase*>(view)
++                     ->IsRenderWidgetHostViewChildFrame())
++      static_cast<content::RenderWidgetHostViewMac*>(view)->SetExternalHostFocus(false);
++  }
++  void OnWidgetVisibilityChanged(views::Widget*, bool visible) override {
++    if (!visible) {
++      desired_ = false;
++      Apply();
++    }
++  }
++  void RenderViewReady() override { ScheduleApply(); }
++  void RenderViewHostChanged(content::RenderViewHost*,
++                             content::RenderViewHost*) override {
++    ScheduleApply();
++  }
++  void RenderFrameHostChanged(content::RenderFrameHost*,
++                              content::RenderFrameHost* new_host) override {
++    if (web_contents() && new_host == web_contents()->GetPrimaryMainFrame())
++      ScheduleApply();
++  }
++  void OnVisibilityChanged(content::Visibility visibility) override {
++    if (visibility == content::Visibility::HIDDEN) {
++      desired_ = false;
++      Apply();
++    }
++  }
++  void WebContentsDestroyed() override {
++    desired_ = false;
++    weak_factory_.InvalidateWeakPtrs();
++    observation_.Reset();
++    widget_.reset();
++    Observe(nullptr);
++  }
++ private:
++  friend class content::WebContentsUserData<ExternalFocus>;
++  explicit ExternalFocus(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<ExternalFocus>(*contents) {}
++  bool Apply() {
++    auto* contents = web_contents();
++    auto* view = contents ? contents->GetRenderWidgetHostView() : nullptr;
++    auto* host = widget_
++        ? views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
++              widget_->GetNativeWindow()) : nullptr;
++    if (!host || (desired_ && !view)) return false;
++    if (view && static_cast<content::RenderWidgetHostViewBase*>(view)
++                    ->IsRenderWidgetHostViewChildFrame()) return false;
++    auto self = weak_factory_.GetWeakPtr();
++    auto contents_weak = contents ? contents->GetWeakPtr()
++                                  : base::WeakPtr<content::WebContents>();
++    const bool focused = desired_;
++    if (!host->SetExternalHostFocus(focused) || !self) return false;
++    // Native activation can call client code and replace/destroy contents.
++    // Re-read the view only through a surviving owner after that dispatch.
++    view = contents_weak ? contents_weak->GetRenderWidgetHostView() : nullptr;
++    if (focused && !view) return false;
++    if (view) {
++      if (static_cast<content::RenderWidgetHostViewBase*>(view)
++              ->IsRenderWidgetHostViewChildFrame()) return false;
++      static_cast<content::RenderWidgetHostViewMac*>(view)
++          ->SetExternalHostFocus(focused);
++    }
++    return true;
++  }
++  void ApplyIfDesired() {
++    if (desired_) Apply();
++  }
++  void ScheduleApply() {
++    // Run after the current swap/attachment notification. No timer, JS focus
++    // or delayed text insertion substitutes for native renderer readiness.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&ExternalFocus::ApplyIfDesired,
++                                 weak_factory_.GetWeakPtr()));
++  }
++  bool desired_ = false;
++  base::WeakPtr<views::Widget> widget_;
++  base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++  base::WeakPtrFactory<ExternalFocus> weak_factory_{this};
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalFocus);
++}  // namespace
++
+ bool SetFocus(views::Widget* widget, CefRefPtr<CefBrowserView> browser_view,
+               bool focused) {
+   auto browser = CefBrowserHostBase::FromBrowser(browser_view->GetBrowser());
+   auto* contents = browser ? browser->GetWebContents() : nullptr;
+-  auto* view = contents ? contents->GetRenderWidgetHostView() : nullptr;
+-  auto* host = widget ? views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
+-                            widget->GetNativeWindow()) : nullptr;
+-  if (!view || !host) return false;
+-  auto* base_view = static_cast<content::RenderWidgetHostViewBase*>(view);
+-  if (base_view->IsRenderWidgetHostViewChildFrame() ||
+-      !host->SetExternalHostFocus(focused)) return false;
+-  static_cast<content::RenderWidgetHostViewMac*>(view)->SetExternalHostFocus(focused);
++  if (!contents || !ExternalFocus::GetOrCreateForWebContents(contents)
++                        ->Set(widget, focused)) return false;
+   if (focused) browser_view->RequestFocus();
+   return true;
+ }

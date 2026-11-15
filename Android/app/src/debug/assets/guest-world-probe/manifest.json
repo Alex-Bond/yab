@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Yab debug guest world probe",
+  "version": "1.0.0",
+  "browser_specific_settings": {"gecko": {"id": "guest-world-probe@browser.local"}},
+  "permissions": ["nativeMessaging", "geckoViewAddons", "storage"],
+  "optional_permissions": ["userScripts"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"scripts": ["background.js"]},
+  "content_scripts": [{"matches": ["http://127.0.0.1/*"], "js": ["host-content.js"], "run_at": "document_start"}]
+}

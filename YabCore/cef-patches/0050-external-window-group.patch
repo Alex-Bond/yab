@@ -1,0 +1,364 @@
+diff --git a/cef/include/cef_browser.h b/cef/include/cef_browser.h
+index b13fb08..42ea617 100644
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -53,6 +53,7 @@
+ #define CEF_YAB_DISCARD_VERSION 1
+ #define CEF_YAB_EXTERNAL_ACTION_VERSION 1
+ #define CEF_YAB_NATIVE_TAB_MODEL_VERSION 1
++#define CEF_YAB_EXTERNAL_TAB_GROUP_VERSION 1
+ #define CEF_YAB_EXTERNAL_PAGE_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ #define CEF_YAB_NATIVE_MEDIA_SESSION_VERSION 1
+@@ -1309,6 +1310,15 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
+   ///
+   /*--cef(added=experimental)--*/
+   virtual bool SetExternalPageVisibility(bool visible) = 0;
++
++  ///
++  /// Lists this bound page in the embedder's window led by |lead|, at |index|.
++  /// Extensions see that one window, its pages in this order, one active.
++  /// A page moves between windows here. UI thread only.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool SetExternalTabGroup(CefRefPtr<CefBrowser> lead, int index,
++                                   bool active) = 0;
+   ///
+   /// Delegates native key status to the exact bound page. UI thread only.
+   ///
+diff --git a/cef/libcef/browser/browser_host_base.cc b/cef/libcef/browser/browser_host_base.cc
+index 5ee68ef..00372a2 100644
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -1202,6 +1202,16 @@ bool CefBrowserHostBase::SetExternalPageSize(const CefSize& size) {
+ #endif
+ }
+ 
++bool CefBrowserHostBase::SetExternalTabGroup(CefRefPtr<CefBrowser> lead,
++                                              int index, bool active) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::GroupPage(this, CefBrowserHostBase::FromBrowser(lead).get(), index, active);
++#else
++  return false;
++#endif
++}
++
+ bool CefBrowserHostBase::SetExternalPageVisibility(bool visible) {
+   CEF_REQUIRE_UIT_RETURN(false);
+ #if BUILDFLAG(IS_MAC)
+diff --git a/cef/libcef/browser/browser_host_base.h b/cef/libcef/browser/browser_host_base.h
+index 4b64165..98a2bc5 100644
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -307,6 +307,7 @@ class CefBrowserHostBase : public CefBrowserHost,
+       const CefString& action, double seconds) override;
+   bool SetExternalPageSize(const CefSize& size) override;
+   bool SetExternalPageVisibility(bool visible) override;
++  bool SetExternalTabGroup(CefRefPtr<CefBrowser> lead, int index, bool active) override;
+   bool SetExternalPageFocus(bool focused) override;
+   bool ReplyExternalPageSelect(int token, int index) override;
+   bool OpenExtensionAction(const CefString& extension_id,
+diff --git a/cef/libcef/browser/views/external_host_mac.h b/cef/libcef/browser/views/external_host_mac.h
+index 2822011..f949495 100644
+--- a/cef/libcef/browser/views/external_host_mac.h
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -16,6 +16,7 @@ bool BindDefaultPage(CefBrowserHostBase* browser);
+ CefRefPtr<CefDictionaryValue> PageState(CefBrowserHostBase* browser);
+ bool ResizePage(CefBrowserHostBase* browser, const CefSize& size);
+ bool ShowPage(CefBrowserHostBase* browser, bool visible);
++bool GroupPage(CefBrowserHostBase* browser, CefBrowserHostBase* lead, int index, bool active);
+ bool FocusPage(CefBrowserHostBase* browser, bool focused);
+ bool SelectPage(CefBrowserHostBase* browser, int token, int index);
+ bool OpenAction(CefBrowserHostBase* browser, const std::string& extension_id,
+diff --git a/cef/libcef/browser/views/external_host_mac.mm b/cef/libcef/browser/views/external_host_mac.mm
+index d6eb6e0..4caba25 100644
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -28,6 +28,8 @@
+ #include "cef/libcef/browser/views/external_print.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
++#include "chrome/common/extensions/api/tabs.h"
++#include "extensions/browser/event_router.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
+ #include "ui/compositor/compositor.h"
+@@ -843,6 +845,42 @@ bool SelectPage(CefBrowserHostBase* browser, int token, int index) {
+   return page && page->Owns() && select && select->Reply(token, index);
+ }
+ 
++namespace {
++void TabActivateRequested(content::WebContents* contents) {
++  CefRefPtr<CefBrowserHostBase> browser;
++  auto handler = DisplayHandlerFor(contents, &browser);
++  if (!handler) return;
++  auto value = CefDictionaryValue::Create();
++  value->SetString("requestedKind", "activate");
++  handler->OnExtensionTabCreated(browser.get(), value);
++}
++}  // namespace
++
++bool GroupPage(CefBrowserHostBase* browser, CefBrowserHostBase* lead, int index, bool active) {
++  auto* contents = browser ? browser->GetWebContents() : nullptr;
++  auto* owner = lead ? lead->GetWebContents() : nullptr;
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !contents || !owner) return false;
++  bool activated = false;
++  if (!extensions::ExternalTabModel::BindEmbedded(contents, owner,
++          sessions::SessionTabHelper::IdForWindowContainingTab(owner).id(),
++          index, active, &activated)) {
++    return false;
++  }
++  if (activated) {
++    extensions::api::tabs::OnActivated::ActiveInfo info;
++    info.tab_id = extensions::ExtensionTabUtil::GetTabId(contents);
++    info.window_id = extensions::ExtensionTabUtil::GetWindowIdOfTab(contents);
++    if (auto* router = extensions::EventRouter::Get(contents->GetBrowserContext())) {
++      router->BroadcastEvent(std::make_unique<extensions::Event>(
++          extensions::events::TABS_ON_ACTIVATED,
++          extensions::api::tabs::OnActivated::kEventName,
++          extensions::api::tabs::OnActivated::Create(info),
++          contents->GetBrowserContext()));
++    }
++  }
++  return true;
++}
++
+ bool BindNativeTabModel(content::WebContents* contents,
+                         content::WebContents* owner,
+                         content::WebContents* opener, bool active, int index) {
+@@ -862,6 +900,7 @@ void InstallExtensionHooks() {
+   hooks.popup_closed = &PopupClosed;
+   hooks.tab_created = &TabCreated;
+   hooks.tab_model_created = &BindNativeTabModel;
++  hooks.tab_activate_requested = &TabActivateRequested;
+   InstallConsentHooks();
+   InstallPrintHooks();
+ }
+diff --git a/chrome/browser/extensions/api/tabs/tabs_api.cc b/chrome/browser/extensions/api/tabs/tabs_api.cc
+index 1f5dd7f..3b87ee2 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -980,6 +980,14 @@ ExtensionFunction::ResponseAction WindowsGetAllFunction::Run() {
+                                           extractor.type_filters())) {
+       continue;
+     }
++    // One entry per embedder window; its pages' concealed windows are not windows.
++    auto* external_contents = controller->GetBrowserWindowInterface()
++                                  ->GetTabStripModel()->GetActiveWebContents();
++    if (ExternalTabModel::Hidden(external_contents)) continue;
++    if (auto* external = ExternalTabModel::Get(external_contents);
++        external && external->embedded() && !external->lead()) {
++      continue;
++    }
+     window_list.Append(ExtensionTabUtil::CreateWindowValueForExtension(
+         *controller->GetBrowserWindowInterface(), extension(),
+         populate_tab_behavior, source_context_type()));
+@@ -2031,6 +2039,8 @@ bool TabsQueryFunction::MatchesTab(::tabs::TabInterface* candidate_tab,
+     return false;
+   }
+ 
++  if (ExternalTabModel::Hidden(web_contents)) return false;
++
+   if (!MatchesBool(query_info_.highlighted,
+                    ExternalTabModel::Get(web_contents)
+                        ? ExternalTabModel::Get(web_contents)->active()
+@@ -2886,6 +2896,15 @@ bool TabsUpdateFunction::UpdateActiveTab(
+     return true;
+   }
+ 
++  // The embedder owns which tab is on screen: it selects, and reports back.
++  if (auto* external = ExternalTabModel::Get(tab_list.GetTab(tab_index)->GetContents());
++      external && external->embedded()) {
++    if (auto activate = GetExternalExtensionHooks().tab_activate_requested) {
++      activate(tab_list.GetTab(tab_index)->GetContents());
++    }
++    return true;
++  }
++
+ #if BUILDFLAG(IS_ANDROID)
+   // TODO(crbug.com/496733610): Supporting CCT/PWA/TWA is currently not possible
+   // in C++ browser tests on Android. Add tests once that's supported.
+diff --git a/chrome/browser/extensions/api/tabs/windows_util.cc b/chrome/browser/extensions/api/tabs/windows_util.cc
+index d85e817..0241339 100644
+--- a/chrome/browser/extensions/api/tabs/windows_util.cc
++++ b/chrome/browser/extensions/api/tabs/windows_util.cc
+@@ -12,6 +12,9 @@
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/browser/extensions/extension_util.h"
+ #include "chrome/browser/extensions/window_controller.h"
++#include "chrome/browser/extensions/external_tab_model.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -66,6 +69,21 @@ bool GetControllerFromWindowID(ExtensionFunction* function,
+       return true;
+     }
+ 
++    // An embedder's window outlives the concealed window it was named after:
++    // any of its pages answers for it.
++    for (extensions::WindowController* candidate :
++         *extensions::WindowControllerList::GetInstance()) {
++      auto* browser = candidate->GetBrowserWindowInterface();
++      auto* model = browser ? extensions::ExternalTabModel::Get(
++                                  browser->GetTabStripModel()->GetActiveWebContents())
++                            : nullptr;
++      if (model && model->embedded() && model->window() == window_id &&
++          CanOperateOnWindow(function, candidate, filter)) {
++        *out_controller = candidate;
++        return true;
++      }
++    }
++
+     *error = extensions::ErrorUtils::FormatErrorMessage(
+         extensions::ExtensionTabUtil::kWindowNotFoundError,
+         base::NumberToString(window_id));
+diff --git a/chrome/browser/extensions/browser_extension_window_controller.cc b/chrome/browser/extensions/browser_extension_window_controller.cc
+index f94bda9..4e9d2c5 100644
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -204,9 +204,17 @@ base::DictValue BrowserExtensionWindowController::CreateWindowValueForExtension(
+     mojom::ContextType context) const {
+   base::DictValue dict;
+ 
+-  dict.Set(extension_misc::kId, session_id_.id());
++  auto* external_contents = tab_list_->GetTabCount() ? tab_list_->GetTab(0)->GetContents() : nullptr;
++  auto* external = ExternalTabModel::Get(external_contents);
++  const bool embedded = external && external->embedded();
++  dict.Set(extension_misc::kId, embedded ? external->window() : session_id_.id());
+   dict.Set(kWindowTypeKey, GetWindowTypeText());
+-  dict.Set(kFocusedKey, window()->IsActive());
++  if (embedded) {
++    auto* focused = ExternalTabModel::Get(ExternalTabFocus::Get(profile()));
++    dict.Set(kFocusedKey, focused && focused->window() == external->window());
++  } else {
++    dict.Set(kFocusedKey, window()->IsActive());
++  }
+   dict.Set(kIncognitoKey, profile()->IsOffTheRecord());
+   dict.Set(kAlwaysOnTopKey,
+            window()->GetZOrderLevel() == ui::ZOrderLevel::kFloatingWindow);
+@@ -252,6 +260,18 @@ base::ListValue BrowserExtensionWindowController::CreateTabList(
+     const Extension* extension,
+     mojom::ContextType context) const {
+   base::ListValue tab_list;
++  auto* external_contents = tab_list_->GetTabCount() ? tab_list_->GetTab(0)->GetContents() : nullptr;
++  if (auto* external = ExternalTabModel::Get(external_contents); external && external->embedded()) {
++    // The embedder's window: its pages in its order, not this concealed one.
++    for (content::WebContents* contents : external->tabs()) {
++      const ExtensionTabUtil::ScrubTabBehavior behavior =
++          ExtensionTabUtil::GetScrubTabBehavior(extension, context, contents);
++      tab_list.Append(ExtensionTabUtil::CreateTabObject(
++                          contents, behavior, extension, &tab_list_.get(), 0)
++                          .ToValue());
++    }
++    return tab_list;
++  }
+   const int tab_count = tab_list_->GetTabCount();
+ 
+   for (int i = 0; i < tab_count; ++i) {
+diff --git a/chrome/browser/extensions/external_action_origin.h b/chrome/browser/extensions/external_action_origin.h
+index e1f98dc..4a9b0dd 100644
+--- a/chrome/browser/extensions/external_action_origin.h
++++ b/chrome/browser/extensions/external_action_origin.h
+@@ -31,6 +31,8 @@ struct ExternalExtensionHooks {
+   void (*popup_shown)(content::WebContents* popup, views::Widget* widget) =
+       nullptr;
+   void (*popup_closed)(content::WebContents* popup) = nullptr;
++  // chrome.tabs.update({active: true}) on a page of an embedder's window.
++  void (*tab_activate_requested)(content::WebContents*) = nullptr;
+   // Conceal an externally presented original action widget before Show().
+   // False cancels showing. Ordinary Chrome popup paths never call this.
+   bool (*popup_before_show)(content::WebContents*, views::Widget*) = nullptr;
+diff --git a/chrome/browser/extensions/external_tab_model.h b/chrome/browser/extensions/external_tab_model.h
+index 444e24d..486aff9 100644
+--- a/chrome/browser/extensions/external_tab_model.h
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -125,6 +125,70 @@ class ExternalTabModel : public base::SupportsUserData::Data {
+         new ExternalTabModel(contents, std::move(group), opener, requested_owner)));
+     return true;
+   }
++  // The embedder lists its window: every page in its order, one active.
++  // `activated` says the active page changed. A page moves between windows
++  // here, unlike Bind. Native session ID of the first lead stays the window's.
++  static bool BindEmbedded(content::WebContents* contents,
++                           content::WebContents* lead, int native_window_id,
++                           int index, bool active, bool* activated) {
++    if (!contents || !lead || contents->IsBeingDestroyed() ||
++        lead->IsBeingDestroyed() || native_window_id < 0 ||
++        contents->GetBrowserContext() != lead->GetBrowserContext())
++      return false;
++    if (!Get(lead)) {
++      auto group = std::make_shared<Group>();
++      group->window = native_window_id;
++      group->active = lead->GetWeakPtr();
++      group->tabs.push_back(lead->GetWeakPtr());
++      lead->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
++          new ExternalTabModel(lead, group, nullptr, lead)));
++    }
++    auto group = Get(lead)->group_;
++    group->embedded = true;
++    auto* context = contents->GetBrowserContext();
++    if (!context->GetUserData(&kEmbeddedKey))
++      context->SetUserData(&kEmbeddedKey, std::make_unique<base::SupportsUserData::Data>());
++    auto* current = Get(contents);
++    if (current && current->group_ != group) {
++      auto& old = current->group_->tabs;
++      std::erase_if(old, [contents](const auto& tab) { return tab.get() == contents; });
++      if (current->group_->active.get() == contents) current->group_->active.reset();
++      current = nullptr;
++    }
++    if (!current) {
++      contents->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
++          new ExternalTabModel(contents, group, nullptr, lead)));
++    }
++    Compact(*group);
++    auto& tabs = group->tabs;
++    std::erase_if(tabs, [contents](const auto& tab) { return tab.get() == contents; });
++    const auto at = index < 0 ? tabs.size()
++                             : std::min(static_cast<size_t>(index), tabs.size());
++    tabs.insert(tabs.begin() + at, contents->GetWeakPtr());
++    if (active && group->active.get() != contents) {
++      group->active = contents->GetWeakPtr();
++      if (activated) *activated = true;
++    }
++    return true;
++  }
++  // A page the embedder does not list (its own management and side-panel
++  // pages), once it lists any in this profile: not a tab to extensions.
++  static bool Hidden(content::WebContents* contents) {
++    if (!contents || !contents->GetBrowserContext()->GetUserData(&kEmbeddedKey)) return false;
++    auto* model = Get(contents);
++    return !model || !model->group_->embedded;
++  }
++  bool embedded() const { return group_->embedded; }
++  bool lead() const {
++    Compact(*group_);
++    return !group_->tabs.empty() && group_->tabs.front().get() == contents_.get();
++  }
++  std::vector<content::WebContents*> tabs() const {
++    Compact(*group_);
++    std::vector<content::WebContents*> all;
++    for (const auto& tab : group_->tabs) all.push_back(tab.get());
++    return all;
++  }
+   bool active() const { return contents_ && group_->active.get() == contents_.get(); }
+   int window() const { return group_->window; }
+   int index() const {
+@@ -148,6 +212,7 @@ class ExternalTabModel : public base::SupportsUserData::Data {
+  private:
+   struct Group {
+     int window = -1;
++    bool embedded = false;
+     base::WeakPtr<content::WebContents> active;
+     std::vector<base::WeakPtr<content::WebContents>> tabs;
+   };
+@@ -163,6 +228,7 @@ class ExternalTabModel : public base::SupportsUserData::Data {
+         opener_(opener ? opener->GetWeakPtr() : base::WeakPtr<content::WebContents>()),
+         owner_(owner ? owner->GetWeakPtr() : base::WeakPtr<content::WebContents>()) {}
+   inline static const int kKey = 0;
++  inline static const int kEmbeddedKey = 0;
+   std::shared_ptr<Group> group_;
+   base::WeakPtr<content::WebContents> contents_, opener_, owner_;
+ };

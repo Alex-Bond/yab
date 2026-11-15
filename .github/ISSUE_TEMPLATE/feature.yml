@@ -1,0 +1,31 @@
+name: Feature request
+description: An idea for something Yab should do.
+labels: ["proposal", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Yab stays small on purpose, so not every good idea fits. The owner decides what goes in; see GOVERNANCE.md. Describing the problem you hit helps more than describing the button you want.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What were you trying to do, and what got in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you'd like
+      description: How would it work? A sketch or a screenshot of another app doing it is welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: How you manage today (optional)
+      description: A workaround, another browser, an extension.
+  - type: input
+    id: yab-version
+    attributes:
+      label: Yab version (optional)

@@ -1,0 +1,135 @@
+{
+  "upstreamRevision": "ac19329a1d32108fd05ead15568cb6e188f8615a",
+  "applied": false,
+  "compiled": false,
+  "runtimeVerified": false,
+  "parityAcceptance": false,
+  "patchSha256": "1c40380ef47228382ed612cf1671d15a54e1da9fb2be4b3503328751b62ad052",
+  "files": [
+    {
+      "path": "chrome/android/chrome_java_sources.gni",
+      "originalSha256": "58cf457f75ff635ec6346bcc82ab6c4745a8f0ac27b3712b4e7de26b8a6ff6c7",
+      "proposedSha256": "cb5bd34a797c9833c5a3b1590eddef985cdc1b99b1bc0acdc7a751dfaf8614f1"
+    },
+    {
+      "path": "chrome/android/java/src/org/chromium/chrome/browser/ChromeApplicationImpl.java",
+      "originalSha256": "0b78e1d9a7853659fb0ac4e02c5b0ad3378ff27d59f92dead6b4848ce6bd968e",
+      "proposedSha256": "5a0fb42ec0c9c9a2a6cec45fc58363baa1d1bec95a3885eb0d507bd4531dc727"
+    },
+    {
+      "path": "chrome/android/java/src/org/chromium/chrome/browser/tab/TabBuilder.java",
+      "originalSha256": "03c8d8c06f2b3d4967f6b16c10c06a5d5b48c0b73e3257f49711dd0db8ac2598",
+      "proposedSha256": "eac7b4f10d40b7784528ed569751ffd4c963b1fbfeb3508cdfbd6272f61ad7d1"
+    },
+    {
+      "path": "chrome/android/java/src/org/chromium/chrome/browser/tab/TabImpl.java",
+      "originalSha256": "40f6374e48c47607f526cb9e542977f18fd48e22b376cdb6c061d96113eb2750",
+      "proposedSha256": "2d59133b7974cc9ea1546ceae484f30abf8e27001b9894297f376c88335b9058"
+    },
+    {
+      "path": "chrome/android/java/src/org/chromium/chrome/browser/tabmodel/ChromeTabCreator.java",
+      "originalSha256": "ddc87a9dc001eae2c2e24ccc716e7649f59ed5791e6197325bc4d0786de12b0c",
+      "proposedSha256": "8e9a2e3f54789a48ba13bcf83e1d8964a39f5ecca8fb5e773bd4d0577ebc0bc5"
+    },
+    {
+      "path": "chrome/android/java/src/org/chromium/chrome/browser/yab/YabChromeBootstrap.java",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "proposedSha256": "eab1ba949bc9182be33ff367a8550b9167774d65744baab60e4c46015ea386fd"
+    },
+    {
+      "path": "chrome/android/java/src/org/chromium/chrome/browser/yab/YabChromeSession.java",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "proposedSha256": "e77479468dd1693421987a15e7ed5e17cd019c7ab57d95f6549b049ce650a362"
+    },
+    {
+      "path": "chrome/browser/android/content/java/src/org/chromium/chrome/browser/content/WebContentsFactory.java",
+      "originalSha256": "6c78ec52798ced8c9c2cdd97c97ac237636cf4f7da6d0b0eb9d0eec38b2598e8",
+      "proposedSha256": "e12c7f2a267752a722cc59c4e2cc71af9db68dfcf85ed80a739e2a7d0d45115a"
+    },
+    {
+      "path": "chrome/browser/android/content/web_contents_factory.cc",
+      "originalSha256": "8194fe44ffb9b63773c30e5fd19847149bfab3710243517f647b8ff5b52e5586",
+      "proposedSha256": "b3985d242c4db35ab8114bf2ebf528ed4045e41aa7a48c2e7bc5874dd3040c04"
+    },
+    {
+      "path": "chrome/browser/profiles/BUILD.gn",
+      "originalSha256": "fa0a8349ea9b057ab43b5fad5b168b8ece5f6d4cf7be2d3f07e6e6a368976e2d",
+      "proposedSha256": "cb9b719c7673b94a8d81396c729bf5e30f3d6a9a8f49ab367d914cca942a1d08"
+    },
+    {
+      "path": "chrome/browser/profiles/android/java/src/org/chromium/chrome/browser/profiles/Profile.java",
+      "originalSha256": "5e63c8a2e1b4779f507d6c31bf62e57728c878c9d306e19322f2b0055f6f09cd",
+      "proposedSha256": "2a9405334e13dd6f173ed212f5c1a0e25424e809d493e5e7d77ec4bf574d0240"
+    },
+    {
+      "path": "chrome/browser/profiles/profile_destroyer.cc",
+      "originalSha256": "a53d76622f2af5db104d0c7d23e528dab8d89db4baf3ae791bbb5e69c937120c",
+      "proposedSha256": "0978ad484cc258a7c7e8716cae871a6316c76d9b45f3624249bb9a2da2fa1f03"
+    },
+    {
+      "path": "chrome/browser/tab/BUILD.gn",
+      "originalSha256": "f7c4021de496f0f258a73a3ded56007ae33d035bbef6c0040fa4327e42538e5a",
+      "proposedSha256": "5745fb11857a74d317123d4e4583b931dfc707846512e0f05055537bf8bfe97c"
+    },
+    {
+      "path": "chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/TabStateExtractor.java",
+      "originalSha256": "bc2a5e44cfb3bd2ae7ddff324baf1e2d59c6a6d3ff315c2942600654c26a2712",
+      "proposedSha256": "299648885afe242acac25d1ffd55ee669e336cdc8adabcccda62e3360c8436dc"
+    },
+    {
+      "path": "chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/WebContentsState.java",
+      "originalSha256": "7c85961b0282c311292e6d3153124f264f7950815e9187925b6c602a653a91ba",
+      "proposedSha256": "22077326a3f83aa460a653906d71f330f7b2d9d94d6b1f679aae19cd8b3f2228"
+    },
+    {
+      "path": "chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/YabNamespaceIdentity.java",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "proposedSha256": "54b843328b3c8614fc060c5f84664a4478511561c90d73d5d27c0f6d1c4e578c"
+    },
+    {
+      "path": "chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/YabNamespaceRuntime.java",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "proposedSha256": "bc4c76dd0c78d92b7e2d256c98ce719e1cebb23efdc29ef879eb3b3125a043d5"
+    },
+    {
+      "path": "chrome/browser/tab/web_contents_state.cc",
+      "originalSha256": "c61bfd0a6f7830e83df18aa4e397458c1e642fd1862be57f4e4adb10cdf8f4ce",
+      "proposedSha256": "9dccb400baad845fb17dda9d95940c492e7078a3a50a9e20163bce166a7e9c1e"
+    },
+    {
+      "path": "extensions/browser/BUILD.gn",
+      "originalSha256": "3e6c5c27f119f5f07b66b6b3f1bb702da4c860876dcedd0dd0356df18bea3aa9",
+      "proposedSha256": "474cfa7f2f1a77b6c20bc961a674b815c1cef4712493c93a9bae86e1eb1317fd"
+    },
+    {
+      "path": "extensions/browser/api/cookies/BUILD.gn",
+      "originalSha256": "0212fe0c35eaa6e449ad7526fb388887138fe936eb6f778e96b3bdeecb1de016",
+      "proposedSha256": "e62b07bc658f2973fcd44bcdfb4f9025078a7bbb61792c1b37ee54f33e6e8b0d"
+    },
+    {
+      "path": "extensions/browser/api/cookies/cookies_api.cc",
+      "originalSha256": "49fe7022252d2c06b884bfed75b1be0aa2c871f38caed1fedf3bf15ba44f4ea0",
+      "proposedSha256": "8d27dbc9ae9a60c174faa6083d34b7fafe10a3664222d7a0ef33c5116f2a0d38"
+    },
+    {
+      "path": "extensions/browser/api/cookies/cookies_api.h",
+      "originalSha256": "19e9b16f13fae524d09d9f147be6458f4a217c2d8b1b491bbbe76625e39807b0",
+      "proposedSha256": "4f1f9a7e5b49af2007b722a770625b75cbd6fd51ab88300ddab1f7930f012134"
+    },
+    {
+      "path": "extensions/browser/api/cookies/yab_cookie_store_policy.cc",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "proposedSha256": "31e8e08a3fb0847c18260d31a3154b117f105765ffc3443c62e496a5b5180fbd"
+    },
+    {
+      "path": "extensions/browser/api/cookies/yab_cookie_store_policy.h",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "proposedSha256": "56c3b3f8cd9de2cecfcd033f0fe0587f6fa2eb0ea87272e318fd36892cc33f43"
+    },
+    {
+      "path": "extensions/browser/api/cookies/yab_cookie_store_policy_unittest.cc",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "proposedSha256": "dbc466f3cba45f1501555acbb81f9176b3bc4ed0aa6ffa5946852efd73046ced"
+    }
+  ]
+}

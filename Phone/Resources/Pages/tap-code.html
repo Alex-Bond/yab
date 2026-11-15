@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#E2001A">
+<title>Sign in · TAP Air Portugal</title>
+<!-- flytap.com/en-se/login/code Hand-made: the prototype does not draw this page; its words and numbers come from the prototype (TASK_DEFS.lisbon, consentHTML('pay'), codeHTML). -->
+<style>
+:root { --top: 54px; --f-ios: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, "Helvetica Neue", Arial, sans-serif; --f-mono: ui-monospace, "SF Mono", Menlo, monospace; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font: 400 16px/1.45 var(--f-ios); color: #111; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; letter-spacing: -.01em; }
+button { appearance: none; border: 0; padding: 0; margin: 0; font-family: var(--f-ios); cursor: pointer; }
+.pg { min-height: 100vh; overflow-x: hidden; }
+.pg .pad { padding: 0 20px; }
+.pg .bottom-space { height: 120px; }
+.pg h1, .pg h2, .pg h3 { margin: 0; font-family: var(--f-ios); letter-spacing: -.02em; }
+.pg p { margin: 0 0 12px; }
+.ic { display: block; flex: none; }
+.fv { display: block; flex: none; object-fit: cover; }
+.fv.sq { border-radius: 23%; }
+.fv.ci { border-radius: 50%; }
+.fv-draw { display: grid; place-items: center; flex: none; color: #fff; font: 700 11px/1 var(--f-ios); }
+.priv-pg { background: #17161C !important; min-height: 100vh; display: grid; place-items: center; }
+.priv-mid { display: grid; justify-items: center; gap: 10px; text-align: center; padding: 0 40px; color: #fff; }
+.priv-mid b { font: 700 22px/1.2 var(--f-ios); }
+.priv-mid span { font: 400 15px/1.45 var(--f-ios); color: rgba(255, 255, 255, .62); }
+html, body { background: #fff; }</style>
+</head>
+<body>
+<div class="pg" style="background:#fff">
+  <div style="background:#E2001A;color:#fff;padding:calc(var(--top,54px) + 6px) 18px 12px"><div style="display:flex;align-items:center;gap:8px;font-weight:700"><span class="fv-draw" style="width:20px;height:20px;border-radius:23%;background:#fff;color:#fff;font-size:10px"><b style="color:#E2001A">T</b></span><span>TAP Air Portugal</span><span style="margin-left:auto;font-weight:500;font-size:14px;opacity:.85">Sign in</span></div></div>
+  <div class="pad" style="padding-top:22px;display:grid;gap:14px">
+    <h1 style="font-size:26px;font-weight:700">Check your phone</h1>
+    <p style="color:#3a3a3c">We sent a 6-digit code to the number ending in 18. It works for 10 minutes.</p>
+    <label for="code" style="font-size:13px;font-weight:600;color:#6e6e73;letter-spacing:.04em;text-transform:uppercase">Code</label>
+    <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" placeholder="······" aria-label="6-digit code"
+      style="height:56px;border-radius:14px;border:1.5px solid #D9DCE1;padding:0 16px;font:600 26px/1 var(--f-ios);letter-spacing:.5em;color:#111;background:#fff">
+    <button id="verify" type="submit" style="height:50px;border-radius:14px;background:#E2001A;color:#fff;font:600 17px/1 var(--f-ios)">Verify and sign in</button>
+    <p style="font-size:14px;color:#6e6e73">Didn’t get it? <span style="color:#E2001A;font-weight:600">Send again</span> in 0:45</p>
+    <div style="height:10px;border-radius:5px;background:#EEF0F2;width:100%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF0F2;width:92%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF0F2;width:86%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF0F2;width:100%;margin:0 0 10px"></div><div style="height:10px;border-radius:5px;background:#EEF0F2;width:92%;margin:0 0 10px"></div>
+  </div><div class="bottom-space"></div></div>
+</body>
+</html>

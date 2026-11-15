@@ -1,0 +1,42 @@
+{
+  "reason": "user deferred extensions to a later release",
+  "startedAt": "2026-10-23T07:56:30.888755+00:00",
+  "baselineCommandId": "cmd_ef0c4c93634447868731c4879cbc",
+  "preflightCommandId": "cmd_efb391afc7a441ffab26323a73b0",
+  "executor": {
+    "pid": 92983,
+    "parent": 92921,
+    "startTicks": 583332,
+    "state": "S",
+    "argv": [
+      "/data/yab-chromium-baseline/checkout/src/third_party/siso/cipd/siso",
+      "ninja",
+      "--offline",
+      "-C",
+      "out/YabDesktopArm64",
+      "-local_jobs=6",
+      "chrome_public_apk"
+    ]
+  },
+  "runnerPid": 92888,
+  "signal": "SIGINT via pidfd",
+  "signalSent": true,
+  "executorExited": true,
+  "completedActionsBeforeStop": 17105,
+  "dynamicTotalActionsBeforeStop": 62841,
+  "freeBytesBefore": 135250653184,
+  "sourceRevision": "ac19329a1d32108fd05ead15568cb6e188f8615a",
+  "configurationSha256": "23990d6ef913ecd24893380adcd7d3410e8892a3087085832ce53b023da77619",
+  "gnArgsSha256": "81f85749bc63cdd1094bc8622df525bd7f18e448cd7b0314563d1419f8f26150",
+  "cacheDeleted": false,
+  "sourceModified": false,
+  "configurationModified": false,
+  "signalSentAt": "2026-10-23T07:56:30.889337+00:00",
+  "executorExitObservedAt": "2026-10-23T07:56:32.390539+00:00",
+  "runnerExitCode": 1,
+  "runnerCompleted": false,
+  "remainingOwnedDescendants": [],
+  "runnerLockReleased": true,
+  "finishedAt": "2026-10-23T07:56:33.417393+00:00",
+  "freeBytesAfter": 135253823488
+}

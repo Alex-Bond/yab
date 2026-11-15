@@ -1,0 +1,16 @@
+# Who reviews what. Every pull request needs an approving review from a code
+# owner before it can merge (branch protection on main, see
+# docs/open-source/process.md). Add maintainers here as they join.
+
+*                       @serafimcloud
+
+# The design system and anything visible: the owner picks the look.
+/Sources/YabDesign/     @serafimcloud
+
+# Security-sensitive paths: updates, passwords, the sync server, CI.
+/Sources/YabUpdate/     @serafimcloud
+/Sources/YabUpdater/    @serafimcloud
+/Sources/Fast/Vault.swift @serafimcloud
+/sync-server/           @serafimcloud
+/.github/               @serafimcloud
+/yab.entitlements       @serafimcloud

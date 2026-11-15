@@ -1,0 +1,142 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Reader readability loading</title>
+<style>p{white-space:pre-wrap}</style></head><body><div id="fixture"></div>
+<script>
+(() => {
+  "use strict";
+  const fixture = document.getElementById("fixture"), messages = [], shadows = [];
+  const attach = Element.prototype.attachShadow;
+  let listener, checks = 0, currentCase = "SOURCE", failureCode = "NONE";
+  const must = (value, code) => { if (!value) { failureCode = code; throw new Error("Owned Reader readability assertion"); } checks++; };
+  const port = {postMessage(value) { messages.push(value); }, onMessage:{addListener(value) { listener = value; }}};
+  const active = () => shadows.filter(value => value.host.isConnected);
+  const paragraph = (length, marker = "PROSE") => {
+    const p = document.createElement("p");
+    p.textContent = marker + "x".repeat(length - marker.length);
+    return p;
+  };
+  const prose = (lengths = [400, 400, 400]) => lengths.map((length, index) => paragraph(length, "PARAGRAPH_" + index));
+  const set = (...nodes) => { must(active().length === 0, "PREVIOUS_SURFACE_CLOSED"); fixture.replaceChildren(...nodes); };
+  const probe = () => {
+    listener({command:"safety", request:"reader-readability-fixture"});
+    return messages.at(-1).readerAvailable;
+  };
+  let id;
+  const command = enabled => {
+    Element.prototype.attachShadow = function(options) {
+      const shadow = attach.call(this, options);
+      if (options.mode === "closed") shadows.push({host:this, shadow});
+      return shadow;
+    };
+    try { listener({command:"reader", enabled, expectedDocument:id, expectedURL:location.href}); }
+    finally { Element.prototype.attachShadow = attach; }
+  };
+  function check(available, inspect = () => {}) {
+    must(probe() === available, "AVAILABILITY");
+    command(true);
+    must(active().length === (available ? 1 : 0), "ENTRY_MATCHES_AVAILABILITY");
+    if (available) {
+      must(messages.at(-1).readerAvailable === true && messages.at(-1).readerEnabled === true, "ACTIVE_REMAINS_AVAILABLE");
+      inspect(active()[0].shadow);
+      command(false);
+      must(active().length === 0 && messages.at(-1).readerEnabled === false, "ORIGINAL_EXIT");
+    }
+  }
+  function finish(passed, category) {
+    const out = document.createElement("output");
+    out.textContent = (passed ? "READER_READABILITY_PASS" : "READER_READABILITY_FAIL") + " READER_READABILITY_STATE " +
+      JSON.stringify({case:currentCase, failure:category, assertion:failureCode, checks}) + " END_READER_READABILITY_STATE";
+    document.body.append(out);
+    document.title = passed ? "Reader readability passed" : "Reader readability failed";
+  }
+  try {
+    const bytes = Uint8Array.from(atob("__SOURCE_BASE64__"), value => value.charCodeAt(0));
+    new Function("browser", new TextDecoder().decode(bytes))({runtime:{connectNative() { return port; }}});
+    id = messages.find(value => value.kind === "state")?.documentID;
+    must(typeof listener === "function" && typeof id === "string", "EXACT_RESOURCE_PORT");
+
+    currentCase = "DIV_POSITIVE";
+    set(...prose());
+    must(!fixture.querySelector("article,main,[role=main]"), "DIV_WITHOUT_ARTICLE_TAG");
+    check(true, shadow => must(shadow.querySelectorAll("p").length === 3, "DIV_PARAGRAPHS_COPIED"));
+
+    currentCase = "LEGACY_250_NEGATIVE";
+    const short = document.createElement("article"); short.textContent = "z".repeat(250); set(short); check(false);
+
+    currentCase = "THRESHOLD_1199";
+    set(...prose([400, 400, 399])); check(false);
+    currentCase = "THRESHOLD_1200";
+    set(...prose([400, 400, 400])); check(true);
+    currentCase = "TRIMMED_1199";
+    const trimmed = prose([400, 400, 399]); trimmed.forEach(p => { p.textContent = " \n" + p.textContent + "\n "; });
+    set(...trimmed); check(false);
+    currentCase = "ONLY_TWO_BLOCKS";
+    set(...prose([600, 600])); check(false);
+    currentCase = "PARAGRAPH_24_EXCLUDED";
+    set(...prose([588, 588, 24])); check(false);
+    currentCase = "PARAGRAPH_25_INCLUDED";
+    set(...prose([588, 587, 25])); check(true);
+
+    const linked = own => Array.from({length:3}, () => {
+      const p = paragraph(own, "OWN_PROSE"), link = document.createElement("a");
+      link.href = "/not-followed"; link.textContent = "LINKED_PROSE" + "l".repeat(1800 - own - 12); p.append(link);
+      return p;
+    });
+    currentCase = "LINK_TWO_THIRDS";
+    set(...linked(600)); check(false);
+    currentCase = "LINK_JUST_BELOW_TWO_THIRDS";
+    set(...linked(601)); check(true, shadow => {
+      must(shadow.querySelectorAll("a").length === 0 && !shadow.textContent.includes("LINKED_PROSE"), "LINK_SUBTREES_STILL_EXCLUDED");
+    });
+
+    for (const [name, style] of [["DISPLAY", "display:none"], ["VISIBILITY", "visibility:hidden"],
+      ["COLLAPSE", "visibility:collapse"], ["OPACITY", "opacity:0"]]) {
+      currentCase = "HIDDEN_" + name;
+      const hidden = document.createElement("div"); hidden.style.cssText = style; hidden.append(paragraph(600));
+      set(...prose([600, 600]), hidden); check(false);
+    }
+    for (const tag of ["aside", "nav", "footer", "a", "dialog"]) {
+      currentCase = "AROUND_TAG_" + tag.toUpperCase();
+      const around = document.createElement(tag); if (tag === "dialog") around.open = true;
+      around.append(paragraph(600)); set(...prose([600, 600]), around); check(false);
+    }
+    for (const role of ["complementary", "navigation", "dialog", "alertdialog"]) {
+      currentCase = "AROUND_ROLE_" + role.toUpperCase();
+      const around = document.createElement("div"); around.setAttribute("role", role); around.append(paragraph(600));
+      set(...prose([600, 600]), around); check(false);
+    }
+    currentCase = "AROUND_CLASS";
+    const related = document.createElement("div"); related.className = "related-story"; related.append(paragraph(600));
+    set(...prose([600, 600]), related); check(false);
+
+    const teasers = extra => Array.from({length:3}, () => {
+      const card = document.createElement("div"), heading = document.createElement("h2");
+      heading.textContent = "h".repeat(extra); card.append(heading, paragraph(400)); return card;
+    });
+    currentCase = "BLOCK_RATIO_EXACT";
+    set(...teasers(140)); check(true);
+    currentCase = "TEASER_EXTRA_TEXT";
+    set(...teasers(141)); check(false);
+
+    const bestCase = sideLength => {
+      const article = document.createElement("div"); article.append(...prose());
+      set(article, paragraph(sideLength, "SIDE_PROSE"));
+    };
+    currentCase = "BEST_EXACT_80_PERCENT";
+    bestCase(300); check(true, shadow => must(!shadow.textContent.includes("SIDE_PROSE"), "DESCENDS_AT_80_PERCENT"));
+    currentCase = "BEST_BELOW_80_PERCENT";
+    bestCase(301); check(true, shadow => must(shadow.textContent.includes("SIDE_PROSE"), "RETAINS_BELOW_80_PERCENT"));
+    currentCase = "ONE_PARAGRAPH_CHILD";
+    const dominant = document.createElement("div"); dominant.append(paragraph(1000, "DOMINANT_PROSE"));
+    set(dominant, paragraph(100, "SECOND_PROSE"), paragraph(100, "THIRD_PROSE"));
+    check(true, shadow => must(shadow.textContent.includes("SECOND_PROSE") && shadow.textContent.includes("THIRD_PROSE"), "DOES_NOT_DESCEND_INTO_ONE_PARAGRAPH"));
+
+    currentCase = "COMPLETE"; finish(true, "NONE");
+  } catch (error) {
+    const category = failureCode !== "NONE" ? "ASSERTION" : error instanceof SyntaxError ? "SYNTAX" :
+      error instanceof ReferenceError ? "REFERENCE" : error instanceof TypeError ? "TYPE" :
+      error instanceof RangeError ? "RANGE" : error?.name === "SecurityError" ? "SECURITY" : "OTHER";
+    finish(false, category);
+  }
+})();
+</script></body></html>

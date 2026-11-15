@@ -1,0 +1,405 @@
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -51,6 +51,7 @@
+ 
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_DISCARD_VERSION 1
++#define CEF_YAB_EXTERNAL_ACTION_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ 
+ class CefBrowserHost;
+@@ -1150,6 +1151,30 @@
+   ///
+   /*--cef(added=experimental)--*/
+   virtual bool FinishNativePrint(const CefString& request) = 0;
++
++  ///
++  /// Runs the enabled extension's original Chrome action for this externally
++  /// hosted, visible and externally focused browser. Call only for an actual
++  /// user button press. Chrome retains its action permission checks and popup
++  /// host; no toolbar is needed. |anchor| is in screen DIP coordinates.
++  /// OnExtensionPopup reports the original widget identity and compositor.
++  /// Returns false if the owner, extension or action is unavailable. UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool OpenExtensionAction(const CefString& extension_id,
++                                   const CefRect& anchor) = 0;
++
++  ///
++  /// Validates the popup's native token against this browser and its current
++  /// document, then updates its screen anchor and delegated focus, or closes
++  /// it. An empty |anchor| leaves position unchanged. Refuses stale, closed or
++  /// foreign tokens. Does not activate or order a producer window. UI thread.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual bool ControlExtensionPopup(const CefString& token,
++                                     const CefRect& anchor,
++                                     bool focused,
++                                     bool close) = 0;
+ #endif
+ };
+ 
+--- a/cef/libcef/browser/browser_host_base.h
++++ b/cef/libcef/browser/browser_host_base.h
+@@ -286,6 +286,10 @@
+   bool RestoreDiscardedPage() override;
+   bool SetPageFrozen(bool frozen) override;
+   bool FinishNativePrint(const CefString& request) override;
++  bool OpenExtensionAction(const CefString& extension_id,
++                           const CefRect& anchor) override;
++  bool ControlExtensionPopup(const CefString& token, const CefRect& anchor,
++                             bool focused, bool close) override;
+ 
+   // CefBrowser methods:
+   bool IsValid() override;
+--- a/cef/libcef/browser/browser_host_base.cc
++++ b/cef/libcef/browser/browser_host_base.cc
+@@ -35,6 +35,7 @@
+ #include "base/feature_list.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "cef/libcef/browser/views/external_print.h"
++#include "cef/libcef/browser/views/external_host_mac.h"
+ #endif
+ #include "base/functional/callback_helpers.h"
+ #include "content/public/browser/file_select_listener.h"
+@@ -1090,6 +1091,28 @@
+ #endif
+ }
+ 
++bool CefBrowserHostBase::OpenExtensionAction(const CefString& extension_id,
++                                             const CefRect& anchor) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::OpenAction(this, extension_id.ToString(), anchor);
++#else
++  return false;
++#endif
++}
++
++bool CefBrowserHostBase::ControlExtensionPopup(const CefString& token,
++                                               const CefRect& anchor,
++                                               bool focused, bool close) {
++  CEF_REQUIRE_UIT_RETURN(false);
++#if BUILDFLAG(IS_MAC)
++  return cef::external_host::ControlPopup(this, token.ToString(), anchor,
++                                         focused, close);
++#else
++  return false;
++#endif
++}
++
+ void CefBrowserHostBase::ReplaceMisspelling(const CefString& word) {
+   if (!CEF_CURRENTLY_ON_UIT()) {
+     CEF_POST_TASK(
+--- a/cef/libcef/browser/views/external_host_mac.h
++++ b/cef/libcef/browser/views/external_host_mac.h
+@@ -12,5 +12,9 @@
+ bool ReplySelect(CefRefPtr<CefBrowserView> browser_view, int token, int index);
+ // Installs Chrome's extension popup and tab-creation hooks (idempotent).
+ void InstallExtensionHooks();
++bool OpenAction(CefBrowserHostBase* browser, const std::string& extension_id,
++                const CefRect& anchor);
++bool ControlPopup(CefBrowserHostBase* browser, const std::string& token,
++                  const CefRect& anchor, bool focused, bool close);
+ }  // namespace cef::external_host
+ #endif
+--- a/chrome/browser/extensions/external_action_origin.h
++++ b/chrome/browser/extensions/external_action_origin.h
+@@ -31,6 +31,9 @@
+   void (*popup_shown)(content::WebContents* popup, views::Widget* widget) =
+       nullptr;
+   void (*popup_closed)(content::WebContents* popup) = nullptr;
++  // Conceal an externally presented original action widget before Show().
++  // False cancels showing. Ordinary Chrome popup paths never call this.
++  bool (*popup_before_show)(content::WebContents*, views::Widget*) = nullptr;
+   // chrome.tabs.create made |contents| with the requested foreground state,
+   // tab strip index (-1 default) and opener tab (may be null).
+   void (*tab_created)(content::WebContents* contents,
+@@ -76,12 +79,12 @@
+ class ExternalActionOrigin : public base::SupportsUserData::Data {
+  public:
+   static bool Attach(content::WebContents* popup, content::WebContents* owner,
+-                     const std::string& extension_id) {
++                     const std::string& extension_id, bool external = false) {
+     if (!popup || !owner || popup == owner || extension_id.empty() ||
+         popup->GetBrowserContext() != owner->GetBrowserContext() ||
+         !owner->GetPrimaryMainFrame() || owner->IsBeingDestroyed()) return false;
+     popup->SetUserData(&kKey, std::unique_ptr<ExternalActionOrigin>(
+-        new ExternalActionOrigin(*popup, *owner, extension_id)));
++        new ExternalActionOrigin(*popup, *owner, extension_id, external)));
+     return true;
+   }
+   static ExternalActionOrigin* Get(content::WebContents* popup) {
+@@ -96,19 +99,25 @@
+         owner_->GetBrowserContext() != popup->GetBrowserContext()) return nullptr;
+     return owner_.get();
+   }
++  // Only for a final invalidation event, never input or new frames.
++  content::WebContents* CapturedOwnerForClose() const {
++    return owner_ && !owner_->IsBeingDestroyed() ? owner_.get() : nullptr;
++  }
++  bool external() const { return external_; }
+   const std::string& extension_id() const { return extension_id_; }
+   const base::UnguessableToken& token() const { return token_; }
+  private:
+   ExternalActionOrigin(content::WebContents& popup, content::WebContents& owner,
+-                       std::string extension_id)
++                       std::string extension_id, bool external)
+       : popup_(popup.GetWeakPtr()), owner_(owner.GetWeakPtr()),
+         document_(owner.GetPrimaryMainFrame()->GetWeakDocumentPtr()),
+-        extension_id_(std::move(extension_id)),
++        extension_id_(std::move(extension_id)), external_(external),
+         token_(base::UnguessableToken::Create()) {}
+   inline static const int kKey = 0;
+   base::WeakPtr<content::WebContents> popup_, owner_;
+   content::WeakDocumentPtr document_;
+   const std::string extension_id_;
++  const bool external_;
+   const base::UnguessableToken token_;
+ };
+ }  // namespace extensions
+--- a/chrome/browser/ui/views/extensions/extension_popup.cc
++++ b/chrome/browser/ui/views/extensions/extension_popup.cc
+@@ -350,6 +350,16 @@
+     return;
+   }
+ 
++#if BUILDFLAG(ENABLE_CEF)
++  if (auto* origin = external_action_origin(); origin && origin->external()) {
++    auto hook = extensions::GetExternalExtensionHooks().popup_before_show;
++    if (!hook || !hook(host_->host_contents(), GetWidget())) {
++      withheld_from_view_.reset();
++      CloseDeferredIfNecessary();
++      return;
++    }
++  }
++#endif
+   GetWidget()->Show();
+   withheld_from_view_.reset();
+ #if BUILDFLAG(ENABLE_CEF)
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -26,6 +26,22 @@
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
+ #include "ui/compositor/compositor.h"
++#include "base/no_destructor.h"
++#include <map>
++#include "content/public/browser/browser_context.h"
++#include "chrome/browser/extensions/extension_action_runner.h"
++#include "chrome/browser/extensions/extension_view_host.h"
++#include "chrome/browser/extensions/extension_view_host_factory.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/views/extensions/extension_popup.h"
++#include "components/sessions/content/session_tab_helper.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_manager.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_util.h"
++#include "extensions/common/extension.h"
+ 
+ namespace cef::external_host {
+ namespace {
+@@ -245,6 +261,7 @@
+                       public views::WidgetObserver,
+                       public content::WebContentsUserData<ExternalFocus> {
+  public:
++  bool focused() const { return desired_ && widget_; }
+   bool Set(views::Widget* widget, bool focused) {
+     if (!widget) return false;
+     auto self = weak_factory_.GetWeakPtr();
+@@ -373,6 +390,7 @@
+ class ExternalPopup : public content::WebContentsUserData<ExternalPopup> {
+  public:
+   gfx::AcceleratedWidget accelerated = gfx::kNullAcceleratedWidget;
++  base::WeakPtr<views::Widget> widget;
+   int window_number = 0;
+  private:
+   friend class content::WebContentsUserData<ExternalPopup>;
+@@ -382,10 +400,47 @@
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(ExternalPopup);
+ 
++using PopupRegistry = std::map<std::string, base::WeakPtr<content::WebContents>>;
++PopupRegistry& Popups() {
++  static base::NoDestructor<PopupRegistry> registry;
++  return *registry;
++}
++
++// A real owner document controls lifetime. Native navigation, hiding or
++// destruction closes the original widget even if the client cannot reply.
++class ActionOwner : public content::WebContentsObserver,
++                    public content::WebContentsUserData<ActionOwner> {
++ public:
++  void Bind(views::Widget* popup) {
++    Close();
++    popup_ = popup->GetWeakPtr();
++  }
++  void PrimaryPageChanged(content::Page&) override { Close(); }
++  void OnVisibilityChanged(content::Visibility visibility) override {
++    if (visibility == content::Visibility::HIDDEN) Close();
++  }
++  void WebContentsDestroyed() override { Close(); }
++ private:
++  friend class content::WebContentsUserData<ActionOwner>;
++  explicit ActionOwner(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<ActionOwner>(*contents) {}
++  void Close() {
++    auto popup = std::move(popup_);
++    popup_.reset();
++    if (popup) popup->Close();
++  }
++  base::WeakPtr<views::Widget> popup_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ActionOwner);
++
+ void SendPopup(content::WebContents* popup, const char* state,
+                uint32_t context, const gfx::Size& pixels, float scale) {
+   auto* origin = extensions::ExternalActionOrigin::Get(popup);
+   auto* owner = origin ? origin->Owner(popup) : nullptr;
++  if (!owner && origin && std::string(state) == "closed")
++    owner = origin->CapturedOwnerForClose();
+   CefRefPtr<CefBrowserHostBase> browser;
+   auto handler = DisplayHandlerFor(owner, &browser);
+   if (!handler) return;
+@@ -410,11 +465,28 @@
+     SendPopup(popup.get(), "frame", context, pixels, scale);
+ }
+ 
++bool PopupBeforeShow(content::WebContents* popup, views::Widget* widget) {
++  auto* origin = extensions::ExternalActionOrigin::Get(popup);
++  auto* owner = origin ? origin->Owner(popup) : nullptr;
++  auto* focus = owner ? ExternalFocus::FromWebContents(owner) : nullptr;
++  if (!origin || !origin->external() || !focus || !focus->focused() ||
++      !Enable(widget)) return false;
++  ExternalVisibility::GetOrCreateForWebContents(popup)->Bind(widget);
++  ActionOwner::GetOrCreateForWebContents(owner)->Bind(widget);
++  return true;
++}
++
+ void PopupShown(content::WebContents* popup, views::Widget* widget) {
+   if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !popup || !widget) return;
+   auto* host = ExternalPopup::GetOrCreateForWebContents(popup);
+   NSWindow* window = widget->GetNativeWindow().GetNativeNSWindow();
+   host->window_number = window ? static_cast<int>(window.windowNumber) : 0;
++  host->widget = widget->GetWeakPtr();
++  if (auto* origin = extensions::ExternalActionOrigin::Get(popup)) {
++    Popups()[origin->token().ToString()] = popup->GetWeakPtr();
++    if (origin->external())
++      ExternalFocus::GetOrCreateForWebContents(popup)->Set(widget, true);
++  }
+   if (auto* compositor = widget->GetCompositor()) {
+     host->accelerated = compositor->widget();
+     ui::AcceleratedWidgetMac::SetFrameCallback(
+@@ -426,6 +498,8 @@
+ 
+ void PopupClosed(content::WebContents* popup) {
+   if (!popup) return;
++  if (auto* origin = extensions::ExternalActionOrigin::Get(popup))
++    Popups().erase(origin->token().ToString());
+   if (auto* host = ExternalPopup::FromWebContents(popup)) {
+     if (host->accelerated != gfx::kNullAcceleratedWidget) {
+       ui::AcceleratedWidgetMac::SetFrameCallback(host->accelerated, {});
+@@ -454,6 +528,7 @@
+ 
+ void InstallExtensionHooks() {
+   auto& hooks = extensions::GetExternalExtensionHooks();
++  hooks.popup_before_show = &PopupBeforeShow;
+   hooks.popup_shown = &PopupShown;
+   hooks.popup_closed = &PopupClosed;
+   hooks.tab_created = &TabCreated;
+@@ -466,6 +541,90 @@
+   auto* contents = browser ? browser->GetWebContents() : nullptr;
+   auto* select = contents ? ExternalSelect::FromWebContents(contents) : nullptr;
+   return select && select->Reply(token, index);
++}
++
++bool OpenAction(CefBrowserHostBase* cef_browser, const std::string& id,
++                const CefRect& anchor) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !cef_browser) return false;
++  for (auto it = Popups().begin(); it != Popups().end();) {
++    if (!it->second) it = Popups().erase(it); else ++it;
++  }
++  if (Popups().size() >= 16) return false;
++  auto* owner = cef_browser->GetWebContents();
++  auto* focus = owner ? ExternalFocus::FromWebContents(owner) : nullptr;
++  if (!focus || !focus->focused() ||
++      owner->GetVisibility() != content::Visibility::VISIBLE) return false;
++  auto* browser = GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(owner);
++  auto* browser_view = browser ? BrowserView::GetBrowserViewForBrowser(browser) : nullptr;
++  if (!browser_view || browser->GetTabStripModel()->GetActiveWebContents() != owner)
++    return false;
++  auto* context = owner->GetBrowserContext();
++  scoped_refptr<const extensions::Extension> extension =
++      extensions::ExtensionRegistry::Get(context)->enabled_extensions().GetByID(id);
++  if (!extension || (context->IsOffTheRecord() &&
++      !extensions::util::IsIncognitoEnabled(id, context))) return false;
++  auto* action = extensions::ExtensionActionManager::Get(context)
++      ->GetExtensionAction(*extension);
++  const int tab = sessions::SessionTabHelper::IdForTab(owner).id();
++  auto* runner = extensions::ExtensionActionRunner::GetForWebContents(owner);
++  if (!action || !runner || !action->GetIsVisible(tab) || !action->HasPopup(tab))
++    return false;
++  // Same native permissions and action dispatch as a Chrome toolbar press.
++  auto owner_weak = owner->GetWeakPtr();
++  const GURL popup_url = action->GetPopupUrl(tab);
++  if (runner->RunAction(extension.get(), /*grant_tab_permissions=*/true) !=
++      extensions::ExtensionAction::ShowAction::kShowPopup || !owner_weak)
++    return false;
++  // Native permission handling can call client code. Revalidate its owner and
++  // enabled package before constructing any view after that dispatch.
++  if (extensions::ExtensionRegistry::Get(context)->enabled_extensions().GetByID(id)
++      != extension.get() || GlobalBrowserCollection::GetInstance()
++          ->FindBrowserWithTab(owner_weak.get()) != browser) return false;
++  auto host = extensions::ExtensionViewHostFactory::CreatePopupHost(
++      *extension, popup_url, browser);
++  if (!host || !extensions::ExternalActionOrigin::Attach(
++          host->host_contents(), owner, id, /*external=*/true)) return false;
++  auto popup = host->host_contents()->GetWeakPtr();
++  ExtensionPopup::ShowPopup(browser, std::move(host),
++      views::BubbleAnchor(browser_view), views::BubbleBorder::TOP_RIGHT,
++      PopupShowAction::kShow,
++      base::BindOnce([](base::WeakPtr<content::WebContents> contents,
++                        CefRect anchor, extensions::ExtensionHost*) {
++        auto* state = contents ? ExternalPopup::FromWebContents(contents.get()) : nullptr;
++        if (state && state->widget && anchor.width > 0 && anchor.height > 0) {
++          gfx::Rect bounds = state->widget->GetWindowBoundsInScreen();
++          bounds.set_origin(gfx::Point(anchor.x, anchor.y + anchor.height));
++          state->widget->SetBounds(bounds);
++        }
++      }, popup, anchor));
++  return true;
++}
++
++bool ControlPopup(CefBrowserHostBase* browser, const std::string& token,
++                  const CefRect& anchor, bool focused, bool close) {
++  auto found = Popups().find(token);
++  auto* popup = found == Popups().end() ? nullptr : found->second.get();
++  auto* origin = popup ? extensions::ExternalActionOrigin::Get(popup) : nullptr;
++  auto* state = popup ? ExternalPopup::FromWebContents(popup) : nullptr;
++  auto* owner = browser ? browser->GetWebContents() : nullptr;
++  if (!owner || !origin || origin->Owner(popup) != owner || !state ||
++      !state->widget) return false;
++  if (close) { state->widget->Close(); return true; }
++  auto* owner_focus = ExternalFocus::FromWebContents(owner);
++  if (origin->external() && (!owner_focus || !owner_focus->focused() ||
++      owner->GetVisibility() != content::Visibility::VISIBLE)) return false;
++  auto popup_weak = popup->GetWeakPtr();
++  auto widget = state->widget;
++  const bool external = origin->external();
++  if (anchor.width > 0 && anchor.height > 0) {
++    gfx::Rect bounds = widget->GetWindowBoundsInScreen();
++    bounds.set_origin(gfx::Point(anchor.x, anchor.y + anchor.height));
++    widget->SetBounds(bounds);
++  }
++  // Bounds changes can invoke embedder code and close the widget.
++  if (!popup_weak || !widget) return false;
++  return !external ||
++      ExternalFocus::GetOrCreateForWebContents(popup_weak.get())->Set(widget.get(), focused);
+ }
+ 
+ bool SetFocus(views::Widget* widget, CefRefPtr<CefBrowserView> browser_view,

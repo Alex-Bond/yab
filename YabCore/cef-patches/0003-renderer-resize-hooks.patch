@@ -1,0 +1,152 @@
+--- a/content/browser/renderer_host/render_widget_host_impl.h
++++ b/content/browser/renderer_host/render_widget_host_impl.h
+@@ -46,6 +46,7 @@
+ #include "content/browser/renderer_host/input/touch_emulator_impl.h"
+ #include "content/browser/renderer_host/mojo_render_input_router_delegate_impl.h"
+ #include "content/browser/renderer_host/render_frame_metadata_provider_impl.h"
++#include "content/browser/renderer_host/external_resize_tracker.h"
+ #include "content/browser/renderer_host/render_widget_host_delegate.h"
+ #include "content/browser/renderer_host/render_widget_host_view_base.h"
+ #include "content/common/content_export.h"
+@@ -799,6 +800,14 @@
+   // Generates a filled in VisualProperties struct representing the current
+   // properties of this widget.
+   blink::VisualProperties GetVisualProperties();
++
++  // UI-sequence-only opt-in for an embedder resize. This correlates sent visual
++  // properties with renderer activation, not native widget presentation.
++  bool RequestExternalResize(uint64_t serial, const gfx::Size& pixels);
++  void ExternalResizeFrameActivated(const cc::RenderFrameMetadata& metadata);
++  uint64_t ExternalResizeReadySerial() const {
++    return external_resize_tracker_.ready_serial();
++  }
+ 
+   // Returns the result of GetVisualProperties(), resetting and storing that
+   // value as what has been sent to the renderer. This should be called when
+@@ -1662,6 +1671,7 @@
+       screen_orientation_type_for_testing_;
+ 
+   RenderFrameMetadataProviderImpl render_frame_metadata_provider_;
++  ExternalResizeTracker external_resize_tracker_;
+   bool surface_id_allocation_suppressed_ = false;
+ 
+   const viz::FrameSinkId frame_sink_id_;
+--- a/content/browser/renderer_host/render_widget_host_impl.cc
++++ b/content/browser/renderer_host/render_widget_host_impl.cc
+@@ -1320,8 +1320,21 @@
+ }
+ 
+ void RenderWidgetHostImpl::ClearVisualProperties() {
++  external_resize_tracker_.Invalidate();
+   old_visual_properties_.reset();
+   visual_properties_ack_pending_ = false;
++}
++
++bool RenderWidgetHostImpl::RequestExternalResize(uint64_t serial,
++                                                const gfx::Size& pixels) {
++  return external_resize_tracker_.Request(
++      serial, pixels, old_visual_properties_.get(),
++      &render_frame_metadata_provider_.LastRenderFrameMetadata());
++}
++
++void RenderWidgetHostImpl::ExternalResizeFrameActivated(
++    const cc::RenderFrameMetadata& metadata) {
++  external_resize_tracker_.RendererActivated(metadata);
+ }
+ 
+ bool RenderWidgetHostImpl::UpdateVisualProperties(bool propagate) {
+@@ -1405,6 +1418,7 @@
+       scroll_focused_node_into_view;
+ 
+   if (propagate) {
++    external_resize_tracker_.VisualPropertiesSent(*visual_properties);
+     blink_widget_->UpdateVisualProperties(*visual_properties);
+   }
+ 
+--- a/content/browser/renderer_host/render_widget_host_view_mac.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
+@@ -909,11 +909,11 @@
+ 
+ void RenderWidgetHostViewMac::OnRenderFrameMetadataChangedAfterActivation(
+     base::TimeTicks activation_time) {
++  const auto& metadata = host()->render_frame_metadata_provider()
++                             ->LastRenderFrameMetadata();
++  host()->ExternalResizeFrameActivated(metadata);
+   // TODO(crbug.com/40219248): Remove toSkColor and make all SkColor4f.
+-  last_frame_root_background_color_ = host()
+-                                          ->render_frame_metadata_provider()
+-                                          ->LastRenderFrameMetadata()
+-                                          .root_background_color.toSkColor();
++  last_frame_root_background_color_ = metadata.root_background_color.toSkColor();
+ }
+ 
+ void RenderWidgetHostViewMac::RenderProcessGone() {
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -1876,6 +1876,7 @@
+     "renderer_host/render_widget_host_factory.h",
+     "renderer_host/render_widget_host_impl.cc",
+     "renderer_host/render_widget_host_impl.h",
++    "renderer_host/external_resize_tracker.h",
+     "renderer_host/render_widget_host_owner_delegate.h",
+     "renderer_host/render_widget_host_view_aura.cc",
+     "renderer_host/render_widget_host_view_aura.h",
+--- /dev/null
++++ b/content/browser/renderer_host/external_resize_tracker.h
+@@ -0,0 +1,56 @@
++#pragma once
++#include <cstdint>
++#include <optional>
++#include "cc/trees/render_frame_metadata.h"
++#include "components/viz/common/surfaces/local_surface_id.h"
++#include "third_party/blink/public/common/widget/visual_properties.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace content {
++// Match an embedder request to the *sent* visual-properties LocalSurfaceId,
++// then to renderer activation. Receipt of renderer metadata is not activation.
++// A later window-compositor CA frame and retained fence are still required.
++class ExternalResizeTracker {
++ public:
++  bool Request(uint64_t serial, gfx::Size pixels,
++               const blink::VisualProperties* last_sent,
++               const cc::RenderFrameMetadata* last_activated) {
++    if (!serial || serial <= serial_ || pixels.IsEmpty()) return false;
++    serial_ = serial;
++    valid_ = true;
++    pixels_ = pixels;
++    expected_.reset();
++    activated_ = false;
++    // A true no-op resize can reuse the already active matching renderer.
++    // If an intermediate resize is in flight, last_sent differs and cannot
++    // seed this request from an older frame of the same dimensions.
++    if (last_sent) VisualPropertiesSent(*last_sent);
++    if (last_activated) RendererActivated(*last_activated);
++    return true;
++  }
++  void VisualPropertiesSent(const blink::VisualProperties& properties) {
++    if (!valid_ || properties.new_size_device_px != pixels_ ||
++        !properties.local_surface_id ||
++        !properties.local_surface_id->is_valid()) return;
++    expected_ = properties.local_surface_id;
++    activated_ = false;
++  }
++  bool RendererActivated(const cc::RenderFrameMetadata& metadata) {
++    activated_ = valid_ && expected_ && metadata.viewport_size_in_pixels == pixels_ &&
++        metadata.local_surface_id &&
++        metadata.local_surface_id->IsSameOrNewerThan(*expected_);
++    return activated_;
++  }
++  uint64_t ready_serial() const { return activated_ ? serial_ : 0; }
++  void Invalidate() {
++    expected_.reset();
++    activated_ = false;
++    valid_ = false;
++  }
++ private:
++  uint64_t serial_ = 0;
++  gfx::Size pixels_;
++  std::optional<viz::LocalSurfaceId> expected_;
++  bool activated_ = false, valid_ = false;
++};
++}  // namespace content

@@ -1,0 +1,88 @@
+--- a/chrome/browser/extensions/external_tab_model.h
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -36,6 +36,24 @@
+   base::WeakPtr<content::WebContents> owner_, opener_;
+   bool active_;
+   int index_;
++};
++// A bound external page is presented in the embedder's ordinary browser UI.
++// CEF internally uses TYPE_POPUP to suppress Chrome controls; that concealed
++// producer type is not the logical window kind extensions should query.
++class ExternalTabWindow : public base::SupportsUserData::Data {
++ public:
++  static void Set(content::WebContents* contents, bool bound) {
++    if (!contents) return;
++    if (bound && !contents->IsBeingDestroyed())
++      contents->SetUserData(&kKey, std::make_unique<ExternalTabWindow>());
++    else
++      contents->RemoveUserData(&kKey);
++  }
++  static bool Bound(content::WebContents* contents) {
++    return contents && !contents->IsBeingDestroyed() && contents->GetUserData(&kKey);
++  }
++ private:
++  inline static const int kKey = 0;
+ };
+ // The embedder delegates focus without activating a concealed Chrome window.
+ // Remember that authoritative native event per BrowserContext. A worker has
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -204,6 +204,7 @@
+     Publish(widget->IsVisible());
+   }
+   void Reset() {
++    extensions::ExternalTabWindow::Set(web_contents(), false);
+     observation_.Reset();
+     bound_ = false;
+     ApplyResizeDeadline();
+@@ -218,6 +219,7 @@
+     Publish(visible);
+   }
+   void OnWidgetDestroying(views::Widget*) override {
++    extensions::ExternalTabWindow::Set(web_contents(), false);
+     observation_.Reset();
+     Publish(false);
+   }
+@@ -255,6 +257,7 @@
+   auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
+       widget->GetNativeWindow());
+   if (host && host->externally_hosted()) {
++    extensions::ExternalTabWindow::Set(contents, true);
+     ExternalVisibility::GetOrCreateForWebContents(contents)->Bind(widget);
+     ExternalSelect::GetOrCreateForWebContents(contents)->Install();
+   } else {
+@@ -591,6 +594,7 @@
+           base::BindRepeating(&ExternalPage::Frame, weak_.GetWeakPtr()))) {
+       Reset(); return false;
+     }
++    extensions::ExternalTabWindow::Set(web_contents(), true);
+     return true;
+   }
+   bool Owns() const {
+@@ -694,6 +698,7 @@
+         content::WebContentsUserData<ExternalPage>(*contents),
+         token_(base::UnguessableToken::Create()) {}
+   void Reset() {
++    extensions::ExternalTabWindow::Set(web_contents(), false);
+     weak_.InvalidateWeakPtrs();
+     if (accelerated_ != gfx::kNullAcceleratedWidget)
+       ui::AcceleratedWidgetMac::SetFrameCallback(accelerated_, {});
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -12,6 +12,7 @@
+ #include "base/notimplemented.h"
+ #include "base/strings/stringprintf.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/external_tab_model.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/tab_list/tab_list_interface.h"
+@@ -137,6 +138,8 @@
+ }
+ 
+ std::string BrowserExtensionWindowController::GetWindowTypeText() const {
++  if (ExternalTabWindow::Bound(GetActiveTab()))
++    return api::tabs::ToString(api::tabs::WindowType::kNormal);
+   return api::tabs::ToString(window_type_);
+ }
+ 

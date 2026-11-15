@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{> head}}
+<link rel="stylesheet" href="/assets/auth.css">
+<title>Sign in · Orbit</title>
+</head>
+<body>
+<div class="auth">
+  <main class="auth-main">
+    <header class="auth-head">
+      <a class="brand" href="/login">{{> mark}}<span>Orbit</span></a>
+      <a class="help" href="/forgot">Need help signing in?</a>
+    </header>
+    <div class="auth-body">
+      <form class="auth-form" method="post" action="/login" data-busy-form>
+        <h1>Sign in to Orbit</h1>
+        <p class="lede">Welcome back. Your dashboards are right where you left them.</p>
+        <button class="btn btn-secondary btn-block sso" type="button">{{> google}}Continue with Google</button>
+        <div class="or">or</div>
+        {{{alert}}}
+        <div class="stack">
+          <div class="field">
+            <label class="label" for="email">Email</label>
+            <input class="input" id="email" type="email" name="email" autocomplete="username" placeholder="you@company.com" value="{{email}}" aria-invalid="{{email_invalid}}" required>
+          </div>
+          <div class="field">
+            <div class="label"><label for="password">Password</label><a href="/forgot">Forgot password?</a></div>
+            <input class="input" id="password" type="password" name="password" autocomplete="current-password" placeholder="Your password" required>
+          </div>
+          <button class="btn btn-primary btn-block" type="submit"><span class="spin"></span><span>Sign in</span></button>
+        </div>
+        <p class="fine">Don't have an account? <a class="link" href="/signup">Sign up</a></p>
+      </form>
+    </div>
+    {{> foot}}
+  </main>
+  <aside class="art">
+    <div class="art-copy">
+      <span class="pill"><b>New</b>Funnels now show why people drop off</span>
+      <h2>See what people do after they sign up.</h2>
+      <p>Funnels, retention and paths for product teams who ship every week. Answers in seconds, not SQL.</p>
+    </div>
+    {{> art}}
+  </aside>
+</div>
+<script src="/assets/auth.js" defer></script>
+</body>
+</html>

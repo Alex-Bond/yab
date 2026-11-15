@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoices · Ledger</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="/assets/ledger.css">
+</head>
+<body data-page="invoices">
+<script src="/assets/shell.js"></script>
+<main>
+  <div class="page">
+    <div class="head">
+      <div><h1>Invoices</h1><p>Bills sent to Tern's customers, with the PDF each one received.</p></div>
+      <div class="actions">
+        <a class="btn" href="/reports/invoices.csv"><span data-icon="download" data-size="16"></span>Export</a>
+        <button class="btn primary" type="button"><span data-icon="plus" data-size="16"></span>Create invoice</button>
+      </div>
+    </div>
+    <div class="grid stats" id="stats"></div>
+    <div class="filters">
+      <label class="find"><span data-icon="search" data-size="16"></span><input id="find" type="text" placeholder="Filter by number or customer" aria-label="Filter invoices"></label>
+      <button class="chip" type="button"><span data-icon="plus" data-size="16"></span>Due date</button>
+      <button class="chip" type="button"><span data-icon="plus" data-size="16"></span>Customer</button>
+      <span class="grow"></span>
+      <span class="muted count-note" id="count"></span>
+    </div>
+    <section class="card table-card">
+      <div class="table-wrap">
+        <table class="t" id="table">
+          <thead><tr><th class="r">Amount</th><th>Status</th><th>Invoice</th><th>Customer</th><th>Due</th><th class="hide-lg">Created</th><th class="r">PDF</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="/assets/data.js"></script>
+<script src="/assets/pages.js"></script>
+</body>
+</html>

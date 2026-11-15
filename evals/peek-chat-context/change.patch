@@ -1,0 +1,310 @@
+diff --git a/Sources/Fast/AgentHints.swift b/Sources/Fast/AgentHints.swift
+index 37f69d92..435be986 100644
+--- a/Sources/Fast/AgentHints.swift
++++ b/Sources/Fast/AgentHints.swift
+@@ -1762,15 +1762,31 @@ extension Hints {
+ /// ⌘J, in the Agent menu beside Take Over.
+ struct PageActionCommand: View {
+     @ObservedObject var browser: Browser
++    @ObservedObject private var peek: PeekFront
++
++    init(browser: Browser) {
++        self.browser = browser
++        self.peek = browser.peekFront
++    }
+ 
+     var body: some View {
+-        let tab = browser.active
+-        Button("Ask Agent…") {
+-            if let tab { TaskLine.shared.open(on: tab) }
+-        }
++        let tab = peek.page ?? browser.active
++        Button("Ask Agent…", action: ask)
+         .shortcut(.agentAsk)
+         .disabled(tab == nil || tab?.isBlank == true)
+     }
++
++    func ask() {
++        guard let tab = browser.chatPage, !tab.isBlank else { return }
++        if peek.page != nil {
++            // Native Peek has no inline task field. Keep the page visible
++            // and ask about it in the existing chat column instead.
++            TaskLine.shared.close()
++            browser.askInChat(about: tab)
++        } else {
++            TaskLine.shared.open(on: tab)
++        }
++    }
+ }
+ 
+ /// A page action offered at the foot, with a real Skip beside the action.
+diff --git a/Sources/Fast/AgentTask.swift b/Sources/Fast/AgentTask.swift
+index f5a61d57..0f981da2 100644
+--- a/Sources/Fast/AgentTask.swift
++++ b/Sources/Fast/AgentTask.swift
+@@ -248,7 +248,7 @@ extension Agents {
+         // asked about, not a task now.
+         if let (when, rest) = Routines.phrase(words) {
+             var tabs = tab.map { [$0] } ?? []
+-            tabs += context.compactMap { item in item.tab.flatMap { id in browser.tabs.first { $0.id == id } } }
++            tabs += context.compactMap { item in item.tab.flatMap(browser.chatTab) }
+             Routines.shared.fromWords(rest, when: when, tabs: tabs, in: browser)
+             return nil
+         }
+@@ -303,7 +303,7 @@ extension Agents {
+         // Tabs of yours it was pointed at are the agent's to work in too,
+         // for what is about them: it decides, as on the line.
+         let pointed = context.compactMap { item in item.kind == .selection ? nil : item.tab }
+-            .compactMap { id in browser.tabs.first { $0.id == id } }
++            .compactMap(browser.chatTab)
+         // Words of theirs already given: a question they answer needs no
+         // folder's name or tool first, only the answer (PageWords).
+         let handed = PageWords.handed && pointed.contains { PageWords.cached($0) != nil }
+@@ -317,7 +317,7 @@ extension Agents {
+             : Agents.newTabsPrompt(words, seen: seen, pointed: !pointed.isEmpty, handed: handed,
+                                    bypass: browser.prefs.agentsAsking == .bypass)
+         let session = run(prompt: prompt, cli: choice?.cli, model: choice?.model, effort: choice?.effort, access: "browser", resume: nil)
+-        session.nativeOriginTab = browser.active.flatMap { $0.shy ? nil : $0.id }
++        session.nativeOriginTab = browser.chatPage.flatMap { $0.shy ? nil : $0.id }
+         session.nativeOriginSpace = browser.spaceID
+         session.nativeWindowID = browser.windowID ?? BrowserWindows.primaryID
+         if TaskWords.undoRequest(words) { session.nativeUndoChange = NativeControl.shared.latestUndoable(in: browser) }
+@@ -417,7 +417,7 @@ extension Agents {
+             "and what you know of it, and say which you took; reach into another space's only when nothing here fits. "
+     }
+ 
+-    private static func given(_ context: [TaskContext], browser: Browser) -> String {
++    static func given(_ context: [TaskContext], browser: Browser) -> String {
+         var lines: [String] = []
+         for item in context {
+             switch item.kind {
+@@ -426,7 +426,7 @@ extension Agents {
+             case .selection:
+                 if let text = item.text { lines.append("They selected this on the page: «\(text.prefix(4000))».") }
+             case .tab:
+-                guard let id = item.tab, let tab = browser.tabs.first(where: { $0.id == id }) else { continue }
++                guard let id = item.tab, let tab = browser.chatTab(id), !tab.shy else { continue }
+                 lines.append("They gave you their tab \(Bench.short(tab)) to read (\(tab.address?.absoluteString ?? ""), \(tab.label)). " + PageWords.said(tab))
+             case .file:
+                 if let url = item.url, url.isFileURL {
+@@ -440,7 +440,7 @@ extension Agents {
+         }
+         if context.contains(where: { $0.kind == .mail }) { lines.append(MailChat.rules) }
+         if let page = context.first(where: { $0.kind == .page }), let id = page.tab,
+-           let tab = browser.tabs.first(where: { $0.id == id }), !context.isEmpty, lines.count < context.count {
++           let tab = browser.chatTab(id), !tab.shy, !context.isEmpty, lines.count < context.count {
+             lines.insert("They were on their tab \(Bench.short(tab)) (\(tab.address?.absoluteString ?? "")) and gave it to you to read. " + PageWords.said(tab), at: 0)
+         }
+         return lines.isEmpty ? "" : lines.joined(separator: " ") + " "
+@@ -652,7 +652,9 @@ final class TaskLine: ObservableObject {
+     }
+ 
+     private static func browser(of tab: Tab) -> Browser? {
+-        BrowserWindows.shared.owner(of: tab.id)?.browser ?? Agents.shared.browser
++        BrowserWindows.shared.owner(of: tab.id)?.browser
++            ?? BrowserWindows.shared.browsers.first { $0.chatTab(tab.id) === tab }
++            ?? Agents.shared.browser
+     }
+ 
+     func run(on tab: Tab) {
+diff --git a/Sources/Fast/ChatColumn.swift b/Sources/Fast/ChatColumn.swift
+index 2ddc35ed..414a315c 100644
+--- a/Sources/Fast/ChatColumn.swift
++++ b/Sources/Fast/ChatColumn.swift
+@@ -46,6 +46,14 @@ extension Browser {
+     /// The chat's column is on the window's left: the tabs' column is on
+     /// the right, and the two stand on either side of the page.
+     var chatLeads: Bool { flank == .right }
++
++    /// A question about what is on screen belongs to Peek while it is up.
++    var chatPage: Tab? { peekFront.page ?? active }
++
++    /// Peek pages are alive outside the tab row until kept or closed.
++    func chatTab(_ id: Tab.ID) -> Tab? {
++        tabs.first { $0.id == id } ?? outside.first { $0.id == id }
++    }
+ }
+ 
+ /// The page, and the column when it is out, in from the card's edges, the
+@@ -205,8 +213,8 @@ extension Browser {
+         // selected on it (ChatComposer.page).
+         let given = context.isEmpty
+             ? (tab.shy ? [] : [TaskContext.page(tab)] + (selection.map { [TaskContext.selection($0)] } ?? []))
+-            : context.filter { item in item.tab.map { id in tabs.first { $0.id == id }?.shy != true } ?? true }
+-        for item in given { if let tab = item.tab.flatMap({ id in tabs.first { $0.id == id } }) { PageWords.warm(tab) } }
++            : context.filter { item in item.tab.map { id in chatTab(id)?.shy != true } ?? true }
++        for item in given { if let tab = item.tab.flatMap(chatTab) { PageWords.warm(tab) } }
+         chatAttach.set(given.compactMap { item -> ChatAttachment? in
+             switch item.kind {
+             case .page, .tab: return item.tab.map(ChatAttachment.tab)
+@@ -2581,10 +2589,7 @@ extension Agents {
+     func followUp(_ id: String, _ words: String, about tab: Tab? = nil, with attached: [ChatAttachment] = [], queue later: Bool = false) {
+         guard followUpProblem(id) == nil else { return }
+         // What it was pointed at: said in the message, the words shown alone.
+-        var tabs = attached.compactMap { item -> Tab? in
+-            if case .tab(let id) = item { return browser?.tabs.first { $0.id == id } }
+-            return nil
+-        }
++        var tabs = browser.map { ChatAttachment.tabs(attached, in: $0) } ?? []
+         if let tab, !tabs.contains(where: { $0.id == tab.id }) { tabs.insert(tab, at: 0) }
+         let quotes = attached.compactMap(\.quote)
+         let mail = attached.compactMap(\.mail).map(MailChat.filled)
+diff --git a/Sources/Fast/ChatComposer.swift b/Sources/Fast/ChatComposer.swift
+index ca491b80..9da2f1e3 100644
+--- a/Sources/Fast/ChatComposer.swift
++++ b/Sources/Fast/ChatComposer.swift
+@@ -25,6 +25,7 @@ struct ChatComposer: View {
+     let asking: Tab?
+     /// The tabs and files the words go with (ChatAttach).
+     @ObservedObject var attach: ChatAttach
++    @ObservedObject private var peek: PeekFront
+     var foot: CGFloat = 10
+     @State private var words = ""
+     @State private var fieldHeight: CGFloat = 40
+@@ -33,6 +34,16 @@ struct ChatComposer: View {
+     @FocusState private var focused: Bool
+     @Environment(\.accessibilityReduceMotion) private var still
+ 
++    init(browser: Browser, chat: Chat?, live: Bool, asking: Tab?, attach: ChatAttach, foot: CGFloat = 10) {
++        self.browser = browser
++        self.chat = chat
++        self.live = live
++        self.asking = asking
++        self.attach = attach
++        self.peek = browser.peekFront
++        self.foot = foot
++    }
++
+     private var trimmed: String { words.trimmingCharacters(in: .whitespacesAndNewlines) }
+     private var attached: [ChatAttachment] {
+         _ = mailShown
+@@ -133,7 +144,7 @@ struct ChatComposer: View {
+             attach.typing = now
+             syncDoneKey()
+             // A question is coming: the chips' pages read ahead (PageWords).
+-            if now { for case .tab(let id) in attached { if let tab = browser.tabs.first(where: { $0.id == id }) { PageWords.warm(tab) } } }
++            if now { for tab in ChatAttachment.tabs(attached, in: browser) { PageWords.warm(tab) } }
+             if now { for case .folder(let id) in attached { if let nest = browser.nests.first(where: { $0.id == id }) { ChatAttachment.warm(nest, in: browser) } } }
+         }
+         .onChange(of: finishing) { _, _ in syncDoneKey() }
+@@ -332,7 +343,7 @@ struct ChatComposer: View {
+         ForEach(attached) { item in
+             switch item {
+             case .tab(let id):
+-                if let tab = browser.tabs.first(where: { $0.id == id }) { tabChip(tab, item) }
++                if let tab = browser.chatTab(id) { tabChip(tab, item) }
+             case .file(let url):
+                 ChatFileChip(url: url, broken: item.trouble() != nil) { attach.remove(item, chat: chat, browser: browser) }
+             case .quote(let text):
+@@ -552,10 +563,7 @@ struct ChatComposer: View {
+     @discardableResult
+     static func begin(_ text: String, with items: [ChatAttachment], in browser: Browser, keep: Bool = true) -> Agents.Session? {
+         guard Agents.ready else { TaskLine.connect(); return nil }
+-        let tabs = items.compactMap { item -> Tab? in
+-            if case .tab(let id) = item { return browser.tabs.first { $0.id == id } }
+-            return nil
+-        }
++        let tabs = ChatAttachment.tabs(items, in: browser)
+         let files = items.compactMap(\.file)
+         let quotes = items.compactMap(\.quote)
+         let mail = items.compactMap(\.mail).map(MailChat.filled)
+@@ -969,12 +939,18 @@ private struct ChatChoice: View {
+ /// picked with a click; in mail, mail's own (MailSuggestions).
+ struct ChatSuggestions: View {
+     let browser: Browser
++    @ObservedObject private var peek: PeekFront
+     @ObservedObject private var ideas = ChatIdeas.shared
+     @ObservedObject private var hints = Hints.shared
+     @ObservedObject private var items = SiteItems.shared
+ 
++    init(browser: Browser) {
++        self.browser = browser
++        self.peek = browser.peekFront
++    }
++
+     var body: some View {
+-        if browser.inMail {
++        if browser.inMail && peek.page == nil {
+             MailSuggestions(browser: browser, attach: browser.chatAttach)
+         } else {
+             page
+@@ -982,7 +958,7 @@ struct ChatSuggestions: View {
+     }
+ 
+     @ViewBuilder private var page: some View {
+-        let tab = ChatComposer.page(browser.active)
++        let tab = ChatComposer.page(browser.chatPage)
+         VStack(alignment: .leading, spacing: 2) {
+             // No page, a private one, or ideas still being written: nothing.
+             // The field's own words already say what it is for.
+@@ -1324,6 +1300,14 @@ enum ChatAttachment: Equatable, Identifiable {
+         browser.tabs(in: nest).filter { ChatComposer.page($0) != nil }
+     }
+ 
++    /// Resolve the same pages for first messages and follow-ups, including Peek.
++    @MainActor static func tabs(_ items: [ChatAttachment], in browser: Browser) -> [Tab] {
++        items.compactMap { item in
++            guard case .tab(let id) = item, let tab = browser.chatTab(id), !tab.shy else { return nil }
++            return tab
++        }
++    }
++
+     /// A folder's chip: its name and how many tabs, "Q4 Planning · 7 tabs".
+     /// Carried as "n:<id>|<chip>", for the chat's line to wear its mark.
+     @MainActor static func chip(_ nest: Nest, in browser: Browser?) -> String {
+@@ -1562,14 +1546,14 @@ final class ChatAttach: ObservableObject {
+ 
+     private func base(chat: Chat?, browser: Browser) -> [ChatAttachment] {
+         if touched { return items }
+-        return chat == nil ? ChatComposer.page(browser.active).map { [.tab($0.id)] } ?? [] : []
++        return chat == nil ? ChatComposer.page(browser.chatPage).map { [.tab($0.id)] } ?? [] : []
+     }
+ 
+     /// In mail: for a new chat, the email or list in front; for a chat
+     /// begun in mail, an email it hasn't had yet. A chat begun on a site
+     /// gets one only from + Add.
+     func mailOffer(chat: Chat?, browser: Browser) -> ChatAttachment? {
+-        guard browser.inMail, let ref = MailChat.now(), ref.id != droppedMail else { return nil }
++        guard browser.inMail, browser.peeking == nil, let ref = MailChat.now(), ref.id != droppedMail else { return nil }
+         if let chat {
+             let agents = Agents.shared
+             guard let thread = ref.thread, let session = agents.session(agents.root(of: chat.id)),
+@@ -1600,7 +1584,7 @@ final class ChatAttach: ObservableObject {
+ 
+     func add(_ item: ChatAttachment, chat: Chat?, browser: Browser) {
+         adopt(chat: chat, browser: browser)
+-        if case .tab(let id) = item, let tab = browser.tabs.first(where: { $0.id == id }) { PageWords.warm(tab) }
++        if case .tab(let id) = item, let tab = browser.chatTab(id) { PageWords.warm(tab) }
+         if case .folder(let id) = item, let nest = browser.nests.first(where: { $0.id == id }) { ChatAttachment.warm(nest, in: browser) }
+         if !items.contains(item) { items.append(item) }
+     }
+@@ -1708,15 +1695,17 @@ struct ChatAddMenu: View {
+         // Your own pages; the agents' tabs are theirs, and many, so only
+         // when you look for one.
+         let words = search.lowercased().split(separator: " ").map(String.init)
+-        let pages = browser.tabs.filter { ChatComposer.page($0) != nil && (!words.isEmpty || $0.agent == nil) }
+-        var out = browser.inMail ? (MailChat.now().map { [Row.mail($0)] } ?? []) : []
++        let peek = browser.peeking.map { [$0] } ?? []
++        let pages = (peek + browser.tabs.filter { tab in !peek.contains { $0.id == tab.id } })
++            .filter { ChatComposer.page($0) != nil && (!words.isEmpty || $0.agent == nil) }
++        var out = browser.inMail && browser.peeking == nil ? (MailChat.now().map { [Row.mail($0)] } ?? []) : []
+         // The folders first: a few, where the tabs are many. Not for a task
+         // line, whose context is tabs one by one.
+         if line == nil {
+             out += browser.nests.filter { !ChatAttachment.tabs(of: $0, in: browser).isEmpty }.map(Row.folder)
+         }
+         out += pages.map(Row.tab)
+-        if let front = ChatComposer.page(browser.active) { out.append(.screenshot(front)) }
++        if let front = ChatComposer.page(browser.chatPage) { out.append(.screenshot(front)) }
+         out.append(.file)
+         // Typing looks through all of it: the tabs by title and address,
+         // the rest by what they say they do.
+@@ -1882,7 +1871,7 @@ struct ChatAddMenu: View {
+     private func hint(_ row: Row) -> String? {
+         switch row {
+         case .mail: return nil
+-        case .tab(let tab): return tab.id == browser.activeID ? "This tab" : nil
++        case .tab(let tab): return tab.id == browser.chatPage?.id ? "This tab" : nil
+         case .folder(let nest):
+             let n = ChatAttachment.tabs(of: nest, in: browser).count
+             return n == 1 ? "1 tab" : "\(n) tabs"

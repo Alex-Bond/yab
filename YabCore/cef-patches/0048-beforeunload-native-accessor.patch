@@ -1,0 +1,19 @@
+--- a/third_party/blink/renderer/core/frame/local_frame_mojo_handler.cc
++++ b/third_party/blink/renderer/core/frame/local_frame_mojo_handler.cc
+@@ -718,1 +718,4 @@
++const String& CurrentNativeBeforeUnloadPreflightRequest() {
++  return NativeBeforeUnloadRequest();
++}
+ const String& LocalFrameMojoHandler::CurrentBeforeUnloadPreflightRequest() {
+--- a/third_party/blink/renderer/core/page/chrome_client_impl.cc
++++ b/third_party/blink/renderer/core/page/chrome_client_impl.cc
+@@ -130,3 +130,4 @@
+ namespace blink {
++const String& CurrentNativeBeforeUnloadPreflightRequest();
+
+ namespace {
+@@ -519,3 +520,3 @@
+   // Synchronous mojo call.
+-  const String& preflight = LocalFrameMojoHandler::CurrentBeforeUnloadPreflightRequest();
++  const String& preflight = CurrentNativeBeforeUnloadPreflightRequest();
+   if(preflight.empty())

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="horizontal" android:padding="8dp" android:background="#FFF7F3ED">
+    <Button android:id="@+id/widget_search" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:text="@string/entrance_search" android:textSize="13sp" android:minWidth="0dp" android:padding="2dp" />
+    <Button android:id="@+id/widget_ask" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:text="@string/entrance_ask" android:textSize="13sp" android:minWidth="0dp" android:padding="2dp" />
+    <Button android:id="@+id/widget_private" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:text="@string/entrance_private" android:textSize="13sp" android:minWidth="0dp" android:padding="2dp" />
+    <Button android:id="@+id/widget_scan" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:text="@string/entrance_scan" android:textSize="13sp" android:minWidth="0dp" android:padding="2dp" />
+</LinearLayout>

@@ -1,0 +1,47 @@
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -26,6 +26,7 @@
+ #include "cef/libcef/browser/views/external_print.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
+ #include "chrome/browser/extensions/external_tab_model.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
+ #include "ui/compositor/compositor.h"
+ #include "base/no_destructor.h"
+@@ -764,9 +765,19 @@
+   return true;
+ }
+ CefRefPtr<CefDictionaryValue> PageState(CefBrowserHostBase* browser) {
+-  auto* page = browser && browser->GetWebContents()
+-      ? ExternalPage::FromWebContents(browser->GetWebContents()) : nullptr;
+-  return page ? page->State() : CefDictionaryValue::Create();
++  auto* contents = browser ? browser->GetWebContents() : nullptr;
++  auto* page = contents ? ExternalPage::FromWebContents(contents) : nullptr;
++  auto result = page ? page->State() : CefDictionaryValue::Create();
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !contents || contents->IsBeingDestroyed())
++    return result;
++  auto* native = GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(contents);
++  if (!extensions::ExtensionTabUtil::BrowserSupportsTabs(native)) return result;
++  // Identity only, even for an ordinary CefBrowserView. Never borrow another
++  // page's geometry. Chrome's logical window can hold several external pages.
++  result->SetInt("browserId", browser->GetIdentifier());
++  result->SetInt("extensionTabId", extensions::ExtensionTabUtil::GetTabId(contents));
++  result->SetInt("extensionWindowId", extensions::ExtensionTabUtil::GetWindowIdOfTab(contents));
++  return result;
+ }
+ bool ResizePage(CefBrowserHostBase* browser, const CefSize& size) {
+   auto* page = browser && browser->GetWebContents()
+@@ -846,6 +857,13 @@
+   auto* runner = extensions::ExtensionActionRunner::GetForWebContents(owner);
+   if (!action || !runner || !action->GetIsVisible(tab) || !action->HasPopup(tab))
+     return false;
++  // This validated action belongs to the externally focused, physically
++  // active owner. An extension may have created another logical foreground
++  // tab meanwhile (for example its welcome page). Do not let that asynchronous
++  // model change retarget the original action's native tabs queries.
++  if (auto* model = extensions::ExternalTabModel::Get(owner); model && !model->Activate())
++    return false;
++  extensions::ExternalTabFocus::Remember(owner);
+   // Same native permissions and action dispatch as a Chrome toolbar press.
+   auto owner_weak = owner->GetWeakPtr();
+   auto owner_document = owner->GetPrimaryMainFrame()->GetWeakDocumentPtr();

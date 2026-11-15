@@ -1,0 +1,392 @@
+[
+ {
+  "stem": "figma",
+  "key": "figma-onb",
+  "fav": "figma",
+  "title": "Onboarding v3 · Welcome screens",
+  "site": "Figma",
+  "url": "figma.com/design/xK29fLm8/Onboarding-v3",
+  "dark": false,
+  "theme": "rgb(44, 44, 44)"
+ },
+ {
+  "stem": "paper",
+  "key": "paper-launch",
+  "fav": "paper",
+  "title": "Launch notes · Tern 2.0 · Paper",
+  "site": "Paper",
+  "url": "paper.so/tern/launch-notes",
+  "dark": false,
+  "theme": "rgb(255, 255, 255)"
+ },
+ {
+  "stem": "ledger",
+  "key": "ledger",
+  "fav": "ledger",
+  "title": "Overview · Ledger",
+  "site": "Ledger",
+  "url": "ledger.app/tern/overview",
+  "dark": false,
+  "theme": "rgb(15, 118, 110)"
+ },
+ {
+  "stem": "lumen",
+  "key": "lumen",
+  "fav": "lumen",
+  "title": "Design Systems Night · Stockholm · Lumen",
+  "site": "Lumen",
+  "url": "lumen.events/e/design-systems-night",
+  "dark": false,
+  "theme": "rgb(255, 251, 247)"
+ },
+ {
+  "stem": "hn",
+  "key": "hn",
+  "fav": "hn",
+  "title": "Hacker News",
+  "site": "Hacker News",
+  "url": "news.ycombinator.com",
+  "dark": false,
+  "theme": "rgb(255, 102, 0)"
+ },
+ {
+  "stem": "hn-thread",
+  "key": "hn-thread",
+  "fav": "hn",
+  "title": "Ask HN: How do you keep tabs under control on your phone?",
+  "site": "Hacker News",
+  "url": "hackernews.com",
+  "dark": false,
+  "theme": "rgb(255, 102, 0)"
+ },
+ {
+  "stem": "github",
+  "key": "gh-pr",
+  "fav": "github",
+  "title": "feat(editor): wrap text at 800 and keep it clear of the side panels",
+  "site": "GitHub",
+  "url": "github.com/excalidraw/excalidraw/pull/12192",
+  "dark": false,
+  "theme": "rgb(246, 248, 250)"
+ },
+ {
+  "stem": "nordbutik",
+  "key": "nord-throw",
+  "fav": "nordbutik",
+  "title": "Fjord linen throw · Nordbutik",
+  "site": "Nordbutik",
+  "url": "nordbutik.com",
+  "dark": false,
+  "theme": "rgb(250, 248, 244)"
+ },
+ {
+  "stem": "youtube",
+  "key": "yt-nn",
+  "fav": "youtube",
+  "title": "But what is a neural network? · YouTube",
+  "site": "YouTube",
+  "url": "youtube.com",
+  "dark": true,
+  "theme": "rgb(15, 15, 15)"
+ },
+ {
+  "stem": "flights",
+  "key": "flights",
+  "fav": "google",
+  "title": "Stockholm to Lisbon · Flights",
+  "site": "Google Flights",
+  "url": "google.com/travel/flights?q=ARN-LIS",
+  "dark": false,
+  "theme": "rgb(255, 255, 255)"
+ },
+ {
+  "stem": "linear",
+  "key": "linear-method",
+  "fav": "linearm",
+  "title": "The Linear Method",
+  "site": "Linear",
+  "url": "linear.app/method",
+  "dark": true,
+  "theme": "rgb(8, 9, 10)"
+ },
+ {
+  "stem": "google",
+  "key": "serp",
+  "fav": "google",
+  "title": "lisbon weather october · Google Search",
+  "site": "Google",
+  "url": "google.com",
+  "dark": false,
+  "theme": "rgb(255, 255, 255)"
+ },
+ {
+  "stem": "google-gift",
+  "key": "serp",
+  "fav": "google",
+  "title": "gift ideas for jonas · Google Search",
+  "site": "Google",
+  "url": "google.com",
+  "dark": false,
+  "theme": "rgb(255, 255, 255)"
+ },
+ {
+  "stem": "private",
+  "key": "private",
+  "fav": "private",
+  "title": "Private Tab",
+  "site": "Private",
+  "url": "private.com",
+  "dark": true,
+  "theme": ""
+ },
+ {
+  "stem": "youtube-home",
+  "key": "generic",
+  "fav": "youtube",
+  "title": "YouTube",
+  "site": "YouTube",
+  "url": "youtube.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "drift",
+  "key": "generic",
+  "fav": "drift",
+  "title": "Drift",
+  "site": "Drift",
+  "url": "drift.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "paulgraham",
+  "key": "generic",
+  "fav": "paul",
+  "title": "How to Do Great Work",
+  "site": "paulgraham.com",
+  "url": "paulgrahamcom.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "wikipedia-rams",
+  "key": "generic",
+  "fav": "wiki",
+  "title": "Dieter Rams · Wikipedia",
+  "site": "Wikipedia",
+  "url": "wikipedia.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "nngroup",
+  "key": "generic",
+  "fav": "nng",
+  "title": "10 Usability Heuristics",
+  "site": "NN/g",
+  "url": "nng.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "youtube-llm",
+  "key": "generic",
+  "fav": "youtube",
+  "title": "[1hr Talk] Intro to Large Language Models",
+  "site": "YouTube",
+  "url": "youtube.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "verge",
+  "key": "generic",
+  "fav": "verge",
+  "title": "The Verge",
+  "site": "The Verge",
+  "url": "theverge.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "daybook",
+  "key": "generic",
+  "fav": "daybook",
+  "title": "Daybook",
+  "site": "Daybook",
+  "url": "daybook.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "linear-issues",
+  "key": "generic",
+  "fav": "linear",
+  "title": "My issues · Linear",
+  "site": "Linear",
+  "url": "linear.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "linear-invite",
+  "key": "generic",
+  "fav": "linear",
+  "title": "ENG-412 · Invite flow · Linear",
+  "site": "Linear",
+  "url": "linear.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "slack",
+  "key": "generic",
+  "fav": "slack",
+  "title": "#design · Slack",
+  "site": "Slack",
+  "url": "slack.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "figma-recents",
+  "key": "generic",
+  "fav": "figma",
+  "title": "Recents · Figma",
+  "site": "Figma",
+  "url": "figma.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "paper-spec",
+  "key": "generic",
+  "fav": "paper",
+  "title": "Onboarding v3 spec · Paper",
+  "site": "Paper",
+  "url": "paper.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "orbit",
+  "key": "generic",
+  "fav": "orbit",
+  "title": "Activation funnel · Orbit",
+  "site": "Orbit",
+  "url": "orbit.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "tern",
+  "key": "generic",
+  "fav": "tern",
+  "title": "Tern · Calm scheduling for busy teams",
+  "site": "localhost",
+  "url": "localhost.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "google-home",
+  "key": "generic",
+  "fav": "google",
+  "title": "Google",
+  "site": "Google",
+  "url": "google.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "airbnb",
+  "key": "generic",
+  "fav": "airbnb",
+  "title": "Alfama · Stays",
+  "site": "Airbnb",
+  "url": "airbnb.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "timeout",
+  "key": "generic",
+  "fav": "timeout",
+  "title": "The best things to do in Lisbon",
+  "site": "Time Out",
+  "url": "timeout.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "wikipedia-lisbon",
+  "key": "generic",
+  "fav": "wiki",
+  "title": "Lisbon · Wikipedia",
+  "site": "Wikipedia",
+  "url": "wikipedia.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "wikipedia-alfama",
+  "key": "generic",
+  "fav": "wiki",
+  "title": "Alfama · Wikipedia",
+  "site": "Wikipedia",
+  "url": "wikipedia.com",
+  "dark": false,
+  "theme": "rgb(244, 244, 246)"
+ },
+ {
+  "stem": "tap-code",
+  "key": "extra",
+  "fav": "tap",
+  "title": "Sign in · TAP Air Portugal",
+  "site": "TAP Air Portugal",
+  "url": "flytap.com/en-se/login/code",
+  "dark": false,
+  "theme": ""
+ },
+ {
+  "stem": "tap-seats",
+  "key": "extra",
+  "fav": "tap",
+  "title": "TAP · Seats",
+  "site": "TAP Air Portugal",
+  "url": "flytap.com/en-se/booking/seats",
+  "dark": false,
+  "theme": ""
+ },
+ {
+  "stem": "tap-payment",
+  "key": "extra",
+  "fav": "tap",
+  "title": "TAP · Payment",
+  "site": "TAP Air Portugal",
+  "url": "flytap.com/en-se/booking/payment",
+  "dark": false,
+  "theme": ""
+ },
+ {
+  "stem": "article",
+  "key": "extra",
+  "fav": "uxm",
+  "title": "The thumb zone, ten years later",
+  "site": "UXmatters",
+  "url": "uxmatters.com/thumb-zone-ten-years-later",
+  "dark": false,
+  "theme": ""
+ },
+ {
+  "stem": "lisboa-alfama",
+  "key": "extra",
+  "fav": "lisboa",
+  "title": "Alfama, de manhã cedo · Lisboa a Pé",
+  "site": "Lisboa a Pé",
+  "url": "lisboa-a-pe.pt/alfama-de-manha",
+  "dark": false,
+  "theme": ""
+ }
+]

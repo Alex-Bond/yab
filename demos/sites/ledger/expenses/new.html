@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New expense · Ledger</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="/assets/ledger.css">
+</head>
+<body data-page="expense-new">
+<script src="/assets/shell.js"></script>
+<main>
+  <div class="page">
+    <div class="crumbs"><a href="/expenses">Expenses</a><span data-icon="chevRight" data-size="16"></span><span>New expense</span></div>
+    <div class="head">
+      <div><h1>New expense</h1><p>Add a purchase made for Tern Labs. Attach the receipt and it goes straight to review.</p></div>
+    </div>
+    <div class="form-grid">
+      <form class="card form-card" id="expense" method="post" action="/expenses" enctype="multipart/form-data" novalidate>
+        <div class="card-body">
+          <div class="fields">
+            <div class="field full" id="f-merchant">
+              <label for="merchant">Merchant</label>
+              <input class="input" id="merchant" name="merchant" type="text" placeholder="Who did you pay?" autocomplete="off" required>
+              <span class="err">Who was it paid to?</span>
+            </div>
+            <div class="field" id="f-amount">
+              <label for="amount">Amount</label>
+              <div class="money">
+                <div class="sym"><span id="sym">$</span><input class="input" id="amount" name="amount" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off" required></div>
+                <select class="select" id="currency" name="currency" aria-label="Currency">
+                  <option value="USD">USD</option><option value="EUR">EUR</option><option value="SEK">SEK</option><option value="GBP">GBP</option><option value="NOK">NOK</option>
+                </select>
+              </div>
+              <span class="err">Add the amount on the receipt.</span>
+            </div>
+            <div class="field">
+              <label for="date">Date</label>
+              <input class="input" id="date" name="date" type="date">
+            </div>
+            <div class="field">
+              <label for="category">Category</label>
+              <select class="select" id="category" name="category">
+                <option value="">Choose a category</option>
+                <option>Travel</option><option>Meals</option><option>Software</option><option>Hardware</option><option>Office</option>
+                <option>Contractors</option><option>Research</option><option>Events</option><option>Other</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="paid">Paid with</label>
+              <select class="select" id="paid" name="paid_with">
+                <option value="card">Team card ···· 0192</option>
+                <option value="personal">My own card, reimburse me</option>
+              </select>
+            </div>
+            <div class="field full">
+              <label for="notes">Notes <span class="opt">(optional)</span></label>
+              <textarea class="input" id="notes" name="notes" placeholder="What was it for? Who was there?"></textarea>
+            </div>
+            <div class="field full">
+              <span class="label" id="receipt-label">Receipt</span>
+              <div class="drop" id="drop" role="group" aria-labelledby="receipt-label">
+                <span class="art" data-icon="upload" data-size="24"></span>
+                <div class="d-txt"><b id="drop-title">Drop receipts here</b><span id="drop-sub">PDF, JPG or PNG, up to 10 MB each</span></div>
+                <button class="btn" type="button" id="attach"><span data-icon="clip" data-size="16"></span>Attach receipt</button>
+              </div>
+              <input class="sr-only" type="file" id="receipt" name="receipt" accept=".pdf,image/*" multiple tabindex="-1" aria-label="Receipt files">
+              <div class="files" id="files"></div>
+            </div>
+          </div>
+        </div>
+        <div class="form-foot">
+          <span class="note"><span data-icon="lock" data-size="16"></span>Receipts are kept for seven years, as Swedish bookkeeping law asks.</span>
+          <div class="end">
+            <a class="btn" href="/expenses">Cancel</a>
+            <button class="btn primary" type="submit" id="submit">Submit expense</button>
+          </div>
+        </div>
+      </form>
+      <aside class="grid">
+        <section class="card aside-card">
+          <div class="card-body">
+            <h4>Before you submit</h4>
+            <ul class="rules">
+              <li><span data-icon="checkCircle" data-size="16"></span><span>A receipt for anything over $75, an itemized one for meals.</span></li>
+              <li><span data-icon="checkCircle" data-size="16"></span><span>Meals with guests: up to $60 a person. Name who was there.</span></li>
+              <li><span data-icon="checkCircle" data-size="16"></span><span>Travel is booked economy. Taxis to and from the airport are fine.</span></li>
+              <li><span data-icon="checkCircle" data-size="16"></span><span>Anna Ek reviews within two working days.</span></li>
+            </ul>
+          </div>
+        </section>
+        <section class="card aside-card">
+          <div class="card-body">
+            <h4>Team card</h4>
+            <div class="list">
+              <div class="li"><span class="logo" style="background:var(--brand)">L</span><div class="grow"><b>Virtual · ···· 0192</b><span>Mira Lindqvist</span></div></div>
+            </div>
+            <div class="limit">
+              <div class="l-row">Spent this month<b>$3,412.80</b></div>
+              <div class="bar"><span style="width:68.3%"></span></div>
+              <div class="l-row">Monthly limit<b>$5,000.00</b></div>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+</main>
+<script src="/assets/data.js"></script>
+<script src="/assets/pages.js"></script>
+</body>
+</html>

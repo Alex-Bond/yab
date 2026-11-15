@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Boost editor fixture</title>
+<style>
+  body { background: white; color: rgb(24, 32, 48); font: 20px/28px Georgia; margin: 16px; }
+  main { font-size: 20px; }
+  article { height: 80px; margin-bottom: 8px; background: rgb(240, 242, 244); }
+  h2 { font-size: 24px; }
+  #photo { width: 80px; height: 40px; filter: contrast(1.1); }
+  #inline { color: rgb(80, 30, 20) !important; }
+</style>
+<main id="stories">
+  <article class="story" id="first"><h2>First story</h2><span id="inherit">Inherited text</span></article>
+  <article class="story" id="second"><h2>Second story</h2></article>
+  <article class="story" id="third"><h2>Third story</h2></article>
+</main>
+<p id="inline" style="color: rgb(80, 30, 20) !important">Original inline priority</p>
+<img id="photo" alt="Fixture photograph" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='40'%3E%3Crect width='80' height='40' fill='%23e06555'/%3E%3C/svg%3E">

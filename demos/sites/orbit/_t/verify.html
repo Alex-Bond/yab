@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{> head}}
+<link rel="stylesheet" href="/assets/auth.css">
+<title>Check your email · Orbit</title>
+</head>
+<body>
+<div class="auth">
+  <main class="auth-main">
+    <header class="auth-head">
+      <a class="brand" href="/login">{{> mark}}<span>Orbit</span></a>
+      <a class="help" href="/forgot">Need help signing in?</a>
+    </header>
+    <div class="auth-body">
+      <form class="auth-form" method="post" action="/verify" id="verify" data-busy-form>
+        <a class="back" href="/login"><svg viewBox="0 0 16 16"><path d="M5.375 3.5 .875 8l4.5 4.5"/></svg>Back to sign in</a>
+        <div class="badge-icon"><svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="3"/><path d="m4.5 7.5 6.3 4.6a2 2 0 0 0 2.4 0l6.3-4.6"/></svg></div>
+        <h1>Check your email</h1>
+        <p class="lede">We sent a 6-digit code to <strong>{{email}}</strong>. Enter it below to finish signing in.</p>
+        {{{alert}}}
+        <input type="hidden" name="code" value="">
+        <div class="otp" role="group" aria-label="6-digit code">
+          <input class="otp-box" id="code1" name="code1" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="one-time-code" aria-label="Digit 1 of 6" required>
+          <input class="otp-box" id="code2" name="code2" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 2 of 6" required>
+          <input class="otp-box" id="code3" name="code3" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 3 of 6" required>
+          <span class="otp-dot" aria-hidden="true"></span>
+          <input class="otp-box" id="code4" name="code4" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 4 of 6" required>
+          <input class="otp-box" id="code5" name="code5" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 5 of 6" required>
+          <input class="otp-box" id="code6" name="code6" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 6 of 6" required>
+        </div>
+        <button class="btn btn-primary btn-block" type="submit"><span class="spin"></span><span>Verify</span></button>
+        <p class="fine">Didn't get the email? <button class="link" type="submit" id="resend" formaction="/verify/resend" formnovalidate>Resend code</button></p>
+        <p class="notice" id="notice" role="status">{{notice}}</p>
+        <p class="hint" style="text-align:center">The code expires in 10 minutes. Check your spam folder if it isn't there.</p>
+      </form>
+    </div>
+    {{> foot}}
+  </main>
+  <aside class="art">
+    <div class="art-copy">
+      <span class="pill"><b>Secure</b>Two-step sign-in for every workspace</span>
+      <h2>One more step, then your dashboards.</h2>
+      <p>Orbit asks for a code from your inbox when you sign in on a new browser, so your product data stays yours.</p>
+    </div>
+    {{> art}}
+  </aside>
+</div>
+<script src="/assets/auth.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+--- a/content/browser/media/session/media_session_impl.cc
++++ b/content/browser/media/session/media_session_impl.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "content/browser/media/session/media_session_impl.h"
++#include "content/public/browser/external_media_session_routes.h"
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -1746,6 +1747,9 @@
+ }
+ 
+ void MediaSessionImpl::UpdateRoutedService() {
++  // A different native routed frame can have identical metadata/actions.
++  // Signal every recomputation, including WebAudio without a routed service.
++  external_media_session::Changed(web_contents());
+   RenderFrameHost* rfh = ComputeFrameForRouting(/*ensure_service=*/true);
+   MediaSessionServiceImpl* new_service =
+       rfh ? services_[rfh->GetGlobalId()] : nullptr;
+--- /dev/null
++++ b/content/public/browser/external_media_session_routes.h
+@@ -0,0 +1,44 @@
++// UI-sequence registration for native MediaSession routed-owner changes.
++// Not installed or invoked by the active SDK.
++#ifndef CONTENT_PUBLIC_BROWSER_EXTERNAL_MEDIA_SESSION_ROUTES_H_
++#define CONTENT_PUBLIC_BROWSER_EXTERNAL_MEDIA_SESSION_ROUTES_H_
++#include <map>
++#include <utility>
++#include "base/functional/callback.h"
++#include "base/no_destructor.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/unguessable_token.h"
++
++namespace content {
++class WebContents;
++namespace external_media_session {
++struct RouteObserver {
++  base::UnguessableToken registration;
++  base::RepeatingClosure changed;
++};
++inline std::map<WebContents*, RouteObserver>& Observers() {
++  static base::NoDestructor<std::map<WebContents*, RouteObserver>> observers;
++  return *observers;
++}
++inline base::UnguessableToken Register(WebContents* owner, base::RepeatingClosure changed) {
++  const auto registration = base::UnguessableToken::Create();
++  Observers().insert_or_assign(owner, RouteObserver{registration, std::move(changed)});
++  return registration;
++}
++inline void Remove(WebContents* owner, const base::UnguessableToken& registration) {
++  auto found = Observers().find(owner);
++  if (found != Observers().end() && found->second.registration == registration)
++    Observers().erase(found);
++}
++inline void Changed(WebContents* owner) {
++  auto found = Observers().find(owner);
++  if (found == Observers().end()) return;
++  // Never call an embedder while MediaSessionImpl is updating its service.
++  // The registered closure must bind a weak observer, so queued work cannot
++  // outlive its observer or affect a later registration at the same address.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, found->second.changed);
++}
++}  // namespace external_media_session
++}  // namespace content
++#endif
+--- a/content/browser/media/session/media_session_impl.h
++++ b/content/browser/media/session/media_session_impl.h
+@@ -225,6 +225,11 @@
+   GetMediaSessionPosition() override;
+ 
+   // Returns the current media session metadata for a one-off request.
++  // Original routed metadata images, read synchronously with native ownership.
++  CONTENT_EXPORT std::vector<media_session::MediaImage> GetExternalArtwork() const {
++    auto found=images_.find(media_session::mojom::MediaSessionImageType::kArtwork);
++    return found==images_.end()?std::vector<media_session::MediaImage>():found->second;
++  }
+   CONTENT_EXPORT const media_session::MediaMetadata& GetMediaSessionMetadata()
+       override;
+ 

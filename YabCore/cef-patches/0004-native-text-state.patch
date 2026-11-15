@@ -1,0 +1,470 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -1115,6 +1115,10 @@
+       "libcef/browser/views/view_util_mac.mm",
+       "libcef/browser/views/external_host_mac.h",
+       "libcef/browser/views/external_host_mac.mm",
++      "libcef/browser/views/external_text_input.h",
++      "libcef/browser/views/external_text_input.cc",
++      "libcef/browser/views/external_text_value.h",
++      "libcef/browser/views/external_text_value.cc",
+       "libcef/common/util_mac.h",
+       "libcef/common/util_mac.mm",
+ 
+--- a/cef/include/cef_display_handler.h
++++ b/cef/include/cef_display_handler.h
+@@ -38,6 +38,10 @@
+ #define CEF_INCLUDE_CEF_DISPLAY_HANDLER_H_
+ #pragma once
+ 
++// Experimental native text-state snapshot API, absent from official SDKs.
++#define CEF_YAB_TEXT_INPUT_VERSION 1
++
++#include "include/cef_values.h"
+ #include "include/cef_api_hash.h"
+ #include "include/cef_base.h"
+ #include "include/cef_browser.h"
+@@ -50,6 +54,22 @@
+ /*--cef(source=client)--*/
+ class CefDisplayHandler : public virtual CefBaseRefCounted {
+  public:
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Called on macOS with native UTF-16 editing state for this browser.
++  /// |state| is a newly owned dictionary with stateVersion=1. Revision and
++  /// focusToken are opaque decimal strings. Rectangles are in root-page DIP.
++  /// A zero focusToken invalidates input ownership. An absent surrounding
++  /// string is unavailable, including for password and former-password fields.
++  /// Cached ranges are not acknowledgement of renderer input processing.
++  /// Reset the client cache on browser close even without a final callback.
++  /// Do not synchronously close or mutate |browser| from this notification.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnExternalTextInputState(CefRefPtr<CefBrowser> browser,
++                                        CefRefPtr<CefDictionaryValue> state) {}
++#endif
++
+   ///
+   /// Called when a frame's address has changed.
+   ///
+--- a/cef/libcef/browser/browser_contents_delegate.h
++++ b/cef/libcef/browser/browser_contents_delegate.h
+@@ -8,6 +8,7 @@
+ 
+ #include <memory>
+ 
++#include "build/build_config.h"
+ #include "base/callback_list.h"
+ #include "base/observer_list.h"
+ #include "cef/libcef/browser/frame_host_impl.h"
+@@ -18,6 +19,10 @@
+ class CefBrowserInfo;
+ class CefBrowserPlatformDelegate;
+ class CefClient;
++#if BUILDFLAG(IS_MAC)
++class CefExternalTextInput;
++struct CefExternalTextSnapshot;
++#endif
+ 
+ // Flags that represent which states have changed.
+ enum class CefBrowserContentsState : uint8_t {
+@@ -67,6 +72,7 @@
+ 
+   explicit CefBrowserContentsDelegate(
+       scoped_refptr<CefBrowserInfo> browser_info);
++  ~CefBrowserContentsDelegate() override;
+ 
+   CefBrowserContentsDelegate(const CefBrowserContentsDelegate&) = delete;
+   CefBrowserContentsDelegate& operator=(const CefBrowserContentsDelegate&) =
+@@ -213,6 +219,10 @@
+ 
+   // True if the focus is currently on an editable field on the page.
+   bool focus_on_editable_field_ = false;
++#if BUILDFLAG(IS_MAC)
++  void OnExternalTextInput(CefExternalTextSnapshot snapshot);
++  std::unique_ptr<CefExternalTextInput> external_text_input_;
++#endif
+ };
+ 
+ #endif  // CEF_LIBCEF_BROWSER_BROWSER_CONTENTS_DELEGATE_H_
+--- a/cef/libcef/browser/browser_contents_delegate.cc
++++ b/cef/libcef/browser/browser_contents_delegate.cc
+@@ -36,6 +36,12 @@
+ #include "sandbox/win/src/sandbox_types.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++#include "base/functional/bind.h"
++#include "cef/libcef/browser/views/external_text_input.h"
++#include "cef/libcef/browser/views/external_text_value.h"
++#endif
++
+ using content::KeyboardEventProcessingResult;
+ 
+ namespace {
+@@ -88,9 +94,22 @@
+     scoped_refptr<CefBrowserInfo> browser_info)
+     : browser_info_(browser_info) {}
+ 
++CefBrowserContentsDelegate::~CefBrowserContentsDelegate() = default;
++
+ void CefBrowserContentsDelegate::ObserveWebContents(
+     content::WebContents* new_contents) {
++#if BUILDFLAG(IS_MAC)
++  external_text_input_.reset();
++#endif
+   WebContentsObserver::Observe(new_contents);
++#if BUILDFLAG(IS_MAC)
++  if (new_contents && CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) {
++    external_text_input_ = std::make_unique<CefExternalTextInput>(
++        new_contents, base::BindRepeating(
++            &CefBrowserContentsDelegate::OnExternalTextInput,
++            base::Unretained(this)));
++  }
++#endif
+ 
+   if (new_contents) {
+     // Make sure MaybeCreateFrame is called at least one time.
+@@ -103,6 +122,19 @@
+     RenderWidgetCreated(new_contents->GetRenderViewHost()->GetWidget());
+   }
+ }
++
++#if BUILDFLAG(IS_MAC)
++void CefBrowserContentsDelegate::OnExternalTextInput(
++    CefExternalTextSnapshot snapshot) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL)) return;
++  if (auto c = client()) {
++    if (auto handler = c->GetDisplayHandler()) {
++      handler->OnExternalTextInputState(browser(),
++                                         CefExternalTextValue(snapshot));
++    }
++  }
++}
++#endif
+ 
+ void CefBrowserContentsDelegate::AddObserver(Observer* observer) {
+   observers_.AddObserver(observer);
+--- /dev/null
++++ b/cef/libcef/browser/views/external_text_input.h
+@@ -0,0 +1,78 @@
++// Candidate native text observer for Yab's experimental source SDK.
++#pragma once
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <vector>
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "content/browser/renderer_host/text_input_manager.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/global_dom_node_id.h"
++#include "ui/base/ime/text_input_type.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/range/range.h"
++
++// Values use native UTF-16 ranges. Rectangles are root-page DIP, never the
++// concealed producer window's screen coordinates. The client maps them into
++// its actual window before answering NSTextInputClient geometry queries.
++struct CefExternalTextSnapshot {
++  uint64_t revision = 0;
++  uint64_t focus_token = 0;  // Zero means no validated native editing target.
++  bool editable = false, secure = false, cancelled = false;
++  bool has_surrounding = false;
++  ui::TextInputType type = ui::TEXT_INPUT_TYPE_NONE;
++  uint32_t flags = 0;
++  int node = 0;
++  std::u16string surrounding;
++  size_t surrounding_offset = 0;
++  gfx::Range selection = gfx::Range::InvalidRange();
++  gfx::Range composition = gfx::Range::InvalidRange();
++  std::optional<gfx::Rect> selection_bounds;
++  std::optional<gfx::Rect> caret_bounds;
++  std::vector<gfx::Rect> composition_bounds;
++};
++
++class CefExternalTextInput final : public content::WebContentsObserver,
++                                   public content::TextInputManager::Observer {
++ public:
++  using content::WebContentsObserver::OnTextSelectionChanged;
++  using Callback = base::RepeatingCallback<void(CefExternalTextSnapshot)>;
++  CefExternalTextInput(content::WebContents* contents, Callback callback);
++  ~CefExternalTextInput() override;
++  void Publish();
++  // UI sequence only. Check immediately before a composition operation; a
++  // previously published selection range alone never authorizes text input.
++  bool MatchesFocus(uint64_t token) const;
++  void WebContentsDestroyed() override;
++  void OnWebContentsFocused(content::RenderWidgetHost*) override;
++  void OnWebContentsLostFocus(content::RenderWidgetHost*) override;
++  void OnFocusChangedInPage(const content::FocusedNodeDetails&) override;
++  void OnFrameFocused(content::RenderFrameHost*) override;
++  void PrimaryPageChanged(content::Page&) override;
++  void RenderFrameDeleted(content::RenderFrameHost*) override;
++  void OnUpdateTextInputStateCalled(content::TextInputManager*,
++      content::RenderWidgetHostViewBase*, bool) override;
++  void OnImeCancelComposition(content::TextInputManager*,
++      content::RenderWidgetHostViewBase*) override;
++  void OnSelectionBoundsChanged(content::TextInputManager*,
++      content::RenderWidgetHostViewBase*) override;
++  void OnImeCompositionRangeChanged(content::TextInputManager*,
++      content::RenderWidgetHostViewBase*, bool) override;
++  void OnTextSelectionChanged(content::TextInputManager*,
++      content::RenderWidgetHostViewBase*) override;
++ private:
++  void Detach();
++  void Emit(bool cancelled);
++  bool HasNativeTarget() const;
++  bool IsActiveView(content::RenderWidgetHostViewBase*) const;
++  raw_ptr<content::TextInputManager> manager_ = nullptr;
++  Callback callback_;
++  uint64_t revision_ = 0;
++  uint64_t focus_token_ = 1;
++  bool focused_ = false;
++  content::GlobalDOMNodeId focused_node_;
++  uint64_t selection_text_token_ = 0;
++  uint64_t selection_geometry_token_ = 0;
++  uint64_t composition_geometry_token_ = 0;
++};
+--- /dev/null
++++ b/cef/libcef/browser/views/external_text_input.cc
+@@ -0,0 +1,172 @@
++#include "external_text_input.h"
++#include <utility>
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/public/browser/focused_node_details.h"
++#include "content/public/browser/render_frame_host.h"
++#include "ui/base/ime/text_input_flags.h"
++
++CefExternalTextInput::CefExternalTextInput(content::WebContents* contents,
++                                         Callback callback)
++    : content::WebContentsObserver(contents), callback_(std::move(callback)) {
++  // WebContentsImpl owns TextInputManager and destroys it after notifying
++  // WebContentsDestroyed. Observe that lifetime, not a transient focused view.
++  manager_ = static_cast<content::WebContentsImpl*>(contents)->GetTextInputManager();
++  if (manager_) manager_->AddObserver(this);
++}
++CefExternalTextInput::~CefExternalTextInput() { Detach(); }
++void CefExternalTextInput::Detach() {
++  if (manager_) manager_->RemoveObserver(this);
++  manager_ = nullptr;
++}
++void CefExternalTextInput::WebContentsDestroyed() {
++  focused_ = false;
++  focused_node_ = {};
++  ++focus_token_;
++  Detach();
++  // Send a final empty state while the receiver is still associated with its
++  // tab. The public bridge must not synchronously destroy the owning window.
++  Emit(true);
++}
++void CefExternalTextInput::Publish() { Emit(false); }
++bool CefExternalTextInput::HasNativeTarget() const {
++  if (!focused_ || !manager_ || !web_contents()) return false;
++  auto* frame = focused_node_.document.AsRenderFrameHostIfValid();
++  auto* widget = manager_->GetActiveWidget();
++  const auto* state = manager_->GetTextInputState();
++  return frame && frame->IsActive() &&
++      frame == web_contents()->GetFocusedFrame() && widget &&
++      widget == frame->GetRenderWidgetHost() && state &&
++      state->type != ui::TEXT_INPUT_TYPE_NONE &&
++      !focused_node_.target_element_dom_id.is_null() &&
++      state->node_id == focused_node_.target_element_dom_id.value();
++}
++bool CefExternalTextInput::MatchesFocus(uint64_t token) const {
++  return token && token == focus_token_ && HasNativeTarget();
++}
++bool CefExternalTextInput::IsActiveView(
++    content::RenderWidgetHostViewBase* updated) const {
++  // Compare addresses only. An unregistering updated view must not be queried.
++  auto* active = manager_ ? manager_->GetActiveWidget() : nullptr;
++  return active && active->GetView() == updated && HasNativeTarget();
++}
++void CefExternalTextInput::OnWebContentsFocused(content::RenderWidgetHost*) {
++  focused_ = true;
++  ++focus_token_;
++  Emit(false);
++}
++void CefExternalTextInput::OnWebContentsLostFocus(content::RenderWidgetHost*) {
++  focused_ = false;
++  ++focus_token_;
++  Emit(true);
++}
++void CefExternalTextInput::OnFocusChangedInPage(
++    const content::FocusedNodeDetails& details) {
++  focused_node_ = details.global_dom_node_id;
++  ++focus_token_;
++  Emit(true);
++}
++void CefExternalTextInput::OnFrameFocused(content::RenderFrameHost* frame) {
++  if (focused_node_.document.AsRenderFrameHostIfValid() != frame) {
++    focused_node_ = {};
++    ++focus_token_;
++    Emit(true);
++  }
++}
++void CefExternalTextInput::PrimaryPageChanged(content::Page&) {
++  focused_node_ = {};
++  ++focus_token_;
++  Emit(true);
++}
++void CefExternalTextInput::RenderFrameDeleted(content::RenderFrameHost* frame) {
++  auto* target = focused_node_.document.AsRenderFrameHostIfValid();
++  if (!target || target == frame) {
++    focused_node_ = {};
++    ++focus_token_;
++    Emit(true);
++  }
++}
++void CefExternalTextInput::Emit(bool cancelled) {
++  CefExternalTextSnapshot snapshot;
++  snapshot.revision = ++revision_;
++  snapshot.cancelled = cancelled;
++  if (HasNativeTarget()) {
++    // Never fetch state from updated_view. That view may be unregistering,
++    // and the active editable widget may belong to a cross-origin child.
++    if (const auto* state = manager_->GetTextInputState()) {
++      snapshot.focus_token = focus_token_;
++      snapshot.type = state->type;
++      snapshot.flags = state->flags;
++      snapshot.node = state->node_id;
++      snapshot.editable = state->type != ui::TEXT_INPUT_TYPE_NONE;
++      snapshot.secure = state->type == ui::TEXT_INPUT_TYPE_PASSWORD ||
++          (state->flags & (ui::TEXT_INPUT_FLAG_HAS_BEEN_PASSWORD |
++                           ui::TEXT_INPUT_FLAG_HAS_BEEN_CUSTOM_PASSWORD));
++      snapshot.selection = state->selection;
++      if (!cancelled && state->composition)
++        snapshot.composition = *state->composition;
++      // Mirror Chromium's secure-input boundary. Do not forward any previous
++      // surrounding-text cache when moving into a password field.
++      if (!snapshot.secure && selection_text_token_ == focus_token_) {
++        if (const auto* selection = manager_->GetTextSelection();
++            selection && selection->text().size() <= 65536) {
++          snapshot.has_surrounding = true;
++          snapshot.surrounding = selection->text();
++          snapshot.surrounding_offset = selection->offset();
++          snapshot.selection = selection->range();
++        }
++      }
++      snapshot.selection_bounds = manager_->GetTextSelectionBounds();
++      if (snapshot.selection.IsValid()) {
++        if (snapshot.selection.is_empty())
++          snapshot.caret_bounds = snapshot.selection_bounds;
++        // EditContext bounds above are optional. Ordinary inputs use the
++        // selection region, already transformed into root-page DIP by TIM.
++        if (selection_geometry_token_ == focus_token_) {
++          if (const auto* region = manager_->GetSelectionRegion()) {
++            if (!snapshot.selection_bounds)
++              snapshot.selection_bounds = region->first_selection_rect;
++            if (snapshot.selection.is_empty() && !snapshot.caret_bounds)
++              snapshot.caret_bounds = region->caret_rect;
++          }
++        }
++      }
++      if (!cancelled && composition_geometry_token_ == focus_token_) {
++        if (const auto* info = manager_->GetCompositionRangeInfo();
++            info && snapshot.composition.IsValid() &&
++            info->range == snapshot.composition &&
++            info->character_bounds.size() == info->range.length() &&
++            info->character_bounds.size() <= 4096) {
++          snapshot.composition_bounds = info->character_bounds;
++        }
++      }
++    }
++  }
++  auto callback = callback_;
++  if (callback) callback.Run(std::move(snapshot));
++}
++void CefExternalTextInput::OnUpdateTextInputStateCalled(
++    content::TextInputManager*, content::RenderWidgetHostViewBase*, bool) {
++  Emit(false);
++}
++void CefExternalTextInput::OnImeCancelComposition(
++    content::TextInputManager*, content::RenderWidgetHostViewBase* view) {
++  if (IsActiveView(view) || !HasNativeTarget()) Emit(true);
++}
++void CefExternalTextInput::OnSelectionBoundsChanged(
++    content::TextInputManager*, content::RenderWidgetHostViewBase* view) {
++  if (IsActiveView(view)) selection_geometry_token_ = focus_token_;
++  Emit(false);
++}
++void CefExternalTextInput::OnImeCompositionRangeChanged(
++    content::TextInputManager*, content::RenderWidgetHostViewBase* view,
++    bool character_bounds_changed) {
++  if (character_bounds_changed && IsActiveView(view))
++    composition_geometry_token_ = focus_token_;
++  Emit(false);
++}
++void CefExternalTextInput::OnTextSelectionChanged(
++    content::TextInputManager*, content::RenderWidgetHostViewBase* view) {
++  if (IsActiveView(view)) selection_text_token_ = focus_token_;
++  Emit(false);
++}
+--- /dev/null
++++ b/cef/libcef/browser/views/external_text_value.h
+@@ -0,0 +1,6 @@
++// Native dictionary bridge candidate; not compiled or runtime accepted.
++#pragma once
++#include "cef/include/cef_values.h"
++struct CefExternalTextSnapshot;
++CefRefPtr<CefDictionaryValue> CefExternalTextValue(
++    const CefExternalTextSnapshot& state);
+--- /dev/null
++++ b/cef/libcef/browser/views/external_text_value.cc
+@@ -0,0 +1,55 @@
++#include "cef/libcef/browser/views/external_text_value.h"
++#include "cef/libcef/browser/views/external_text_input.h"
++#include "base/strings/string_number_conversions.h"
++
++namespace {
++CefRefPtr<CefDictionaryValue> RectValue(const gfx::Rect& rect) {
++  auto result = CefDictionaryValue::Create();
++  result->SetInt("x", rect.x());
++  result->SetInt("y", rect.y());
++  result->SetInt("width", rect.width());
++  result->SetInt("height", rect.height());
++  return result;
++}
++CefRefPtr<CefDictionaryValue> RangeValue(const gfx::Range& range) {
++  auto result = CefDictionaryValue::Create();
++  result->SetBool("valid", range.IsValid());
++  if (range.IsValid()) {
++    result->SetDouble("start", range.start());
++    result->SetDouble("end", range.end());
++  }
++  return result;
++}
++}  // namespace
++CefRefPtr<CefDictionaryValue> CefExternalTextValue(
++    const CefExternalTextSnapshot& state) {
++  auto result = CefDictionaryValue::Create();
++  result->SetInt("stateVersion", 1);
++  result->SetString("coordinateSpace", "rootPage");
++  result->SetString("revision", base::NumberToString(state.revision));
++  result->SetString("focusToken", base::NumberToString(state.focus_token));
++  result->SetBool("editable", state.editable);
++  result->SetBool("secure", state.secure);
++  result->SetBool("cancelled", state.cancelled);
++  result->SetInt("type", static_cast<int>(state.type));
++  result->SetDouble("flags", state.flags);
++  result->SetInt("node", state.node);
++  result->SetDictionary("selection", RangeValue(state.selection));
++  result->SetDictionary("composition", RangeValue(state.composition));
++  result->SetBool("hasSurrounding", state.has_surrounding && !state.secure);
++  if (state.has_surrounding && !state.secure) {
++    result->SetString("surrounding", CefString(state.surrounding));
++    result->SetString("surroundingOffset",
++                      base::NumberToString(state.surrounding_offset));
++  }
++  if (state.selection_bounds)
++    result->SetDictionary("selectionBounds", RectValue(*state.selection_bounds));
++  if (state.caret_bounds)
++    result->SetDictionary("caretBounds", RectValue(*state.caret_bounds));
++  auto bounds = CefListValue::Create();
++  bounds->SetSize(state.composition_bounds.size());
++  for (size_t i = 0; i < state.composition_bounds.size(); ++i)
++    bounds->SetDictionary(i, RectValue(state.composition_bounds[i]));
++  result->SetList("compositionBounds", bounds);
++  return result;
++}

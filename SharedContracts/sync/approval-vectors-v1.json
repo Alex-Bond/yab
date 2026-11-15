@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "provenance": "Reference bytes; verified by actual Swift AssistantApprovalRecords.Request and Detail Codable models",
+  "cases": [
+    {
+      "name": "request-null-unknown-seen-and-escaping",
+      "type": "request",
+      "input": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"account\":\"test-account\",\"mac\":\"test-mac\",\"assistant\":\"claude\",\"session\":\"session\",\"tab\":\"chat:test\",\"permit\":\"mail.send\",\"title\":\"Claude: café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"lines\":[\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"https://site.test/a/b?x=1\"],\"issued\":1700000000.125,\"expires\":1700003600,\"seen\":{\"device\":\"test-mac\",\"at\":1700000001},\"choices\":null,\"future\":{\"ignored\":true}}",
+      "canonical": "{\"account\":\"test-account\",\"assistant\":\"claude\",\"expires\":1700003600,\"id\":\"00000000-0000-0000-0000-000000000007\",\"issued\":1700000000.125,\"lines\":[\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"https://site.test/a/b?x=1\"],\"mac\":\"test-mac\",\"permit\":\"mail.send\",\"session\":\"session\",\"tab\":\"chat:test\",\"title\":\"Claude: café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"}",
+      "digest": "131a51ed8f30038607d3505105e7b65e701924ef8b49b30f60015ed8cea125e6"
+    },
+    {
+      "name": "request-choices-and-integral-double",
+      "type": "request",
+      "input": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"account\":\"test-account\",\"mac\":\"test-mac\",\"assistant\":\"claude\",\"session\":\"session\",\"tab\":\"chat:test\",\"permit\":\"mail.send\",\"title\":\"Claude: café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"lines\":[\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"https://site.test/a/b?x=1\"],\"issued\":1700000000,\"expires\":1700003600,\"choices\":[\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"other\"],\"future\":null}",
+      "canonical": "{\"account\":\"test-account\",\"assistant\":\"claude\",\"choices\":[\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"other\"],\"expires\":1700003600,\"id\":\"00000000-0000-0000-0000-000000000007\",\"issued\":1700000000,\"lines\":[\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"https://site.test/a/b?x=1\"],\"mac\":\"test-mac\",\"permit\":\"mail.send\",\"session\":\"session\",\"tab\":\"chat:test\",\"title\":\"Claude: café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"}",
+      "digest": "5531256785738ad5630d2edde665eb59799c5b4bdec73799634dc7df29fae45e"
+    },
+    {
+      "name": "detail-full-mail-payment-nested-unknown-and-null",
+      "type": "detail",
+      "input": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"verb\":\"Send / Pay\",\"mails\":[{\"id\":\"mail\",\"from\":{\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"address\":\"me@example.test\",\"unknown\":true},\"to\":[{\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"address\":\"me@example.test\",\"unknown\":true}],\"cc\":[],\"bcc\":[{\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"address\":\"me@example.test\"}],\"subject\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"body\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"files\":[{\"id\":\"pdf\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"bytes\":9007199254740991,\"kind\":\"pdf\",\"pages\":2,\"previews\":1,\"width\":null,\"height\":null,\"unknown\":true}],\"date\":1700000000.125,\"unknown\":true}],\"pay\":{\"site\":\"https://site.test/a/b\",\"item\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"amount\":\"$42.10\",\"delivery\":\"\",\"cards\":[{\"id\":\"card\",\"brand\":\"Visa\",\"last4\":\"4242\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"unknown\":\"ignored\"}],\"places\":[{\"id\":\"place\",\"line\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"who\":\"Home\",\"unknown\":\"ignored\"}],\"card\":\"card\",\"place\":\"place\",\"takesCard\":true,\"takesPlace\":true,\"unknown\":42},\"text\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"person\":{\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"address\":\"me@example.test\",\"unknown\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"},\"files\":null,\"unknown\":true}",
+      "canonical": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"mails\":[{\"bcc\":[{\"address\":\"me@example.test\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"}],\"body\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"cc\":[],\"date\":1700000000.125,\"files\":[{\"bytes\":9007199254740991,\"id\":\"pdf\",\"kind\":\"pdf\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"pages\":2,\"previews\":1}],\"from\":{\"address\":\"me@example.test\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"},\"id\":\"mail\",\"subject\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"to\":[{\"address\":\"me@example.test\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"}]}],\"pay\":{\"amount\":\"$42.10\",\"card\":\"card\",\"cards\":[{\"brand\":\"Visa\",\"id\":\"card\",\"last4\":\"4242\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"}],\"delivery\":\"\",\"item\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"place\":\"place\",\"places\":[{\"id\":\"place\",\"line\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"who\":\"Home\"}],\"site\":\"https://site.test/a/b\",\"takesCard\":true,\"takesPlace\":true},\"person\":{\"address\":\"me@example.test\",\"name\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\"},\"text\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"verb\":\"Send / Pay\"}",
+      "digest": "c7f790854f434682fbcc9f40974735c4e6fe06471aeb428d023e46ad69752df2"
+    },
+    {
+      "name": "detail-exponent-and-optional-nulls",
+      "type": "detail",
+      "input": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"mails\":[{\"id\":\"mail2\",\"to\":[{\"name\":\"A\",\"address\":null,\"unknown\":false}],\"cc\":[],\"subject\":\"\",\"body\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"files\":[],\"date\":1.25e-07,\"from\":null,\"bcc\":null}],\"verb\":null,\"files\":null,\"pay\":null,\"text\":null,\"person\":null}",
+      "canonical": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"mails\":[{\"body\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"cc\":[],\"date\":1.25e-07,\"files\":[],\"id\":\"mail2\",\"subject\":\"\",\"to\":[{\"name\":\"A\"}]}]}",
+      "digest": "4e73dfed49e46ee2a6afe1ed8affe62a185b8ef12f7ad12fce8f31ed5a1d07e5"
+    },
+    {
+      "name": "detail-negative-zero",
+      "type": "detail",
+      "input": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"mails\":[{\"id\":\"mail2\",\"to\":[{\"name\":\"A\"}],\"cc\":[],\"subject\":\"\",\"body\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"files\":[],\"date\":-0}]}",
+      "canonical": "{\"id\":\"00000000-0000-0000-0000-000000000007\",\"mails\":[{\"body\":\"café / 東京 \\\\ \\\" \\b\\f\\n\\r\\t\\u0000\\u001f    é 💡\",\"cc\":[],\"date\":-0,\"files\":[],\"id\":\"mail2\",\"subject\":\"\",\"to\":[{\"name\":\"A\"}]}]}",
+      "digest": "b6454e039143800ecded57d7c109d0c356736a4c2a4827136da6b2eb00af85de"
+    }
+  ]
+}

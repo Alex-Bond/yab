@@ -1,0 +1,416 @@
+--- a/cef/BUILD.gn
++++ b/cef/BUILD.gn
+@@ -616,6 +616,8 @@
+     "libcef/browser/download_manager_delegate.h",
+     "libcef/browser/download_manager_delegate_impl.cc",
+     "libcef/browser/download_manager_delegate_impl.h",
++    "libcef/browser/external_file_dialog.cc",
++    "libcef/browser/external_file_dialog.h",
+     "libcef/browser/file_dialog_manager.cc",
+     "libcef/browser/file_dialog_manager.h",
+     "libcef/browser/file_dialog_runner.cc",
+--- a/cef/include/cef_dialog_handler.h
++++ b/cef/include/cef_dialog_handler.h
+@@ -38,6 +38,9 @@
+ #define CEF_INCLUDE_CEF_DIALOG_HANDLER_H_
+ #pragma once
+ 
++#include "include/cef_api_hash.h"
++#include "include/cef_frame.h"
++#include "include/cef_values.h"
+ #include "include/cef_base.h"
+ #include "include/cef_browser.h"
+ 
+@@ -62,6 +65,8 @@
+   virtual void Cancel() = 0;
+ };
+ 
++#define CEF_YAB_NATIVE_FILE_FRAME_VERSION 1
++
+ ///
+ /// Implement this interface to handle dialog events. The methods of this class
+ /// will be called on the browser process UI thread.
+@@ -70,6 +75,33 @@
+ class CefDialogHandler : public virtual CefBaseRefCounted {
+  public:
+   typedef cef_file_dialog_mode_t FileDialogMode;
++
++#if CEF_API_ADDED(CEF_EXPERIMENTAL)
++  ///
++  /// Accepted Chrome native chooser for the actual requesting |frame| and
++  /// committed document. The source dictionary carries opaque request and
++  /// native document IDs, RFH process/routing IDs, native DevTools frame and
++  /// loader IDs, URL/origin, mode and acceptExtensions. No main-frame fallback.
++  /// Return true to retain the original |callback|; false keeps OnFileDialog.
++  /// The source is not a Runtime uniqueContextId. Embedders must authenticate
++  /// the live session, frame and document before publishing script ownership.
++  ///
++  /*--cef(added=experimental,optional_param=title,optional_param=default_file_path)--*/
++  virtual bool OnFileDialogForFrame(CefRefPtr<CefBrowser> browser,
++      CefRefPtr<CefFrame> frame, CefRefPtr<CefDictionaryValue> source,
++      const CefString& title, const CefString& default_file_path,
++      CefRefPtr<CefFileDialogCallback> callback) { return false; }
++
++  ///
++  /// Exactly-once retirement of a handled native request, including selection,
++  /// cancellation, listener destruction, document/frame or renderer loss.
++  /// The embedder must withdraw any field belonging to this exact request.
++  ///
++  /*--cef(added=experimental)--*/
++  virtual void OnFileDialogClosed(CefRefPtr<CefBrowser> browser,
++      const CefString& request, const CefString& reason) {}
++#endif
++
+ 
+   ///
+   /// Called to run a file chooser dialog. |mode| represents the type of dialog
+--- /dev/null
++++ b/cef/libcef/browser/external_file_dialog.cc
+@@ -0,0 +1,192 @@
++#include "cef/libcef/browser/external_file_dialog.h"
++#include <map>
++#include <utility>
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "base/unguessable_token.h"
++#include "cef/include/cef_api_hash.h"
++#include "cef/libcef/browser/thread_util.h"
++#include "cef/libcef/common/api_version_util.h"
++#include "chrome/browser/external_file_origin.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "components/tabs/public/tab_interface.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "ui/shell_dialogs/selected_file_info.h"
++namespace cef::external_file {
++namespace {
++using Listener = ui::SelectFileDialog::Listener;
++class Callback;
++using Pending = std::map<Listener*, CefRefPtr<Callback>>;
++Pending& Requests() { static base::NoDestructor<Pending> requests; return *requests; }
++class Callback final : public CefFileDialogCallback,
++                       public content::WebContentsObserver {
++ public:
++  Callback(Listener* listener, content::RenderFrameHost* frame,
++           CefRefPtr<CefDialogHandler> handler, cef_file_dialog_mode_t mode)
++      : content::WebContentsObserver(content::WebContents::FromRenderFrameHost(frame)),
++        listener_(listener), document_(frame->GetWeakDocumentPtr()),
++        handler_(handler), mode_(mode), request_(base::UnguessableToken::Create().ToString()) {
++    auto* native = static_cast<content::RenderFrameHostImpl*>(frame);
++    receipt_ = CefDictionaryValue::Create();
++    receipt_->SetString("request", request_);
++    receipt_->SetString("document", native->GetDocumentToken().ToString());
++    receipt_->SetString("frameId", frame->GetDevToolsFrameToken().ToString());
++    const auto loader = native->GetDevToolsNavigationToken();
++    if (loader) receipt_->SetString("loaderId", loader->ToString());
++    receipt_->SetInt("processId", frame->GetGlobalId().child_id.value());
++    receipt_->SetInt("routingId", frame->GetGlobalId().frame_routing_id);
++    receipt_->SetBool("main", frame == web_contents()->GetPrimaryMainFrame());
++    receipt_->SetString("url", frame->GetLastCommittedURL().spec());
++    receipt_->SetString("origin", frame->GetLastCommittedOrigin().Serialize());
++    receipt_->SetInt("mode", mode_);
++    receipt_->SetBool("acceptedNativeChooser", true);
++  }
++  CefRefPtr<CefDictionaryValue> receipt() const { return receipt_->Copy(false); }
++  void MarkHandled() { handled_ = true; }
++  bool done() const { return done_; }
++  bool Live() const {
++    auto* frame = document_.AsRenderFrameHostIfValid();
++    if (done_ || !listener_ || !web_contents() || web_contents()->IsBeingDestroyed() ||
++        !frame || !frame->IsActive() || !frame->IsRenderFrameLive() ||
++        content::WebContents::FromRenderFrameHost(frame) != web_contents()) return false;
++    auto* tab = tabs::TabInterface::MaybeGetFromContents(web_contents());
++    return !tab || tab->IsActivated();
++  }
++  void Watch() {
++    if (done_) return;
++    if (!Live()) { Finish({}, true, "native-owner-retired"); return; }
++    // Covers same-RFH replacement and subframe/OOPIF renderer loss even when
++    // the primary renderer remains alive. No frame pointer survives a commit.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,
++        base::BindOnce(&Callback::Watch, CefRefPtr<Callback>(this)), base::Milliseconds(50));
++  }
++  void Continue(const std::vector<CefString>& paths) override {
++    if (!CEF_CURRENTLY_ON_UIT()) {
++      CEF_POST_TASK(CEF_UIT, base::BindOnce(&Callback::Continue, CefRefPtr<Callback>(this), paths)); return;
++    }
++    if (!Live()) { Finish({}, true, "stale-native-document"); return; }
++    if (paths.size() > (mode_ == FILE_DIALOG_OPEN_MULTIPLE ? 1024u : 1u)) {
++      Finish({}, true, "invalid-file-count"); return;
++    }
++    std::vector<ui::SelectedFileInfo> selected;
++    for (const auto& value : paths) {
++      const std::string path = value.ToString();
++      if (path.find('\0') != std::string::npos || !base::FilePath(path).IsAbsolute()) {
++        Finish({}, true, "invalid-file-path"); return;
++      }
++      selected.emplace_back(base::FilePath(path));
++    }
++    Finish(selected, true, selected.empty() ? "cancelled" : "selected");
++  }
++  void Cancel() override {
++    if (!CEF_CURRENTLY_ON_UIT()) {
++      CEF_POST_TASK(CEF_UIT, base::BindOnce(&Callback::Cancel, CefRefPtr<Callback>(this))); return;
++    }
++    Finish({}, true, "cancelled");
++  }
++  void DestroyListener() { Finish({}, false, "native-listener-retired"); }
++  void Disconnect() { handled_ = false; Finish({}, false, "fallback"); }
++  void RenderFrameDeleted(content::RenderFrameHost*) override {
++    if (!document_.AsRenderFrameHostIfValid()) Finish({}, true, "frame-removed");
++  }
++  void DidFinishNavigation(content::NavigationHandle*) override {
++    if (!document_.AsRenderFrameHostIfValid()) Finish({}, true, "document-replaced");
++  }
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override {
++    Finish({}, true, "renderer-gone");
++  }
++  void WebContentsDestroyed() override { Finish({}, true, "browser-closed"); }
++ private:
++  void Finish(const std::vector<ui::SelectedFileInfo>& files, bool notify, const char* reason) {
++    if (done_) return;
++    CefRefPtr<Callback> keep(this);
++    done_ = true;
++    Listener* listener = std::exchange(listener_, nullptr);
++    auto it = Requests().find(listener);
++    if (it != Requests().end() && it->second.get() == this) Requests().erase(it);
++    // Remove exact identity before original listener or embedder reenters.
++    // A later chooser reusing its address has a different callback and token.
++    auto browser = web_contents() ? CefBrowserHostBase::GetBrowserForContents(web_contents()) : nullptr;
++    Observe(nullptr);
++    if (notify && listener) {
++      if (files.empty()) listener->FileSelectionCanceled();
++      else if (files.size() == 1) listener->FileSelected(files[0], 0);
++      else listener->MultiFilesSelected(files);
++    }
++    if (handled_ && browser && CEF_API_IS_ADDED(CEF_EXPERIMENTAL))
++      handler_->OnFileDialogClosed(browser, request_, reason);
++  }
++  Listener* listener_;  // Used only while the original dialog owns it.
++  content::WeakDocumentPtr document_;
++  CefRefPtr<CefDialogHandler> handler_;
++  cef_file_dialog_mode_t mode_;
++  std::string request_;
++  CefRefPtr<CefDictionaryValue> receipt_;
++  bool done_ = false, handled_ = false;
++  IMPLEMENT_REFCOUNTING(Callback);
++};
++}  // namespace
++bool Run(CefRefPtr<CefBrowserHostBase> browser, Listener* listener,
++         ui::SelectFileDialog::Type type, const std::u16string& title,
++         const base::FilePath& path, const ui::SelectFileDialog::FileTypeInfo* types) {
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !browser || !listener) return false;
++  if (!external_file_origin::Has(listener)) return false;
++  auto* frame = external_file_origin::Get(listener);
++  if (!frame || !frame->IsActive() || !frame->IsRenderFrameLive()) {
++    listener->FileSelectionCanceled(); return true;
++  }
++  if ( content::WebContents::FromRenderFrameHost(frame) != browser->GetWebContents()) return false;
++  auto handler = browser->client() ? browser->client()->GetDialogHandler() : nullptr;
++  auto cef_frame = browser->GetFrameForHost(frame);
++  if (!handler || !cef_frame || !cef_frame->IsValid()) return false;
++  cef_file_dialog_mode_t mode;
++  switch (type) {
++    case ui::SelectFileDialog::SELECT_OPEN_FILE: mode = FILE_DIALOG_OPEN; break;
++    case ui::SelectFileDialog::SELECT_OPEN_MULTI_FILE: mode = FILE_DIALOG_OPEN_MULTIPLE; break;
++    case ui::SelectFileDialog::SELECT_UPLOAD_FOLDER: mode = FILE_DIALOG_OPEN_FOLDER; break;
++    default: return false;
++  }
++  // No pending request is inferred from renderer Page.fileChooserOpened.
++  // This entry is called only by SelectFileImpl after Chrome's policy passed.
++  if (Requests().contains(listener)) return false;
++  CefRefPtr<Callback> callback = new Callback(listener, frame, handler, mode);
++  Requests().emplace(listener, callback);
++  auto receipt = callback->receipt();
++  receipt->SetInt("browserId", browser->GetIdentifier());
++  auto accepts = CefListValue::Create();
++  if (types) for (size_t i=0; i<types->extensions.size(); ++i) {
++    auto extensions = CefListValue::Create();
++    for (const auto& ext : types->extensions[i]) extensions->SetString(extensions->GetSize(), ext);
++    accepts->SetList(accepts->GetSize(), extensions);
++  }
++  receipt->SetList("acceptExtensions", accepts);
++  auto filters = CefListValue::Create();
++  for (const auto& mime : external_file_origin::Origins().at(listener).accepts)
++    filters->SetString(filters->GetSize(), mime);
++  receipt->SetList("acceptFilters", filters);
++  callback->MarkHandled();
++  const bool handled = handler->OnFileDialogForFrame(browser, cef_frame, receipt, title,
++                                                     path.value(), callback);
++  if (!handled && !callback->done()) {
++    if (!callback->Live()) { callback->Cancel(); return true; }
++    callback->Disconnect(); return false;
++  }
++  callback->Watch();
++  return true;
++}
++void CancelForContents(content::WebContents* contents) {
++  std::vector<CefRefPtr<Callback>> owned;
++  for (const auto& [listener, callback] : Requests())
++    if (callback->web_contents() == contents) owned.push_back(callback);
++  for (const auto& callback : owned) callback->Cancel();
++}
++void ListenerDestroyed(Listener* listener) {
++  auto it = Requests().find(listener);
++  if (it != Requests().end()) { auto held = it->second; held->DestroyListener(); }
++}
++}  // namespace cef::external_file
+--- /dev/null
++++ b/cef/libcef/browser/external_file_dialog.h
+@@ -0,0 +1,14 @@
++// Exact original native chooser callback. No main-frame or focus inference.
++#ifndef CEF_LIBCEF_BROWSER_EXTERNAL_FILE_DIALOG_H_
++#define CEF_LIBCEF_BROWSER_EXTERNAL_FILE_DIALOG_H_
++#include "cef/libcef/browser/browser_host_base.h"
++#include "ui/shell_dialogs/select_file_dialog.h"
++namespace cef::external_file {
++bool Run(CefRefPtr<CefBrowserHostBase> browser,
++    ui::SelectFileDialog::Listener* listener, ui::SelectFileDialog::Type type,
++    const std::u16string& title, const base::FilePath& default_path,
++    const ui::SelectFileDialog::FileTypeInfo* types);
++void ListenerDestroyed(ui::SelectFileDialog::Listener* listener);
++void CancelForContents(content::WebContents* contents);
++}  // namespace cef::external_file
++#endif
+--- a/cef/libcef/browser/file_dialog_manager.cc
++++ b/cef/libcef/browser/file_dialog_manager.cc
+@@ -15,6 +15,7 @@
+ #include "cef/libcef/browser/context.h"
+ #include "cef/libcef/browser/thread_util.h"
+ #include "chrome/browser/file_select_helper.h"
++#include "chrome/browser/external_file_origin.h"
+ #include "content/public/browser/file_select_listener.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/web_contents.h"
+@@ -373,6 +374,7 @@
+   // ui::SelectFileDialog::Create internally and that call will be intercepted
+   // by CefSelectFileDialogFactory, resulting in call to RunSelectFile below.
+   // See related comments on CefSelectFileDialogFactory.
++  external_file_origin::ScopedEmbedderChooser not_renderer_origin;
+   FileSelectHelper::RunFileChooser(
+       browser_->GetWebContents()->GetPrimaryMainFrame(),
+       base::MakeRefCounted<CefFileSelectListener>(std::move(callback)),
+--- a/cef/libcef/browser/file_dialog_runner.cc
++++ b/cef/libcef/browser/file_dialog_runner.cc
+@@ -4,6 +4,7 @@
+ // found in the LICENSE file.
+ 
+ #include "cef/libcef/browser/file_dialog_runner.h"
++#include "cef/libcef/browser/external_file_dialog.h"
+ 
+ #include "cef/libcef/browser/browser_host_base.h"
+ #include "chrome/browser/file_select_helper.h"
+@@ -107,6 +108,7 @@
+     has_multiple_file_choices_ =
+         file_types ? file_types->extensions.size() > 1 : true;
+ 
++    if (cef::external_file::Run(browser_, listener_, type, title, default_path, file_types)) return;
+     browser_->RunSelectFile(listener_, std::move(select_file_policy_), type,
+                             title, default_path, file_types, file_type_index,
+                             default_extension, owning_window);
+@@ -117,6 +119,7 @@
+   }
+ 
+   void ListenerDestroyed() override {
++    cef::external_file::ListenerDestroyed(listener_);
+     if (browser_) {
+       browser_->SelectFileListenerDestroyed(listener_);
+     }
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -1,4 +1,5 @@
+ #include "cef/libcef/browser/views/external_host_mac.h"
++#include "cef/libcef/browser/external_file_dialog.h"
+ #include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
+ #include "ui/views/widget/widget.h"
+ #include "cef/libcef/browser/browser_host_base.h"
+@@ -235,6 +236,7 @@
+       view->SetShouldUseDefaultDeadlineOnResize(bound_);
+   }
+   void Publish(std::optional<bool> visible) {
++    if (visible && !*visible) cef::external_file::CancelForContents(web_contents());
+     if (!web_contents() || web_contents()->IsBeingDestroyed()) return;
+     auto* view = static_cast<content::WebContentsImpl*>(web_contents())->GetView();
+     if (view)
+--- /dev/null
++++ b/chrome/browser/external_file_origin.h
+@@ -0,0 +1,37 @@
++// UI-sequence-only provenance for Chrome's original chooser listener.
++#ifndef CHROME_BROWSER_EXTERNAL_FILE_ORIGIN_H_
++#define CHROME_BROWSER_EXTERNAL_FILE_ORIGIN_H_
++#include <map>
++#include <vector>
++#include "base/no_destructor.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "ui/shell_dialogs/select_file_dialog.h"
++namespace external_file_origin {
++using Listener = ui::SelectFileDialog::Listener;
++struct Source {
++  content::WeakDocumentPtr document;
++  std::vector<std::u16string> accepts;
++};
++inline auto& Origins() {
++  static base::NoDestructor<std::map<Listener*, Source>> origins;
++  return *origins;
++}
++inline thread_local unsigned suppressed = 0;
++class ScopedEmbedderChooser {
++ public:
++  ScopedEmbedderChooser() { ++suppressed; }
++  ~ScopedEmbedderChooser() { --suppressed; }
++};
++inline void Set(Listener* listener, content::RenderFrameHost* frame,
++                const std::vector<std::u16string>& accepts) {
++  if (frame && !suppressed) Origins().insert_or_assign(listener, Source{frame->GetWeakDocumentPtr(), accepts});
++}
++inline bool Has(Listener* listener) { return Origins().contains(listener); }
++inline void Remove(Listener* listener) { Origins().erase(listener); }
++inline content::RenderFrameHost* Get(Listener* listener) {
++  const auto it = Origins().find(listener);
++  return it == Origins().end() ? nullptr : it->second.document.AsRenderFrameHostIfValid();
++}
++}  // namespace external_file_origin
++#endif
+--- a/chrome/browser/file_select_helper.cc
++++ b/chrome/browser/file_select_helper.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/file_select_helper.h"
++#include "chrome/browser/external_file_origin.h"
+ 
+ #include <stddef.h>
+ 
+@@ -669,6 +670,7 @@
+   render_frame_host_ = render_frame_host;
+   web_contents_ = WebContents::FromRenderFrameHost(render_frame_host);
+   listener_ = std::move(listener);
++  external_file_origin::Set(this, render_frame_host_, params->accept_types);
+   InitLifecycleObserver(web_contents_);
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -725,6 +727,11 @@
+   DCHECK(!select_file_dialog_);
+   if (AbortIfWebContentsDestroyed())
+     return;
++
++  if (external_file_origin::Has(this) && !external_file_origin::Get(this)) {
++    RunFileChooserEnd();
++    return;
++  }
+ 
+   // RunFileChooser() hops to the thread pool and back before reaching this
+   // point, so the run may already have been ended in the meantime - for
+@@ -809,6 +816,7 @@
+ // dialog or if the renderer was destroyed. Perform any cleanup and release the
+ // reference we added in RunFileChooser().
+ void FileSelectHelper::RunFileChooserEnd() {
++  external_file_origin::Remove(this);
+ #if !BUILDFLAG(IS_ANDROID)
+   // Ensure picture-in-picture occlusion mitigation stops, even if we need to
+   // keep this instance alive for temporary files.

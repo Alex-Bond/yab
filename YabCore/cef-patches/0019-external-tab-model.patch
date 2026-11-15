@@ -1,0 +1,357 @@
+--- a/cef/include/cef_browser.h
++++ b/cef/include/cef_browser.h
+@@ -52,6 +52,7 @@
+ // Experimental Yab source-build capability, absent from official CEF SDKs.
+ #define CEF_YAB_DISCARD_VERSION 1
+ #define CEF_YAB_EXTERNAL_ACTION_VERSION 1
++#define CEF_YAB_NATIVE_TAB_MODEL_VERSION 1
+ #define CEF_YAB_NATIVE_PRINT_VERSION 1
+ 
+ class CefBrowserHost;
+--- a/cef/libcef/browser/views/external_host_mac.mm
++++ b/cef/libcef/browser/views/external_host_mac.mm
+@@ -24,6 +24,7 @@
+ #include "cef/libcef/browser/views/external_consent.h"
+ #include "cef/libcef/browser/views/external_print.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_tab_model.h"
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
+ #include "ui/compositor/compositor.h"
+ #include "base/no_destructor.h"
+@@ -187,6 +188,7 @@
+       public views::WidgetObserver,
+       public content::WebContentsUserData<ExternalVisibility> {
+  public:
++  bool bound() const { return bound_ && observation_.IsObserving(); }
+   void Bind(views::Widget* widget) {
+     observation_.Reset();
+     observation_.Observe(widget);
+@@ -526,12 +528,25 @@
+ }
+ }  // namespace
+ 
++bool BindNativeTabModel(content::WebContents* contents,
++                        content::WebContents* owner,
++                        content::WebContents* opener, bool active, int index) {
++  auto* visibility = owner ? ExternalVisibility::FromWebContents(owner) : nullptr;
++  if (!CEF_API_IS_ADDED(CEF_EXPERIMENTAL) || !visibility || !visibility->bound())
++    return false;
++  // This is the original owner captured before Chrome selected a new physical
++  // Browser. Its session window, profile and opener are native identities.
++  return extensions::ExternalTabModel::Bind(contents, owner, opener,
++      sessions::SessionTabHelper::IdForWindowContainingTab(owner).id(), active, index);
++}
++
+ void InstallExtensionHooks() {
+   auto& hooks = extensions::GetExternalExtensionHooks();
+   hooks.popup_before_show = &PopupBeforeShow;
+   hooks.popup_shown = &PopupShown;
+   hooks.popup_closed = &PopupClosed;
+   hooks.tab_created = &TabCreated;
++  hooks.tab_model_created = &BindNativeTabModel;
+   InstallConsentHooks();
+   InstallPrintHooks();
+ }
+@@ -633,7 +648,10 @@
+   auto* contents = browser ? browser->GetWebContents() : nullptr;
+   if (!contents || !ExternalFocus::GetOrCreateForWebContents(contents)
+                         ->Set(widget, focused)) return false;
+-  if (focused) browser_view->RequestFocus();
++  if (focused) {
++    if (auto* model = extensions::ExternalTabModel::Get(contents)) model->Activate();
++    browser_view->RequestFocus();
++  }
+   return true;
+ }
+ }  // namespace cef::external_host
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/extensions/api/tabs/tabs_api.h"
+ #include "chrome/browser/extensions/external_action_origin.h"
++#include "chrome/browser/extensions/external_tab_model.h"
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+@@ -1920,7 +1921,8 @@
+ 
+     TabListInterface* tab_list = TabListInterface::From(browser);
+     for (int i = 0; i < tab_list->GetTabCount(); ++i) {
+-      if (tab_index > -1 && i != tab_index) {
++      auto* model = ExternalTabModel::Get(tab_list->GetTab(i)->GetContents());
++      if (tab_index > -1 && (model ? model->index() : i) != tab_index) {
+         continue;
+       }
+ 
+@@ -1972,25 +1974,37 @@
+     return false;
+   }
+ 
++  const auto logical_window = [](BrowserWindowInterface* browser) {
++    if (!browser) return -1;
++    auto* contents = browser->GetTabStripModel()->GetActiveWebContents();
++    auto* model = ExternalTabModel::Get(contents);
++    return model ? model->window() : ExtensionTabUtil::GetWindowId(browser);
++  };
++  const int candidate_window = logical_window(candidate_browser);
++  const bool current_window = current_browser &&
++      candidate_window == logical_window(current_browser);
++  const bool last_window = last_active_browser &&
++      candidate_window == logical_window(last_active_browser);
++
+   // Note: `target_window_id` may be -1 or -2, which indicate unknown and
+   // current windows.
+   if (target_window_id >= 0 &&
+-      target_window_id != ExtensionTabUtil::GetWindowId(candidate_browser)) {
++      target_window_id != candidate_window) {
+     return false;
+   }
+ 
+   if (target_window_id == extension_misc::kCurrentWindowId &&
+-      candidate_browser != current_browser) {
++      !current_window) {
+     return false;
+   }
+ 
+   if (!MatchesBool(query_info_.current_window,
+-                   candidate_browser == current_browser)) {
++                   current_window)) {
+     return false;
+   }
+ 
+   if (!MatchesBool(query_info_.last_focused_window,
+-                   candidate_browser == last_active_browser)) {
++                   last_window)) {
+     return false;
+   }
+ 
+@@ -2010,11 +2024,16 @@
+     return false;
+   }
+ 
+-  if (!MatchesBool(query_info_.highlighted, candidate_tab->IsSelected())) {
+-    return false;
+-  }
+-
+-  if (!MatchesBool(query_info_.active, candidate_tab->IsActivated())) {
++  if (!MatchesBool(query_info_.highlighted,
++                   ExternalTabModel::Get(web_contents)
++                       ? ExternalTabModel::Get(web_contents)->active()
++                       : candidate_tab->IsSelected())) {
++    return false;
++  }
++
++  auto* model = ExternalTabModel::Get(web_contents);
++  if (!MatchesBool(query_info_.active,
++                   model ? model->active() : candidate_tab->IsActivated())) {
+     return false;
+   }
+ 
+@@ -2386,6 +2405,11 @@
+ 
+ void TabsCreateFunction::OpenTabInBrowser(BrowserWindowInterface& browser,
+                                           content::WebContents* opener_tab) {
++  auto* requested_owner = browser.GetTabStripModel()->GetActiveWebContents();
++  auto owner_identity = requested_owner ? requested_owner->GetWeakPtr()
++                                       : base::WeakPtr<content::WebContents>();
++  ScopedExternalTabCreation native_creation(requested_owner, opener_tab,
++      active_.value_or(true), index_.value_or(-1));
+   OpenTabHelper::Params options;
+ 
+   options.active = active_;
+@@ -2401,6 +2425,12 @@
+   }
+ 
+   content::WebContents* new_contents = result.value();
++
++  if (auto bind = GetExternalExtensionHooks().tab_model_created;
++      bind && owner_identity) {
++    bind(new_contents, owner_identity.get(), opener_tab,
++         active_.value_or(true), index_.value_or(-1));
++  }
+ 
+   // Tell an embedder that keeps its own tab model what was asked for.
+   if (auto hook = GetExternalExtensionHooks().tab_created) {
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/external_tab_model.h"
+ 
+ #include <stddef.h>
+ 
+@@ -353,6 +354,7 @@
+ }
+ 
+ int ExtensionTabUtil::GetWindowIdOfTab(const WebContents* web_contents) {
++  if (auto* model = ExternalTabModel::Get(web_contents)) return model->window();
+   return sessions::SessionTabHelper::IdForWindowContainingTab(web_contents)
+       .id();
+ }
+@@ -378,10 +380,14 @@
+   tabs::TabInterface* tab_interface =
+       tab_list ? tab_list->GetTab(tab_index) : nullptr;
+ 
+-  bool is_active = tab_interface && tab_interface->IsActivated();
++  auto* external_model = ExternalTabModel::Get(contents);
++  if (external_model) tab_object.index = external_model->index();
++  bool is_active = external_model ? external_model->active()
++                                 : tab_interface && tab_interface->IsActivated();
+   tab_object.active = is_active;
+   tab_object.selected = is_active;
+-  tab_object.highlighted = tab_interface && tab_interface->IsSelected();
++  tab_object.highlighted = external_model ? external_model->active()
++                                          : tab_interface && tab_interface->IsSelected();
+   tab_object.pinned = tab_interface && tab_interface->IsPinned();
+ 
+   tab_object.group_id = -1;
+@@ -470,6 +476,11 @@
+     }
+   }
+ 
++  if (external_model) {
++    tab_object.opener_tab_id.reset();
++    if (auto* opener = external_model->opener())
++      tab_object.opener_tab_id = GetTabIdForExtensions(*opener);
++  }
+   ScrubTabForExtension(extension, contents, &tab_object, scrub_tab_behavior);
+   return tab_object;
+ }
+--- a/chrome/browser/extensions/external_action_origin.h
++++ b/chrome/browser/extensions/external_action_origin.h
+@@ -34,6 +34,10 @@
+   // Conceal an externally presented original action widget before Show().
+   // False cancels showing. Ordinary Chrome popup paths never call this.
+   bool (*popup_before_show)(content::WebContents*, views::Widget*) = nullptr;
++  // Bind the original native creation inputs before any API response. The
++  // owner is captured before Navigate can create a different physical Browser.
++  bool (*tab_model_created)(content::WebContents*, content::WebContents*,
++                            content::WebContents*, bool, int) = nullptr;
+   // chrome.tabs.create made |contents| with the requested foreground state,
+   // tab strip index (-1 default) and opener tab (may be null).
+   void (*tab_created)(content::WebContents* contents,
+--- /dev/null
++++ b/chrome/browser/extensions/external_tab_model.h
+@@ -0,0 +1,119 @@
++// Native embedder tab state, separate from concealed physical Browser widgets.
++#ifndef CHROME_BROWSER_EXTENSIONS_EXTERNAL_TAB_MODEL_H_
++#define CHROME_BROWSER_EXTENSIONS_EXTERNAL_TAB_MODEL_H_
++#include <algorithm>
++#include <memory>
++#include <utility>
++#include <vector>
++#include "base/supports_user_data.h"
++#include "base/memory/weak_ptr.h"
++#include "content/public/browser/web_contents.h"
++
++namespace extensions {
++// The exact synchronous Chrome API creation operation, captured before
++// Navigate creates/attaches a different native Browser. Nested operations
++// restore the previous operation; no last-active-tab or timing inference.
++class ScopedExternalTabCreation {
++ public:
++  ScopedExternalTabCreation(content::WebContents* owner,
++                            content::WebContents* opener, bool active, int index)
++      : previous_(current_), owner_(owner ? owner->GetWeakPtr()
++                                        : base::WeakPtr<content::WebContents>()),
++        opener_(opener ? opener->GetWeakPtr() : base::WeakPtr<content::WebContents>()),
++        active_(active), index_(index) { current_ = this; }
++  ~ScopedExternalTabCreation() { current_ = previous_; }
++  ScopedExternalTabCreation(const ScopedExternalTabCreation&) = delete;
++  ScopedExternalTabCreation& operator=(const ScopedExternalTabCreation&) = delete;
++  static const ScopedExternalTabCreation* Current() { return current_; }
++  content::WebContents* owner() const { return owner_.get(); }
++  content::WebContents* opener() const { return opener_.get(); }
++  bool active() const { return active_; }
++  int index() const { return index_; }
++ private:
++  inline static thread_local ScopedExternalTabCreation* current_ = nullptr;
++  ScopedExternalTabCreation* previous_;
++  base::WeakPtr<content::WebContents> owner_, opener_;
++  bool active_;
++  int index_;
++};
++// UI sequence only. Chrome owns all WebContents and their real session IDs.
++// A group only retains weak identities, never a page or a physical window.
++class ExternalTabModel : public base::SupportsUserData::Data {
++ public:
++  static ExternalTabModel* Get(const content::WebContents* contents) {
++    return contents && !contents->IsBeingDestroyed()
++        ? static_cast<ExternalTabModel*>(contents->GetUserData(&kKey)) : nullptr;
++  }
++  static bool Bind(content::WebContents* contents,
++                   content::WebContents* requested_owner,
++                   content::WebContents* opener,
++                   int native_window_id, bool active, int index) {
++    if (!contents || !requested_owner || contents->IsBeingDestroyed() ||
++        requested_owner->IsBeingDestroyed() || native_window_id < 0 ||
++        contents->GetBrowserContext() != requested_owner->GetBrowserContext() ||
++        (opener && (opener->IsBeingDestroyed() ||
++                    opener->GetBrowserContext() != contents->GetBrowserContext())))
++      return false;
++    auto* owner = Get(requested_owner);
++    if (!owner) {
++      auto group = std::make_shared<Group>();
++      group->window = native_window_id;
++      group->active = requested_owner->GetWeakPtr();
++      group->tabs.push_back(requested_owner->GetWeakPtr());
++      requested_owner->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
++          new ExternalTabModel(requested_owner, group, nullptr)));
++      owner = Get(requested_owner);
++    }
++    auto group = owner->group_;
++    if (auto* current = Get(contents); current && current->group_ != group)
++      return false;  // Reparenting requires an explicit later model operation.
++    Compact(*group);
++    auto& tabs = group->tabs;
++    std::erase_if(tabs, [contents](const auto& tab) { return tab.get() == contents; });
++    const auto at = index < 0 ? tabs.size()
++                             : std::min(static_cast<size_t>(index), tabs.size());
++    tabs.insert(tabs.begin() + at, contents->GetWeakPtr());
++    if (active) group->active = contents->GetWeakPtr();
++    contents->SetUserData(&kKey, std::unique_ptr<ExternalTabModel>(
++        new ExternalTabModel(contents, std::move(group), opener)));
++    return true;
++  }
++  bool active() const { return contents_ && group_->active == contents_; }
++  int window() const { return group_->window; }
++  int index() const {
++    Compact(*group_);
++    for (size_t i = 0; i < group_->tabs.size(); ++i)
++      if (group_->tabs[i] == contents_) return static_cast<int>(i);
++    return -1;
++  }
++  content::WebContents* opener() const {
++    return opener_ && !opener_->IsBeingDestroyed() ? opener_.get() : nullptr;
++  }
++  bool Activate() {
++    if (!contents_ || contents_->IsBeingDestroyed()) return false;
++    Compact(*group_);
++    group_->active = contents_;
++    return true;
++  }
++ private:
++  struct Group {
++    int window = -1;
++    base::WeakPtr<content::WebContents> active;
++    std::vector<base::WeakPtr<content::WebContents>> tabs;
++  };
++  static void Compact(Group& group) {
++    std::erase_if(group.tabs, [](const auto& tab) {
++      return !tab || tab->IsBeingDestroyed();
++    });
++    if (group.active && group.active->IsBeingDestroyed()) group.active.reset();
++  }
++  ExternalTabModel(content::WebContents* contents, std::shared_ptr<Group> group,
++                   content::WebContents* opener)
++      : group_(std::move(group)), contents_(contents->GetWeakPtr()),
++        opener_(opener ? opener->GetWeakPtr() : base::WeakPtr<content::WebContents>()) {}
++  inline static const int kKey = 0;
++  std::shared_ptr<Group> group_;
++  base::WeakPtr<content::WebContents> contents_, opener_;
++};
++}  // namespace extensions
++#endif

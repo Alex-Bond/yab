@@ -1,0 +1,449 @@
+{
+ "name": "offline",
+ "owner": "Mira",
+ "space": "00000000-0000-0000-0000-000000000001",
+ "sync": {
+  "server": "http://127.0.0.1:9",
+  "seed": true,
+  "device": "Mira's iPhone"
+ },
+ "spaces": [
+  {
+   "id": "00000000-0000-0000-0000-000000000001",
+   "name": "Personal",
+   "emoji": "🏠",
+   "tint": [
+    238,
+    233,
+    226
+   ],
+   "today": [
+    {
+     "id": "573BCF42-6857-58CC-9BED-1385A274DBCD",
+     "title": "Train notes 1 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-1",
+     "host": "paper.so"
+    },
+    {
+     "id": "98B4AB7E-29E3-55CF-966E-6C4D6AA71AC2",
+     "title": "Train notes 2 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-2",
+     "host": "paper.so"
+    },
+    {
+     "id": "1FEE2417-85CE-5B47-92D1-4BBAED5E2199",
+     "title": "Train notes 3 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-3",
+     "host": "paper.so"
+    },
+    {
+     "id": "F0FE1078-938E-5768-A872-147D3B690EB4",
+     "title": "Train notes 4 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-4",
+     "host": "paper.so"
+    },
+    {
+     "id": "899222ED-DEF7-57C7-8FD1-2E1C638F201C",
+     "title": "Train notes 5 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-5",
+     "host": "paper.so"
+    },
+    {
+     "id": "6DA1F4D2-2486-5A64-A823-39A4DD456F27",
+     "title": "Train notes 6 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-6",
+     "host": "paper.so"
+    },
+    {
+     "id": "E3E805F5-D45F-5AA8-BC06-B6E3EA1D5FEE",
+     "title": "Train notes 7 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-7",
+     "host": "paper.so"
+    },
+    {
+     "id": "C018FD44-CA33-5793-A765-1C4307D584A0",
+     "title": "Train notes 8 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-8",
+     "host": "paper.so"
+    },
+    {
+     "id": "0CA10266-1E45-5E30-ADF3-D3AC7C2FAF72",
+     "title": "Train notes 9 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-9",
+     "host": "paper.so"
+    },
+    {
+     "id": "95431F91-8347-5904-8033-8879584E3F78",
+     "title": "Train notes 10 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-10",
+     "host": "paper.so"
+    },
+    {
+     "id": "BC3D71C5-FD75-576C-810B-56C13B612073",
+     "title": "Train notes 11 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-11",
+     "host": "paper.so"
+    },
+    {
+     "id": "A3D96F76-8B66-516A-B1FC-1CEFF925784F",
+     "title": "Train notes 12 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-12",
+     "host": "paper.so"
+    },
+    {
+     "id": "38B101BB-C50F-5B9F-BC0B-FD1B7897F875",
+     "title": "Train notes 13 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-13",
+     "host": "paper.so"
+    },
+    {
+     "id": "849B4EC4-3AB5-5E8B-95F2-F2F6C515D74D",
+     "title": "Train notes 14 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-14",
+     "host": "paper.so"
+    },
+    {
+     "id": "BB3079E9-A8B5-5875-BAD9-240A9B021709",
+     "title": "Train notes 15 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-15",
+     "host": "paper.so"
+    },
+    {
+     "id": "A4098625-5885-527E-BC52-9CE29D8A5A0B",
+     "title": "Train notes 16 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-16",
+     "host": "paper.so"
+    },
+    {
+     "id": "12F36881-9AE1-5D17-87E5-37B66E9D8E2E",
+     "title": "Train notes 17 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-17",
+     "host": "paper.so"
+    },
+    {
+     "id": "C8515F0A-EDC6-5B7C-9FC7-2494B316B4AD",
+     "title": "Train notes 18 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-18",
+     "host": "paper.so"
+    },
+    {
+     "id": "2B85C218-F7D9-58DC-990C-DF50B5642C8F",
+     "title": "Train notes 19 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-19",
+     "host": "paper.so"
+    },
+    {
+     "id": "5DCEB932-9790-5E92-BA80-8CA9EDC570D6",
+     "title": "Train notes 20 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-20",
+     "host": "paper.so"
+    },
+    {
+     "id": "3950AB49-5C57-5B5B-85FE-89780D165091",
+     "title": "Train notes 21 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-21",
+     "host": "paper.so"
+    },
+    {
+     "id": "A2C1A221-399F-5515-94C0-83CC71AD1860",
+     "title": "Train notes 22 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-22",
+     "host": "paper.so"
+    },
+    {
+     "id": "83F1FAAC-9095-5778-9E37-18F6FE4237B9",
+     "title": "Train notes 23 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-23",
+     "host": "paper.so"
+    },
+    {
+     "id": "DA9F846A-EEFD-5EA4-98EA-827541D5D89E",
+     "title": "Train notes 24 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-24",
+     "host": "paper.so"
+    },
+    {
+     "id": "9B41F7B0-1BA0-5254-9E87-2E4EF1C1EF1D",
+     "title": "Train notes 25 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-25",
+     "host": "paper.so"
+    },
+    {
+     "id": "3DFB6CF7-A8BA-5A85-BC65-43969B558ECD",
+     "title": "Train notes 26 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-26",
+     "host": "paper.so"
+    },
+    {
+     "id": "F301F755-2107-50B3-AEED-2B72F9D0CF46",
+     "title": "Train notes 27 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-27",
+     "host": "paper.so"
+    },
+    {
+     "id": "34247BEC-FA6E-5E5D-8AB9-ED35B2BDB560",
+     "title": "Train notes 28 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-28",
+     "host": "paper.so"
+    },
+    {
+     "id": "6D781630-9E5F-5BC7-97D2-8371F461B11C",
+     "title": "Train notes 29 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-29",
+     "host": "paper.so"
+    },
+    {
+     "id": "C58A72BB-7A1E-599E-8754-6553A34F6A4C",
+     "title": "Train notes 30 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-30",
+     "host": "paper.so"
+    },
+    {
+     "id": "E63049F6-E496-5271-871F-1AA7DA25C4FE",
+     "title": "Train notes 31 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/mira/train-notes-31",
+     "host": "paper.so"
+    }
+   ]
+  },
+  {
+   "id": "B6AA01F9-0D45-55E3-80B9-A54325B9A58D",
+   "name": "Work",
+   "emoji": "💼",
+   "tint": [
+    226,
+    233,
+    244
+   ],
+   "kept": [
+    {
+     "tab": {
+      "id": "2501E53E-36DE-5B0B-8535-B65E9030CA97",
+      "title": "Onboarding v3 · Welcome screens",
+      "site": "Figma",
+      "icon": "figma",
+      "url": "figma.com/design/xK29fLm8/Onboarding-v3",
+      "page": "figma",
+      "host": "figma.com"
+     }
+    },
+    {
+     "tab": {
+      "id": "D16A70F2-A923-5723-AE4E-2218E6A1DD2E",
+      "title": "ENG-412 · Invite flow · Linear",
+      "site": "Linear",
+      "icon": "linear",
+      "url": "linear.com",
+      "page": "linear-invite",
+      "host": "linear.com"
+     }
+    },
+    {
+     "tab": {
+      "id": "571FC290-0504-5CDF-9C21-56289CC0AC23",
+      "title": "#design · Slack",
+      "site": "Slack",
+      "icon": "slack",
+      "url": "slack.com",
+      "page": "slack",
+      "host": "slack.com"
+     }
+    }
+   ],
+   "today": [
+    {
+     "id": "C83D050C-A186-5900-99AC-3F3391851A2B",
+     "title": "Hacker News",
+     "site": "Hacker News",
+     "icon": "hn",
+     "url": "news.ycombinator.com",
+     "page": "hn",
+     "host": "news.ycombinator.com"
+    },
+    {
+     "id": "EA379062-A7B3-5FE6-BE80-57391AB61C93",
+     "title": "feat(editor): wrap text at 800 and keep it clear of the side panels",
+     "site": "GitHub",
+     "icon": "github",
+     "url": "github.com/excalidraw/excalidraw/pull/12192",
+     "page": "github",
+     "host": "github.com"
+    },
+    {
+     "id": "DC4AED61-6014-5FB1-9BEF-B1E2DA085379",
+     "title": "Launch notes · Tern 2.0 · Paper",
+     "site": "Paper",
+     "icon": "paper",
+     "url": "paper.so/tern/launch-notes",
+     "page": "paper",
+     "host": "paper.so"
+    },
+    {
+     "id": "6F4E32FD-268A-58E4-8012-1323829506AC",
+     "title": "Overview · Ledger",
+     "site": "Ledger",
+     "icon": "ledger",
+     "url": "ledger.app/tern/overview",
+     "page": "ledger",
+     "host": "ledger.app"
+    },
+    {
+     "id": "1251201C-7C1E-5825-9170-3CCCB4B6E86C",
+     "title": "Design Systems Night · Stockholm · Lumen",
+     "site": "Lumen",
+     "icon": "lumen",
+     "url": "lumen.events/e/design-systems-night",
+     "page": "lumen",
+     "host": "lumen.events"
+    },
+    {
+     "id": "67CE539B-DBDC-51A0-8E95-EE0C4620D41B",
+     "title": "The Verge",
+     "site": "The Verge",
+     "icon": "verge",
+     "url": "theverge.com",
+     "page": "verge",
+     "host": "theverge.com"
+    },
+    {
+     "id": "6AE2BD08-5794-5637-8074-34B6B51647F8",
+     "title": "Lisbon · Wikipedia",
+     "site": "Wikipedia",
+     "icon": "wiki",
+     "url": "wikipedia.com",
+     "page": "wikipedia-lisbon",
+     "host": "wikipedia.com"
+    },
+    {
+     "id": "ED13C56C-9D1D-556E-AC5E-D1813657285B",
+     "title": "Alfama · Wikipedia",
+     "site": "Wikipedia",
+     "icon": "wiki",
+     "url": "wikipedia.com",
+     "page": "wikipedia-alfama",
+     "host": "wikipedia.com"
+    },
+    {
+     "id": "279E878A-C213-5F22-9A54-FAE17299187C",
+     "title": "10 Usability Heuristics",
+     "site": "NN/g",
+     "icon": "nng",
+     "url": "nng.com",
+     "page": "nngroup",
+     "host": "nng.com"
+    },
+    {
+     "id": "A051F119-E25A-5514-B11B-48507E2025F5",
+     "title": "How to Do Great Work",
+     "site": "paulgraham.com",
+     "icon": "paul",
+     "url": "paulgrahamcom.com",
+     "page": "paulgraham",
+     "host": "paulgrahamcom.com"
+    },
+    {
+     "id": "084E946F-B120-5135-A813-E489C24D3CE3",
+     "title": "The best things to do in Lisbon",
+     "site": "Time Out",
+     "icon": "timeout",
+     "url": "timeout.com",
+     "page": "timeout",
+     "host": "timeout.com"
+    },
+    {
+     "id": "D88EE0F2-FE35-55EB-B4A7-F5A3C75E0245",
+     "title": "Alfama · Stays",
+     "site": "Airbnb",
+     "icon": "airbnb",
+     "url": "airbnb.com",
+     "page": "airbnb",
+     "host": "airbnb.com"
+    },
+    {
+     "id": "53D39BF4-525B-53B8-90EC-D4D5019D8B29",
+     "title": "Drift",
+     "site": "Drift",
+     "icon": "drift",
+     "url": "drift.com",
+     "page": "drift",
+     "host": "drift.com"
+    },
+    {
+     "id": "25312D8A-8692-5A6B-A266-796EB9B6578B",
+     "title": "Activation funnel · Orbit",
+     "site": "Orbit",
+     "icon": "orbit",
+     "url": "orbit.com",
+     "page": "orbit",
+     "host": "orbit.com"
+    }
+   ]
+  }
+ ],
+ "mac": {
+  "name": "MacBook Pro",
+  "asleep": false
+ }
+}

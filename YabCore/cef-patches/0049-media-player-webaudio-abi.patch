@@ -1,0 +1,79 @@
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.h
+@@ -192,6 +192,9 @@
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override {}
++  void RequestNativeControlState(RequestNativeControlStateCallback callback) override;
++  void RequestNativePlaybackRate(double rate) override;
++  void RequestNativeCaptions(bool enabled) override;
+   void SetVolumeMultiplier(double multiplier) override;
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override {}
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -1261,6 +1261,16 @@
+   }
+ }
+
++// AudioContext has no original video target, duration/rate or captions. Keep
++// the new MediaPlayer ABI complete without claiming HTMLMediaElement controls.
++void AudioContext::RequestNativeControlState(RequestNativeControlStateCallback callback) {
++  auto state = media::mojom::blink::MediaPlayerControlState::New();
++  state->known = false;
++  std::move(callback).Run(std::move(state));
++}
++void AudioContext::RequestNativePlaybackRate(double rate) {}
++void AudioContext::RequestNativeCaptions(bool enabled) {}
++
+ void AudioContext::SetVolumeMultiplier(double multiplier) {
+   volume_multiplier_ = multiplier;
+ }
+--- a/content/browser/media/media_web_contents_observer_unittest.cc
++++ b/content/browser/media/media_web_contents_observer_unittest.cc
+@@ -36,6 +36,13 @@
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override {}
++  void RequestNativeControlState(RequestNativeControlStateCallback callback) override {
++    auto state = media::mojom::MediaPlayerControlState::New();
++    state->known = false;
++    std::move(callback).Run(std::move(state));
++  }
++  void RequestNativePlaybackRate(double rate) override {}
++  void RequestNativeCaptions(bool enabled) override {}
+   void SetVolumeMultiplier(double multiplier) override {}
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override {}
+--- a/content/browser/media/session/media_session_controller_unittest.cc
++++ b/content/browser/media/session/media_session_controller_unittest.cc
+@@ -146,6 +146,13 @@
+       const std::optional<gfx::Size>& min_size) override {}
+
+   void RequestMute(bool mute) override {}
++  void RequestNativeControlState(RequestNativeControlStateCallback callback) override {
++    auto state = media::mojom::MediaPlayerControlState::New();
++    state->known = false;
++    std::move(callback).Run(std::move(state));
++  }
++  void RequestNativePlaybackRate(double rate) override {}
++  void RequestNativeCaptions(bool enabled) override {}
+
+   void SetVolumeMultiplier(double multiplier) override {
+     received_volume_multiplier_ = multiplier;
+--- a/content/browser/picture_in_picture/picture_in_picture_service_impl_unittest.cc
++++ b/content/browser/picture_in_picture/picture_in_picture_service_impl_unittest.cc
+@@ -184,6 +184,13 @@
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override {}
++  void RequestNativeControlState(RequestNativeControlStateCallback callback) override {
++    auto state = media::mojom::MediaPlayerControlState::New();
++    state->known = false;
++    std::move(callback).Run(std::move(state));
++  }
++  void RequestNativePlaybackRate(double rate) override {}
++  void RequestNativeCaptions(bool enabled) override {}
+   void SetVolumeMultiplier(double multiplier) override {}
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override {}
