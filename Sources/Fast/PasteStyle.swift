@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import WebKit
 
 /// A weak editing destination, never clipboard text. The command field keeps
 /// the editor it was raised over, rather than pasting into its own query.
@@ -140,6 +141,11 @@ final class PasteStyleTarget {
         let target = PasteStyleTarget(pasteboard: pasteboard)
         target.capture(in: window)
         guard target.editable() else { return false }
+        // WebKit says yes to a menu row before its page has answered
+        // (WebViewImpl validates later), caret or not. A web view has an
+        // input context only while the caret is in something editable, in
+        // any frame, as the key monitor asks it (ContentView.perform).
+        if let web = target.receiver() as? WKWebView, web.inputContext == nil { return false }
         target.perform()
         return true
     }

@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import WebKit
 @testable import Fast
 
 @MainActor
@@ -140,6 +141,19 @@ struct PasteStyleTests {
         try #require(window.makeFirstResponder(window))
         #expect(!PasteStyleTarget.takesPasteAndGoKey(in: window, pasteboard: board))
         #expect(!PasteStyleTarget.takesPasteAndGoKey(in: nil, pasteboard: board))
+    }
+
+    /// WebKit validates the plain-paste row as enabled before its page
+    /// answers. A focused web view with no caret in a field leaves the key
+    /// to Paste and Go.
+    @Test func pasteAndGoKeyGoesFromAWebViewWithoutACaret() throws {
+        let window = window(), board = board("https://example.com/838")
+        defer { window.close(); board.releaseGlobally() }
+        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 150))
+        window.contentView = web
+        try #require(window.makeFirstResponder(web))
+        try #require(web.inputContext == nil)
+        #expect(!PasteStyleTarget.takesPasteAndGoKey(in: window, pasteboard: board))
     }
 
     @Test func onlyOurUniqueMenuRowMovesImmediatelyAfterPaste() throws {

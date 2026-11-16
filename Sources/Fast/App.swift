@@ -108,9 +108,11 @@ private struct FileItems: View {
         Button("Open Address…") { selected.pressOpenAddress() }
             .shortcut(.openAddress)
         Button("Paste and Go") {
-            // From the key, in a text field, the key is the text's
-            // (PasteStyleTarget.takesPasteAndGoKey). Chosen from the menu, it goes.
-            if NSApp.currentEvent?.type == .keyDown, PasteStyleTarget.takesPasteAndGoKey(in: NSApp.keyWindow) { return }
+            // From its key, in a text field, the key is the text's
+            // (PasteStyleTarget.takesPasteAndGoKey). Chosen from the menu,
+            // by the pointer or by the arrows and Return, it goes.
+            if let event = NSApp.currentEvent, event.type == .keyDown, Keymap.shared.matches(event, .pasteAndGo),
+               PasteStyleTarget.takesPasteAndGoKey(in: NSApp.keyWindow) { return }
             selected.pasteAndGo()
         }
             .shortcut(.pasteAndGo)
