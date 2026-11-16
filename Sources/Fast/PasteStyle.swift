@@ -128,6 +128,21 @@ final class PasteStyleTarget {
     }
 
     static func current() -> PasteStyleTarget { current(in: NSApp.keyWindow) }
+
+    /// ⇧⌘V that reached Paste and Go's menu row: in a text field it is paste
+    /// without formatting, as in Chrome. The browser's key monitor decides
+    /// this in its own windows; a link's window, Settings and the others
+    /// leave the key to the menu, which navigated the browser's tab (#838).
+    /// True when the caret is in editable text, so the key was the text's
+    /// even with nothing plain to paste.
+    @discardableResult
+    static func takesPasteAndGoKey(in window: NSWindow?, pasteboard: NSPasteboard = .general) -> Bool {
+        let target = PasteStyleTarget(pasteboard: pasteboard)
+        target.capture(in: window)
+        guard target.editable() else { return false }
+        target.perform()
+        return true
+    }
 }
 
 /// Refresh menu enablement when AppKit opens a menu. The keyboard action

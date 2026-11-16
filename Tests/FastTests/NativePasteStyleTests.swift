@@ -122,6 +122,26 @@ struct PasteStyleTests {
         #expect(text.string.isEmpty)
     }
 
+    /// #838: ⇧⌘V reaching Paste and Go's row pastes plain in a text field
+    /// and keeps the key from navigating, even with nothing plain to paste.
+    @Test func pasteAndGoKeyPastesPlainInTextAndGoesElsewhere() throws {
+        let window = window(), board = board()
+        defer { window.close(); board.releaseGlobally() }
+        let text = try editor(in: window)
+        #expect(PasteStyleTarget.takesPasteAndGoKey(in: window, pasteboard: board))
+        #expect(text.string == "  plain café\nsecond line  ")
+
+        let empty = self.board(nil)
+        defer { empty.releaseGlobally() }
+        #expect(PasteStyleTarget.takesPasteAndGoKey(in: window, pasteboard: empty))
+
+        text.isEditable = false
+        #expect(!PasteStyleTarget.takesPasteAndGoKey(in: window, pasteboard: board))
+        try #require(window.makeFirstResponder(window))
+        #expect(!PasteStyleTarget.takesPasteAndGoKey(in: window, pasteboard: board))
+        #expect(!PasteStyleTarget.takesPasteAndGoKey(in: nil, pasteboard: board))
+    }
+
     @Test func onlyOurUniqueMenuRowMovesImmediatelyAfterPaste() throws {
         let menu = NSMenu(title: "Edit")
         let cut = NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
