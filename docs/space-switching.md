@@ -654,3 +654,15 @@ moves are the catch's alone, its drift with them, and so are the glide's
 after the fingers lift (`SwipeGlide`), until the glide ends or fingers come
 down again. A mouse's side buttons over the column now only turn the space,
 as their comment always said.
+
+**Its end.** With the catch really taking events, a swipe could reach the
+rows only in part. A began with no move in it (the bench's swipe, `hand.py`'s,
+some devices') shows no way yet, so the catch hands it on and the rows'
+scroll view opens a gesture; the first move shows sideways and the catch
+takes the rest, its end too. The rows were left in a gesture that never
+closed. Now a swipe whose began the rows heard hands them its end, whoever's
+the swipe was (`SwipeEnd`, unit-tested in `SwipeEndTests`). The end carries
+no move, so it scrolls nothing, and the space still turns as before: the
+catch acts on the end and then lets it through. Its glide stays held back.
+SpacePager reads an end it hears only by whether the row is still held,
+and the catch has let it go by then.

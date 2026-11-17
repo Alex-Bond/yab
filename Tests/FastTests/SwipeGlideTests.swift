@@ -54,3 +54,46 @@ struct SwipeGlideTests {
         #expect(!glide.held)
     }
 }
+
+// A sideways swipe's end, owed to the rows when they heard its began
+// (SwipeEnd): taken with the rest, it left their scroll view in a gesture
+// that never closed.
+struct SwipeEndTests {
+    @Test func aBeganTheRowsHeardGetsItsEnd() {
+        // An empty began, handed on; the moves sideways, taken.
+        var end = SwipeEnd()
+        end.began(passed: true)
+        let passes = end.ended()
+        #expect(passes)
+    }
+
+    @Test func aBeganTakenKeepsItsEnd() {
+        // A began whose first move showed sideways: the rows never heard it.
+        var end = SwipeEnd()
+        end.began(passed: true)
+        end.began(passed: false)
+        let passes = end.ended()
+        #expect(!passes)
+    }
+
+    @Test func theEndIsOwedOnce() {
+        var end = SwipeEnd()
+        end.began(passed: true)
+        let first = end.ended()
+        // A second end with no began between, a cancel after the end.
+        let second = end.ended()
+        #expect(first)
+        #expect(!second)
+        #expect(!end.owed)
+    }
+
+    @Test func eachSwipeIsJudgedAfresh() {
+        var end = SwipeEnd()
+        end.began(passed: false)
+        let taken = end.ended()
+        end.began(passed: true)
+        let handedOn = end.ended()
+        #expect(!taken)
+        #expect(handedOn)
+    }
+}
