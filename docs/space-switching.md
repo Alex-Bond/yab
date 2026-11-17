@@ -656,13 +656,15 @@ down again. A mouse's side buttons over the column now only turn the space,
 as their comment always said.
 
 **Its end.** With the catch really taking events, a swipe could reach the
-rows only in part. A began with no move in it (the bench's swipe, `hand.py`'s,
-some devices') shows no way yet, so the catch hands it on and the rows'
-scroll view opens a gesture; the first move shows sideways and the catch
-takes the rest, its end too. The rows were left in a gesture that never
-closed. Now a swipe whose began the rows heard hands them its end, whoever's
-the swipe was (`SwipeEnd`, unit-tested in `SwipeEndTests`). The end carries
-no move, so it scrolls nothing, and the space still turns as before: the
-catch acts on the end and then lets it through. Its glide stays held back.
-SpacePager reads an end it hears only by whether the row is still held,
-and the catch has let it go by then.
+rows only in part. A began with no move in it (the bench's swipe and
+`hand.py`'s send one) goes on to the rows before the catch knows which way
+the fingers go, and their scroll view opens a gesture. When the moves after
+it went sideways the catch took them and the end too, and the rows were
+left in a gesture that never closed. Now the catch still takes a sideways
+began, which owes the rows nothing, but when the rows heard the began it
+hands them the swipe's end or cancel (`SwipeEnd`). The space turns as
+before: the catch acts on the end, then lets it through. The glide after
+stays held back (`SwipeGlide`). The row of spaces is let go once: the catch
+releases SpacePager before returning the end, and if SpacePager's monitor
+hears the end first, it only lets go later, after checking that the same
+swipe still holds the row (`SpacePager.parting`).
